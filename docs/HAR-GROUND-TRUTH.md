@@ -118,6 +118,21 @@ và `GET …/messages` của đúng conv đó trả `global_id = 100061610676863
 | 429 (73) | chỉ 2 endpoint danh sách | gửi tin miễn nhiễm |
 | 0 (85) | gọi chi tiết thread bị trình duyệt huỷ | đừng dò gid song song quá nhiều |
 
+## 7b. Trình tự thật của app quanh một lần gửi (đọc dòng thời gian)
+
+```
+GET  …/messages            ← nạp thread trước khi gửi
+POST …/contents/facebook   ← đăng ký ảnh (nếu có), +0,07 s là gửi
+POST …/messages            ← gửi
+GET  …/messages            ← đọc lại sau ~1,3 s
+POST …/messages            ← tin tiếp theo của cùng hội thoại
+POST …/check_inbox         ← SAU khi gửi, không phải trước
+POST …/contents/touch
+```
+
+Kết luận: `check_inbox` **không** phải bước "nhận hội thoại" trước khi gửi (giả thuyết liên quan `#10` bị bác bỏ).
+Không được thêm nó vào trước đường gửi để "chắc ăn" — chỉ tốn request.
+
 ## 8. Những thứ KHÔNG có trong HAR (vùng mù — không được suy diễn)
 
 1. Kênh **Extension ↔ trang** (không phải HTTP).
@@ -133,10 +148,31 @@ và `GET …/messages` của đúng conv đó trả `global_id = 100061610676863
 | "Có endpoint gửi thứ hai `POST /conversations/{convId}`" | Không — đó chính là 58 request `/messages`, tên bị cắt khi in |
 | "Code chưa đọc global_id từ payload chat" | Đã đọc từ trước (dòng 2107, 1098) — 52 ca "không có gid" là Pancake trả null thật |
 
+## 9b. BẰNG CHỨNG QUYẾT ĐỊNH: lịch sử tin KHÔNG đáng tin
+
+Đo trực tiếp trên 23 lần gửi **thành công** (có `id` trả về) trong HAR:
+
+| Kiểm tra | Kết quả |
+|---|---|
+| `id` có trong lần ĐỌC ngay sau (~1,3 s) | 17/23 |
+| `id` có trong **một** lần đọc sau đó | 18/23 (trễ 0,8–1,2 s khi thấy) |
+| `id` **không bao giờ** thấy trong toàn bộ HAR | **5/23 (22%)** |
+
+⇒ **"Không thấy tin trong lịch sử" KHÔNG phải bằng chứng "chưa gửi".**
+
+Hệ quả bắt buộc:
+
+1. **KHÔNG được tự động gửi lại** ca "kiểm chứng không thấy tin". Nếu làm, tỉ lệ gửi trùng sẽ xấp xỉ 20%+ — đúng lỗi người dùng cấm.
+2. Chính sách hiện tại của code (giữ ⚠, không bắn lại) là **đúng**, và giờ đã có số liệu bảo vệ.
+3. 16–27 tin ⚠ mỗi lô **không phải là "lọt khách còn sống"**: một phần trong đó nhiều khả năng đã giao thật.
+   Tỉ lệ thành công thật có thể **cao hơn** con số 99,3% đang báo.
+4. Đọc lại nhiều nhịp (1.91.78) cũng không cứu được điều này — nó chỉ tốn thời gian. Đã rút ở 1.91.79.
+
 ## 10. Trạng thái việc làm
 
 - ✅ 1.91.79 — đọc lại Ext không còn giữ lượt (bỏ 176 s chờ vô ích).
 - ✅ 1.91.80 — luôn gửi `is_record_ctx_7_days` như app thật (52/52).
-- ⬜ Xác nhận hàng loạt bằng `snippet`/`last_sent_by`/`read_watermarks` (có giãn nhịp, chỉ lật ⚠→✅).
+- ❌ **HUỶ** kế hoạch gửi lại ca "không rõ" — xem mục 9b (22% ca đã gửi vẫn không thấy trong lịch sử).
+- ⬜ Xác nhận hàng loạt bằng `snippet`/`last_sent_by`/`read_watermarks` (chỉ lật ⚠→✅, không bao giờ kết luận ngược).
 - ⬜ Đếm `can_inbox=false` để đối chiếu với số ❌ thực tế (telemetry, chưa dùng để quyết định).
 - ⬜ Coi `Hội thoại này không tồn tại` là kết luận dứt điểm (cân nhắc: chỉ khi gặp 2 lần, tránh lỗi tạm thời).

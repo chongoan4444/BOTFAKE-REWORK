@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.80-w200.22
+// @version      1.91.81-w200.23
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.80-W200.22'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.81-W200.23'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6524,7 +6524,7 @@
             ? ' | 🔎 Kiểm chứng ACK: đã đến nơi ' + verifyStats.found + ' · bắn cứu ' + verifyStats.fired + ' · không kiểm chứng được ' + verifyStats.unknown
             : '')
           + ((extTimeoutStats.timeout || extTimeoutStats.skipped || extTimeoutStats.found || extTimeoutStats.notFound || extTimeoutStats.unknown)
-            ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy tin ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
+            ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy trong lịch sử ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
             : '')
           + ' | ⏱ Tổng thời gian: ' + elapsedSec + 's');
         logLine('⚡ TỐC ĐỘ: đã chốt ' + c.settled + '/' + c.total + ' (' + settledPerSec.toFixed(2) + '/giây; '
