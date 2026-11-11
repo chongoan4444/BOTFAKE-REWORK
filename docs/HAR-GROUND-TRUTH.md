@@ -133,6 +133,39 @@ POST …/contents/touch
 Kết luận: `check_inbox` **không** phải bước "nhận hội thoại" trước khi gửi (giả thuyết liên quan `#10` bị bác bỏ).
 Không được thêm nó vào trước đường gửi để "chắc ăn" — chỉ tốn request.
 
+## 7c. Cơ chế phân trang danh sách — lý do KHÔNG nên nạp danh sách bằng API
+
+Đo trên 187 request danh sách:
+
+| Số liệu | Giá trị |
+|---|---|
+| Kích thước trang | **luôn 40 hội thoại** (110/110 phản hồi `len=40`) |
+| Tham số xin trang lớn hơn (`limit`, `page_size`, `per_page`) | **KHÔNG tồn tại** |
+| Tỉ lệ bị 429 | **73/187 = 39%** |
+| Nhịp app tự gửi | median **0,13 s**, min 0,0 s — app **không** backoff |
+
+Tham số thật của endpoint danh sách: `pages`, `unread_first`, `mode`, `tags`, `except_tags`,
+`cursor_mode`, `from_platform`, `current_count`, `next_cursor`, `access_token`.
+
+`next_cursor` là base64 của khối nhị phân không đọc được (`…1881264518397934:881264518397934_…`) ⇒
+**không thể tự dựng cursor**, chỉ có thể nhận rồi trả lại nguyên vẹn.
+
+Hệ quả: nạp 11 000 chat qua API = **~275 request tuần tự**, trong đó ~39% bị 429.
+⇒ Giữ nguyên chiến lược đọc danh sách từ trang/extension, **không** xây bộ nạp danh sách bằng API.
+(Điều này khớp với chẩn đoán `HTTP 0` của script.)
+
+## 7d. Các giả thuyết đã KIỂM và BÁC BỎ
+
+| Giả thuyết | Kết quả |
+|---|---|
+| `check_inbox` là bước "nhận hội thoại" trước khi gửi, thiếu nó sinh `#10` | **Sai** — nó luôn nằm SAU khi gửi |
+| `global_id`/`can_inbox` chỉ có khi gửi `is_new_api=true` | **Sai** — 91/91 phản hồi đều có `can_inbox` + `read_watermarks` bất kể cờ; `global_id` có 33/91 độc lập với cờ |
+| Có endpoint gửi thứ hai | **Sai** — xem mục 9 |
+| Danh sách có `global_id` | **Sai** — 0/54 |
+
+Số liệu phân bố chuẩn của lần đọc tin (91 mẫu): `can_inbox` **luôn có mặt** (4 false / 87 true),
+`read_watermarks` **luôn có mặt**, `global_id` chỉ **33/91 (36%)** — phần còn lại dịch vụ trả `null` thật.
+
 ## 8. Những thứ KHÔNG có trong HAR (vùng mù — không được suy diễn)
 
 1. Kênh **Extension ↔ trang** (không phải HTTP).
