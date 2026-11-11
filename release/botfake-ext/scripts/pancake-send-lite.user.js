@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.82-w200.24
+// @version      1.91.83-w200.25
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.82-W200.24'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.83-W200.25'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5644,6 +5644,23 @@
             logLine('✅ ' + nm2 + ' — gửi THÀNH CÔNG qua '
               + (r.sendBy === 'socket' ? 'Socket' : r.sendBy === 'extension' ? 'Extension' : 'API'));
             return;
+          }
+          // [v1.91.83] CỨU CA KHÔNG CÓ global_id — chỗ rò 57 tin/lô (0,53%).
+          // Với lô lớn, chat im >24h bị cắt làn API (skipFutileApi) ⇒ plan chỉ còn
+          // ['ext','socket']. Nhưng khi KHÔNG có global_id thì: Ext bị noGidGate chặn,
+          // Socket bắt buộc phải có gid ⇒ CẢ HAI đều bất khả, dù làn API là làn DUY NHẤT
+          // không cần gid (HAR: URL gửi chỉ dùng convId, 58/58 request không chứa global_id).
+          // Nay: gặp đúng tình huống đó thì chuyển sang làn API một lần duy nhất.
+          // An toàn chống trùng: fireApiAndWatch đi qua acquireOutbound(conv.id) — nếu chat
+          // đã được bắn ở làn khác thì trả dupBlocked, không sinh tin thứ hai.
+          if (!r.ok && !r.uncertain && !r.recipientUnavailable
+              && (r.gidUnknown || /globalId/i.test(String(r.error || '')))) {
+            try {
+              sendDiag.apiNoGidFallback = (sendDiag.apiNoGidFallback || 0) + 1;
+              logLine('🛟 ' + nm2 + ' — không có global_id (Ext/Socket đều bất khả) — chuyển làn API');
+              fireApiAndWatch(conv, text, photo);
+              return;
+            } catch (e0) { /* rơi xuống xử lý cũ */ }
           }
           if (r.uncertain) {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
