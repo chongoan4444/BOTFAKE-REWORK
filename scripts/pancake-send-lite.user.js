@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.73-w200.15
+// @version      1.91.74-w200.16
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.73-W200.15'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.74-W200.16'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3877,26 +3877,54 @@
     };
     await paceSocketPublish(pageId);
     const publishedAt = Date.now();
-    const nextReqId = (typeof sock.requestId === 'number') ? (sock.requestId + 1) : null;
     const ackWaitMs = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 8000 : 15000;
+    /* ===== SỬA GỐC "MẤT ACK" Ở LÔ LỚN =====
+     * Trong _app (@818834) hàm publish() làm đúng thế này:
+     *     i = { app_id, payload, request_id: ++sock.requestId, type }
+     *     this.PENDING_MESSAGES[`${pageId}_${i.request_id}`] = { callback, clearTimeout }
+     *     instance.publish('/ls_req', JSON.stringify(i))
+     * và khi /ls_resp về: request_id được echo lại → helper tra đúng key đó để resolve.
+     *
+     * Bản cũ ĐOÁN id của chính mình bằng `sock.requestId + 1` ĐỌC TRƯỚC khi gọi publish
+     * (cách nhau một microtask Promise.resolve().then). Với 192 làn cùng một page, hàng chục
+     * frame khác chen vào giữa ⇒ id đoán gần như LUÔN SAI. Tệ hơn: khi hết 15s nó
+     * clearTimeout + delete PENDING_MESSAGES[key đoán] — tức entry của TIN KHÁC — làm promise
+     * của tin kia không bao giờ resolve (timer của nó vừa bị xoá) ⇒ chat treo "chờ ACK" tới
+     * watchdog 180s. Đây chính là "mất ACK" hàng loạt ở lô 10k.
+     *
+     * Nay:
+     *   1) đọc requestId NGAY SÁT lệnh gọi (không await/microtask ở giữa ⇒ chính xác tuyệt đối
+     *      vì request_id = ++sock.requestId xảy ra đồng bộ bên trong publish);
+     *   2) timeout chỉ dọn entry CỦA CHÍNH MÌNH, và chỉ khi còn đúng object tham chiếu đó —
+     *      không bao giờ chạm vào entry của tin khác.
+     */
+    let myKey = null;
+    let myEntry = null;
     const publishPromise = new Promise((resolve) => {
       let done = false;
       const timer = setTimeout(() => {
         if (done) return;
         done = true;
         try {
-          if (nextReqId !== null && helper.PENDING_MESSAGES) {
-            const k = pageId + '_' + nextReqId;
-            if (helper.PENDING_MESSAGES[k]) {
-              clearTimeout(helper.PENDING_MESSAGES[k].clearTimeout);
-              delete helper.PENDING_MESSAGES[k];
-            }
+          if (myKey && helper.PENDING_MESSAGES && helper.PENDING_MESSAGES[myKey] === myEntry) {
+            clearTimeout(myEntry.clearTimeout);
+            delete helper.PENDING_MESSAGES[myKey];
           }
         } catch (e0) { /* ignore */ }
         resolve({ success: false, data: null, timedOut: true });
       }, ackWaitMs);
-      Promise.resolve()
-        .then(() => helper.publish(pageId, '/ls_req', frame, 3))
+      let publishRet = null;
+      try {
+        const rid = (typeof sock.requestId === 'number') ? sock.requestId + 1 : null;
+        publishRet = helper.publish(pageId, '/ls_req', frame, 3); // gán request_id = ++sock.requestId
+        if (rid !== null) {
+          myKey = pageId + '_' + rid;
+          myEntry = (helper.PENDING_MESSAGES && helper.PENDING_MESSAGES[myKey]) || null;
+        }
+      } catch (ePub) {
+        publishRet = null;
+      }
+      Promise.resolve(publishRet)
         .then((res) => {
           if (done) return;
           done = true;

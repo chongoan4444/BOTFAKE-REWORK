@@ -91,6 +91,19 @@ trong lịch sử *không phải* bằng chứng — API lịch sử của Panca
 ⇒ `(#10)` phần lớn là do **thiếu cờ**, không phải app khác giữ thread. Response lỗi thật
 dùng `e_code`/`e_subcode` (không có `message_code`).
 
+### Mất ACK ở lô lớn (v1.91.74)
+
+`_app` @818834 — `publish()` gán **`request_id = ++sock.requestId` NGAY, đồng bộ, bên trong
+hàm**, rồi lưu `PENDING_MESSAGES['{pageId}_{request_id}']`; `/ls_resp` echo `request_id` để
+tra đúng entry. Bản cũ **đoán** id của mình bằng `sock.requestId + 1` đọc *trước* lệnh gọi
+(cách nhau một microtask) ⇒ với 192 làn cùng page thì gần như luôn SAI. Nặng hơn: khi hết
+15s nó `clearTimeout` + xoá `PENDING_MESSAGES[id đoán]` — tức entry của **tin khác** — làm
+promise của tin đó không bao giờ resolve (timer của nó vừa bị xoá) ⇒ chat treo "chờ ACK"
+tới watchdog 180 s.
+
+Nay: đọc `requestId` **ngay sát** lệnh gọi (chính xác tuyệt đối) và khi timeout **chỉ** dọn
+entry của chính mình, có so sánh tham chiếu object.
+
 ### Các thay đổi
 
 1. **`(#10)` mà request thiếu cờ** → gửi lại **đúng 1 lần kèm cờ** trước khi kết luận.
