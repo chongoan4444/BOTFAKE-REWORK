@@ -438,9 +438,9 @@ chrome.runtime.onInstalled.addListener(async () => {
     const tabs = await chrome.tabs.query({});
     for (const t of tabs) {
       if (!t.id || !/^https?:/.test(t.url || '')) continue;
-      try { await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['overlay.js'] }); } catch (e) { /* ignore */ }
+      try { await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['extension/overlay.js'] }); } catch (e) { /* ignore */ }
       if (/pancake\.(vn|ph|id|in|biz)|pages\.fm|socialos\.vip/.test(t.url || '')) {
-        try { await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['bridge.js'] }); } catch (e) { /* ignore */ }
+        try { await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['extension/bridge.js'] }); } catch (e) { /* ignore */ }
       }
     }
   } catch (e) { /* ignore */ }

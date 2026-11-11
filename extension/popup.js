@@ -17,7 +17,7 @@ function showPanel(tabId) {
     }
     chrome.scripting.executeScript({
       target: { tabId: tabId },
-      files: ['pancake-send-lite.user.js'],
+      files: ['scripts/pancake-send-lite.user.js'],
       world: 'MAIN',
     }, () => {
       setTimeout(() => {

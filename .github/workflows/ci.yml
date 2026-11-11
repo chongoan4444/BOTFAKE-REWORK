@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Chặn merge khi: version lệch giữa version.json / manifest / userscript / update.xml,
+      # hoặc manifest trỏ tới file không tồn tại (extension sẽ không load được).
+      - name: Verify structure & version
+        run: npm run check
+
+      - name: Build package
+        run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: botfake-zip
+          path: dist/botfake.zip
+          if-no-files-found: error
