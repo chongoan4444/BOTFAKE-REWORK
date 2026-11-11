@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.76-w200.18
+// @version      1.91.77-w200.19
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.76-W200.18'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.77-W200.19'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2835,10 +2835,15 @@
         }
         if (isThreadControlError(msg)) {
           // Không blacklist page vì 1 ca: chỉ chặn khi lỗi cấp page lặp liên tiếp.
-          notePageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
-          if (!batchSkipApi) {
-          batchSkipApi = true; // học nhanh trong lượt: chat còn lại đi thẳng Socket/Ext
-          logLine('⛔ API bị chặn (' + msg + ') — các chat còn lại trong lô sẽ đi thẳng Socket/Ext');
+          const streak = notePageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
+          // [v1.91.77] TRƯỚC ĐÂY: ca (#10) ĐẦU TIÊN là bật batchSkipApi ⇒ tắt API cho TOÀN BỘ
+          // phần còn lại của lượt (log 11873 tin: "API 8" — chỉ 8 tin đi API, 11865 tin dồn hết
+          // sang Socket). Một ca lẻ không đủ chứng minh API của page bị chặn, nhất là khi (#10)
+          // phần lớn do thiếu cờ ctx-7-days (đã có retry kèm cờ ngay phía trên).
+          // Nay chỉ học khi đã lặp ≥ 2 lần.
+          if (!batchSkipApi && streak >= 2) {
+            batchSkipApi = true;
+            logLine('⛔ API bị chặn lặp (' + clip(msg, 80) + ') — các chat còn lại trong lô sẽ đi thẳng Socket/Ext');
           }
         }
         // BÁO RÕ KẾT QUẢ THẬT — không bao giờ "báo gửi" xong im lặng khi request đã bị từ chối.
@@ -2982,13 +2987,15 @@
   const PAGE_BLOCK_STREAK_TO_BLOCK = 3;
   const pageBlockStreak = {}; // pageId → số lần bị từ chối cấp page LIÊN TIẾP
   function notePageRejection(pageId) {
-    if (!pageId) return;
+    if (!pageId) return 0;
     const k = String(pageId);
     pageBlockStreak[k] = (pageBlockStreak[k] || 0) + 1;
-    if (pageBlockStreak[k] >= PAGE_BLOCK_STREAK_TO_BLOCK) {
+    const n = pageBlockStreak[k];
+    if (n >= PAGE_BLOCK_STREAK_TO_BLOCK) {
       markApiBlockedForPage(k);
       pageBlockStreak[k] = 0;
     }
+    return n;
   }
   function resetPageRejection(pageId) {
     if (pageId) delete pageBlockStreak[String(pageId)];
@@ -6741,6 +6748,13 @@
           logLine('⚠ ' + name + ' — bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
         } else if (r && r.recipientUnavailable && !hasMoreAfterSocket) {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+          // [v1.91.77] ĐÂY là nơi tín hiệu "khách không nhận được" xuất hiện nhiều nhất trong
+          // thực tế: Extension trả {"errorDescription":"Người này hiện không có mặt.", "fbErrorCode":…}
+          // (log lượt 11873 tin: 4895 ca, nhưng "GHI NHỚ LỖI: thêm mới 0"). Không lưu ⇒ lượt sau
+          // lại dồn 1/3 danh sách vào đúng những chat này. Nay ghi nhớ ngay tại đây.
+          try {
+            if (rememberConfirmedSocketUnavailable(conv, r)) sendDiag.recipientUnavailable++;
+          } catch (e0) { /* ignore */ }
           logLine('❌ ' + name + ' — bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
             + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)');
         } else {
