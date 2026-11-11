@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.74-w200.16
+// @version      1.91.75-w200.17
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.74-W200.16'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.75-W200.17'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4959,13 +4959,20 @@
   // /messages khỏe chỉ ~40–250ms, nhưng bắn cố định 128 luồng ở lô 5.000 làm
   // Pancake/Chrome dội 429 + timeout dây chuyền. Lane tự tăng khi phản hồi nhanh,
   // tự giảm + nghỉ chung khi 429/chậm — giữ thông lượng thật cao nhất mà server chịu được.
-  const CTX_FETCH_INITIAL = 32;
+  // [v1.91.75] Ở lô 10k, khâu DÒ global_id là nút cổ chai: mỗi chat chưa có gid phải đi
+  // HTTP GET /messages rồi tới Ext finder, trong khi làn gửi đã 64–192. Trước đây làn dò
+  // chỉ 32 (HTTP) và 12 (Ext) ⇒ đói làn ⇒ resolveGlobalId trả null ⇒ gidUnknown dồn sang
+  // Pass 2 (đúng triệu chứng "mất globalid" người dùng thấy). Nâng mức KHỞI ĐIỂM (không
+  // nâng trần) để vẫn giữ khả năng tự lùi của makeAdaptiveLane khi server bắt đầu chậm/429.
+  const CTX_FETCH_INITIAL = 48;
   const CTX_FETCH_MIN = 8;
-  const CTX_FETCH_MAX = 64;
+  const CTX_FETCH_MAX = 96;
   const PHOTO_UPLOAD_PARALLEL = 96;
-  const GID_EXT_INITIAL = 12;
+  // Ext finder là đường ĐẮT nhất (đi qua Extension) nhưng cũng là đường duy nhất biết
+  // {threadId → globalId} khi HTTP/WS không có. 12 → 20 làn khởi điểm, trần 24 → 32.
+  const GID_EXT_INITIAL = 20;
   const GID_EXT_MIN = 4;
-  const GID_EXT_MAX = 24;
+  const GID_EXT_MAX = 32;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
   // 🔥 [FIX-TỐC-ĐỘ] Ext gửi 48 khởi điểm, adaptive tới 64 — đủ cho ~1000 chat ngoài 24h trong 30s.
   const BUS_PARALLEL_EXT = 48;
@@ -6150,6 +6157,37 @@
     return promise;
   }
 
+  /* [v1.91.75] Nạp global_id cho TOÀN BỘ page của một lượt gửi TRƯỚC khi bắn.
+   * Bằng chứng HAR: response HTTP (GET /conversations, GET /messages) KHÔNG hề có trường
+   * `global_id` — chỉ có `thread_id` (48/48 conversation) và `thread_key` (`t_<thread_id>`).
+   * Và trong _app, threadMapping[threadId] = globalId được dựng từ HAI CỘT KHÁC NHAU
+   * (globalId = cột 2/9, threadId = cột 3/65) ⇒ thread_id KHÔNG phải global_id.
+   * Vì vậy KHÔNG được "đoán" gid từ thread_id (gửi sai thread). Nguồn duy nhất biết
+   * {threadId → globalId} là BATCH_GET_GLOBAL_ID của Extension + socket threadMapping,
+   * nên phải nạp chúng cho mọi page ngay từ đầu lô. */
+  function prefetchGidsForBatch(groups) {
+    const adapter = window.__ExtensionAdapter__;
+    const h = window.__MqttHelper__;
+    if (!adapter || typeof adapter.send !== 'function') return;
+    const seen = {};
+    const pages = [];
+    (groups || []).forEach((g) => {
+      (g && g.list ? g.list : []).forEach((c) => {
+        const pid = String((c && (c.pageId || String(c.id || '').split('_')[0])) || '');
+        if (!pid || seen[pid]) return;
+        seen[pid] = true;
+        pages.push(pid);
+      });
+    });
+    pages.forEach((pid) => {
+      requestBatchGlobalIds(pid, false);
+      try { if (h) syncSocketMappingsToCache(h, pid); } catch (e) { /* ignore */ }
+    });
+    if (pages.length > 1) {
+      try { logLine('🧭 Nạp trước global_id cho ' + pages.length + ' page (BATCH_GET_GLOBAL_ID) trước khi bắn.'); } catch (e) { /* ignore */ }
+    }
+  }
+
   function warmUpSockets(targets, opts) {
     try {
       preloadPersistentGlobalIds();
@@ -7275,6 +7313,11 @@
     render();
     // Khởi động warmUpSockets + BATCH_GET_GLOBAL_ID NGAY TỪ ĐẦU (chạy song song với lọc tag + upload ảnh)
     try { warmUpSockets(targets, { forceBatch: true }); } catch (e) { /* ignore */ }
+    // [v1.91.75] warmUpSockets(targets) chỉ thấy các chat được đưa vào của lô hiện tại. Với
+    // 10k chat trải trên nhiều page, phải quét TOÀN BỘ danh sách để mỗi page đều được nạp
+    // BATCH_GET_GLOBAL_ID (1 lệnh/page, idempotent nhờ batchGidPromises/batchGidFetchedPages)
+    // TRƯỚC khi làn gửi bắt đầu — thay vì dò lẻ từng chat giữa lúc đang gửi (chậm + đói làn).
+    try { prefetchGidsForBatch(sendGroups); } catch (e) { /* ignore */ }
 
 
     // Chuẩn bị ảnh (nếu có): upload 1 lần → gắn attachment cho từng page
