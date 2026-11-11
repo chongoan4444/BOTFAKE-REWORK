@@ -31,7 +31,7 @@ Mã phụ ở đường **đọc** (không phải gửi):
 
 ```
 action=reply_inbox
-is_record_ctx_7_days=true          ← 52/52 đều có; thiếu cờ ⇒ (#10) oan
+is_record_ctx_7_days=true          ← chỉ 24/58 request có; xem bảng dưới (thiếu cờ ⇒ (#10))
 message=<nội dung>
 content_id=<uuid>                  ← chỉ khi có ảnh
 attachment_id=<fb_id>              ← chỉ khi có ảnh
@@ -187,6 +187,25 @@ Cộng với việc server có độ trễ ghi (17/23 thấy sau ~1,3 s, 5/23 kh
 Với chat sôi động, tin của ta có thể bị đẩy ra ngoài cửa sổ trong vài giây ⇒ **không bao giờ** được
 dùng kết quả "không thấy" để kết luận "chưa gửi". (Xem mục 9b.)
 
+## 7f. CỜ ctx7 — ĐÃ SỬA SỐ LIỆU SAI VÀ XÁC NHẬN BẰNG BẢNG CHÉO
+
+Trước đây tài liệu (và tôi) ghi "52/52 request đều có cờ". **SAI** — con số đó lấy từ một chú thích
+trong code, không phải từ đếm thật. Đếm lại trên 58 request gửi:
+
+| Cờ ctx7 | OK | `#10` | `#551` | Tổng |
+|---|---|---|---|---|
+| **CÓ cờ** | **19** | **0** | 5 | 24 |
+| **THIẾU cờ** | 4 | **24** | 6 | 34 |
+
+Kết luận (mạnh hơn cả chú thích cũ):
+
+- **24/24 ca `#10` đều THIẾU cờ — không có ca `#10` nào khi có cờ.**
+- Tỉ lệ thành công: có cờ **19/24 = 79 %** · thiếu cờ **4/34 = 12 %**.
+- Cờ **không** cứu được `#551` (khách chết) — 5 ca có cờ vẫn `#551`.
+
+⇒ Thay đổi 1.91.80 (luôn gửi cờ) là **đúng và đã được kiểm bằng dữ liệu**, không phải theo chú thích.
+Đồng thời đây là lời giải thích cho việc lô thực tế không còn dòng `🚫 API bị chặn ngoài cửa sổ 24h`.
+
 ## 7e. KẾT QUẢ ĐO THỰC TẾ (lô 10 660 tin, 1.91.82, 347 s)
 
 | Chỉ số | Kết quả | So với trước |
@@ -248,7 +267,7 @@ Hệ quả bắt buộc:
 ## 10. Trạng thái việc làm
 
 - ✅ 1.91.79 — đọc lại Ext không còn giữ lượt (bỏ 176 s chờ vô ích).
-- ✅ 1.91.80 — luôn gửi `is_record_ctx_7_days` như app thật (52/52).
+- ✅ 1.91.80 — luôn gửi `is_record_ctx_7_days` (bảng chéo 7f: thiếu cờ ⇒ 24/24 ca `#10`).
 - ❌ **HUỶ** kế hoạch gửi lại ca "không rõ" — xem mục 9b (22% ca đã gửi vẫn không thấy trong lịch sử).
 - ⬜ Xác nhận hàng loạt bằng `snippet`/`last_sent_by`/`read_watermarks` (chỉ lật ⚠→✅, không bao giờ kết luận ngược).
 - ⬜ Đếm `can_inbox=false` để đối chiếu với số ❌ thực tế (telemetry, chưa dùng để quyết định).
