@@ -75,6 +75,38 @@ sẽ chạy code cũ dù bạn đã sửa).
 Quy trình phát hành: sửa code → tăng `base`/`build` trong `version.json` →
 `npm run build:crx` → commit `botfake.crx` + `update.xml` → push (GitHub Pages phục vụ).
 
+## Cơ chế gửi – nhận phản hồi – bù (v1.91.73)
+
+Nguyên tắc: **chỉ bù khi có bằng chứng DƯƠNG TÍNH rằng tin chưa đi**. Không thấy tin
+trong lịch sử *không phải* bằng chứng — API lịch sử của Pancake trễ vài giây.
+
+### Bằng chứng từ HAR (54 request `reply_inbox`)
+
+| Cờ `is_record_ctx_7_days` | Kết quả server | Số ca |
+|---|---|---|
+| **Có** | `success: true` | 19/19 |
+| **Không** | `e_code 10`, `e_subcode 2018300` — "(#10) …ứng dụng khác đang kiểm soát thread" | 24/24 |
+| Có / Không | `e_code 551`, `e_subcode 1545041` — "(#551) Người này hiện không có mặt" | 5 / 6 |
+
+⇒ `(#10)` phần lớn là do **thiếu cờ**, không phải app khác giữ thread. Response lỗi thật
+dùng `e_code`/`e_subcode` (không có `message_code`).
+
+### Các thay đổi
+
+1. **`(#10)` mà request thiếu cờ** → gửi lại **đúng 1 lần kèm cờ** trước khi kết luận.
+   (`#10` = server chưa gửi ⇒ gửi lại không thể trùng.)
+2. **Không chặn API cấp page vì 1 ca lẻ** — chỉ chặn khi lỗi lặp ≥ 3 lần liên tiếp; một ca
+   thành công là reset. Trước đây 1 lần `#10` khoá page 4 giờ.
+3. **Phân xử lịch sử 3 trạng thái** (`historyVerdict`): `yes` / `no` / `unknown`.
+   - `no` chỉ khi có **mốc nước**: tin mới nhất của cả chat vẫn cũ hơn `sentAt − 3s`.
+   - Bỏ dòng "mọi tin của page sau `sentAt−2s` đều tính là đã gửi" (chốt ✅ oan ⇒ mất tin).
+4. **Kiểm chứng Socket đọc lặp** (3–4 lần, cách 2–6s) và chỉ bù khi `no` **hai lần liên tiếp**
+   — đây là chỗ gây *lặp câu* do API lịch sử trễ.
+5. **Ca "không rõ kết quả"** (timeout/5xx) trước đây chốt ⚠ rồi bỏ (mất tin) → nay kiểm chứng
+   lịch sử sau 9s + 7s: `yes` → ✅, `no` → bù 1 vòng, còn lại giữ ⚠.
+
+Chạy `npm test` để kiểm tra 12 kịch bản phân xử (test trích thẳng hàm thật từ userscript).
+
 ## Quy tắc khi viết script cho website
 
 - Khi người dùng yêu cầu viết script cho website, trước tiên phải kiểm tra các file

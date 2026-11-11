@@ -20,6 +20,9 @@ jobs:
       - name: Verify structure & version
         run: npm run check
 
+      - name: Test logic phân xử lịch sử (cơ chế bù)
+        run: npm test
+
       - name: Build package
         run: npm run build
 

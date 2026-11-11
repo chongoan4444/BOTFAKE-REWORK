@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.72-w200.14
+// @version      1.91.73-w200.15
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.72-W200.14'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.73-W200.15'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2565,7 +2565,11 @@
         ok: false,
         sent: false,
         error: (data && (data.message || data.error)) || ('HTTP ' + res.status),
-        code: data && data.message_code,
+        // HAR: response lỗi của Pancake dùng e_code / e_subcode (KHÔNG có message_code):
+        //   {"e_code":10,"e_subcode":2018300,"message":"(#10) Không gửi được…","success":false}
+        //   {"e_code":551,"e_subcode":1545041,"message":"(#551) Người này hiện không có mặt.","success":false}
+        code: (data && (data.e_code != null ? data.e_code : data.message_code)) || null,
+        subcode: (data && data.e_subcode != null) ? data.e_subcode : null,
       };
     } catch (e) {
       return { ok: false, sent: 'maybe', error: 'Lỗi mạng: ' + (e && e.message || e) };
@@ -2648,7 +2652,8 @@
   // Đối chiếu 13 request gửi THẬT của app trong tinnhan.har & executeByApi (@946500) + buildRequestBody (@951000) trong _app:
   //   • Gửi chữ hoặc 1 ảnh: multipart/form-data (action=reply_inbox, [is_record_ctx_7_days], message, content_id, attachment_id, content_url, width, height, send_by_platform=web)
   //   • Gửi >= 2 ảnh (đa ảnh): application/json ({ action: 'reply_inbox', [is_record_ctx_7_days], message, content_ids, attachment_ids, content_urls, dimensions, send_by_platform: 'web' })
-  function buildInboxSend(conv, text, photo) {
+  function buildInboxSend(conv, text, photo, opts) {
+    opts = opts || {};
     const token = getToken();
     if (!token) return { error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
     const pageId = conv.pageId || conv.id.split('_')[0];
@@ -2660,6 +2665,14 @@
       const full7 = peekConv(conv) || conv;
       if (isRecordCtx7Days(full7)) ctx7 = true;
     } catch (e) { /* thiếu dữ liệu → gửi như request thường */ }
+    // ===== BẰNG CHỨNG HAR (đối chiếu 54 request reply_inbox) =====
+    //   • 19/19 request CÓ is_record_ctx_7_days:true        → success:true
+    //   • 24/24 request THIẾU cờ                            → e_code 10 / e_subcode 2018300
+    //        "(#10) Không gửi được tin nhắn do một ứng dụng khác hiện đang kiểm soát thread này."
+    // → Thiếu cờ chính là nguyên nhân phổ biến nhất của (#10), KHÔNG phải app khác giữ thread.
+    // Khi lần gửi trước đã bị (#10) mà request đó thiếu cờ, caller gửi lại ĐÚNG 1 lần kèm cờ
+    // (opts.forceCtx7). (#10) = server chưa gửi → gửi lại không thể sinh tin trùng.
+    if (opts.forceCtx7) ctx7 = true;
 
     const items = normalizePhotoItems(photo);
     if (items.length > 1) {
@@ -2676,7 +2689,7 @@
         send_by_platform: 'web',
       };
       if (ctx7) jsonBody.is_record_ctx_7_days = true;
-      return { url: url, isJson: true, jsonBody: jsonBody };
+      return { url: url, isJson: true, jsonBody: jsonBody, ctx7: ctx7 };
     }
 
     const fd = new FormData();
@@ -2695,7 +2708,7 @@
       if (p0.h) fd.append('height', String(p0.h));
     }
     fd.append('send_by_platform', 'web'); // request thật của app luôn có (cả text lẫn ảnh)
-    return { url: url, fd: fd, isJson: false };
+    return { url: url, fd: fd, isJson: false, ctx7: ctx7 };
   }
 
   // ⚡ CHẾ ĐỘ NHANH: bắn request API qua cổng điều tiết apiSendLane (64 luồng HTTP song song),
@@ -2781,9 +2794,10 @@
       try { data = await res.json(); } catch (e) { data = null; parsed = false; }
       if (res.ok && data && data.success) {
         sendDiag.apiSuccess++;
+        resetPageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
         markDelivered(conv.id, 'api'); postSendSideEffects(conv); return;
       } // đã đến nơi — im lặng
-      const msg = (data && (data.message || data.error)) || ('HTTP ' + res.status);
+      let msg = (data && (data.message || data.error)) || ('HTTP ' + res.status);
       if (res.status === 401 || res.status === 403) capturedToken = null;
       const nm = conv.name || conv.id;
       const certainFail = isCertainHttpNotSent(res.status, data, parsed);
@@ -2796,10 +2810,33 @@
         // "(#10)"; HAR có update_global_id chạy sau cả "(#551)"). → PHẢI bù qua kênh chưa thử.
         const win = isWindowClosedError(msg);
         if (win) windowBlocked++;
+        // ===== (#10): thử lại ĐÚNG 1 LẦN KÈM CỜ trước khi kết luận =====
+        // HAR: 24/24 request thiếu is_record_ctx_7_days bị (#10) e_subcode 2018300; 19/19 request
+        // CÓ cờ thì success. Vì vậy nếu request vừa rồi thiếu cờ → bắn lại 1 lần kèm cờ.
+        // (#10) = server CHƯA gửi tin → gửi lại không thể trùng.
+        if (isThreadControlError(msg) && !req.ctx7 && !ctx7Retried[conv.id]) {
+          ctx7Retried[conv.id] = true;
+          const req2 = buildInboxSend(conv, text, photo, { forceCtx7: true });
+          if (!req2.error) {
+            const res2 = await timedFetch(req2);
+            let d2 = null;
+            try { d2 = await res2.json(); } catch (e2) { d2 = null; }
+            if (res2.ok && d2 && d2.success) {
+              sendDiag.apiSuccess++;
+              sendDiag.ctx7RetryOk = (sendDiag.ctx7RetryOk || 0) + 1;
+              resetPageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
+              logLine('🔁 ' + nm + ' — (#10) do THIẾU CỜ ctx-7-days → gửi lại kèm cờ THÀNH CÔNG.');
+              markDelivered(conv.id, 'api'); postSendSideEffects(conv); return;
+            }
+            const msg2 = (d2 && (d2.message || d2.error)) || ('HTTP ' + res2.status);
+            if (d2 && d2.success === false) msg = msg2; // cờ đã có mà vẫn (#10) → chặn thật của chat này
+          }
+        }
         if (isThreadControlError(msg)) {
-          markApiBlockedForPage(conv.pageId || String(conv.id || '').split('_')[0]); // nhớ page này cho các lượt sau
+          // Không blacklist page vì 1 ca: chỉ chặn khi lỗi cấp page lặp liên tiếp.
+          notePageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
           if (!batchSkipApi) {
-          batchSkipApi = true; // học nhanh: API bị chặn cấp page (#10 app khác giữ thread, #613…) → chat còn lại trong lô đi thẳng Socket/Ext
+          batchSkipApi = true; // học nhanh trong lượt: chat còn lại đi thẳng Socket/Ext
           logLine('⛔ API bị chặn (' + msg + ') — các chat còn lại trong lô sẽ đi thẳng Socket/Ext');
           }
         }
@@ -2811,7 +2848,8 @@
       } else {
         sendDiag.apiUnknown++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-        logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — KHÔNG gửi lại để tránh trùng');
+        logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — kiểm chứng lịch sử trước khi bù');
+        scheduleUncertainVerify(conv, text, photo, Date.now(), msg);
       }
     }).then((laneRes) => {
       // lane nuốt lỗi văng ra từ fetch (mạng / abort quá hạn 20s) thành {ok:false,error:'Lỗi kênh:…'}
@@ -2822,13 +2860,15 @@
         && !deliveredIds[conv.id] && !finalFailedIds[conv.id] && !uncertainIds[conv.id]) {
         sendDiag.apiUnknown++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-        logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng/quá hạn) — KHÔNG gửi lại để tránh trùng');
+        logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng/quá hạn) — kiểm chứng lịch sử trước khi bù');
+        scheduleUncertainVerify(conv, text, photo, Date.now(), 'lỗi mạng/quá hạn');
       }
     }).catch(() => {
       if (myRun !== runSeq) return;
       sendDiag.apiUnknown++;
       if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-      logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng) — KHÔNG gửi lại để tránh trùng');
+      logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng) — kiểm chứng lịch sử trước khi bù');
+      scheduleUncertainVerify(conv, text, photo, Date.now(), 'lỗi mạng');
     });
     return { ok: true, id: '', sendBy: 'api', sent: true, fired: true };
   }
@@ -2885,7 +2925,11 @@
         ok: false,
         sent: false,
         error: (data && (data.message || data.error)) || ('HTTP ' + res.status),
-        code: data && data.message_code,
+        // HAR: response lỗi của Pancake dùng e_code / e_subcode (KHÔNG có message_code):
+        //   {"e_code":10,"e_subcode":2018300,"message":"(#10) Không gửi được…","success":false}
+        //   {"e_code":551,"e_subcode":1545041,"message":"(#551) Người này hiện không có mặt.","success":false}
+        code: (data && (data.e_code != null ? data.e_code : data.message_code)) || null,
+        subcode: (data && data.e_subcode != null) ? data.e_subcode : null,
       };
     } catch (e) {
       // lỗi mạng: request có thể đã tới server → KHÔNG rõ — không được thử kênh khác
@@ -2926,6 +2970,27 @@
     if (!pageId) return;
     apiBlockedPages[String(pageId)] = Date.now();
     try { sessionStorage.setItem(API_BLOCKED_PAGES_KEY, JSON.stringify(apiBlockedPages)); } catch (e) { /* ignore */ }
+  }
+
+  /* ---- CHẶN API CẤP PAGE: chỉ khi lỗi LẶP, không chặn vì 1 ca lẻ ----
+   * Bản cũ: 1 lần (#10) là markApiBlockedForPage() → page mất API 4 GIỜ. Với lô lớn, một
+   * ca lỗi lẻ (hoặc một request thiếu cờ ctx-7-days) đẩy toàn bộ page sang Socket/Extension
+   * — chậm hơn nhiều và dễ sinh bù chồng. Nay: đếm số lần liên tiếp, đủ ngưỡng mới chặn;
+   * một ca thành công là reset streak (chứng minh API của page vẫn sống).
+   * HAR: 24 ca (#10) liên tiếp trên MỘT page đều thiếu cờ → đây chính là ca "lỗi lẻ" đó. */
+  const PAGE_BLOCK_STREAK_TO_BLOCK = 3;
+  const pageBlockStreak = {}; // pageId → số lần bị từ chối cấp page LIÊN TIẾP
+  function notePageRejection(pageId) {
+    if (!pageId) return;
+    const k = String(pageId);
+    pageBlockStreak[k] = (pageBlockStreak[k] || 0) + 1;
+    if (pageBlockStreak[k] >= PAGE_BLOCK_STREAK_TO_BLOCK) {
+      markApiBlockedForPage(k);
+      pageBlockStreak[k] = 0;
+    }
+  }
+  function resetPageRejection(pageId) {
+    if (pageId) delete pageBlockStreak[String(pageId)];
   }
 
   // NGOÀI CỬA SỔ 24H — API từ chối "(#551) Người này hiện không có mặt" / "(#10)…ngoài khoảng
@@ -6185,6 +6250,7 @@
   const BU_RETRY_MS = 1000;     // Socket: kênh dự phòng cuối (1s)
   const BU_SPREAD_MS = 50;      // rải nhẹ 50ms — hàng đợi Socket/Ext vốn đã tự điều tiết
   const buRetryDone = {}; // convId → đã bù trong lượt này
+  const ctx7Retried = {}; // convId → đã gửi lại 1 lần kèm cờ ctx-7-days trong lượt này (chống lặp vô hạn)
   let buRetrySeq = 0;
   let runSeq = 0; // mỗi lượt gửi 1 số — bù của lượt cũ tự hủy khi có lượt mới (chống gửi lẫn/lặp)
   const deliveredIds = {}; // convId → ĐÃ có kênh báo thành công trong lượt này ('api'|'ext'|'socket') — tuyệt đối không gửi lại
@@ -6205,6 +6271,7 @@
   const sockVerifyFired = {}; // convId → runSeq đã bắn cứu sau kiểm chứng (mỗi lượt tối đa 1 lần/chat)
   const verifyStats = { found: 0, fired: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
   const extVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng sau khi Ext timeout
+  const uncertainVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng ca "không rõ kết quả" (API timeout/5xx)
   const extTimeoutStats = { timeout: 0, skipped: 0, found: 0, notFound: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
   let bgWatchdogTimer = null;
   // ⚡ [FIX-5] Với bắn-nhả 192 slot, đuôi hàng đợi retry Socket/Ext có thể chờ >90s khi lô lớn.
@@ -6293,7 +6360,8 @@
     const settled = okTotal + failTotal + unsureTotal + skipLateTotal;
     const verifyPendingNow = Object.keys(sockVerifyPending).filter((id) => sockVerifyPending[id] === runSeq).length;
     const extVerifyPendingNow = Object.keys(extVerifyPending).filter((id) => extVerifyPending[id] === runSeq).length;
-    const pending = Math.max(0, (batchStats.total || 0) - settled) + verifyPendingNow + extVerifyPendingNow;
+    const uncertainVerifyPendingNow = Object.keys(uncertainVerifyPending).filter((id) => uncertainVerifyPending[id] === runSeq).length;
+    const pending = Math.max(0, (batchStats.total || 0) - settled) + verifyPendingNow + extVerifyPendingNow + uncertainVerifyPendingNow;
     return {
       total: batchStats.total || 0,
       okTotal, okApi, okExt, okSocket,
@@ -6658,25 +6726,58 @@
       .trim();
   }
 
-  function isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAt) {
-    if (!Array.isArray(msgs) || !msgs.length) return false;
-    const batchStart = (batchStats && batchStats.startedAt) || sentAt;
-    // Chỉ xét tin được tạo trong lượt gửi hiện tại (trừ 3s lệch đồng hồ) và từ lúc bắt đầu bắn chat này (trừ 5s):
-    // TUYỆT ĐỐI không nhìn lùi 60–75s về lượt gửi trước đó (tránh khớp nhầm tin của lượt cũ gây BÙ THIẾU)!
-    const minTime = Math.max(batchStart - 3000, sentAt - 5000);
-    return msgs.some((m) => {
-      if (!m || m.is_removed) return false;
-      if (!m.from || String(m.from.id) !== String(pageId)) return false; // chỉ tin DO PAGE gửi
+  /* ===== PHÂN XỬ LỊCH SỬ CHAT — 3 KẾT LUẬN, KHÔNG ĐOÁN (v1.91.73) =====
+   *   'yes'     : thấy ĐÚNG tin của page (khớp nội dung, hoặc khớp ảnh khi không có chữ)
+   *               tạo trong [sentAt-5s, now] → tin ĐÃ tới nơi.
+   *   'no'      : đọc được lịch sử VÀ có MỐC NƯỚC — tin mới nhất của cả chat vẫn cũ hơn
+   *               sentAt-3s → chưa có gì mới đi ra. Đây là bằng chứng DƯƠNG tính duy nhất
+   *               được phép dùng để kết luận "chưa gửi".
+   *   'unknown' : mọi trường hợp còn lại (không thấy tin nhưng lịch sử đã có tin mới hơn
+   *               sentAt, thiếu mốc giờ, lịch sử lạ…) → KHÔNG kết luận, KHÔNG bù.
+   *
+   * Hai lỗi của bản cũ đã sửa:
+   *   1) FALSE-POSITIVE: dòng "t >= sentAt-2000 && (normMsg || có ảnh)" coi MỌI tin của page
+   *      sau sentAt-2s là "đã gửi" — kể cả tin khác nội dung (tin của wave trước, quick reply…)
+   *      → chốt ✅ oan, tin thật KHÔNG BAO GIỜ được bù ⇒ mất tin im lặng.
+   *   2) FALSE-NEGATIVE: "không thấy tin" bị coi là "chưa gửi" chỉ sau 1 lần đọc ⇒ bù ⇒ LẶP CÂU
+   *      khi API lịch sử của Pancake trễ vài giây. Nay 'no' đòi hỏi mốc nước + đọc lặp.
+   * minTime vẫn chặn nhìn lùi về lượt trước (chống khớp nhầm tin cũ). */
+  function historyVerdict(msgs, pageId, want, photo, sentAt) {
+    if (!Array.isArray(msgs) || !msgs.length) return 'unknown';
+    const at = Number(sentAt) || 0;
+    if (!at) return 'unknown';
+    const batchStart = (batchStats && batchStats.startedAt) || at;
+    const minTime = Math.max(batchStart - 3000, at - 5000);
+    let newestAny = 0;
+    let sawTime = false;
+    for (let i = 0; i < msgs.length; i++) {
+      const m = msgs[i];
+      if (!m || m.is_removed) continue;
       const rawT = String(m.inserted_at || '');
-      if (!rawT) return false;
+      if (!rawT) continue;
       const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
-      if (isNaN(t) || t < minTime) return false;
-      const normMsg = normalizeMsgText(m.message);
-      if (want && (normMsg === want || normMsg.indexOf(want) > -1)) return true;
-      if (!want && photo && Array.isArray(m.attachments) && m.attachments.length > 0) return true;
-      if (t >= sentAt - 2000 && (normMsg || (Array.isArray(m.attachments) && m.attachments.length > 0))) return true;
-      return false;
-    });
+      if (isNaN(t)) continue;
+      sawTime = true;
+      if (t > newestAny) newestAny = t;
+      if (!m.from || String(m.from.id) !== String(pageId)) continue; // chỉ tin DO PAGE gửi
+      if (t < minTime) continue;
+      const hasAtt = Array.isArray(m.attachments) && m.attachments.length > 0;
+      if (want) {
+        const normMsg = normalizeMsgText(m.message);
+        if (normMsg && (normMsg === want || normMsg.indexOf(want) > -1)) return 'yes';
+      } else if (hasAtt) {
+        return 'yes';
+      }
+    }
+    if (!sawTime || !newestAny) return 'unknown';
+    // Mốc nước: KHÔNG có tin nào (của bất kỳ ai) mới hơn thời điểm bắn → chưa có gì tới FB.
+    if (newestAny < at - 3000) return 'no';
+    return 'unknown';
+  }
+
+  // Tương thích chỗ gọi cũ: chỉ coi là "đã tới" khi verdict chắc chắn 'yes'.
+  function isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAt) {
+    return historyVerdict(msgs, pageId, want, photo, sentAt) === 'yes';
   }
 
   function scheduleSocketVerify(conv, text, photo, publishedAtMs) {
@@ -6711,41 +6812,67 @@
           + '/conversations/' + encodeURIComponent(convId)
           + '/messages?customer_id=' + encodeURIComponent(custId)
           + '&user_view=true&is_new_api=true&separate_pos=true';
-        const res = await ctxFetchLane(() => fetchJson(url, 2));
-        if (!res || !res.ok || !res.data || res.data.success === false) {
-          verifyStats.unknown++;
-          logLine('🔎 ' + nm + ' — không kiểm chứng được tin Socket (đọc lịch sử lỗi) — giữ ⚠ như cũ, không gửi lại');
-          return;
-        }
-        try {
-          const hGid = gidFromPayload(res.data);
-          const tid = f.thread_id || f.threadId || conv.threadId || '';
-          if (hGid && typeof window.__botfakeSaveGid__ === 'function') {
-            window.__botfakeSaveGid__(convId, pageId, tid, String(hGid));
+        // ===== ĐỌC LẠI NHIỀU LẦN TRƯỚC KHI KẾT LUẬN =====
+        // API lịch sử của Pancake trễ vài giây so với thời điểm FB nhận tin qua Socket.
+        // Bản cũ đọc ĐÚNG 1 LẦN sau 1.5s (3s với lô >50) rồi kết luận "chưa tới" ⇒ bắn cứu
+        // ⇒ tin thật về sau đó ⇒ khách nhận 2 lần (đây chính là "bù gây lặp câu").
+        // Nay: chỉ kết luận 'no' khi thấy MỐC NƯỚC RỖNG ở HAI LẦN ĐỌC LIÊN TIẾP, cách nhau
+        // vài giây; 'yes' chốt ngay; còn lại giữ ⚠ (không bù).
+        let verdict = 'unknown';
+        let noStreak = 0;
+        const maxReads = (batchStats && batchStats.total > 50) ? 4 : 3;
+        for (let attempt = 0; attempt < maxReads; attempt++) {
+          if (attempt > 0) {
+            await sleep(attempt === 1 ? 2000 : (attempt === 2 ? 4000 : 6000));
+            if (myRun !== runSeq || state.stopRequested) return;
+            if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
           }
-        } catch (e0) { /* ignore */ }
-        const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
-        if (!Array.isArray(msgs)) {
-          verifyStats.unknown++;
-          logLine('🔎 ' + nm + ' — không kiểm chứng được tin Socket (lịch sử lạ) — giữ ⚠ như cũ, không gửi lại');
-          return;
+          let res = null;
+          try { res = await ctxFetchLane(() => fetchJson(url, 2)); } catch (e) { res = null; }
+          if (!res || !res.ok || !res.data || res.data.success === false) {
+            if (attempt === 0) {
+              logLine('🔎 ' + nm + ' — chưa đọc được lịch sử (' + ((res && res.error) || 'lỗi') + ') — thử lại…');
+            }
+            continue;
+          }
+          try {
+            const hGid = gidFromPayload(res.data);
+            const tid = f.thread_id || f.threadId || conv.threadId || '';
+            if (hGid && typeof window.__botfakeSaveGid__ === 'function') {
+              window.__botfakeSaveGid__(convId, pageId, tid, String(hGid));
+            }
+          } catch (e0) { /* ignore */ }
+          const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
+          if (!Array.isArray(msgs)) continue;
+          verdict = historyVerdict(msgs, pageId, want, photo, sentAt);
+          if (verdict === 'yes') break;
+          if (verdict === 'no') {
+            noStreak++;
+            if (noStreak >= 2) break; // 2 lần đọc liên tiếp đều rỗng mốc nước → chắc chắn chưa đi
+          } else {
+            noStreak = 0;
+          }
         }
-        const found = isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAt);
-        if (found) {
+        if (verdict === 'yes') {
           verifyStats.found++;
           markDelivered(conv.id, 'socket');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
           logLine('🔎 ' + nm + ' — kiểm chứng: tin ĐÃ đến nơi (Socket chỉ mất ACK) — tính ✅ Socket');
           return;
         }
-        // Đọc được lịch sử mà không thấy tin → publish chưa hề tới FB (socket chết ngầm)
-        verifyStats.fired++;
-        sockVerifyFired[conv.id] = myRun;
-        reopenUncertain(conv.id);
-        releaseOutbound(conv.id); // tin chắc chưa đi → nhả khóa để kênh cứu được bắn (đúng luật khóa outbound)
-        noteBgPending(conv, 'verify-bu');
-        logLine('🔎 ' + nm + ' — kiểm chứng: CHƯA thấy tin trong lịch sử — bắn cứu 1 vòng qua Extension');
-        scheduleBuRetry(conv, text, photo, nm, 'Socket mất ACK (kiểm chứng chưa thấy tin)', ['socket']);
+        if (verdict === 'no') {
+          // Đọc lại nhiều lần, mốc nước rỗng liên tiếp → publish chưa hề tới FB (socket chết ngầm)
+          verifyStats.fired++;
+          sockVerifyFired[conv.id] = myRun;
+          reopenUncertain(conv.id);
+          releaseOutbound(conv.id); // tin chắc chưa đi → nhả khóa để kênh cứu được bắn (đúng luật khóa outbound)
+          noteBgPending(conv, 'verify-bu');
+          logLine('🔎 ' + nm + ' — kiểm chứng: đọc ' + maxReads + ' lần vẫn KHÔNG có tin — bắn cứu 1 vòng qua Extension');
+          scheduleBuRetry(conv, text, photo, nm, 'Socket mất ACK (kiểm chứng ' + maxReads + ' lần chưa thấy tin)', ['socket']);
+          return;
+        }
+        verifyStats.unknown++;
+        logLine('🔎 ' + nm + ' — kiểm chứng KHÔNG kết luận được (lịch sử chưa đủ rõ) — giữ ⚠, KHÔNG gửi lại để tránh trùng');
       } catch (e) {
         verifyStats.unknown++;
         logLine('🔎 ' + nm + ' — kiểm chứng lỗi (' + (e && e.message || e) + ') — giữ ⚠ như cũ, không gửi lại');
@@ -6827,6 +6954,87 @@
         try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
       }
     }, delayMs);
+  }
+
+  /* ===== KIỂM CHỨNG CA "KHÔNG RÕ KẾT QUẢ" (API timeout / 5xx / mất mạng) =====
+   * Trước đây ca này chỉ chốt ⚠ rồi BỎ — tin có thể chưa hề đi (timeout trước khi tới FB)
+   * và không bao giờ được bù ⇒ MẤT TIN. Nay kiểm chứng bằng nguồn ĐỘC LẬP (đọc lịch sử):
+   *   • 'yes' → tin đã tới → ✅ (ACK trễ)
+   *   • 'no'  (mốc nước rỗng 2 lần liên tiếp, đọc sau ≥9s) → chắc chắn chưa đi → bù 1 vòng
+   *   • còn lại → GIỮ ⚠, tuyệt đối không bắn mò (chống trùng)
+   * Chỉ chạy khi có nội dung để đối chiếu; mỗi chat 1 lần/lượt. */
+  const UNCERTAIN_VERIFY_FIRST_MS = 9000; // chờ 9s rồi đọc lần 1 (đủ để tin "đang bay" kịp vào lịch sử)
+  const UNCERTAIN_VERIFY_GAP_MS = 7000;   // đọc lần 2 sau 7s — xác nhận mốc nước rỗng
+  function scheduleUncertainVerify(conv, text, photo, sentAtMs, why) {
+    if (!conv || !conv.id) return;
+    const want = normalizeMsgText(text);
+    if (!want && !photo) return;
+    if (uncertainVerifyPending[conv.id]) return;
+    if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+    const myRun = runSeq;
+    uncertainVerifyPending[conv.id] = myRun;
+    const nm = conv.name || conv.id;
+    const sentAt = sentAtMs || Date.now();
+    setTimeout(async () => {
+      try {
+        if (myRun !== runSeq || state.stopRequested) return;
+        if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+        let f = null;
+        try { f = peekConv(conv); } catch (e) { f = null; }
+        if (!f || !(f.page_id || f.pageId)) {
+          try { f = await ctxFull(conv, {}); } catch (e) { f = null; }
+        }
+        f = f || conv;
+        const pageId = f.page_id || f.pageId || conv.pageId || String(conv.id || '').split('_')[0];
+        const convId = f.id || conv.id;
+        const custId = String(f.customerId || conv.customerId
+          || (f.customers && f.customers[0] && f.customers[0].id)
+          || (conv.customers && conv.customers[0] && conv.customers[0].id) || '');
+        if (!pageId) return;
+        const url = apiBase() + '/v1/pages/' + pageId
+          + '/conversations/' + encodeURIComponent(convId)
+          + '/messages?customer_id=' + encodeURIComponent(custId)
+          + '&user_view=true&is_new_api=true&separate_pos=true';
+        let verdict = 'unknown';
+        let noStreak = 0;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          if (attempt) {
+            await sleep(UNCERTAIN_VERIFY_GAP_MS);
+            if (myRun !== runSeq || state.stopRequested) return;
+            if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+          }
+          let res = null;
+          try { res = await ctxFetchLane(() => fetchJson(url, 2)); } catch (e) { res = null; }
+          if (!res || !res.ok || !res.data || res.data.success === false) continue;
+          const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
+          if (!Array.isArray(msgs)) continue;
+          verdict = historyVerdict(msgs, pageId, want, photo, sentAt);
+          if (verdict === 'yes') break;
+          if (verdict === 'no') { noStreak++; if (noStreak >= 2) break; } else { noStreak = 0; }
+        }
+        if (verdict === 'yes') {
+          markDelivered(conv.id, 'api');
+          try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
+          logLine('🔎 ' + nm + ' — kiểm chứng: tin ĐÃ tới (API chỉ trả lời trễ) — tính ✅ API');
+          return;
+        }
+        if (verdict === 'no') {
+          reopenUncertain(conv.id);
+          releaseOutbound(conv.id);
+          noteBgPending(conv, 'verify-bu');
+          logLine('🔎 ' + nm + ' — kiểm chứng: đọc 2 lần vẫn KHÔNG thấy tin — bắn cứu 1 vòng qua kênh khác');
+          scheduleBuRetry(conv, text, photo, nm, 'API không rõ kết quả (kiểm chứng chưa thấy tin)', ['api']);
+          return;
+        }
+        logLine('🔎 ' + nm + ' — kiểm chứng KHÔNG kết luận được (' + clip(why || 'không rõ', 60) + ') — giữ ⚠, KHÔNG gửi lại để tránh trùng');
+      } catch (e) {
+        // kiểm chứng lỗi → giữ nguyên ⚠
+      } finally {
+        delete uncertainVerifyPending[conv.id];
+        try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
+        try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
+      }
+    }, UNCERTAIN_VERIFY_FIRST_MS);
   }
 
   // Nhóm chat theo NỘI DUNG sẽ gửi: chat thuộc câu nào → ĐÚNG chữ của câu đó;
