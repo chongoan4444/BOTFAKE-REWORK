@@ -307,3 +307,36 @@ Hệ quả bắt buộc:
 - ⬜ Xác nhận hàng loạt bằng `snippet`/`last_sent_by`/`read_watermarks` (chỉ lật ⚠→✅, không bao giờ kết luận ngược).
 - ⬜ Đếm `can_inbox=false` để đối chiếu với số ❌ thực tế (telemetry, chưa dùng để quyết định).
 - ⬜ Coi `Hội thoại này không tồn tại` là kết luận dứt điểm (cân nhắc: chỉ khi gặp 2 lần, tránh lỗi tạm thời).
+
+## 11. Tối ưu tốc độ — số liệu và cách tự tìm điểm ngọt
+
+Từ lô 10 660 tin (347 s, 30,7 tin/s, 192 in-flight, ACK TB 3 431 ms):
+
+- Trần lý thuyết theo định luật Little: 192 ÷ 3,431 s ≈ **56 tin/s**; thực tế 30,7 ⇒ đạt **55 %**.
+- Nút thắt chính: **Socket/page cap bị bộ điều tốc hạ 192 → 64** (`backoff chậm/no-ACK 4/2`),
+  trong khi bucket ACK lớn nhất là 2–5 s (9 134 tin).
+- `wave→cổng 18,4 s` **không phải** nút thắt: wave 1 000 tin phát trong ~1 s nhưng cổng xả
+  30 tin/s nên phải đợi 33 s. Đổi wave size chỉ đổi độ trễ nhìn thấy, không đổi thông lượng.
+
+### Cách tự thử (không cần build lại)
+
+Mở Console của trang Pancake khi đang chạy script:
+
+```js
+__botfakeSetSockPageFloor__(128)   // sàn 128; thử 96 / 128 / 192
+__botfakeSetSockPageFloor__(64)    // về mặc định
+```
+
+Giá trị lưu ở `localStorage['botfake_sock_page_floor']`, áp dụng cho lượt gửi kế tiếp.
+Dòng `🌊` trong log sẽ hiện `Socket/page cap <sàn>–192 (sàn tự đặt)` khi khác mặc định.
+
+### Cách đánh giá một lần thử (1 lô là đủ)
+
+| Giữ sàn cao nếu | Trả về 64 nếu |
+|---|---|
+| ACK TB ≤ 4 000 ms | ACK TB > 5 000 ms |
+| `no-ACK` = 0 | `no-ACK` > 0 |
+| tốc độ tin/s tăng | tốc độ không tăng hoặc ❌ tăng |
+
+Muốn vượt trần 56 tin/s một cách chắc chắn thì phải **tăng số page chạy song song** —
+giới hạn nằm ở từng page của Facebook, không phải ở máy.

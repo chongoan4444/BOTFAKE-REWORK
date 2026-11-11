@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.83-w200.25
+// @version      1.91.84-w200.26
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.83-W200.25'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.84-W200.26'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5012,6 +5012,26 @@
   // 🔥 [FIX-TỐC-ĐỘ] Socket/page 128 khởi điểm, đủ cho pace 4ms × 2 page = 500/s mà không chờ slot.
   const BUS_PARALLEL_SOCKET = 128;
   const SOCKET_LANE_MIN = 64;
+  // [v1.91.84] SÀN cap Socket/page CHỈNH ĐƯỢC LÚC CHẠY — không cần build lại.
+  // Bối cảnh: bộ điều tốc tự hạ 192 → 64 (0,8× mỗi lần) khi ACK chậm; log lô 10 660 tin cho
+  // thấy cap cuối [64×1] trong khi trần lý thuyết (192 ÷ 3,43 s) là 56 tin/s ⇒ bị chặn dưới
+  // khả năng. Nay người dùng tự đặt sàn để tìm điểm ngọt trên máy mình:
+  //     __botfakeSetSockPageFloor__(128)      // trong Console của trang Pancake
+  // hoặc đặt localStorage 'botfake_sock_page_floor' = 128. Đặt lại 64 để về mặc định.
+  let socketLaneFloor = SOCKET_LANE_MIN;
+  try {
+    const _f = parseInt(localStorage.getItem('botfake_sock_page_floor') || '', 10);
+    if (_f >= 16 && _f <= SOCKET_LANE_MAX) socketLaneFloor = _f;
+  } catch (e0) { /* ignore */ }
+  try {
+    window.__botfakeSetSockPageFloor__ = function (v) {
+      const n = parseInt(v, 10);
+      if (!(n >= 16 && n <= SOCKET_LANE_MAX)) return 'giá trị phải trong khoảng 16–' + SOCKET_LANE_MAX;
+      socketLaneFloor = n;
+      try { localStorage.setItem('botfake_sock_page_floor', String(n)); } catch (e1) { /* ignore */ }
+      return 'đã đặt sàn Socket/page = ' + n + ' — áp dụng cho lượt gửi kế tiếp (tải lại trang nếu đang chạy)';
+    };
+  } catch (e2) { /* ignore */ }
   const SOCKET_LANE_MAX = 192;
   const SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD = 4; // thử nghiệm: tránh hạ lane vì chỉ 2 ACK đuôi chậm lẻ tẻ
   const SOCKET_LANE_NOACK_BACKOFF_THRESHOLD = 2; // no-ACK giữ ngưỡng chặt hơn vì thường báo hiệu Socket/page có vấn đề
@@ -5206,9 +5226,9 @@
         ctl.fastOk = 0;
         ctl.slowAck = 0;
         ctl.noAckStreak++;
-        if (ctl.noAckStreak >= SOCKET_LANE_NOACK_BACKOFF_THRESHOLD && lane.getLimit() > SOCKET_LANE_MIN) {
+        if (ctl.noAckStreak >= SOCKET_LANE_NOACK_BACKOFF_THRESHOLD && lane.getLimit() > socketLaneFloor) {
           ctl.noAckStreak = 0;
-          const next = lane.setLimit(Math.max(SOCKET_LANE_MIN, Math.floor(lane.getLimit() * 0.8)));
+          const next = lane.setLimit(Math.max(socketLaneFloor, Math.floor(lane.getLimit() * 0.8)));
           logLine('🐢 Socket no-ACK lặp ' + SOCKET_LANE_NOACK_BACKOFF_THRESHOLD + ' lần — giảm lane page ' + pid + ' xuống ' + next + '.');
         }
       } else if (kind === 'ok' || kind === 'rejected') {
@@ -5216,9 +5236,9 @@
         ctl.noAckStreak = 0;
         if (ms >= 6000) {
           ctl.slowAck++;
-          if (ctl.slowAck >= SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD && lane.getLimit() > SOCKET_LANE_MIN) {
+          if (ctl.slowAck >= SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD && lane.getLimit() > socketLaneFloor) {
             ctl.slowAck = 0;
-            const next = lane.setLimit(Math.max(SOCKET_LANE_MIN, Math.floor(lane.getLimit() * 0.8)));
+            const next = lane.setLimit(Math.max(socketLaneFloor, Math.floor(lane.getLimit() * 0.8)));
             logLine('🐢 Socket ACK chậm liên tiếp ' + SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD + ' lần — giảm lane page ' + pid + ' xuống ' + next + '.');
           }
         } else {
@@ -5456,7 +5476,7 @@
     const pid = String(pageId || '');
     if (!pid) return socketLane;
     if (!pageSocketLanes[pid]) {
-      pageSocketLanes[pid] = makeAdaptivePriorityLane(BUS_PARALLEL_SOCKET, SOCKET_LANE_MIN, SOCKET_LANE_MAX);
+      pageSocketLanes[pid] = makeAdaptivePriorityLane(BUS_PARALLEL_SOCKET, socketLaneFloor, SOCKET_LANE_MAX);
       socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0, noAckStreak: 0 };
     }
     return pageSocketLanes[pid];
@@ -6562,7 +6582,7 @@
         logLine('🌊 WAVE: script ' + APP_VERSION + ' · ' + waveDiag.wavesStarted + '/' + waveDiag.plannedWaves + ' wave · size ' + waveDiag.waveSize
           + ' · gap cấu hình ' + waveDiag.configuredGapMs + 'ms · Gửi nhanh ' + (waveDiag.quickEnabled ? 'BẬT' : 'TẮT')
           + ' · main cap ' + waveDiag.mainCapMinObserved + '–96 (cuối ' + waveDiag.mainCapFinal + ', hạ/tăng ' + waveDiag.mainCapDownshifts + '/' + waveDiag.mainCapUpshifts + ') / active max ' + waveDiag.maxMainInFlight
-          + ' · Socket/page cap ' + SOCKET_LANE_MIN + '–' + SOCKET_LANE_MAX + ' · wave→cổng TB/max '
+          + ' · Socket/page cap ' + socketLaneFloor + '–' + SOCKET_LANE_MAX + (socketLaneFloor !== SOCKET_LANE_MIN ? ' (sàn tự đặt)' : '') + ' · wave→cổng TB/max '
           + (waveDiag.wavesStarted ? Math.round(waveDiag.gateWaitMsTotal / waveDiag.wavesStarted) : 0) + '/' + waveDiag.gateWaitMsMax + 'ms'
           + ' · peak Socket queue/active/cool ' + waveDiag.maxSocketRetryQueue + '/' + waveDiag.maxSocketRetryActive + '/' + waveDiag.maxSocketCooldown
           + ' · peak Ext queue/active ' + waveDiag.maxExtQueue + '/' + waveDiag.maxExtActive
