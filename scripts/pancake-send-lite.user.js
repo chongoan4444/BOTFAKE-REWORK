@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.75-w200.17
+// @version      1.91.76-w200.18
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.75-W200.17'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.76-W200.18'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -151,10 +151,11 @@
   }
   function rememberConfirmedSocketUnavailable(conv, result) {
     if (!conv || !conv.id || !result || !result.recipientUnavailable) return false;
-    const error = String(result.error || '');
-    // sendOne đóng gói lỗi theo kênh trong `tried` (ví dụ "socket: Socket: ..."),
-    // nên so khớp thông báo confirmed bên trong kết quả cuối.
-    if (error.indexOf('Socket: FB từ chối nhận tin (khách hiện không có mặt / đã khóa nick)') < 0) return false;
+    // [v1.91.76] Trước đây còn đòi khớp NGUYÊN VĂN 'Socket: FB từ chối nhận tin (khách hiện
+    // không có mặt / đã khóa nick)' trong result.error, nên mọi ca lỗi được bọc lại
+    // ("socket: …"), hoặc đến từ nhánh không dựng chuỗi đó, đều bị BỎ QUA ⇒ không nhớ được gì.
+    // Cờ recipientUnavailable đã là kết luận đã qua 2 lần rejected (xem settleSocketResult),
+    // nên chỉ cần cờ là đủ; chuỗi chỉ dùng để ghi log.
     const id = String(conv.id);
     if (unavailableConversationIds.has(id)) return false;
     unavailableConversationIds.add(id);
@@ -3877,7 +3878,10 @@
     };
     await paceSocketPublish(pageId);
     const publishedAt = Date.now();
-    const ackWaitMs = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 8000 : 15000;
+    // [v1.91.76] Log lượt 10k: ACK TB 2317ms · MAX 15544ms, bucket ≥5s có 420 ca ⇒ ngưỡng
+    // 15000ms cắt oan đúng những ACK chậm nhất (mỗi ca bị cắt thành "no-ACK" rồi phải kiểm
+    // chứng lịch sử). Nới lên 20000ms cho lô lớn; lô ≤30 chat vẫn 8000ms cho nhanh.
+    const ackWaitMs = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 8000 : 20000;
     /* ===== SỬA GỐC "MẤT ACK" Ở LÔ LỚN =====
      * Trong _app (@818834) hàm publish() làm đúng thế này:
      *     i = { app_id, payload, request_id: ++sock.requestId, type }
@@ -4371,6 +4375,14 @@
             scheduleBuRetry(conv, text, photo, nm, res.error || 'Socket không kết nối', ['socket']);
           } else {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+            // [v1.91.76] GHI NHỚ KHÁCH KHÔNG NHẬN ĐƯỢC — nhánh "xác nhận nền" trước đây KHÔNG
+            // lưu gì (TỔNG HỢP in "người nhận rejected cuối 0" dù có hàng nghìn ca). Hệ quả:
+            // lượt sau vẫn gửi tiếp vào đúng những chat chết đó, và trong lượt vẫn retry vô ích.
+            // Log thực tế 10k: 3744 lỗi, retry 3302 lần cứu được 0, unavailable ghi nhận 0.
+            if (res && res.recipientUnavailable) {
+              sendDiag.recipientUnavailable++;
+              try { rememberConfirmedSocketUnavailable(conv, res); } catch (e0) { /* ignore */ }
+            }
             logLine('❌ ' + nm + ' — ' + ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)');
           }
         };
