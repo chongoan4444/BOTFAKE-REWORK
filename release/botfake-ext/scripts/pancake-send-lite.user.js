@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.77-w200.19
+// @version      1.91.78-w200.20
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.77-W200.19'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.78-W200.20'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6985,7 +6985,14 @@
   // lật ⚠ thành ✅ khi thấy đúng tin trong lịch sử. Không thấy tin thì vẫn giữ
   // ⚠, không bắn cứu, không mở khóa outbound (tránh trùng tuyệt đối).
   const EXT_VERIFY_DELAY_MS = 20000; // sau mốc adapter timeout 35s → tổng phân xử khoảng 55–60s
-  function scheduleExtTimeoutVerify(conv, text, photo, sentAtMs) {
+  // [v1.91.78] ĐỌC LẠI THEO NHỊP GIÃN cho ca Extension quá hạn.
+  // Log lô 4296 tin: 27 ca kết thúc ở "⚠ bù không rõ kết quả" vì lần đọc DUY NHẤT
+  // (sau ~20s) chưa thấy tin — nhưng "chưa thấy" ở 20s KHÔNG phải bằng chứng "chưa đi":
+  // server Pancake thường chỉ trả tin mới sau khi thread được làm mới. Nay đọc lại thêm
+  // 2 lần ở nhịp giãn (≈+65s, ≈+185s). RÀNG BUỘC: các lần đọc lại CHỈ được lật ⚠ → ✅,
+  // không bao giờ bắn lại, không mở khóa gửi ⇒ không thể sinh tin trùng.
+  const EXT_RECHECK_DELAYS = { 2: 45000, 1: 120000 };
+  function scheduleExtTimeoutVerify(conv, text, photo, sentAtMs, roundsLeft, recheck, delayOverride) {
     if (!conv || !conv.id || !sentAtMs) return;
     const want = normalizeMsgText(text);
     if (!want && !photo) return;
@@ -6994,7 +7001,9 @@
     const myRun = runSeq;
     extVerifyPending[conv.id] = myRun;
     const nm = conv.name || conv.id;
-    const delayMs = EXT_VERIFY_DELAY_MS + Math.floor(Math.random() * 5000); // rải nhịp khi timeout theo cụm
+    const left = (typeof roundsLeft === 'number') ? roundsLeft : 2; // còn 2 lần đọc lại
+    const isRecheck = !!recheck; // lần đọc lại: KHÔNG cộng vào thống kê chốt
+    const delayMs = (delayOverride || EXT_VERIFY_DELAY_MS) + Math.floor(Math.random() * 5000); // rải nhịp khi timeout theo cụm
     setTimeout(async () => {
       try {
         if (myRun !== runSeq) return;
@@ -7018,11 +7027,11 @@
           + '&user_view=true&is_new_api=true&separate_pos=true';
         const res = await ctxFetchLane(() => fetchJson(url, 1, { timeoutMs: 8000 }));
         if (!res || !res.ok || !res.data || res.data.success === false) {
-          extTimeoutStats.unknown++;
+          if (!isRecheck) extTimeoutStats.unknown++;
           return;
         }
         const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
-        if (!Array.isArray(msgs)) { extTimeoutStats.unknown++; return; }
+        if (!Array.isArray(msgs)) { if (!isRecheck) extTimeoutStats.unknown++; return; }
         const found = isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAtMs);
         if (found) {
           extTimeoutStats.found++;
@@ -7031,13 +7040,21 @@
           logLine('🔎 ' + nm + ' — kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi — tính ✅ Ext');
           return;
         }
-        extTimeoutStats.notFound++;
+        if (!isRecheck) extTimeoutStats.notFound++;
         // Không log từng ca "chưa thấy" để tránh ngập log khi timeout theo cụm;
         // số tổng nằm ở dòng TỔNG HỢP. Vẫn giữ ⚠ và không bắn lại.
       } catch (e) {
-        extTimeoutStats.unknown++;
+        if (!isRecheck) extTimeoutStats.unknown++;
       } finally {
         delete extVerifyPending[conv.id];
+        // [v1.91.78] Hẹn lần đọc lại kế tiếp (chỉ đọc, không bắn).
+        try {
+          if (left > 0 && !state.stopRequested && runSeq === myRun
+              && !deliveredIds[conv.id] && !finalFailedIds[conv.id]) {
+            const nd = EXT_RECHECK_DELAYS[left] || 120000;
+            scheduleExtTimeoutVerify(conv, text, photo, sentAtMs, left - 1, true, nd);
+          }
+        } catch (e1) { /* ignore */ }
         // Ca Ext timeout đã được đếm ⚠ ngay khi timeout; kiểm chứng nền
         // chỉ có thể lật ✅ nếu thấy tin. Khi nó kết thúc mà không thấy
         // tin, vẫn phải tính lại pending để lượt gửi chốt hẳn, không treo
