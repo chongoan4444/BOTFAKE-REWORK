@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.81-w200.23
+// @version      1.91.82-w200.24
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.81-W200.23'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.82-W200.24'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2104,6 +2104,15 @@
         if (custs[i] && custs[i].global_id) return String(custs[i].global_id);
       }
     }
+    // [v1.91.82] ĐO can_inbox — cờ "page còn quyền nhắn khách" của Facebook.
+    // HAR: có mặt trong 91/91 lần đọc tin (4 false / 87 true). CHỈ ĐẾM, không dùng để
+    // quyết định bỏ gửi: mẫu 4/91 quá nhỏ, bỏ gửi theo nó có thể làm lọt khách còn sống.
+    try {
+      if (typeof sendDiag === 'object' && sendDiag && typeof j.can_inbox === 'boolean') {
+        sendDiag.canInboxSeen = (sendDiag.canInboxSeen || 0) + 1;
+        if (j.can_inbox === false) sendDiag.canInboxFalse = (sendDiag.canInboxFalse || 0) + 1;
+      }
+    } catch (e0) { /* ignore */ }
     if (j.global_id) return String(j.global_id);
     if (j.page_customer && j.page_customer.global_id) return String(j.page_customer.global_id);
     return '';
@@ -6569,6 +6578,7 @@
           + ' · lần dò chưa ra ' + gidStats.unknown
           + ' · batch nạp ' + gidStats.batchMappings + '/' + gidStats.batchReturned + ' mapping (lỗi ' + gidStats.batchFail + ')'
           + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
+          + ' · can_inbox=false ' + ((sendDiag && sendDiag.canInboxFalse) || 0) + '/' + ((sendDiag && sendDiag.canInboxSeen) || 0)
           + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
           + ' · lane HTTP ' + ctxFetchLane.getLimit()
           + ' / Ext dò ' + gidExtLane.getLimit()
