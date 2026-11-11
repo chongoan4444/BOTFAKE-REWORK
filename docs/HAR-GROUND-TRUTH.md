@@ -187,6 +187,29 @@ Cộng với việc server có độ trễ ghi (17/23 thấy sau ~1,3 s, 5/23 kh
 Với chat sôi động, tin của ta có thể bị đẩy ra ngoài cửa sổ trong vài giây ⇒ **không bao giờ** được
 dùng kết quả "không thấy" để kết luận "chưa gửi". (Xem mục 9b.)
 
+## 7e. KẾT QUẢ ĐO THỰC TẾ (lô 10 660 tin, 1.91.82, 347 s)
+
+| Chỉ số | Kết quả | So với trước |
+|---|---|---|
+| Thành công / mục tiêu thật | **8 979/9 053 = 99,2 %** | 99,3 % (ngang) |
+| Tốc độ | 30,73 tin/s | 28,19 → **nhanh hơn** |
+| `🚫 API bị chặn ngoài cửa sổ 24h` | **KHÔNG còn xuất hiện** | 7 → **0** ✅ |
+| `can_inbox=false` | **0/57** | mới đo |
+| ACK TB/max | 3 431/6 831 ms | 1 346 ms → **chậm hơn 2,5×** |
+| Socket/page cap cuối | **[64×1]** | [192×1] → bộ điều tốc tự hạ |
+| `retry lần` | 0 | 0 ✅ |
+
+**Đối soát khít 100 %:** ❌ 1 664 = **1 607** khách chết (đã ghi nhớ) + **57** không có global_id.
+Không có lỗi nào khác. Đây là bằng chứng mạnh rằng phân loại hiện tại **không còn lọt dạng lỗi nào chưa biết**.
+
+**Kết luận về `can_inbox`: LOẠI BỎ khỏi hướng đi.** 57 ca đọc tin mà **không ca nào** `can_inbox=false`,
+trong khi 1 607 khách chết là có thật ⇒ cờ này **không** phản ánh việc khách chặn page. Không dùng để lọc.
+
+**Việc còn lại duy nhất (0,53 %):** 57 ca `HTTP không có gid` mỗi lô. Theo HAR, endpoint gửi
+`POST /pages/{pageId}/conversations/{convId}/messages` **chỉ dùng convId, không có tham số global_id**,
+nên về lý thuyết làn API gửi được cho các chat này. Hiện code dừng ở cổng `noGidGate` của làn Extension
+và chưa thử API ⇒ cần đọc kỹ `sendOne` + `sendViaApi` trước khi sửa.
+
 ## 8. Những thứ KHÔNG có trong HAR (vùng mù — không được suy diễn)
 
 1. Kênh **Extension ↔ trang** (không phải HTTP).
