@@ -166,6 +166,27 @@ Hệ quả: nạp 11 000 chat qua API = **~275 request tuần tự**, trong đó
 Số liệu phân bố chuẩn của lần đọc tin (91 mẫu): `can_inbox` **luôn có mặt** (4 false / 87 true),
 `read_watermarks` **luôn có mặt**, `global_id` chỉ **33/91 (36%)** — phần còn lại dịch vụ trả `null` thật.
 
+## 9c. Vì sao lịch sử thiếu tin? ĐÃ TÌM RA — không phải do tin ảnh
+
+Giả thuyết "tin chỉ có ảnh (không chữ) bị lịch sử bỏ sót" ⇒ **SAI**. Bảng đối chiếu 23 ca gửi thành công:
+
+| Loại tin | Thấy trong lịch sử | Không thấy |
+|---|---|---|
+| ảnh, không chữ | **3/3** | 0 |
+| chữ | 13/16 | 3 |
+| gửi dạng JSON nhiều ảnh | 2/4 | 2 |
+
+Tin ảnh **luôn được ghi nhận đúng**. Cái thiếu là tin **chữ**.
+
+Nguyên nhân thật: **lần đọc chỉ trả về một CỬA SỔ 5–13 tin** (median 8; phân bố 5/7/8/9/10/13).
+Tin nào rơi ra ngoài cửa sổ đó thì không bao giờ thấy — dù đã gửi thành công.
+Cộng với việc server có độ trễ ghi (17/23 thấy sau ~1,3 s, 5/23 không thấy trong toàn bộ phiên),
+điều này giải thích đủ 22% thiếu hụt mà **không cần** giả thuyết nào về ảnh.
+
+⇒ Hệ quả kỹ thuật quan trọng: mọi logic "kiểm chứng bằng lịch sử" chỉ nhìn được ~8 tin gần nhất.
+Với chat sôi động, tin của ta có thể bị đẩy ra ngoài cửa sổ trong vài giây ⇒ **không bao giờ** được
+dùng kết quả "không thấy" để kết luận "chưa gửi". (Xem mục 9b.)
+
 ## 8. Những thứ KHÔNG có trong HAR (vùng mù — không được suy diễn)
 
 1. Kênh **Extension ↔ trang** (không phải HTTP).
