@@ -24,7 +24,7 @@
  */
 
 import {
-  readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, statSync,
+  readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, statSync, cpSync, readdirSync,
 } from 'node:fs';
 import {
   createHash, createPrivateKey, createPublicKey, sign as cryptoSign,
@@ -43,6 +43,9 @@ const USERSCRIPT = 'scripts/pancake-send-lite.user.js';
 const UPDATE_XML = 'update.xml';
 const CRX_OUT = 'botfake.crx';
 const DIST = 'dist';
+// Folder TIỆN ÍCH HOÀN CHỈNH, tự chứa — commit lên GitHub để tải/“Load unpacked” một phát.
+// (manifest.json ở gốc repo không dùng trực tiếp được vì cạnh nó còn HAR/HTML tham chiếu.)
+const RELEASE_DIR = 'release/botfake-ext';
 const KEY_CANDIDATES = [
   process.env.CRX_SIGNING_KEY,
   'installer/extension-signing-key.pem',
@@ -349,6 +352,79 @@ function checkCrxFreshness() {
   warnings.push(`${CRX_OUT}: không đọc được userscript bên trong để so sánh.`);
 }
 
+/* ------------------------------ RELEASE FOLDER ------------------------------ */
+
+/** Các file phải có trong folder phát hành (đường dẫn tương đối từ gốc repo). */
+function releaseFileList() {
+  const out = [MANIFEST];
+  const walk = (dir) => {
+    for (const name of readdirSync(abs(dir), { withFileTypes: true })) {
+      const rel = `${dir}/${name.name}`;
+      if (name.isDirectory()) walk(rel);
+      else out.push(rel);
+    }
+  };
+  walk('extension');
+  walk('scripts');
+  return out.sort();
+}
+
+const sha = (p) => createHash('sha256').update(readFileSync(abs(p))).digest('hex');
+
+/** So folder phát hành đã commit với nguồn hiện tại. */
+function checkReleaseFolder() {
+  const files = releaseFileList();
+  if (!existsSync(abs(RELEASE_DIR))) {
+    warnings.push(`Chưa có ${RELEASE_DIR}/ — chạy "npm run build" để sinh folder tiện ích hoàn chỉnh.`);
+    return;
+  }
+  let stale = 0;
+  for (const f of files) {
+    const dest = `${RELEASE_DIR}/${f}`;
+    if (!existsSync(abs(dest)) || sha(dest) !== sha(f)) stale++;
+  }
+  const extra = [];
+  const walk = (dir) => {
+    for (const e of readdirSync(abs(dir), { withFileTypes: true })) {
+      if (e.name === 'README-LOAD-UNPACKED.txt') continue;
+      const rel = `${dir}/${e.name}`;
+      if (e.isDirectory()) walk(rel);
+      else if (!files.includes(rel.slice(RELEASE_DIR.length + 1))) extra.push(rel);
+    }
+  };
+  walk(RELEASE_DIR);
+  if (stale) warnings.push(`${RELEASE_DIR}/ lệch ${stale} file so với nguồn — chạy "npm run build" để cập nhật (GitHub sẽ phát hành bản cũ).`);
+  if (extra.length) warnings.push(`${RELEASE_DIR}/ có ${extra.length} file thừa: ${extra.slice(0, 3).join(', ')}`);
+}
+
+function syncReleaseFolder() {
+  const files = releaseFileList();
+  rmSync(abs(RELEASE_DIR), { recursive: true, force: true });
+  for (const f of files) {
+    const dest = path.join(RELEASE_DIR, f);
+    mkdirSync(path.dirname(abs(dest)), { recursive: true });
+    cpSync(abs(f), abs(dest));
+  }
+  writeFileSync(abs(`${RELEASE_DIR}/README-LOAD-UNPACKED.txt`), [
+    'BOTFAKE LITE — folder tiện ích hoàn chỉnh (tự chứa)',
+    '',
+    'Cài đặt:',
+    '  1. Tải cả folder này về máy (giữ nguyên cấu trúc bên trong).',
+    '  2. chrome://extensions → bật "Developer mode".',
+    '  3. "Load unpacked" → chọn ĐÚNG folder chứa manifest.json này.',
+    '',
+    'Bên trong:',
+    '  manifest.json   khai báo MV3',
+    '  extension/      service worker, content script, popup, icon',
+    '  scripts/        pancake-send-lite.user.js (toàn bộ logic gửi trong tab Pancake)',
+    '',
+    'Lưu ý: đây là bản sinh tự động từ mã nguồn ở gốc repo — không sửa trực tiếp',
+    'trong folder này. Sửa ở nguồn rồi chạy: npm run build',
+    '',
+  ].join('\n'));
+  return files.length + 1;
+}
+
 /* ------------------------------ MAIN ------------------------------ */
 
 function main() {
@@ -369,6 +445,7 @@ function main() {
 
   // 2) kiểm tra
   validateManifest(ver);
+  if (CHECK) checkReleaseFolder();
   validateUserscript(ver);
   validateUpdateXml(ver);
   checkCrxFreshness();
@@ -389,6 +466,9 @@ function main() {
   }
 
   // 3) đóng gói
+  const nRelease = syncReleaseFolder();
+  console.log(`✓ ${RELEASE_DIR}/ (${nRelease} file — folder tiện ích hoàn chỉnh để load unpacked)`);
+
   const { zipPath, size } = zipFiles();
   console.log(`✓ ${rel(zipPath)} (${(size / 1024).toFixed(0)} KB)`);
 

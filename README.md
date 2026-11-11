@@ -40,6 +40,15 @@ MESSAGE POST, post, "lại là POST"                              # mẫu curl A
 > **phải** nằm đúng thư mục trên: `manifest.json` và các lệnh `chrome.scripting.executeScript`
 > trỏ theo đường dẫn tuyệt đối tính từ gốc repo.
 
+## Tải về dùng ngay (1 folder)
+
+Trên GitHub đã có sẵn **`release/botfake-ext/`** — folder tiện ích **hoàn chỉnh, tự chứa**
+(`manifest.json` + `extension/` + `scripts/`). Tải folder đó về → `chrome://extensions` →
+Developer mode → **Load unpacked** → chọn đúng folder chứa `manifest.json`.
+
+Folder này **sinh tự động** từ mã nguồn: đừng sửa trực tiếp trong đó, sửa ở nguồn rồi chạy
+`npm run build`. `npm run check` sẽ cảnh báo nếu folder phát hành bị lệch so với nguồn.
+
 ## Build & phát hành
 
 Version chỉ khai báo **một lần** trong `version.json`:
