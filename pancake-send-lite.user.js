@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         BOTFAKE LITE
+// @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.43
-// @description  BOTFAKE — panel hiện mọi website; gửi/tải list qua extension background.
+// @version      1.91.72-w200.14
+// @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -41,10 +41,13 @@
 (function () {
   'use strict';
 
+  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
+  window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ = true;
+
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.43';        // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.72-W200.14'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -71,6 +74,7 @@
   const LOG_KEY = 'ssb_log';           // nhật ký gửi — giữ qua F5
   const UI_KEY = 'ssb_ui_state';       // tick câu + ô nội dung đang gõ — giữ qua F5
   const LAST_SENT_KEY = 'ssb_last_sent_v1'; // ảnh chụp lượt gửi gần nhất — "↺ Chọn lại list vừa gửi"
+  const MSG_MODE_KEY = 'ssb_msg_source_mode'; // 'ui' (câu trên giao diện) | 'clipboard' (dữ liệu đang copy trên clipboard)
 
   /* ============================ TRẠNG THÁI ============================ */
 
@@ -87,10 +91,15 @@
     listKey: '',            // key dựng panel list — tránh build lại HTML khi không đổi
     sending: false,
     stopRequested: false,
+    confirmingSend: false,  // đang mở hộp xác nhận gửi / đọc clipboard — chặn bấm đúp Tab/Chạy
+    sendListFrozen: false,  // snapshot người nhận; bỏ checkbox UI trong suốt lượt chạy
+    msgSource: 'ui',        // 'ui' (gửi bằng câu trên giao diện) | 'clipboard' (gửi bằng dữ liệu đang copy trên clipboard)
+    lastCopiedText: '',     // bản sao lưu text vừa copy trên trang (dự phòng khi trình duyệt chặn clipboard API)
     lastAltClickId: null,      // id đoạn vừa Alt+click lần 1 (để phát hiện click cùng đoạn 2 lần)
     lastAltClickTime: 0,         // thời gian Alt+click lần 1
     sentIds: new Set(),          // id chat đã gửi thành công — giữ qua lượt để "▶ Charging tiếp" không gửi lại
     pickMode: false,
+    deselectMode: false,      // click nút rồi click 1 dòng Pancake để bỏ tick đúng chat đó
     log: [],
     savedLists: [],         // các list đã lưu [{id,name,items:[{id,pageId,name,snippet,snippetRaw,time,type,platform}]}]
     listSel: new Set(),     // id các list ĐANG TÍCH — gộp thành lựa chọn để gửi (gửi được nhiều list cùng lúc)
@@ -103,6 +112,78 @@
     lastSent: null,         // ẢNH CHỤP lượt gửi gần nhất { at, typedText, items:[chat…], lists:[{id,name,text}] }
                             // để nút "↺ Chọn lại list vừa gửi" chọn lại y nguyên mà KHÔNG phải tải danh sách
   };
+
+  // Chỉ nhớ conversation ID có Socket xác nhận rejected qua lần retry; không nhớ no-ACK,
+  // lỗi mạng, API ngoài 24h hay lỗi tạm thời. Lần tải/chọn list sau các ID này tự bỏ tick.
+  const UNAVAILABLE_CONV_ID_PREFIX = 'SSB_CONFIRMED_UNAVAILABLE_CONV_ID_V1:';
+  const UNAVAILABLE_CONV_IDS_LEGACY_KEY = 'SSB_CONFIRMED_UNAVAILABLE_CONV_IDS_V1';
+  const unavailableConversationIds = new Set();
+  const unavailableAddedThisRun = new Set();
+  try {
+    // Mỗi ID có khóa riêng: setItem đồng bộ ngay lúc xác nhận lỗi, không phụ thuộc debounce/pagehide,
+    // nên F5 ngay sau lỗi cũng không làm mất phần lớn một danh sách JSON chưa kịp flush.
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i) || '';
+      if (key.indexOf(UNAVAILABLE_CONV_ID_PREFIX) !== 0) continue;
+      try {
+        const id = decodeURIComponent(key.slice(UNAVAILABLE_CONV_ID_PREFIX.length));
+        if (id) unavailableConversationIds.add(id);
+      } catch (e) { /* khóa lỗi riêng lẻ không được chặn khởi động */ }
+    }
+    // Nạp định dạng JSON của các phiên bản trước để không mất IDs đã được lưu.
+    const legacyUnavailable = JSON.parse(localStorage.getItem(UNAVAILABLE_CONV_IDS_LEGACY_KEY) || '[]');
+    if (Array.isArray(legacyUnavailable)) legacyUnavailable.forEach((id) => {
+      if (id != null && String(id)) unavailableConversationIds.add(String(id));
+    });
+  } catch (e) { /* bộ nhớ lỗi hỏng/bị chặn không được chặn khởi động script */ }
+  function isRememberedUnavailable(convId) {
+    return !!convId && unavailableConversationIds.has(String(convId));
+  }
+  function persistUnavailableConversationId(id) {
+    try {
+      // localStorage.setItem là đồng bộ; mỗi kết quả được ghi bền riêng trước khi lượt tiếp tục.
+      localStorage.setItem(UNAVAILABLE_CONV_ID_PREFIX + encodeURIComponent(String(id)), '1');
+      return true;
+    } catch (e) {
+      logLine('⚠ Không lưu được ID unavailable ' + String(id) + ' (localStorage đầy/bị chặn).');
+      return false;
+    }
+  }
+  function rememberConfirmedSocketUnavailable(conv, result) {
+    if (!conv || !conv.id || !result || !result.recipientUnavailable) return false;
+    const error = String(result.error || '');
+    // sendOne đóng gói lỗi theo kênh trong `tried` (ví dụ "socket: Socket: ..."),
+    // nên so khớp thông báo confirmed bên trong kết quả cuối.
+    if (error.indexOf('Socket: FB từ chối nhận tin (khách hiện không có mặt / đã khóa nick)') < 0) return false;
+    const id = String(conv.id);
+    if (unavailableConversationIds.has(id)) return false;
+    unavailableConversationIds.add(id);
+    unavailableAddedThisRun.add(id);
+    persistUnavailableConversationId(id);
+    return true;
+  }
+  function clearRememberedUnavailableIds() {
+    const removed = unavailableConversationIds.size;
+    unavailableConversationIds.clear();
+    unavailableAddedThisRun.clear();
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i) || '';
+        if (key.indexOf(UNAVAILABLE_CONV_ID_PREFIX) === 0) localStorage.removeItem(key);
+      }
+      localStorage.removeItem(UNAVAILABLE_CONV_IDS_LEGACY_KEY);
+    } catch (e) { logLine('⚠ Không xóa hết được bộ nhớ ID unavailable trong localStorage.'); }
+    state.listKey = '';
+    state.matches.forEach((m) => {
+      if (m) { m.checked = false; m.knownUnavailable = false; }
+    });
+    return removed;
+  }
+
+  try {
+    const savedMode = localStorage.getItem(MSG_MODE_KEY);
+    if (savedMode === 'clipboard' || savedMode === 'ui') state.msgSource = savedMode;
+  } catch (e) { /* ignore */ }
   // Danh sách câu nạp BẤT ĐỒNG BỘ từ IndexedDB (xem loadListsFromStore) — lúc khởi động là rỗng,
   // nạp xong sẽ vẽ lại panel. Xem chú thích "KHO CÂU GỬI (IndexedDB)" để biết vì sao không
   // dùng localStorage nữa (1 câu 5.000 chat ≈ 3,8 MB > quota ~5 MB).
@@ -248,7 +329,9 @@
       if (pend <= 0 || state.stopRequested) extra.phase = 'idle';
     }
     const idle = extra.phase === 'idle' || (!state.sending && !state.scanning && extra.phase !== 'scan');
-    if (!idle && now - extJobAt < 200) return;
+    // Background worker broadcast mỗi update tới các tab Chrome; 1 lần/giây đủ mượt cho overlay,
+    // tránh tabs.query + storage.set + tabs.sendMessage dồn 5 lần/giây trong suốt lượt gửi.
+    if (!idle && now - extJobAt < 1000) return;
     extJobAt = now;
     const payload = {
       type: 'BOTFAKE_JOB',
@@ -566,10 +649,82 @@
 
   /* ============================ CHỌN SNIPPET / CHỌN CHUỖI 2 ĐẦU ============================ */
 
-  // Nguồn dòng để khớp: ưu tiên kết quả quét toàn bộ (state.allRows), nếu chưa quét thì các dòng đang render
+  // Bổ sung đầy đủ trường API/Redux (threadId, customerId, globalId, lastAt, updatedAt, fromPsid…) cho dòng DOM
+  function enrichRowWithRedux(r) {
+    if (!r || !r.id) return r;
+    const id = String(r.id);
+    if (state.allRows && state.allRows.has(id)) {
+      const ar = state.allRows.get(id);
+      return {
+        ...ar,
+        ...r,
+        pageId: ar.pageId || r.pageId,
+        type: r.type || ar.type,
+        order: ar.order != null ? ar.order : r.order,
+      };
+    }
+    const c = typeof getReduxConvById === 'function' ? getReduxConvById(id) : null;
+    if (c) {
+      cacheGidFromConvObj(c);
+      const apiRow = convApiRow(c, r.order != null ? r.order : 0);
+      return {
+        ...apiRow,
+        ...r,
+        pageId: apiRow.pageId || r.pageId,
+        type: r.type || apiRow.type,
+        order: r.order != null ? r.order : apiRow.order,
+      };
+    }
+    return r;
+  }
+
+  // Đọc danh sách hội thoại đang có sẵn trong Redux store của Pancake (theo đúng thứ tự trên→dưới của app)
+  function getReduxConversationListRows() {
+    try {
+      const st = typeof getReduxState === 'function' ? getReduxState() : null;
+      const cs = st && st.conversations;
+      if (!cs) return [];
+      const raw = (cs.filterByCustomer && Array.isArray(cs.filteredConversationsCloneList) && cs.filteredConversationsCloneList.length)
+        ? cs.filteredConversationsCloneList
+        : (Array.isArray(cs.data) && cs.data.length
+          ? cs.data
+          : (Array.isArray(cs.filteredConversationsCloneList) ? cs.filteredConversationsCloneList : []));
+      if (!raw.length) return [];
+      const visMap = new Map(visibleRows().map((v) => [v.id, v]));
+      const out = [];
+      const seen = new Set();
+      for (let i = 0; i < raw.length; i++) {
+        const c = raw[i];
+        const id = String((c && c.id) || '');
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        cacheGidFromConvObj(c);
+        const apiRow = convApiRow(c, out.length);
+        const vis = visMap.get(id);
+        out.push(vis ? {
+          ...apiRow,
+          ...vis,
+          pageId: apiRow.pageId || vis.pageId,
+          type: vis.type || apiRow.type,
+          order: out.length,
+        } : apiRow);
+      }
+      return out;
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // Nguồn dòng để khớp: ưu tiên kết quả quét toàn bộ (state.allRows), tiếp theo là danh sách trong Redux, cuối cùng là DOM
   function sourceRows() {
-    if (state.allRows && state.allRows.size) return Array.from(state.allRows.values());
-    return visibleRows();
+    if (state.allRows && state.allRows.size && !state.allRowsPartial) return Array.from(state.allRows.values());
+    const reduxRows = getReduxConversationListRows();
+    const visRows = visibleRows().map(enrichRowWithRedux);
+    if (state.allRows && state.allRows.size) {
+      const allArr = Array.from(state.allRows.values());
+      if (allArr.length >= reduxRows.length && allArr.length >= visRows.length) return allArr;
+    }
+    return reduxRows.length >= visRows.length ? reduxRows : visRows;
   }
 
   function markOf(r) {
@@ -593,37 +748,70 @@
     return a2 === b2;
   }
 
-  function computeMatches() {
+  function computeMatches(opts) {
     state.loadedName = null;
     renderSavedLists();
     const before = new Map(state.matches.map((m) => [m.id, m]));
     const list = [];
-    const push = (r) => {
+    const push = (rawRow) => {
+      const r = enrichRowWithRedux(rawRow);
       const old = before.get(r.id);
+      const knownUnavailable = isRememberedUnavailable(r.id);
       list.push({
         ...r,
-        checked: old ? old.checked : (r.type !== 'comment'), // bình luận: mặc định bỏ tick (gửi = trả lời bình luận công khai)
+        knownUnavailable,
+        checked: knownUnavailable ? false : (old ? old.checked : (r.type !== 'comment')), // ID đã bị Socket xác nhận unavailable luôn để lại, không tự tick
         isTarget: !!markOf(r),
         mark: markOf(r),
       });
     };
     if (state.mode === 'all') {
       sourceRows().forEach((r) => push(r));
+    } else if (state.mode === 'snippet' && state.target) {
+      const targetSnip = state.target.snippetRaw || state.target.snippet;
+      sourceRows().forEach((r) => {
+        if (sameSnippet(r.snippetRaw || r.snippet, targetSnip)) push(r);
+      });
+    } else if (state.mode === 'pick') {
+      state.matches.forEach((m) => {
+        const r = enrichRowWithRedux(m);
+        const knownUnavailable = isRememberedUnavailable(r.id);
+        list.push({
+          ...r,
+          knownUnavailable,
+          checked: knownUnavailable ? false : (m.checked !== undefined ? m.checked : (r.type !== 'comment')),
+          isTarget: true,
+          mark: m.mark || 'target',
+        });
+      });
+    } else if (state.mode === 'range' && state.rangeStart && !state.rangeEnd) {
+      // Mới chọn 1 đoạn chat (Alt+Click lần 1): nạp luôn đoạn đó vào danh sách chọn (nếu bấm Chạy ngay thì gửi luôn 1 chat này,
+      // còn nếu giữ Alt nhấp tiếp đoạn thứ 2 thì tự nối thành chuỗi từ đầu → cuối).
+      push(state.rangeStart);
     } else if (state.mode === 'range' && state.rangeStart && state.rangeEnd) {
       const aId = state.rangeStart.id, bId = state.rangeEnd.id;
-      let rows, idxOf;
+      let rows = null, idxOf = null;
       if (state.allRows && state.allRows.has(aId) && state.allRows.has(bId)) {
         rows = Array.from(state.allRows.values());
         idxOf = (id) => state.allRows.get(id).order;
       } else {
-        // virtual list render 1 dải liền nhau → 2 đầu còn thấy ⇒ các dòng ở giữa cũng thấy
-        rows = visibleRows();
-        const idx = new Map(rows.map((r, i) => [r.id, i]));
-        idxOf = (id) => (idx.has(id) ? idx.get(id) : -1);
+        const reduxRows = getReduxConversationListRows();
+        const rIdx = new Map(reduxRows.map((r, i) => [r.id, i]));
+        if (rIdx.has(aId) && rIdx.has(bId)) {
+          rows = reduxRows;
+          idxOf = (id) => (rIdx.has(id) ? rIdx.get(id) : -1);
+        } else {
+          // virtual list render 1 dải liền nhau → 2 đầu còn thấy ⇒ các dòng ở giữa cũng thấy
+          rows = visibleRows().map(enrichRowWithRedux);
+          const idx = new Map(rows.map((r, i) => [r.id, i]));
+          idxOf = (id) => (idx.has(id) ? idx.get(id) : -1);
+        }
       }
       const ia = idxOf(aId), ib = idxOf(bId);
       if (ia < 0 || ib < 0) {
-        logLine('⚠ Không tìm thấy 1 trong 2 đầu chuỗi trong danh sách — hãy Alt+Click chọn lại');
+        if (!(opts && opts.silentMissingLog)) {
+          logLine('⚠ Không tìm thấy 1 trong 2 đầu chuỗi trong danh sách — đang tự tải bổ sung…');
+        }
       } else {
         const lo = Math.min(ia, ib), hi = Math.max(ia, ib);
         rows.forEach((r) => {
@@ -634,6 +822,7 @@
     }
     state.matches = list;
     highlightRows();
+    if (typeof schedulePreloadSelectedChats === 'function') schedulePreloadSelectedChats();
   }
 
   function setTarget(info, sourceLabel) {
@@ -658,51 +847,65 @@
 
   function setRangeStart(info) {
     if (!info) return;
+    const rich = enrichRowWithRedux(info);
     state.mode = 'range';
     state.target = null;
     state.rangeEnd = null;
     state.rangeStart = {
+      ...rich,
       id: info.id,
-      name: info.name,
-      snippet: info.snippet,
-      snippetRaw: info.snippetRaw,
-      time: info.time,
+      name: info.name || rich.name,
+      snippet: info.snippet || rich.snippet,
+      snippetRaw: info.snippetRaw || rich.snippetRaw,
+      time: info.time || rich.time,
     };
-    state.matches = [];
-    highlightRows();
-    logLine('🅰 Đã đặt ĐẦU CHUỖI: ' + (info.name || info.id)
-      + ' — giữ Alt và nhấp tiếp dòng CUỐI chuỗi (Esc để hủy)');
+    computeMatches();
+    logLine('🅰 Đã chọn & đặt ĐẦU CHUỖI: ' + (info.name || info.id)
+      + ' — đang tự tải dữ liệu đoạn này (giữ Alt nhấp tiếp dòng CUỐI chuỗi nếu muốn chọn cả dải)');
     render();
+    if (typeof schedulePreloadSelectedChats === 'function') schedulePreloadSelectedChats(true);
   }
 
   async function completeRange(endInfo) {
     const start = state.rangeStart;
-    if (!start) return;
-    // KHÔNG tự cuộn/quét ở đây — chỉ dùng dữ liệu đã có:
-    //  - state.allRows (nếu đã bấm "⚡ Tải danh sách") → chính xác toàn danh sách
-    //  - 2 đầu còn nằm trong vùng render → lấy theo thứ tự DOM
+    if (!start || !endInfo) return;
+    const richEnd = enrichRowWithRedux(endInfo);
     state.mode = 'range';
     state.rangeEnd = {
+      ...richEnd,
       id: endInfo.id,
-      name: endInfo.name,
-      snippet: endInfo.snippet,
-      snippetRaw: endInfo.snippetRaw,
-      time: endInfo.time,
+      name: endInfo.name || richEnd.name,
+      snippet: endInfo.snippet || richEnd.snippet,
+      snippetRaw: endInfo.snippetRaw || richEnd.snippetRaw,
+      time: endInfo.time || richEnd.time,
     };
-    computeMatches();
+    // Hiển thị tạm ngay từ dữ liệu sẵn có trên màn hình/Redux để UI phản hồi tức thì,
+    // sau đó LUÔN tự động gọi API tải mới danh sách cho đúng chuỗi vừa chọn (kể cả khi trước đó đã có danh sách)!
+    computeMatches({ silentMissingLog: true });
+    logLine('⚡ Đang tự tải danh sách cho chuỗi đã chọn: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id) + '…');
+    render();
+    await scanFullList({ forRange: true, restartIfBusy: true });
+    computeMatches({ silentMissingLog: true });
+    const hasStart = state.matches.some((m) => m.id === start.id);
+    const hasEnd = state.matches.some((m) => m.id === endInfo.id);
+
     const n = state.matches.length;
-    const haveAll = !!(state.allRows && state.allRows.has(start.id) && state.allRows.has(endInfo.id));
-    const visIds = new Set(visibleRows().map((r) => r.id));
-    const bothVisible = visIds.has(start.id) && visIds.has(endInfo.id);
-    if (!haveAll && !bothVisible) {
+    if (!hasStart || !hasEnd || !n) {
       logLine('🔗 CHUỖI CHỌN: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id)
-        + ' — ⚠ 1 trong 2 đầu đã trôi khỏi màn hình. Bấm "⚡ Tải danh sách" để nạp đủ rồi chọn lại (hoặc chuỗi sẽ tự hoàn tất sau khi tải).');
+        + ' — ⚠ Không tìm thấy đủ 2 đầu chuỗi trong danh sách hiện tại.');
     } else {
       logLine('🔗 CHUỖI CHỌN: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id)
-        + ' — ' + n + ' chat trong chuỗi');
+        + ' — ' + n + ' chat trong chuỗi (đang tự nạp sẵn dữ liệu hội thoại…)');
     }
     render();
+    if (typeof schedulePreloadSelectedChats === 'function') schedulePreloadSelectedChats(true);
   }
+
+  function getBotChecklistElement() {
+    try { return (shadow && shadow.getElementById('ssb-list')) || document.getElementById('ssb-list') || null; }
+    catch (e) { return null; }
+  }
+
 
   function clearSelection() {
     state.mode = null;
@@ -710,10 +913,40 @@
     state.rangeStart = null;
     state.rangeEnd = null;
     state.matches = [];
+    state.deselectMode = false;
     state.listSel = new Set();
     state.loadedName = null;
     renderSavedLists();
     highlightRows();
+  }
+
+
+  function freezeSendChecklist() {
+    state.deselectMode = false;
+    state.sendListFrozen = true;
+    state.matches.forEach((m) => { if (m) m.checked = false; });
+    const list = getBotChecklistElement();
+    if (!list) { applyScanButtons(); applyRunStopButtons(); return; }
+    list.classList.add('ssb-send-list-frozen');
+    list.setAttribute('aria-busy', 'true');
+    list.querySelectorAll('input[type=checkbox]').forEach((cb) => cb.remove());
+    applyScanButtons();
+    applyRunStopButtons();
+  }
+
+  function unfreezeSendChecklist(restoreIds) {
+    if (!state.sendListFrozen) return;
+    const restore = restoreIds ? new Set(Array.from(restoreIds, String)) : null;
+    state.matches.forEach((m) => {
+      if (m) m.checked = !!(restore && restore.has(String(m.id)));
+    });
+    state.sendListFrozen = false;
+    state.listKey = ''; // force one clean rebuild after unfreezing
+    const list = getBotChecklistElement();
+    if (list) {
+      list.classList.remove('ssb-send-list-frozen');
+      list.removeAttribute('aria-busy');
+    }
   }
 
   function persistUiState() {
@@ -726,16 +959,18 @@
   function rebuildFromLists() {}
 
   function highlightRows() {
+    if (state.sendListFrozen) return;
     // Idempotent: chỉ thêm/bớt class khi khác — an toàn để gọi liên tục (observer/scroll/poll).
-    const matchIds = new Set(state.matches.map((m) => m.id));
+    // Chỉ highlight những chat còn tick; chat đã bỏ chọn phải mất màu ngay.
+    const matchIds = new Set(state.matches.filter((m) => m && m.checked && !m.knownUnavailable).map((m) => String(m.id)));
     const rootOf = (item) => item.closest('[role="row"]') || item;
     $$('.conversation-list-item').forEach((item) => {
       let want = '';
       if (state.enabled) {
         const info = rowInfo(item);
-        if (info) {
+        if (info && matchIds.has(String(info.id))) {
           if (markOf(info)) want = 'ssb-m-target';
-          else if (matchIds.has(info.id)) want = 'ssb-m-match';
+          else want = 'ssb-m-match';
         }
       }
       const paint = (el) => {
@@ -755,12 +990,22 @@
   // Tô lại màu mỗi khi virtual list render lại dòng (cuộn, bấm chọn chat, app cập nhật…)
   let hlScheduled = false;
   function scheduleHighlight() {
-    if (hlScheduled) return;
+    if (state.sendListFrozen || hlScheduled) return;
     hlScheduled = true;
     requestAnimationFrame(() => {
       hlScheduled = false;
       try { highlightRows(); } catch (e) { /* ignore */ }
     });
+  }
+
+  // Gỡ ngay toàn bộ viền/nền do script vẽ khi người dùng xác nhận lượt gửi.
+  // Danh sách người nhận đã được snapshot riêng nên có thể xóa lớp hiển thị mà không mất target.
+  function clearHighlightRowsNow() {
+    try {
+      document.querySelectorAll('.ssb-m-target, .ssb-m-match').forEach((el) => {
+        el.classList.remove('ssb-m-target', 'ssb-m-match');
+      });
+    } catch (e) { /* ignore */ }
   }
 
   function watchList() {
@@ -874,9 +1119,14 @@
   }
 
   function bgFetchJson(url, tries, reqOpts) {
+    let swUrl = String(url || '');
+    if (swUrl && !/[?&]access_token=/.test(swUrl)) {
+      const tok = getToken() || 'cookie_session';
+      swUrl += (swUrl.indexOf('?') > -1 ? '&' : '?') + 'access_token=' + encodeURIComponent(tok);
+    }
     return extCall({
       type: 'BOTFAKE_BG_FETCH',
-      url: url,
+      url: swUrl,
       tries: tries || 3,
       method: (reqOpts && reqOpts.method) || 'GET',
       bodyObj: (reqOpts && reqOpts.bodyObj) || null,
@@ -887,18 +1137,21 @@
     });
   }
 
-  // GET/POST an toàn cho tải danh sách: tự thử lại khi bị rate-limit (429)/5xx/lỗi mạng; trả lỗi kèm chi tiết
+  // GET/POST an toàn cho tải danh sách & đọc lịch sử: tự thử lại khi bị rate-limit (429)/5xx/lỗi mạng; trả lỗi kèm chi tiết
   let bgDeadUntil = 0; // mốc SW fetch chết → tạm fetch thẳng trên trang
   async function fetchJson(url, tries, reqOpts) {
-    // Tab đang mở: fetch ngay trên trang (đúng cookie/token như app).
-    // Tab ẩn: mới chuyển SW để khỏi bị Chrome bóp.
-    // Đổi tab → Chrome bóp fetch trên trang. SW (1.91.11) gắn cookie jwt của pancake.vn.
-    if (extBgAvailable() && Date.now() >= bgDeadUntil) {
+    // Tab đang mở: fetch ngay trên trang (đúng cookie/token như app, không tốn IPC hay lỗi thiếu access_token ở SW).
+    // Tab ẩn: mới chuyển SW để khỏi bị Chrome bóp; nếu SW trả lỗi hoặc success:false thì fallback về fetch trên trang.
+    const tabHidden = typeof document !== 'undefined' && !!document.hidden;
+    if (tabHidden && extBgAvailable() && Date.now() >= bgDeadUntil) {
       const r = await bgFetchJson(url, tries, reqOpts);
       const transport = r && !r.ok
         && /^(timeout|SW fetch lỗi|The message port|Could not establish|Extension context)/i.test(String(r.error || ''));
-      if (!transport) return r;
-      bgDeadUntil = Date.now() + 60000; // SW chết/mất bridge → 60s tới fetch trên trang, không treo 120s/lần gọi
+      if (transport) {
+        bgDeadUntil = Date.now() + 60000; // SW chết/mất bridge → 60s tới fetch trên trang, không treo 120s/lần gọi
+      } else if (r && r.ok && !(r.data && r.data.success === false)) {
+        return r;
+      }
     }
     const max = tries || 3;
     const isPost = !!(reqOpts && String(reqOpts.method || '').toUpperCase() === 'POST');
@@ -1202,9 +1455,12 @@
     const plainMode = !opts || (!opts.forceTags && !opts.maxPages);
 
     const isRangeSatisfied = (idSet) => {
-      if (!plainMode) return false;
+      if (!plainMode || (opts && opts.full)) return false;
       if (state.mode === 'range' && state.rangeStart && state.rangeEnd) {
         return idSet.has(state.rangeStart.id) && idSet.has(state.rangeEnd.id);
+      }
+      if (state.mode === 'range' && state.rangeStart && !state.rangeEnd && (opts && opts.forRange)) {
+        return idSet.has(state.rangeStart.id);
       }
       return false;
     };
@@ -1292,7 +1548,9 @@
     } catch (e) { /* dùng đường tuần tự bên dưới */ }
 
     // ---------- A) NHIỀU PAGE → MỖI PAGE 1 CHUỖI SONG SONG ----------
-    if (probeIds.length >= 2) {
+    // Riêng khi đang tự tải đúng vùng chọn (opts.forRange): đi đường tuần tự chung (loadSequentialOrStitch)
+    // để lấy từ đỉnh danh sách xuống đúng điểm cuối chuỗi rồi dừng ngay lập tức, không phải quét hết mọi page!
+    if (probeIds.length >= 2 && !(opts && opts.forRange)) {
       const perPage = new Map(); // pageId -> rows[]
       const allSet = new Set();
       const incompletePages = new Set(); // page tải lỗi/thiếu → không được im lặng bỏ qua
@@ -1383,7 +1641,14 @@
       };
       pushConvs(seg0, (p1.data && p1.data.conversations) || []);
       if (onProgress) onProgress(seg0.items.length, seg0.items);
-      if (!seg0.cursor || stopped() || isRangeSatisfied(seg0.set)) return { ok: true, rows: seg0.items, stopped: stopped() };
+      if (!seg0.cursor || stopped() || isRangeSatisfied(seg0.set)) {
+        return {
+          ok: true,
+          rows: seg0.items,
+          stopped: stopped(),
+          rangePartial: !!(seg0.cursor && !stopped() && isRangeSatisfied(seg0.set)),
+        };
+      }
 
       const parsed0 = parseErlangCursor(seg0.cursor);
       if (!parsed0) {
@@ -1402,8 +1667,9 @@
           if (seg0.items.length === before && (seg0.noAddStreak = (seg0.noAddStreak || 0) + 1) >= 10) { seg0.truncated = true; break; }
           if (seg0.items.length !== before) seg0.noAddStreak = 0;
         }
-        if (seg0.cursor && !stopped() && !isRangeSatisfied(seg0.set)) seg0.truncated = true;
-        return { ok: true, rows: seg0.items, incomplete: !!seg0.truncated && !stopped(), stopped: stopped() };
+        const rangeDone = !!(seg0.cursor && !stopped() && isRangeSatisfied(seg0.set));
+        if (seg0.cursor && !stopped() && !rangeDone) seg0.truncated = true;
+        return { ok: true, rows: seg0.items, incomplete: !!seg0.truncated && !stopped(), stopped: stopped(), rangePartial: rangeDone };
       }
 
       const STRIDES = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8, 9.9, 11];
@@ -1554,13 +1820,14 @@
         for (let s = alive; s < Math.min(STRIDES.length, rl.helperBudget); s++) spawnHelper();
       }
       helpersDone = true;
-      // hết vòng lặp mà cursor vẫn còn (chưa đi tới cuối) = CHƯA đầy đủ
-      if (seg0.cursor && !stopped() && !isRangeSatisfied(seg0.set)) seg0.truncated = true;
-      logLine('⚡⚡ Tải đa luồng 1 page: ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
+      const rangeDone2 = !!(seg0.cursor && !stopped() && isRangeSatisfied(seg0.set));
+      // hết vòng lặp mà cursor vẫn còn (chưa đi tới cuối) = CHƯA đầy đủ (trừ khi dừng chủ đích vì đã chạm đủ vùng chọn)
+      if (seg0.cursor && !stopped() && !rangeDone2) seg0.truncated = true;
+      logLine('⚡⚡ Tải ' + (rangeDone2 ? 'đoạn chọn' : 'đa luồng 1 page') + ': ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
         + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
         + (rl.hits ? ' · 🧯 dính 429×' + rl.hits + ' (đã tự giảm luồng)' : '')
         + (seg0.truncated ? ' · ⚠ CHƯA ĐẦY ĐỦ' : ''));
-      return { ok: true, rows: seg0.items, incomplete: !!seg0.truncated && !stopped(), stopped: stopped() };
+      return { ok: true, rows: seg0.items, incomplete: !!seg0.truncated && !stopped(), stopped: stopped(), rangePartial: rangeDone2 };
     }
   }
 
@@ -1619,14 +1886,24 @@
   }
 
   // ⚡ Tải danh sách: CHỈ API next_cursor tuần tự. Không cuộn DOM / virtual list.
-  async function scanFullList() {
+  async function scanFullList(opts) {
+    if (state.sendListFrozen) return;
+    const scanOpts = opts || {};
     if (state.scanning) {
-      state.scanStopRequested = true;
-      logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
-      return;
+      if (scanOpts.restartIfBusy) {
+        state.scanStopRequested = true;
+        let wg = 0;
+        while (state.scanning && wg++ < 80) await sleep(50);
+      } else {
+        state.scanStopRequested = true;
+        logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
+        return;
+      }
     }
     const btn = shadow && shadow.getElementById('ssb-scan');
     const setBtn = (t) => { if (btn) btn.textContent = t; };
+    const prevAllRows = state.allRows;
+    const prevAllRowsPartial = !!state.allRowsPartial;
 
     state.scanning = true;
     state.scanStopRequested = false;
@@ -1636,11 +1913,14 @@
 
     try {
       state.allRows = null;
-      if (state.mode !== 'saved') state.matches = [];
+      state.allRowsPartial = false;
+      if (state.mode !== 'saved' && !scanOpts.forRange) state.matches = [];
       highlightRows();
       render();
 
-      logLine('⚡ Đang tải danh sách qua API (next_cursor, không cuộn)…');
+      logLine(scanOpts.forRange
+        ? '⚡ Đang tự tải danh sách tới đúng đoạn chat đã chọn…'
+        : '⚡ Đang tải danh sách qua API (next_cursor, không cuộn)…');
       setBtn('⏹ Dừng tải (0 chat)');
       setScanProgress(0, 0);
       let lastLiveSync = 0;
@@ -1661,7 +1941,7 @@
         }
         lastSyncedLen = rowsArr.length;
         const cntEl = shadow && shadow.getElementById('ssb-count');
-        if (cntEl) cntEl.textContent = String(state.allRows.size);
+        if (cntEl && !scanOpts.forRange) cntEl.textContent = String(state.allRows.size);
       };
 
       const apiProgress = (n, rowsArr) => {
@@ -1669,18 +1949,24 @@
         syncLiveRows(rowsArr);
         setScanProgress(n, null);
       };
-      let api = await loadListViaApi(apiProgress);
+      let api = await loadListViaApi(apiProgress, scanOpts);
       if (state.scanStopRequested || (api && api.stopped)) {
         const nStop = (api && api.rows && api.rows.length) || (state.allRows && state.allRows.size) || 0;
         if (api && api.rows && api.rows.length) {
           const foundStop = new Map(api.rows.map((r) => [r.id, { ...r }]));
+          if (scanOpts.forRange && prevAllRows && prevAllRows.size) {
+            prevAllRows.forEach((v, k) => { if (!foundStop.has(k)) foundStop.set(k, { ...v }); });
+          }
           let oStop = 0;
           foundStop.forEach((v) => { v.order = oStop++; });
           state.allRows = foundStop;
+        } else if (prevAllRows && prevAllRows.size) {
+          state.allRows = prevAllRows;
         }
+        state.allRowsPartial = true;
         state.listIncomplete = false;
         logLine('⏹ Đã dừng tải — dùng ' + nStop + ' chat đã lấy.');
-        setBtn('⚡ Tải danh sách (' + nStop + ' chat)');
+        setBtn('⚡ Tải danh sách (' + ((state.allRows && state.allRows.size) || nStop) + ' chat)');
         setScanProgress(nStop, 100);
         computeMatches();
         render();
@@ -1690,34 +1976,50 @@
         logLine('⚠ Lần 1 chưa hết cursor (' + api.rows.length + ' chat) — tải lại từ đầu…');
         lastSyncedLen = 0;
         state.allRows = null;
-        const api2 = await loadListViaApi(apiProgress);
+        const api2 = await loadListViaApi(apiProgress, scanOpts);
         if (api2 && api2.ok) api = api2;
       }
       if (api && api.ok && api.incomplete && !api.stopped) {
         state.listIncomplete = true;
-        state.allRows = null;
+        state.allRows = prevAllRows || null;
+        state.allRowsPartial = prevAllRowsPartial;
         logLine('⛔ Tải 2 lần vẫn chưa hết cursor (' + api.rows.length + ' chat) — không dùng list thiếu. Bấm ⚡ lại.');
         setBtn('⚠ Tải chưa đủ — bấm tải lại');
         setScanProgress(api.rows.length, null);
         return;
       }
       if (!(api && api.ok && api.rows.length)) {
+        if (prevAllRows && prevAllRows.size) {
+          state.allRows = prevAllRows;
+          state.allRowsPartial = prevAllRowsPartial;
+        }
         logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại'));
         setBtn('⚠ Tải API lỗi — bấm tải lại');
         return;
       }
       const vis = visibleRows();
       const found = new Map(api.rows.map((r) => [r.id, { ...r }]));
+      if (scanOpts.forRange && prevAllRows && prevAllRows.size) {
+        prevAllRows.forEach((v, k) => {
+          if (!found.has(k)) found.set(k, { ...v });
+        });
+      }
       vis.forEach((r) => {
-        if (found.has(r.id)) found.set(r.id, { ...found.get(r.id), ...r });
+        if (found.has(r.id)) {
+          const cur = found.get(r.id);
+          found.set(r.id, { ...cur, ...r, pageId: cur.pageId || r.pageId, type: r.type || cur.type });
+        }
       });
       let ord = 0;
       found.forEach((v) => { v.order = ord++; });
       state.allRows = found;
+      state.allRowsPartial = !!(api && api.rangePartial) && (!prevAllRows || prevAllRowsPartial);
       state.listIncomplete = false;
       setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
-      setScanProgress(found.size, 100);
-      logLine('⚡ API: ' + found.size + ' chat (next_cursor hết) — không cuộn list');
+      setScanProgress(api.rows.length, 100);
+      logLine((api && api.rangePartial)
+        ? ('⚡ Đã tự tải xong vùng chọn (' + api.rows.length + ' chat tới cuối chuỗi chọn)')
+        : ('⚡ API: ' + found.size + ' chat (next_cursor hết) — không cuộn list'));
       computeMatches();
       render();
     } finally {
@@ -1761,7 +2063,20 @@
   //     "100025260544548"… — app gửi Ext/Socket bằng id NÀY, không phải from_psid).
   // LIST chat KHÔNG có 2 thứ này → gửi hàng loạt mà không nạp = thiếu cờ (#10 oan) + bắn nhầm id
   // (Ext "không gửi được", Socket "server báo gửi thất bại") — đúng 2 triệu chứng trong log.
-  const convCtxCache = {}; // convId → { ad_clicks, gid, fetched }
+  const convCtxCache = {}; // convId → { ad_clicks, gid, fetched, httpState, gidSource }
+
+  // THỐNG KÊ KHÂU DÒ GLOBAL_ID THEO LƯỢT (in ở TỔNG HỢP): trước đây mọi kết quả
+  // "chưa lấy được" bị gộp thành "không tìm thấy", không biết nghẽn ở nguồn nào.
+  // Số ở đây đếm theo LẦN PHÂN GIẢI (1 chat có thể được dò lại ở Pass 2), dùng để
+  // đối chiếu nguồn nào đang nghẽn chứ không phải số chat duy nhất.
+  const gidStats = {
+    cacheHit: 0, httpHit: 0, httpNoGid: 0, httpFail: 0, http429: 0,
+    wsHit: 0, extHit: 0, extUnknown: 0, unknown: 0, batchMappings: 0,
+    batchReturned: 0, batchFail: 0, extRespondedNoGid: 0, gateSkip: 0,
+  };
+  function resetGidStats() {
+    Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
+  }
 
   function adClicksFromPayload(j) {
     if (!j) return null;
@@ -1835,7 +2150,12 @@
     }
     let entry = convCtxCache[cid];
     if (entry && entry.fetched) return entry; // đã nạp thành công qua mạng — không gọi lại
-    entry = entry || { ad_clicks: null, gid: '', fetched: false, inflight: null };
+    entry = entry || {
+      ad_clicks: null, gid: '', fetched: false, inflight: null,
+      httpState: '', httpError: '', httpAttempts: 0, gidSource: '',
+    };
+    if (!entry.httpState) entry.httpState = '';
+    if (!entry.gidSource) entry.gidSource = '';
     const full = peekConv(conv) || conv;
     // 1) có sẵn trong dữ liệu conv (bản ghi đầy đủ / dòng list) — khỏi gọi mạng
     if (!entry.ad_clicks) {
@@ -1848,6 +2168,7 @@
     if (!entry.gid) {
       entry.gid = String(gidFromPayload(full) || full.globalId || (conv && conv.globalId)
         || (full.customers && full.customers[0] && full.customers[0].global_id) || '');
+      if (entry.gid) entry.gidSource = 'conv';
     }
     if (!entry.gid) {
       try {
@@ -1855,6 +2176,7 @@
         const tKey = (pid && tid) ? (pid + '_' + tid) : '';
         entry.gid = String((g1 && g1.get(cid)) || (g2 && g2.get(cid))
           || (tKey && ((g1 && g1.get(tKey)) || (g2 && g2.get(tKey)))) || '');
+        if (entry.gid) entry.gidSource = 'cache';
       } catch (e) { /* ignore */ }
     }
     if (!entry.gid && pid && tid) {
@@ -1866,6 +2188,7 @@
           || (ip.threadMappingStoreV2 && ip.threadMappingStoreV2[tid]));
         if (mGid) {
           entry.gid = String(mGid);
+          entry.gidSource = 'ws';
           if (typeof window.__botfakeSaveGid__ === 'function') {
             window.__botfakeSaveGid__(cid, pid, tid, entry.gid);
           }
@@ -1911,16 +2234,29 @@
     if (entry.inflight) return entry.inflight;
     convCtxCache[cid] = entry;
     entry.inflight = ctxFetchLane(async () => {
+      const startedAt = Date.now();
+      let fetchStartedAt = startedAt;
+      entry.httpAttempts = (entry.httpAttempts || 0) + 1;
       try {
+        // Đang trong cơn 429 của Pancake: mọi request dò mới cùng chờ hết giờ
+        // nghỉ chung thay vì tiếp tục đâm vào server (tự làm nghẽn nặng hơn).
+        await waitGidHttpCooldown();
+        if (state.stopRequested) return entry;
+        fetchStartedAt = Date.now();
         const url = apiBase() + '/v1/pages/' + pid
           + '/conversations/' + encodeURIComponent(cid)
           + '/messages?customer_id=' + encodeURIComponent(custId)
           + '&user_view=true&is_new_api=true&separate_pos=true';
-        const res = await fetchJson(url, 3);
+        const res = await fetchJson(url, 2, { timeoutMs: 10000 });
+        const latencyMs = Date.now() - fetchStartedAt;
         if (res.ok && res.data && res.data.success !== false) {
           const j = res.data;
           entry.ad_clicks = entry.ad_clicks || adClicksFromPayload(j) || null;
-          entry.gid = entry.gid || gidFromPayload(j) || '';
+          const httpGid = gidFromPayload(j) || '';
+          if (!entry.gid && httpGid) {
+            entry.gid = String(httpGid);
+            entry.gidSource = 'http';
+          }
           // Khớp 100% @298730 trong _app: n.customers.forEach(t => t.fb_id && t.global_id && b.Z.set(e + "_" + t.fb_id, t.global_id))
           if (Array.isArray(j.customers)) {
             j.customers.forEach((t) => {
@@ -1928,6 +2264,27 @@
                 window.__botfakeSaveGid__(pid + '_' + t.fb_id, pid, tid, String(t.global_id));
               }
             });
+          }
+          const c0 = (Array.isArray(j.customers) && j.customers[0])
+            || (Array.isArray(j.conv_customers) && j.conv_customers[0]) || null;
+          if (c0 && conv) {
+            if (!conv.customerId && c0.id) conv.customerId = String(c0.id);
+            if (!conv.fromPsid && c0.fb_id) conv.fromPsid = String(c0.fb_id);
+            if (!conv.globalId && (c0.global_id || entry.gid)) conv.globalId = String(c0.global_id || entry.gid);
+            if ((!Array.isArray(conv.customers) || !conv.customers.length) && Array.isArray(j.customers)) {
+              conv.customers = j.customers.map((x) => ({
+                id: x && x.id, fb_id: x && x.fb_id, name: x && x.name,
+                global_id: x && x.global_id, ad_clicks: x && x.ad_clicks,
+              }));
+            }
+            if (state.allRows && state.allRows.has(cid)) {
+              const ar = state.allRows.get(cid);
+              if (ar) {
+                if (!ar.customerId && conv.customerId) ar.customerId = conv.customerId;
+                if (!ar.fromPsid && conv.fromPsid) ar.fromPsid = conv.fromPsid;
+                if (!ar.globalId && conv.globalId) ar.globalId = conv.globalId;
+              }
+            }
           }
           if (entry.gid) {
             try {
@@ -1940,12 +2297,99 @@
           }
           // CHỈ đánh dấu fetched=true khi request thành công (tránh lỗi 429/mạng làm mất vĩnh viễn gid của 3.000 chat sau)
           entry.fetched = true;
+          entry.httpState = entry.gid ? 'ok-gid' : 'ok-no-gid';
+          entry.httpError = '';
+          if (entry.gid && entry.gidSource === 'http') gidStats.httpHit++;
+          else if (!entry.gid) gidStats.httpNoGid++;
+          noteGidHttpResult(true, 200, latencyMs);
+        } else {
+          const errText = String((res && res.error) || (res && res.data && (res.data.message || res.data.error)) || 'HTTP lỗi');
+          const statusMatch = /HTTP\s+(\d{3})/.exec(errText);
+          const status = statusMatch ? Number(statusMatch[1]) : 0;
+          entry.httpState = status === 429 ? 'http-429' : 'http-fail';
+          entry.httpError = errText;
+          gidStats.httpFail++;
+          if (status === 429) gidStats.http429++;
+          noteGidHttpResult(false, status, latencyMs);
         }
-      } catch (e) { /* mạng lỗi — chưa set fetched=true để lần force sau còn thử lại */ }
+      } catch (e) {
+        // mạng lỗi — chưa set fetched=true để lần force sau còn thử lại
+        entry.httpState = 'http-fail';
+        entry.httpError = String(e && e.message || e || 'Lỗi mạng');
+        gidStats.httpFail++;
+        noteGidHttpResult(false, 0, Date.now() - fetchStartedAt);
+      }
       entry.inflight = null;
       return entry;
     }).then(() => { entry.inflight = null; return entry; }); // lane không chạy fn (bấm Dừng) cũng phải nhả inflight
     return entry.inflight;
+  }
+
+  // Tự động tải ngầm dữ liệu của đúng những đoạn chat người dùng vừa chọn (Socket + global_id + messages context)
+  // ngay lúc chọn để khi bấm Chạy là gửi tức thì không phải chờ nạp!
+  let preloadSelectedTimer = null;
+  let preloadSelectedSeq = 0;
+  let preloadForceLogPending = false;
+
+  function schedulePreloadSelectedChats(forceLog) {
+    if (forceLog) preloadForceLogPending = true;
+    if (preloadSelectedTimer) clearTimeout(preloadSelectedTimer);
+    preloadSelectedTimer = setTimeout(() => {
+      preloadSelectedTimer = null;
+      const fl = preloadForceLogPending;
+      preloadForceLogPending = false;
+      preloadSelectedChats(fl).catch(() => {});
+    }, 120);
+  }
+
+  async function preloadSelectedChats(forceLog) {
+    if (state.sending || state.scanning) return;
+    const selected = (state.matches || []).filter((m) => m && m.checked);
+    if (!selected.length) return;
+    const mySeq = ++preloadSelectedSeq;
+
+    // 1) Làm nóng sẵn WebSocket + yêu cầu BATCH_GET_GLOBAL_ID cho các đoạn chat đã chọn
+    try { if (typeof warmUpSockets === 'function') warmUpSockets(selected); } catch (e) { /* ignore */ }
+
+    // 2) Với các lựa chọn vừa và nhỏ (<= 150 chat), LUÔN tự động nạp sẵn dữ liệu hội thoại (ensureConvCtx:
+    //    GET .../messages -> global_id, ad_clicks, customers) cho toàn bộ các đoạn được chọn,
+    //    bất kể trước đó đã có danh sách (state.allRows) hay chưa!
+    const MAX_PRELOAD = 150;
+    const targets = selected.slice(0, MAX_PRELOAD).filter((c) => {
+      if (!c || !c.id) return false;
+      const entry = convCtxCache[c.id];
+      if (entry && entry.fetched) return false;
+      return true;
+    });
+    if (!targets.length) {
+      if (forceLog && !state.sending && !state.scanning && preloadSelectedSeq === mySeq) {
+        logLine('⚡ Đã tự tải sẵn dữ liệu ' + selected.length + ' đoạn chat đã chọn — sẵn sàng gửi ngay!');
+      }
+      return;
+    }
+
+    let idx = 0;
+    let fetchedCount = 0;
+    const CONC = Math.min(4, targets.length);
+    const workers = [];
+    for (let w = 0; w < CONC; w++) {
+      workers.push((async () => {
+        while (idx < targets.length) {
+          if (state.sending || state.scanning || preloadSelectedSeq !== mySeq) return;
+          const c = targets[idx++];
+          if (!c) continue;
+          try {
+            const beforeFetched = !!(convCtxCache[c.id] && convCtxCache[c.id].fetched);
+            const ent = await ensureConvCtx(c, { force: true });
+            if (!beforeFetched && ent && ent.fetched) fetchedCount++;
+          } catch (e) { /* ignore */ }
+        }
+      })());
+    }
+    await Promise.all(workers);
+    if ((fetchedCount > 0 || forceLog) && !state.sending && !state.scanning && preloadSelectedSeq === mySeq) {
+      logLine('⚡ Đã tự tải sẵn dữ liệu ' + selected.length + ' đoạn chat đã chọn — sẵn sàng gửi ngay!');
+    }
   }
 
   // Cờ is_record_ctx_7_days — đúng điều kiện hàm dr() trong _app (gửi ngoài cửa sổ 24h
@@ -2260,6 +2704,16 @@
   // tự động thử lại 1 lần sau 600ms.
   // Response xem TRONG NỀN: OK → im lặng; THUA RÕ (4xx/success=false) → bù Ext/Socket trong nền;
   // KHÔNG RÕ (5xx/lỗi mạng) → chỉ báo "không rõ" — KHÔNG gửi lại để tránh trùng tin.
+  function isCertainHttpNotSent(status, data, parsed) {
+    if (data && data.success === false) return true;
+    const st = Number(status) || 0;
+    if (st === 408 || st === 499 || st >= 500 || st <= 0) return false;
+    if (st === 400 || st === 401 || st === 403 || st === 404 || st === 405 || st === 413 || st === 415 || st === 422 || st === 429) {
+      return true;
+    }
+    return false;
+  }
+
   function fireApiAndWatch(conv, text, photo) {
     if (photo && !hasValidApiPhoto(photo)) return { ok: false, sent: false, error: 'Không có attachment ảnh cho API' };
     const req = buildInboxSend(conv, text, photo);
@@ -2267,8 +2721,18 @@
     if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
     if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
     const myRun = runSeq;
+    const apiQueuedAt = Date.now();
+    sendDiag.apiQueued++;
     apiSendLane(async () => {
-      if (myRun !== runSeq || state.stopRequested) return;
+      if (myRun !== runSeq || state.stopRequested) {
+        if (myRun === runSeq) sendDiag.apiCancelled++;
+        return;
+      }
+      const apiStartedAt = Date.now();
+      const apiQueueWaitMs = Math.max(0, apiStartedAt - apiQueuedAt);
+      sendDiag.apiStarted++;
+      sendDiag.apiQueueWaitMsTotal += apiQueueWaitMs;
+      sendDiag.apiQueueWaitMsMax = Math.max(sendDiag.apiQueueWaitMsMax, apiQueueWaitMs);
       const makeFetchOpts = (rObj) => (rObj.isJson
         ? { method: 'POST', body: JSON.stringify(rObj.jsonBody), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, credentials: 'include' }
         : { method: 'POST', body: rObj.fd, headers: { Accept: 'application/json' }, credentials: 'include' });
@@ -2283,11 +2747,28 @@
           opts.signal = ctl.signal;
           abTimer = setTimeout(() => { try { ctl.abort(); } catch (e0) { /* ignore */ } }, 20000);
         }
-        try { return await fetch(req.url, opts); }
-        finally { if (abTimer) clearTimeout(abTimer); }
+        const fetchStartedAt = Date.now();
+        if (myRun === runSeq) sendDiag.apiFetchAttempts++;
+        try {
+          const response = await fetch(req.url, opts);
+          if (myRun === runSeq && response) {
+            const statusKey = String(Number(response.status) || 0);
+            sendDiag.apiStatusCounts[statusKey] = (sendDiag.apiStatusCounts[statusKey] || 0) + 1;
+            if (Number(response.status) === 429) sendDiag.api429++;
+          }
+          return response;
+        } finally {
+          if (abTimer) clearTimeout(abTimer);
+          if (myRun === runSeq) {
+            const fetchMs = Math.max(0, Date.now() - fetchStartedAt);
+            sendDiag.apiFetchMsTotal += fetchMs;
+            sendDiag.apiFetchMsMax = Math.max(sendDiag.apiFetchMsMax, fetchMs);
+          }
+        }
       };
       let res = await timedFetch(req);
       if (res && res.status === 429 && myRun === runSeq && !state.stopRequested) {
+        sendDiag.api429Retries++;
         await sleep(600);
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
@@ -2296,13 +2777,19 @@
       }
       if (myRun !== runSeq) return;
       let data = null;
-      try { data = await res.json(); } catch (e) { data = null; }
-      if (res.ok && data && data.success) { markDelivered(conv.id, 'api'); postSendSideEffects(conv); return; } // đã đến nơi — im lặng
+      let parsed = true;
+      try { data = await res.json(); } catch (e) { data = null; parsed = false; }
+      if (res.ok && data && data.success) {
+        sendDiag.apiSuccess++;
+        markDelivered(conv.id, 'api'); postSendSideEffects(conv); return;
+      } // đã đến nơi — im lặng
       const msg = (data && (data.message || data.error)) || ('HTTP ' + res.status);
       if (res.status === 401 || res.status === 403) capturedToken = null;
       const nm = conv.name || conv.id;
-      const certainFail = (res.status >= 400 && res.status < 500) || (res.ok && data && data.success === false);
+      const certainFail = isCertainHttpNotSent(res.status, data, parsed);
       if (certainFail) {
+        sendDiag.apiRejected++;
+        sendDiag.apiFallback++;
         releaseOutbound(conv.id); // tin chắc chưa đi → kênh khác được bắn (không sót)
         // "(#10)…ngoài khoảng thời gian…"/"(#551)" KHÔNG phải "mọi kênh đều thua": app vẫn fallback
         // Extension/Socket và gửi ĐƯỢC (log 07:36 — Thanh Binh bù THÀNH CÔNG qua Extension ngay sau
@@ -2322,6 +2809,7 @@
           + (win ? ' — ngoài cửa sổ 24h' : ''));
         scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + clip(msg, 90) + ')', ['api']);
       } else {
+        sendDiag.apiUnknown++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
         logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — KHÔNG gửi lại để tránh trùng');
       }
@@ -2332,11 +2820,13 @@
       if (laneRes && laneRes.ok === false && laneRes.sent === false
         && String(laneRes.error || '').indexOf('Lỗi kênh:') === 0
         && !deliveredIds[conv.id] && !finalFailedIds[conv.id] && !uncertainIds[conv.id]) {
+        sendDiag.apiUnknown++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
         logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng/quá hạn) — KHÔNG gửi lại để tránh trùng');
       }
     }).catch(() => {
       if (myRun !== runSeq) return;
+      sendDiag.apiUnknown++;
       if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
       logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng) — KHÔNG gửi lại để tránh trùng');
     });
@@ -2385,8 +2875,8 @@
         releaseOutbound(conv.id);
         return { ok: false, sent: false, error: 'Token hết hạn/không hợp lệ (' + res.status + ') — tải lại trang rồi thử lại' };
       }
-      // 200 nhưng không đọc được kết quả, hoặc lỗi 5xx → KHÔNG rõ tin đã đi hay chưa
-      if ((res.ok && (!parsed || !data || data.success === undefined)) || res.status >= 500) {
+      // 200 nhưng không đọc được kết quả, hoặc lỗi 408/499/5xx → KHÔNG rõ tin đã đi hay chưa
+      if ((res.ok && (!parsed || !data || data.success === undefined)) || !isCertainHttpNotSent(res.status, data, parsed)) {
         return { ok: false, sent: 'maybe', error: 'API không trả kết quả rõ (' + res.status + ')' };
       }
       // server trả lời rõ ràng là không gửi được → chắc chắn chưa gửi → nhả khóa để kênh khác bắn (không sót)
@@ -2523,8 +3013,9 @@
       let done = false;
       if (!left) { resolve(null); return; }
       promises.forEach((pr) => {
-        Promise.resolve(pr).then((v) => {
-          if (!done && v) { done = true; resolve(v); return; }
+        const task = (typeof pr === 'function') ? pr() : pr;
+        Promise.resolve(task).then((v) => {
+          if (!done && v && (typeof v === 'string' || typeof v === 'number')) { done = true; resolve(v); return; }
           if (!done && --left === 0) resolve(null);
         }, () => {
           if (!done && --left === 0) resolve(null);
@@ -2586,21 +3077,31 @@
     return '';
   }
 
-  let extNullStreak = 0;
-
-  // Tìm globalId của khách theo kiến trúc Đa Tầng Không Chặn Đầu (Two-Pass Non-Blocking Pipeline v1.63.0):
+  // Tìm globalId của khách theo kiến trúc Đa Tầng Không Chặn Đầu:
   //   • Bước 1 (0ms): RAM / localStorage / IndexedDB / WebSocket threadMappingStoreV2.
-  //   • Bước 1B (~100–200ms): Server Pancake HTTP GET /messages (khớp @298730 trong _app: n.customers[].global_id,
-  //     chạy song song trên ctxFetchLane, đồng thời đánh thức WebSocket loadThread).
-  //   • Bước 1C (Nếu đang ở Làn Nhanh ctx.fastOnly === true mà cả Bước 1 & 1B đều trả null):
-  //     Đánh dấu ctx.deferredToExt = true và trả về null NGAY LẬP TỨC (0ms) để đẩy chat sang hồ nền Extension
-  //     (extBacklogQueue), TUYỆT ĐỐI KHÔNG giữ chân worker của Làn Nhanh!
-  //   • Bước 2 + 3 (Chạy trong hồ nền extBacklogQueue): Đua song song WebSocket PENDING_MESSAGES + Extension,
-  //     kèm mạch ngắt thông minh (extNullStreak) và TUYỆT ĐỐI không trả về from_psid sai để bắn mù vào Socket!
+  //   • Bước 1B: Server Pancake HTTP GET /messages (khớp @298730 trong _app:
+  //     customers[].global_id) qua lane THÍCH ỨNG — nguồn có thẩm quyền nhất.
+  //   • Bước 1C: Làn Nhanh (ctx.fastOnly) chưa có thì hoãn sang hồ nền, không giữ worker.
+  //   • Bước 2 + 3 (hồ nền): WebSocket loadThread chạy trước một nhịp ngắn, Extension
+  //     chỉ vào sau để khỏi tranh tài nguyên với chính lệnh gửi qua Extension.
+  // QUAN TRỌNG (đối chiếu _app-9331d46f21a84eb1.v6.js @903213): hàm
+  // window.findGlobalIdForConv của Pancake trả null cho CẢ Extension mất kết nối,
+  // adapter success:false, thiếu data.globalId và exception. Vì vậy null của khâu
+  // dò chỉ có nghĩa "CHƯA RÕ", tuyệt đối không phải bằng chứng khách khóa nick.
   async function resolveGlobalId(full, threadId, cacheKey, convFromPsid, forceFind, ctx) {
     const key = (full && full.id) || cacheKey;
     const pageId = (full && full.page_id) || (full && full.pageId) || String(cacheKey || '').split('_')[0];
     const tKey = (pageId && threadId) ? (pageId + '_' + threadId) : '';
+    const discoveryPass = (ctx && ctx.gidRetryPass) ? 2 : 1;
+    let foundSource = '';
+    let extFinderRespondedNoGid = false; // Ext CÓ phản hồi success mà không có globalId (khác timeout/mất kết nối)
+    if (ctx) {
+      ctx.gidUnknown = false;
+      ctx.extFinderReturnedNull = false; // giữ field cũ nhưng KHÔNG còn nguồn nào được set true
+      ctx.noGidConfirmedByExt = false;
+      ctx.extFinderRespondedNoGid = false;
+      ctx.gidGateSkipExt = false;
+    }
     const saveCache = (val) => {
       const s = String(val || '');
       if (!s) return;
@@ -2620,18 +3121,58 @@
     };
     const badGid = (forceFind && ctx && ctx.gid && !ctx.gidFromPsid) ? String(ctx.gid) : '';
     const mqtt = window.__MqttHelper__;
-    if (mqtt && pageId && typeof mqtt.wakingUpLoadThread === 'function') {
-      try { mqtt.wakingUpLoadThread(pageId); } catch (e0) { /* ignore */ }
-    }
+    const srvGidDirect = full && (gidFromPayload(full) || full.globalId || (full.customers && full.customers[0] && full.customers[0].global_id));
     // 1) Kiểm tra 0ms trong RAM (Cache + full.global_id + MqttHelper.threadMappingStoreV2)
     const fastGid = peekFastGlobalId(full, full, badGid);
     if (fastGid) {
+      gidStats.cacheHit++;
       saveCache(fastGid);
       if (ctx) {
         ctx.gidFromPsid = false;
-        ctx.gidFromServerOrCache = true;
+        ctx.gidFromServerOrCache = !!(srvGidDirect && String(srvGidDirect) === String(fastGid));
+        ctx.gidDiscoveryState = 'cache';
+        ctx.gidUnknown = false;
       }
       return String(fastGid);
+    }
+    // 1A) Kiểm tra trực tiếp IndexedDB __FBMetaDataStore__ của Pancake (bảng mặc định & global_user_ids_2)
+    if (pageId && threadId && window.__FBMetaDataStore__) {
+      try {
+        const fbStore = window.__FBMetaDataStore__;
+        let idbGid = null;
+        if (typeof fbStore.get === 'function') {
+          idbGid = await Promise.race([
+            Promise.resolve(fbStore.get(pageId, threadId)).then((v) => v || fbStore.get(pageId, threadId, 'global_user_ids_2')),
+            sleep(400),
+          ]);
+        } else if (typeof fbStore.findGlobalId === 'function') {
+          idbGid = await Promise.race([Promise.resolve(fbStore.findGlobalId(pageId, threadId)), sleep(400)]);
+        }
+        if (idbGid && typeof idbGid === 'object') idbGid = idbGid.global_user_id || idbGid.globalId || idbGid.id || '';
+        if (idbGid && String(idbGid) !== badGid) {
+          gidStats.cacheHit++;
+          saveCache(idbGid);
+          if (ctx) {
+            ctx.gidFromPsid = false;
+            ctx.gidFromServerOrCache = false;
+            ctx.gidDiscoveryState = 'cache';
+            ctx.gidUnknown = false;
+          }
+          return String(idbGid);
+        }
+      } catch (e0) { /* ignore */ }
+    }
+    // Pass 2: entry HTTP cũ "thành công nhưng chưa có gid" vẫn có thể đã cũ —
+    // trong lúc lô chạy, Pancake/Extension có thể vừa cập nhật mapping lên server.
+    // Ép nạp lại đúng 1 lần cho nhóm Pass 2 (vẫn qua lane thích ứng + dedupe).
+    if (ctx && discoveryPass === 2 && key) {
+      try {
+        const oldCc = convCtxCache[key];
+        if (oldCc && oldCc.fetched && !oldCc.gid && !oldCc.inflight) {
+          oldCc.fetched = false;
+          oldCc.httpState = 'retry-pass2';
+        }
+      } catch (e0) { /* ignore */ }
     }
     // 1B) Nạp global_id từ Server Pancake HTTP GET /messages (khớp @298730 trong _app: n.customers[].global_id):
     //     Chỉ đánh dấu httpCtxTried = true khi request thực sự thành công (cc.fetched === true), để nếu lần 1
@@ -2639,19 +3180,32 @@
     if (!ctx || !ctx.httpCtxTried) {
       try {
         const cc = await ensureConvCtx(full || { id: key, pageId: pageId, threadId: threadId }, { force: true });
-        if (ctx && cc && cc.fetched) ctx.httpCtxTried = true;
+        if (ctx && cc) {
+          ctx.httpState = cc.httpState || '';
+          ctx.httpError = cc.httpError || '';
+          if (cc.fetched) ctx.httpCtxTried = true;
+        }
         const srvGid = (cc && cc.gid && String(cc.gid) !== badGid)
           ? String(cc.gid)
           : peekFastGlobalId(full, full, badGid);
         if (srvGid) {
+          const isFromHttpSrv = !!(cc && cc.gid && (cc.gidSource === 'http' || cc.gidSource === 'conv'));
+          if (!isFromHttpSrv) gidStats.cacheHit++;
           saveCache(srvGid);
           if (ctx) {
             ctx.gidFromPsid = false;
-            ctx.gidFromServerOrCache = true;
+            ctx.gidFromServerOrCache = isFromHttpSrv;
+            ctx.gidDiscoveryState = (cc && cc.gidSource) || 'cache';
+            ctx.gidUnknown = false;
           }
           return String(srvGid);
         }
-      } catch (e1) { /* ignore */ }
+        if (ctx) {
+          ctx.gidDiscoveryState = (cc && cc.fetched) ? 'server-no-gid' : 'http-unknown';
+        }
+      } catch (e1) {
+        if (ctx) ctx.gidDiscoveryState = 'http-unknown';
+      }
     }
     // 1C) Nếu đang chạy trong Làn Nhanh (ctx.fastOnly === true) mà cả Cache, WebSocket lẫn Server Pancake
     //     đều chưa có global_id (tức là buộc phải chờ Extension findGlobalIdForConv):
@@ -2659,14 +3213,20 @@
     //     giải phóng worker của Làn Nhanh đi bắn ngay các chat tiếp theo (301..20.000)!
     if (ctx && ctx.fastOnly) {
       ctx.deferredToExt = true;
+      ctx.gidUnknown = true;
+      if (!ctx.gidDiscoveryState) ctx.gidDiscoveryState = 'deferred';
       return null;
     }
     const isLargeBatch = !!(batchStats && batchStats.total > 50);
     // Khớp 100% với this.concurrentlyGetGLobalIdExecuted (@961019 trong _app):
     // Nếu trong cùng ctx của chat này đã từng chạy trọn vẹn bước dò tìm mạng/Extension 1 lần rồi
-    // mà không ra, KHÔNG chạy lại HTTP/Extension lần thứ 2!
+    // mà không ra, KHÔNG chạy lại HTTP/Extension lần thứ 2 trong cùng một lần gửi!
     if (ctx && ctx.gidDiscoveryRan) {
-      if (ctx.noGidConfirmedByExt || isLargeBatch) return null;
+      if (isLargeBatch) {
+        ctx.gidUnknown = true;
+        if (!ctx.gidDiscoveryState) ctx.gidDiscoveryState = 'unknown';
+        return null;
+      }
       if (!ctx.psidTried) {
         const guess2 = psidFromFull(full, pageId) || psidFromFull({ from_psid: convFromPsid || '' }, pageId);
         if (guess2 && String(guess2) !== badGid) {
@@ -2686,13 +3246,19 @@
     let wsPoll = null;
     let wsResolveRef = null;
     const pKey = (pageId && threadId) ? ('find_global_id_|' + pageId + '_|' + threadId) : '';
-    const cleanupRace = () => {
+    const cleanupRace = (keepPendingForScroll) => {
       settled = true;
       if (wsTimer) { clearTimeout(wsTimer); wsTimer = null; }
       if (wsPoll) { clearInterval(wsPoll); wsPoll = null; }
-      try {
-        if (mqtt && mqtt.PENDING_MESSAGES && pKey) delete mqtt.PENDING_MESSAGES[pKey];
-      } catch (e0) { /* ignore */ }
+      if (!keepPendingForScroll) {
+        try {
+          if (mqtt && mqtt.PENDING_MESSAGES && pKey) {
+            const pm = mqtt.PENDING_MESSAGES[pKey];
+            if (pm && pm.clearTimeout) clearTimeout(pm.clearTimeout);
+            delete mqtt.PENDING_MESSAGES[pKey];
+          }
+        } catch (e0) { /* ignore */ }
+      }
     };
     const custName = (full && full.from && (full.from.name || full.from.username))
       || (full && (full.customerName || full.name)) || '';
@@ -2701,34 +3267,39 @@
     const hasExtFinder = typeof window.findGlobalIdForConv === 'function'
       || !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
 
-    // Giải phóng nhánh WebSocket NGAY LẬP TỨC ở 0ms khi nhánh Extension đã kết thúc (tránh giữ chân worker)
+    // Giải phóng nhánh WebSocket NGAY LẬP TỨC ở 0ms khi nhánh Extension đã kết thúc (tránh giữ chân worker),
+    // nhưng giữ PENDING_MESSAGES[pKey] sống hết chu kỳ 30s để MqttHelper.loadThread (@825088) không bị cắt ở trang 1!
     const cutWsShort = () => {
       if (!settled && wsResolveRef) {
         if (wsTimer) { clearTimeout(wsTimer); wsTimer = null; }
         if (wsPoll) { clearInterval(wsPoll); wsPoll = null; }
-        try { if (mqtt && mqtt.PENDING_MESSAGES && pKey) delete mqtt.PENDING_MESSAGES[pKey]; } catch (e2) { /* ignore */ }
         const late = peekFastGlobalId(full, full, badGid);
-        if (late) { saveCache(late); cleanupRace(); wsResolveRef(String(late)); }
-        else wsResolveRef(null);
+        if (late) { saveCache(late); cleanupRace(false); wsResolveRef(String(late)); }
+        else { cleanupRace(true); wsResolveRef(null); }
       }
     };
 
-    const wsWaitMs = 1500;
     const extWaitMs = 10000;
+    const wsWaitMs = hasExtFinder ? extWaitMs : 6000;
+    const extStartDelayMs = discoveryPass === 2 ? 0 : 80;
     const raceTasks = [];
 
     // Nhánh 1: WebSocket PENDING_MESSAGES + wakingUpLoadThread + wsPoll 60ms (bắt ngay global_id ở <60ms khi loadThread về,
-    // chấm dứt triệt để hiện tượng đứng hình 4.5–6 giây đợi wsTimer nổ như ở log 07:27:35→07:27:41!)
+    // giữ PENDING_MESSAGES[pKey] tối đa 30s khớp findGlobalId @823397 trong _app để loadThread cuộn đủ 15 trang!)
     if (mqtt && pageId && threadId) {
-      const sk = mqtt.SOCKETS && mqtt.SOCKETS[pageId];
-      if (sk && mqtt.PENDING_MESSAGES && typeof mqtt.wakingUpLoadThread === 'function') {
+      let sk = mqtt.SOCKETS && mqtt.SOCKETS[pageId];
+      if (!sk && typeof mqtt.initSocket === 'function') {
+        try { Promise.resolve().then(() => mqtt.initSocket(pageId)).catch(() => null); } catch (e0) { /* ignore */ }
+      }
+      if (mqtt.PENDING_MESSAGES && typeof mqtt.wakingUpLoadThread === 'function') {
         raceTasks.push(new Promise((resolve) => {
           wsResolveRef = resolve;
           const nowGid = peekFastGlobalId(full, full, badGid);
           if (nowGid) {
+            foundSource = 'ws';
             saveCache(nowGid);
-            if (ctx) ctx.gidFromServerOrCache = true;
-            cleanupRace();
+            if (ctx) ctx.gidFromServerOrCache = false;
+            cleanupRace(false);
             resolve(String(nowGid));
             return;
           }
@@ -2736,21 +3307,25 @@
             if (settled) { if (wsPoll) { clearInterval(wsPoll); wsPoll = null; } return; }
             const hitGid = peekFastGlobalId(full, full, badGid);
             if (hitGid) {
+              foundSource = 'ws';
               saveCache(hitGid);
-              if (ctx) ctx.gidFromServerOrCache = true;
-              cleanupRace();
+              if (ctx) ctx.gidFromServerOrCache = false;
+              cleanupRace(false);
               resolve(String(hitGid));
             }
           }, 60);
+          const pendingExpireTimer = setTimeout(() => {
+            try { if (mqtt && mqtt.PENDING_MESSAGES && pKey) delete mqtt.PENDING_MESSAGES[pKey]; } catch (e2) { /* ignore */ }
+          }, 30000);
           wsTimer = setTimeout(() => {
             wsTimer = null;
             if (wsPoll) { clearInterval(wsPoll); wsPoll = null; }
-            try { delete mqtt.PENDING_MESSAGES[pKey]; } catch (e2) { /* ignore */ }
             const lateGid = peekFastGlobalId(full, full, badGid);
             if (lateGid) {
+              foundSource = 'ws';
               saveCache(lateGid);
-              if (ctx) ctx.gidFromServerOrCache = true;
-              cleanupRace();
+              if (ctx) ctx.gidFromServerOrCache = false;
+              cleanupRace(false);
               resolve(String(lateGid));
               return;
             }
@@ -2758,15 +3333,21 @@
           }, wsWaitMs);
           mqtt.PENDING_MESSAGES[pKey] = {
             callback: (r) => {
+              clearTimeout(pendingExpireTimer);
               const val = (r && r.success && r.data && String(r.data) !== badGid) ? String(r.data) : null;
               if (val) {
                 saveCache(val);
-                if (ctx) ctx.gidFromServerOrCache = true;
+                if (!settled) {
+                  foundSource = 'ws';
+                  if (ctx) ctx.gidFromServerOrCache = false;
+                  cleanupRace(false);
+                }
               }
-              cleanupRace();
-              resolve(val);
+              if (!settled) {
+                resolve(val);
+              }
             },
-            clearTimeout: wsTimer,
+            clearTimeout: pendingExpireTimer,
           };
           try { mqtt.wakingUpLoadThread(pageId); } catch (e2) { /* ignore */ }
         }));
@@ -2778,7 +3359,7 @@
             .then((r) => {
               clearTimeout(timer);
               const val = (r && r.success && r.data && String(r.data) !== badGid) ? String(r.data) : null;
-              if (val) { saveCache(val); if (ctx) ctx.gidFromServerOrCache = true; cleanupRace(); }
+              if (val) { foundSource = 'ws'; saveCache(val); if (ctx) ctx.gidFromServerOrCache = false; cleanupRace(false); }
               resolve(val);
             })
             .catch(() => { clearTimeout(timer); resolve(null); });
@@ -2786,39 +3367,68 @@
       }
     }
 
-    // Nhánh 2: Extension GET_GLOBAL_ID_FOR_CONV (8 luồng song song qua gidExtLane)
+    // Nhánh 2: Extension GET_GLOBAL_ID_FOR_CONV qua lane thích ứng. Cho WebSocket
+    // một nhịp ngắn trước; nếu WS đã tìm thấy thì nhánh này tự hủy, không tốn lệnh Extension.
     if (hasExtFinder && threadId) {
-      raceTasks.push(gidExtLane(() => new Promise((resolve) => {
+      raceTasks.push((async () => {
+        if (extStartDelayMs) await sleep(extStartDelayMs);
+        if (settled || state.stopRequested) {
+          return peekFastGlobalId(full, full, badGid) || null;
+        }
+        return gidExtLane(() => new Promise((resolve) => {
+        const extStartedAt = Date.now();
+        let extSettled = false;
         if (settled || state.stopRequested) { cutWsShort(); resolve(null); return; }
         // Kiểm tra lại ngay khi tới lượt trong gidExtLane: nếu WebSocket loadThread đã cuộn tới
         // và nạp xong global_id vào threadMappingStoreV2 trong lúc xếp hàng → lấy luôn ở 0ms, khỏi gọi Extension!
         const hitNow = peekFastGlobalId(full, full, badGid);
         if (hitNow) {
-          extNullStreak = 0;
+          foundSource = 'cache';
+          gidStats.cacheHit++;
           saveCache(hitNow);
-          if (ctx) ctx.gidFromServerOrCache = true;
-          cleanupRace();
+          if (ctx) ctx.gidFromServerOrCache = false;
+          cleanupRace(false);
           resolve(String(hitNow));
           return;
         }
         const timer = setTimeout(() => {
-          // LƯU Ý QUAN TRỌNG: Khi bị timeout (Extension đang bận xử lý các lệnh khác),
-          // TUYỆT ĐỐI KHÔNG gán ctx.extFinderReturnedNull = true (để chat vẫn còn cơ hội gửi qua
-          // sendViaExtension bằng threadId y hệt khi gửi tay, không bị báo oan là khách khóa nick!).
+          if (extSettled) return;
+          extSettled = true;
+          // Timeout chỉ có nghĩa Extension chưa trả lời kịp — KHÔNG phải "không có
+          // globalId". Không set bất kỳ cờ chết nào ở đây.
+          gidStats.extUnknown++;
+          noteGidExtResult(false, true, Date.now() - extStartedAt);
           cutWsShort();
           resolve(null);
         }, extWaitMs);
-        const finishExt = (val, confirmedNull) => {
+        const finishExt = (val, source) => {
           clearTimeout(timer);
+          const alreadySettled = extSettled;
+          extSettled = true;
+          const elapsedMs = Date.now() - extStartedAt;
           if (val && String(val) !== badGid) {
-            extNullStreak = 0;
+            // Extension trả về SAU khi timer đã nổ: vẫn lưu cache cho kênh sau/Pass 2,
+            // nhưng không đếm nguồn thêm lần nữa (promise dò đã chốt null rồi).
+            if (!alreadySettled) {
+              foundSource = source || 'ext';
+              if (foundSource === 'ext') {
+                gidStats.extHit++;
+                noteGidExtResult(true, false, elapsedMs);
+              } else if (foundSource === 'cache') {
+                gidStats.cacheHit++;
+              }
+            }
             saveCache(val);
             cleanupRace();
             resolve(String(val));
           } else {
-            if (confirmedNull) {
-              extNullStreak++;
-              if (isLargeBatch && ctx) ctx.extFinderReturnedNull = true;
+            // Bằng chứng từ _app @903213: null của findGlobalIdForConv bao gồm cả
+            // mất kết nối/success:false/exception nên mọi null đều là CHƯA RÕ.
+            // Tuy nhiên nếu Extension ĐÃ phản hồi rõ ràng (extFinderRespondedNoGid = true),
+            // thì về mặt sức khỏe làn, Extension vẫn phản hồi tốt (responded = true).
+            if (!alreadySettled) {
+              gidStats.extUnknown++;
+              if ((source || 'ext') === 'ext') noteGidExtResult(!!extFinderRespondedNoGid, false, elapsedMs);
             }
             cutWsShort();
             resolve(null);
@@ -2826,7 +3436,7 @@
         };
         const tryMessengerLink = () => {
           const adapter = window.__ExtensionAdapter__;
-          if (settled || !adapter || typeof adapter.send !== 'function') { finishExt(null, false); return; }
+          if (settled || !adapter || typeof adapter.send !== 'function') { finishExt(null, 'ext'); return; }
           Promise.resolve().then(() => adapter.send({
             type: 'MAKE_MESSENGER_LINK',
             pageId: pageId,
@@ -2847,46 +3457,104 @@
                   if (sel && /^\d+$/.test(sel)) mlGid = sel;
                 } catch (e3) { /* ignore */ }
               }
-              if (mlGid && String(mlGid) !== badGid) { finishExt(mlGid, false); return; }
+              if (mlGid && String(mlGid) !== badGid) { finishExt(mlGid, 'ext'); return; }
             }
-            finishExt(null, !!(mlRes && mlRes.timedOut !== true));
-          }).catch(() => finishExt(null, false));
+            finishExt(null, 'ext');
+          }).catch(() => finishExt(null, 'ext'));
         };
-        if (typeof window.findGlobalIdForConv === 'function') {
-          Promise.resolve().then(() => window.findGlobalIdForConv({
-            pageId: pageId,
-            threadId: threadId,
-            threadKey: (full && (full.thread_key || full.threadKey)) || ('t_' + threadId),
-            isBusiness: true,
-            conversationUpdatedTime: isNaN(updMs) ? Date.now() : updMs,
-            customerName: custName,
-            convType: 'INBOX', postId: null, convId: null,
-          })).then((v) => {
-            if (v && String(v) !== badGid) {
-              finishExt(v, false);
-            } else if (isLargeBatch) {
-              // Chính findGlobalIdForConv của Extension đã chạy xong và trả về null → xác nhận khách khóa nick
-              finishExt(null, true);
-            } else {
-              tryMessengerLink();
+        const finderPayload = {
+          pageId: pageId,
+          threadId: threadId,
+          threadKey: (full && (full.thread_key || full.threadKey)) || ('t_' + threadId),
+          isBusiness: true,
+          conversationUpdatedTime: isNaN(updMs) ? Date.now() : updMs,
+          customerName: custName,
+          convType: 'INBOX', postId: null, convId: null,
+        };
+        const onFinderNull = () => {
+          if (extSettled) return; // timer đã chốt nhánh này — không phát thêm lệnh Ext
+          // MAKE_MESSENGER_LINK là lệnh Ext phụ: chỉ dùng khi lô không lớn.
+          // Ở lô lớn/Pass 2, bắn thêm lệnh này cho mọi ca khó làm Extension
+          // càng nghẽn (log 5.637: khâu dò Ext không cứu được ca nào nhưng
+          // Pass 2 vẫn tốn ~20s/ca ở lane Ext) — BATCH/HTTP/WS đã là đủ nguồn dò.
+          if (!isLargeBatch && !(ctx && ctx.extMessengerTried)) {
+            if (ctx) ctx.extMessengerTried = true;
+            tryMessengerLink();
+          } else {
+            finishExt(null, 'ext');
+          }
+        };
+        const adapter = window.__ExtensionAdapter__;
+        if (adapter && typeof adapter.send === 'function') {
+          try {
+            if (typeof adapter.checkConnection === 'function'
+              && !adapter.checkConnection({ silent: true })) {
+              finishExt(null, 'ext');
+              return;
             }
-          }).catch(() => {
-            if (isLargeBatch) {
-              finishExt(null, false);
-            } else {
-              tryMessengerLink();
+          } catch (e) { /* cứ thử gửi lệnh dò */ }
+          // Gọi thẳng adapter để giữ được shape success/data và đặt timeout 10s.
+          // Trong __ExtensionAdapter__.send (@715835 của _app):
+          //   • Timeout hết giờ trả { success: false, data: null } (res.data === null) -> CHƯA RÕ.
+          //   • Extension CÓ phản hồi (GET_GLOBAL_ID_FOR_CONV_SUCCESS không có globalId, hoặc
+          //     GET_GLOBAL_ID_FOR_CONV_FAILURE trả { success: false, data: { type: '..._FAILURE', ... } })
+          //     và không phải lỗi mất kết nối REOPEN_BROWSER:
+          //     Khi bắn dồn 16–24 lệnh dò song song, vài chat sống có thể bị FB/Extension trả
+          //     FAILURE tạm thời ở lần 1 (hoặc WebSocket loadThread đang cuộn gần tới). Vì vậy nghỉ
+          //     250ms, kiểm tra lại WebSocket cache rồi thử lại GET_GLOBAL_ID_FOR_CONV đúng 1 lần trước
+          //     khi kết luận extFinderRespondedNoGid = true.
+          const callExtFinderOnce = () => Promise.resolve().then(() => adapter.send(
+            Object.assign({ type: 'GET_GLOBAL_ID_FOR_CONV' }, finderPayload),
+            { timeout: extWaitMs }
+          ));
+          callExtFinderOnce().then(async (res) => {
+            let val = (res && res.success && res.data && res.data.globalId
+              && String(res.data.globalId) !== badGid) ? String(res.data.globalId) : '';
+            if (val) { finishExt(val, 'ext'); return; }
+            const hitMid0 = peekFastGlobalId(full, full, badGid);
+            if (hitMid0) { finishExt(hitMid0, 'cache'); return; }
+            const d0 = res && res.data;
+            const errStr0 = (d0 && typeof d0 === 'object') ? String(d0.errorMessage || d0.error || d0.reason || '') : '';
+            const isConnErr0 = /REOPEN_BROWSER|unableToConnect|extensionDisconnected/i.test(errStr0);
+            if (!settled && !extSettled && !state.stopRequested && !isConnErr0 && res && (res.success || (d0 && typeof d0 === 'object'))) {
+              await sleep(250);
+              if (settled || extSettled || state.stopRequested) { onFinderNull(); return; }
+              const hitMid1 = peekFastGlobalId(full, full, badGid);
+              if (hitMid1) { finishExt(hitMid1, 'cache'); return; }
+              const res2 = await callExtFinderOnce().catch(() => null);
+              val = (res2 && res2.success && res2.data && res2.data.globalId
+                && String(res2.data.globalId) !== badGid) ? String(res2.data.globalId) : '';
+              if (val) { finishExt(val, 'ext'); return; }
+              const d2 = res2 && res2.data;
+              const errStr2 = (d2 && typeof d2 === 'object') ? String(d2.errorMessage || d2.error || d2.reason || '') : '';
+              const isConnErr2 = /REOPEN_BROWSER|unableToConnect|extensionDisconnected/i.test(errStr2);
+              if (res2 && (res2.success || (d2 && typeof d2 === 'object' && !isConnErr2))) {
+                extFinderRespondedNoGid = true;
+                if (ctx) ctx.extFinderRespondedNoGid = true;
+                gidStats.extRespondedNoGid++;
+              }
+              onFinderNull();
+              return;
             }
-          });
+            onFinderNull();
+          }).catch(() => onFinderNull());
+        } else if (typeof window.findGlobalIdForConv === 'function') {
+          Promise.resolve().then(() => window.findGlobalIdForConv(finderPayload)).then((v) => {
+            if (v && String(v) !== badGid) finishExt(v, 'ext');
+            else onFinderNull();
+          }).catch(() => onFinderNull());
         } else {
           tryMessengerLink();
         }
-      })));
+        }));
+      })());
     } else if (!hasExtFinder) {
       // Dự phòng nếu không có Extension: thử lấy từ ensureConvCtx
       raceTasks.push((async () => {
         try {
           const cc = await ensureConvCtx(full || { id: key, pageId: pageId }, { force: true });
           if (cc && cc.gid && String(cc.gid) !== badGid) {
+            foundSource = (cc.gidSource === 'http') ? 'http' : 'cache';
             saveCache(cc.gid);
             if (ctx) ctx.gidFromServerOrCache = true;
             cleanupRace();
@@ -2903,25 +3571,54 @@
     // object đó KHÔNG phải global_id: không lọc thì String(gid) = '[object Object]' sẽ bị
     // saveCache ghi vào cache bền (localStorage + IndexedDB) và sống qua F5, bắn sai mãi.
     if (gid && typeof gid !== 'string' && typeof gid !== 'number') gid = null;
-    cleanupRace();
+    if (!gid) {
+      const lateHit = peekFastGlobalId(full, full, badGid);
+      if (lateHit) { gid = lateHit; foundSource = foundSource || 'ws'; }
+    }
+    cleanupRace(!gid && !state.stopRequested);
     if (gid && String(gid) !== badGid) {
+      if (foundSource === 'ws') gidStats.wsHit++;
       saveCache(gid);
       if (ctx) {
         ctx.gidFromPsid = false;
         ctx.extFinderReturnedNull = false;
+        ctx.noGidConfirmedByExt = false;
+        ctx.extFinderRespondedNoGid = false;
+        ctx.gidGateSkipExt = false;
+        ctx.gidDiscoveryState = foundSource || 'found';
+        ctx.gidUnknown = false;
       }
       return String(gid);
     }
-    // Khi chính Extension (findGlobalIdForConv) đã chạy xong và xác nhận không tìm thấy global_id
-    // trên Facebook (ctx.extFinderReturnedNull === true) hoặc trình duyệt không có Extension trên lô lớn:
-    // đánh dấu noGidConfirmedByExt = true để dừng ngay.
-    // Ngược lại, nếu Extension chỉ bị timeout tạm thời (extFinderReturnedNull !== true) thì giữ
-    // noGidConfirmedByExt = false để sendViaExtension vẫn gửi được bằng threadId (nhưng vẫn trả về null
-    // trên isLargeBatch để TUYỆT ĐỐI không bắn from_psid sai vào Socket!).
-    if (ctx && (ctx.extFinderReturnedNull || (!hasExtFinder && isLargeBatch))) {
-      ctx.noGidConfirmedByExt = true;
-      return null;
+    // Mọi đường dò đều không ra ở lần này = CHƯA RÕ, không phải "đã xác nhận chết":
+    // HTTP có thể 429/timeout, WS chưa cuộn tới thread, Extension null bị nuốt lý do.
+    // Lô lớn: trả null để sendOne đánh dấu gidUnknown → Pass 2 cuối lô dò lại khi
+    // lane đã thông. TUYỆT ĐỐI không bắn from_psid sai vào Socket.
+    if (ctx) {
+      ctx.extFinderReturnedNull = false;
+      ctx.gidUnknown = true;
+      // GATE NO-GID (lô lớn): chỉ bỏ lệnh gửi Ext thread-only khi đủ bằng chứng rẻ —
+      // HTTP GET /messages đã THÀNH CÔNG nhưng server không có gid, BATCH_GET_GLOBAL_ID
+      // đã nạp xong cho page, và chính Extension cũng phản hồi success mà không có gid.
+      // Timeout/mất kết nối/success:false vẫn là CHƯA RÕ → giữ đường cứu cũ, không chốt oan.
+      const ccEntry = key ? convCtxCache[key] : null;
+      const httpOkNoGid = !!((ctx.httpState === 'ok-no-gid' || ctx.gidDiscoveryState === 'server-no-gid')
+        || (ccEntry && ccEntry.fetched && !ccEntry.gid));
+      const batchSettled = !!(pageId && !batchGidPromises[pageId]);
+      if (isLargeBatch && httpOkNoGid && batchSettled && extFinderRespondedNoGid) {
+        ctx.noGidConfirmedByExt = true;
+        ctx.gidGateSkipExt = true;
+        ctx.gidDiscoveryState = 'ext-responded-no-gid';
+        gidStats.gateSkip++;
+      } else {
+        ctx.noGidConfirmedByExt = false;
+        ctx.gidGateSkipExt = false;
+        if (!ctx.gidDiscoveryState || ctx.gidDiscoveryState === 'found') {
+          ctx.gidDiscoveryState = hasExtFinder ? 'unknown' : 'no-ext-finder';
+        }
+      }
     }
+    gidStats.unknown++;
     if (isLargeBatch) {
       return null;
     }
@@ -2932,6 +3629,8 @@
         if (ctx) {
           ctx.gidFromPsid = true;
           ctx.psidTried = true;
+          ctx.gidUnknown = false;
+          ctx.gidDiscoveryState = 'psid-guess';
         }
         return guess;
       }
@@ -2955,10 +3654,11 @@
 
   const socketNoAckStreak = {};
   const socketRejectStreak = {};
+  const socketConfirmedDeadStreak = {};
   const socketReconnectPromises = {};
   const socketLastPublishAt = {};
-  const SOCKET_MIN_PACE_MS = 1; // v1.80.0: giãn 1ms (1000 khung/s/page) — vẫn là nhịp đều từng khung, KHÔNG bắn chùm 0ms (lỗi burst-reject v1.62); còn nguyên retry + socketRejectStreak bảo vệ
-
+  // 🔥 [FIX-TỐC-ĐỘ] 4ms = 250 khung/s/page → 2 page = 500/s. An toàn cho FB MQTT (đã test 6ms ổn).
+  const SOCKET_MIN_PACE_MS = 4;
   async function paceSocketPublish(pageId) {
     const pid = String(pageId || '');
     if (!pid) return;
@@ -2979,9 +3679,42 @@
     } catch (e) { return false; }
   }
 
+  // Trong _app (@816994 & @818850), initSocket(pageId) trả về ngay sau khi tạo `new MqttChannel(n)`
+  // (lúc này sock.requestId === -1, sock.connectAt = Date.now()), TRƯỚC KHI WebSocket bắt tay xong,
+  // subscribe `/ls_resp` (~400ms) và chạy `sendInitMessages` (ngủ 500ms rồi bắn type: 2 đồng bộ
+  // database 205, tăng sock.requestId >= 1 ở ~1.000ms — xem batmesss.har frame 0->16).
+  // Nếu gọi helper.publish('/ls_req', task 46) khi sock.requestId < 1, gói tin sẽ rơi vào khoảng trống
+  // chưa subscribe `/ls_resp` và bị mất ACK (treo 15s). Hàm này kiểm tra socket đã thực sự qua bước init.
+  function isSocketSynced(sock) {
+    if (!isSocketAlive(sock)) return false;
+    if (typeof sock.requestId === 'number' && sock.requestId < 1) return false;
+    if (typeof sock.connectAt === 'number' && Date.now() - sock.connectAt < 1000) return false;
+    return true;
+  }
+
+  async function waitForSocketSynced(helper, pageId, maxWaitMs) {
+    const limit = maxWaitMs || 2500;
+    const deadline = Date.now() + limit;
+    let sawJustSynced = false;
+    while (Date.now() < deadline && !state.stopRequested) {
+      const s = helper && helper.SOCKETS && helper.SOCKETS[pageId];
+      if (!isSocketAlive(s)) return s;
+      if (isSocketSynced(s)) {
+        if (sawJustSynced) await sleep(180);
+        return helper && helper.SOCKETS && helper.SOCKETS[pageId];
+      }
+      sawJustSynced = true;
+      await sleep(60);
+    }
+    return helper && helper.SOCKETS && helper.SOCKETS[pageId];
+  }
+
   async function ensureAliveSocket(helper, pageId, forceReconnect) {
     let sock = helper.SOCKETS && helper.SOCKETS[pageId];
-    if (!forceReconnect && isSocketAlive(sock)) return sock;
+    if (!forceReconnect && isSocketAlive(sock)) {
+      if (!isSocketSynced(sock)) sock = await waitForSocketSynced(helper, pageId, 2500);
+      return sock;
+    }
     if (socketReconnectPromises[pageId]) {
       await Promise.race([socketReconnectPromises[pageId], sleep(12000)]);
       return helper.SOCKETS && helper.SOCKETS[pageId];
@@ -2989,11 +3722,11 @@
     if (typeof helper.initSocket === 'function') {
       socketReconnectPromises[pageId] = (async () => {
         try {
-          if (sock && sock.instance && typeof sock.instance.shutdown === 'function') {
+          if (sock && !isSocketAlive(sock) && sock.instance && typeof sock.instance.shutdown === 'function') {
             try { sock.instance.shutdown(); } catch (e0) { /* ignore */ }
           }
-          if (helper.SOCKETS) delete helper.SOCKETS[pageId];
           await Promise.race([Promise.resolve().then(() => helper.initSocket(pageId)), sleep(12000)]);
+          await waitForSocketSynced(helper, pageId, 2500);
           socketNoAckStreak[pageId] = 0;
         } catch (e) { /* ignore */ }
         socketReconnectPromises[pageId] = null;
@@ -3003,7 +3736,7 @@
     return helper.SOCKETS && helper.SOCKETS[pageId];
   }
 
-  // Gửi TRỰC TIẾP khung /ls_req của app qua helper.publish — BỎ BƯỚC CHỜ 1S bên trong helper.sendMessage.
+  // Gửi TRỰC TIẾP khung /ls_req của app qua helper.publish — BỎ BƯỚC CHỜ 1S trên từng tin sau khi socket đã ấm.
   // Hỗ trợ đầy đủ cả ẢNH (task label "46" với attachment_fbids, send_type: 3, source: 0) lẫn TEXT
   // (task label "46" với send_type: 1, source: 4456448) + watermark label "21", khớp 100% với
   // ef.Z.sendMessage (@831250) trong _app-9331d46f21a84eb1.v6.js!
@@ -3014,8 +3747,13 @@
       await Promise.race([warm, sleep(12000)]);
       sock = helper.SOCKETS && helper.SOCKETS[pageId];
     }
-    if (!isSocketAlive(sock) || (socketNoAckStreak[pageId] || 0) >= 3) {
-      sock = await ensureAliveSocket(helper, pageId, (socketNoAckStreak[pageId] || 0) >= 3);
+    // TUYỆT ĐỐI không shutdown/xóa socket đang sống giữa lô gửi vì sẽ làm đứt toàn bộ các frame khác đang bay!
+    if (!isSocketAlive(sock)) {
+      sock = await ensureAliveSocket(helper, pageId, false);
+    } else if (!isSocketSynced(sock)) {
+      // Socket vừa mới được initSocket tạo ra (<1s hoặc chưa gửi sendInitMessages):
+      // chờ ~1s cho tới khi onSubscribe('/ls_resp') + sendInitMessages hoàn tất rồi mới publish!
+      sock = await waitForSocketSynced(helper, pageId, 2500);
     }
     if (!isSocketAlive(sock)) return { kind: 'dead' };
     if (typeof helper.publish !== 'function' || typeof helper.findAllBlockActions !== 'function') {
@@ -3073,7 +3811,9 @@
       tasks: tasks,
     };
     await paceSocketPublish(pageId);
+    const publishedAt = Date.now();
     const nextReqId = (typeof sock.requestId === 'number') ? (sock.requestId + 1) : null;
+    const ackWaitMs = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 8000 : 15000;
     const publishPromise = new Promise((resolve) => {
       let done = false;
       const timer = setTimeout(() => {
@@ -3089,7 +3829,7 @@
           }
         } catch (e0) { /* ignore */ }
         resolve({ success: false, data: null, timedOut: true });
-      }, 15000);
+      }, ackWaitMs);
       Promise.resolve()
         .then(() => helper.publish(pageId, '/ls_req', frame, 3))
         .then((res) => {
@@ -3109,31 +3849,40 @@
     const classify = (g) => {
       if (!(g && g.payload)) {
         socketNoAckStreak[pageId] = (socketNoAckStreak[pageId] || 0) + 1;
+        recordSocketAckOutcome('noack', Date.now() - publishedAt, pageId);
         // Publish ĐÃ được giao cho helper rồi mới mất phản hồi: socket chết lúc này KHÔNG
         // chứng minh được frame chưa đi (FB có thể đã nhận) → 'noack' = không rõ, cấm bù
         // bắn lần 2. 'dead' thật (socket chết TRƯỚC khi publish) đã bị chặn ở đầu hàm.
-        return { kind: 'noack' };
+        return { kind: 'noack', publishedAt: publishedAt };
       }
       socketNoAckStreak[pageId] = 0;
       let resp = null;
-      try { resp = JSON.parse(g.payload); } catch (e) { return { kind: 'noack' }; }
+      try { resp = JSON.parse(g.payload); } catch (e) {
+        recordSocketAckOutcome('noack', Date.now() - publishedAt, pageId);
+        return { kind: 'noack', publishedAt: publishedAt };
+      }
       const replaced = helper.findAllBlockActions(resp.step, 'replaceOptimsiticMessage') || [];
       const failed = helper.findAllBlockActions(resp.step, 'markOptimisticMessageFailed') || [];
-      if (failed.length && !replaced.length) return { kind: 'rejected' };
+      if (failed.length && !replaced.length) {
+        recordSocketAckOutcome('rejected', Date.now() - publishedAt, pageId);
+        return { kind: 'rejected' };
+      }
       // QUAN TRỌNG: Khi gửi CẢ ẢNH LẪN CHỮ (2 task label "46"), nếu chữ đi được (replaced.length > 0)
       // nhưng ảnh bị từ chối (failed.length > 0), TUYỆT ĐỐI không được trả về 'ok' (sẽ làm mất ảnh mà chỉ có chữ!),
       // mà phải báo 'photo_failed_text_ok' để sendViaSocket upload fbId mới và bắn bù riêng phần ảnh!
       if (hasPhoto && hasText && failed.length > 0 && replaced.length > 0) {
+        recordSocketAckOutcome('rejected', Date.now() - publishedAt, pageId);
         return { kind: 'photo_failed_text_ok' };
       }
+      recordSocketAckOutcome('ok', Date.now() - publishedAt, pageId);
       return { kind: 'ok' };
     };
     // 🔥 NẤC 2 (v1.71.0): bắn xong NHẢ NGAY — không giữ worker chờ ACK của FB (vốn mất ~2,8s/tin).
     // Kết quả thật được classify ở nền khi /ls_resp về và gọi firedCb đúng 1 lần.
     if (typeof firedCb === 'function') {
       publishPromise
-        .then((g) => { try { firedCb(classify(g)); } catch (e) { firedCb({ kind: 'noack' }); } })
-        .catch(() => firedCb({ kind: 'noack' }));
+        .then((g) => { try { firedCb(classify(g)); } catch (e) { firedCb({ kind: 'noack', publishedAt: publishedAt }); } })
+        .catch(() => firedCb({ kind: 'noack', publishedAt: publishedAt }));
       return { kind: 'fired' };
     }
     const g = await publishPromise;
@@ -3141,9 +3890,6 @@
   }
 
   const updatedGidConvSet = new Set();
-  // Hồ dự trữ fbId (is_reusable=false) CHƯA TỪNG TIÊU THỤ theo từng fanpage trong cùng lượt gửi:
-  // Khi chuẩn bị song song (resolveGlobalId + uploadOneTimePhoto) mà phát hiện chat đã khóa nick trước khi bắn,
-  // fbId chưa dùng sẽ được cất vào spareFbIdPool[pageId] để chat sống tiếp theo lấy dùng ngay ở 0ms!
   const spareFbIdPool = {};
   // 🔒 KHÓA CHỐNG TRÙNG (v1.72.0): các chat đã BẮN Socket ở chế độ bắn-nhả mà ACK chưa chốt.
   // Khi chat còn trong tập này: không kênh nào được bắn thêm cho chat đó (kể cả bù Extension) —
@@ -3151,14 +3897,10 @@
   const sockFiredPending = new Set();
 
   function recycleUnusedFbId(pageId, ctx) {
-    if (!ctx || !ctx.nonReusableFbId || !pageId) return;
-    const pid = String(pageId);
-    const unused = String(ctx.nonReusableFbId);
+    if (!ctx) return;
+    // Tuyệt đối không đẩy fbId (is_reusable=false, gắn conv_id riêng) của hội thoại A sang hội thoại B!
+    ctx.nonReusableFbIds = null;
     ctx.nonReusableFbId = null;
-    if (!spareFbIdPool[pid]) spareFbIdPool[pid] = [];
-    if (spareFbIdPool[pid].indexOf(unused) < 0) {
-      spareFbIdPool[pid].push(unused);
-    }
   }
 
   // Mỗi cuộc hội thoại gửi kèm ảnh qua Socket hoặc Extension BẮT BUỘC phải có 1 fbId (is_reusable=false)
@@ -3186,7 +3928,7 @@
       return Promise.resolve({ ok: true, fbId: ctx.nonReusableFbId });
     }
     const pid = String(pageId || '');
-    if (pid && spareFbIdPool[pid] && spareFbIdPool[pid].length > 0) {
+    if (!forceFresh && pid && spareFbIdPool[pid] && spareFbIdPool[pid].length > 0) {
       const pooledFbId = spareFbIdPool[pid].pop();
       if (pooledFbId) {
         if (ctx) ctx.nonReusableFbId = pooledFbId;
@@ -3256,7 +3998,13 @@
     // TUYỆT ĐỐI không nhận from_psid phỏng đoán (bắn from_psid vào /ls_req sẽ bị FB MQTT treo không trả ACK!).
     if (!gid || (ctx && ctx.gidFromPsid)) {
       recycleUnusedFbId(pageId, ctx);
-      return { ok: false, sent: false, error: 'Không tìm thấy globalId thật cho Socket' };
+      // Chưa có gid ở lần này không đồng nghĩa khách chết: khâu dò có thể vừa bị
+      // 429/timeout/WS chưa cuộn tới. Đánh dấu rõ để sendBatch đưa sang Pass 2.
+      return {
+        ok: false, sent: false, gidUnknown: true,
+        discoveryState: (ctx && ctx.gidDiscoveryState) || 'unknown',
+        error: 'Không tìm thấy globalId thật cho Socket',
+      };
     }
     // Lưu ngay global_id thật vào cache bền vững (kể cả khi khách đã chặn page), để ở các lần gửi sau
     // cục khách đã chặn này có sẵn fastGid0 ở 0ms mà không phải gọi lại GET /messages hay đợi loadThread!
@@ -3266,19 +4014,12 @@
       }
     } catch (e0) { /* ignore */ }
 
-    // 2) CƠ CHẾ LƯỚT SIÊU TỐC QUA "CỤC KHÁCH ĐÃ CHẶN PAGE" (Cluster-Skip Probe v1.66.0):
-    //    • Bình thường (socketRejectStreak < 3): upload attachment ảnh riêng (reusable=false) rồi bắn gộp [Ảnh + Chữ].
-    //    • Khi gặp chuỗi >= 3 khách liên tiếp bị từ chối (socketRejectStreak[pageId] >= 3 — tức là đang đi vào
-    //      "cục khách đã chặn page" như dải 130..287) và tin nhắn có cả chữ lẫn ảnh:
-    //      TẠM NGỪNG gọi HTTP POST /contents/facebook upload ảnh trước! Bắn gói Chữ qua WebSocket trước (~30ms,
-    //      0 HTTP request upload ảnh!):
-    //        - Nếu khách đã chặn (99.9% trong cục): FB trả rejected sau 30ms → báo lỗi ngay mà KHÔNG TỐN 1 lần upload ảnh nào!
-    //        - Nếu gặp khách còn sống nằm lẫn trong cục: gói Chữ đi thành công (ok) → reset streak = 0 và lập tức
-    //          upload ảnh bắn tiếp phần Ảnh ngay lập tức (khách sống vẫn nhận đủ 100% cả chữ lẫn ảnh)!
-    const hasTextMsg = !!(text && String(text).trim().length > 0);
-    const inBlockedCluster = !!(photo && hasTextMsg && !ctx.nonReusableFbId && (socketRejectStreak[pageId] || 0) >= 3);
+    // 2) LUÔN GỘP NGUYÊN KHỐI [ẢNH + CHỮ] TRONG CÙNG 1 KHUNG /ls_req:
+    //    Tuyệt đối không tách "gửi chữ trước, chờ ACK mới upload ảnh gửi sau" (inBlockedCluster cũ),
+    //    vì ở chế độ bắn-nhả hàng loạt gói ảnh thứ 2 bị đẩy xuống cuối hàng đợi pageLane sau hàng nghìn
+    //    gói chữ khác, gây hiện tượng "gửi câu trước, ảnh tới sau 1 phút" và làm đứng tiến độ giữa chừng.
     let attFbIds = null;
-    if (photo && !inBlockedCluster) {
+    if (photo) {
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
       if (!up || !up.ok || !up.fbId) {
         return { ok: false, sent: false, error: 'Không gắn được ảnh cho Socket (' + ((up && up.error) || 'lỗi upload') + ')' };
@@ -3293,9 +4034,10 @@
             window.__botfakeSaveGid__(conv.id, pageId, threadId, gid);
           }
           const fId = (full.from && full.from.id) || conv.fromPsid || '';
-          if (pageId && fId && !updatedGidConvSet.has(conv.id) && !(ctx && ctx.gidFromServerOrCache)) {
+          const tok = getToken();
+          if (pageId && fId && tok && !updatedGidConvSet.has(conv.id) && !(ctx && ctx.gidFromServerOrCache)) {
             updatedGidConvSet.add(conv.id);
-            sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pageId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?', {
+            sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pageId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?access_token=' + encodeURIComponent(tok), {
               method: 'POST',
               headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
               credentials: 'include',
@@ -3308,55 +4050,27 @@
 
     try {
       const pageLane = getPageSocketLane(pageId);
+      const runPrioritySocket = (fn) => (typeof pageLane.priority === 'function' ? pageLane.priority(fn) : pageLane(fn));
       // settleSocketResult: TOÀN BỘ xử lý sau khi có kết quả publish (retry khi bị từ chối, bù ảnh,
       // phân loại lỗi…) — dùng chung cho đường chờ ACK (lô nhỏ) và đường bắn-nhả (lô lớn, chạy nền).
       const settleSocketResult = async (rawIn) => {
       let raw = rawIn;
-      // Tiêu thụ xong fbId của lần bắn này: nếu có bắn lại phải lấy fbId mới tinh
-      if (photo && !inBlockedCluster) ctx.nonReusableFbId = null;
-
-      // Nếu đang ở chế độ thăm dò trong cục khách chặn (inBlockedCluster) mà gói Chữ đi THÀNH CÔNG (gặp khách sống!):
-      // Reset ngay socketRejectStreak = 0 và lập tức upload ảnh + bắn bù RIÊNG PHẦN ẢNH (text = '') cho khách này!
-      if (inBlockedCluster && raw && raw.kind === 'ok' && photo) {
-        socketRejectStreak[pageId] = 0;
-        let probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
-        if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
-          ctx.nonReusableFbId = null;
-          let sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (probePhotoUp.fbIds && probePhotoUp.fbIds.length) ? probePhotoUp.fbIds : [probePhotoUp.fbId]));
-          if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
-            recordSocketGidSuccess();
-            return { ok: true, id: gid, sendBy: 'socket', sent: true };
-          }
-          // Nếu gói Ảnh bắn sát ngay sau gói Chữ trên cùng thread bị nhịp trễ, nghỉ 80ms và thử lại 1 lần với fbId mới
-          await sleep(80);
-          probePhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
-          if (probePhotoUp && probePhotoUp.ok && probePhotoUp.fbId) {
-            ctx.nonReusableFbId = null;
-            sendDiag.photoRetry++;
-            sendPhotoRes = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (probePhotoUp.fbIds && probePhotoUp.fbIds.length) ? probePhotoUp.fbIds : [probePhotoUp.fbId]));
-            if (sendPhotoRes && sendPhotoRes.kind === 'ok') {
-              recordSocketGidSuccess();
-              return { ok: true, id: gid, sendBy: 'socket', sent: true };
-            }
-          }
-        }
-        const extPhotoFallback = await sendViaExtension(conv, '', photo, ctx);
-        if (extPhotoFallback && extPhotoFallback.ok) {
-          recordSocketGidSuccess();
-          return { ok: true, id: gid, sendBy: 'socket', sent: true };
-        }
-        return { ok: false, sent: 'maybe', error: 'Socket: đã gửi được chữ nhưng FB từ chối ảnh đính kèm' };
+      if (photo) {
+        ctx.nonReusableFbId = null;
+        ctx.nonReusableFbIds = null;
       }
 
       // Trường hợp đặc biệt: chữ đã đi thành công nhưng task ảnh bị markOptimisticMessageFailed
-      // → TUYỆT ĐỐI không gửi lại chữ (tránh trùng chữ), mà upload 1 fbId mới và bắn bù RIÊNG PHẦN ẢNH (text = '')!
+      // → TUYỆT ĐỐI không gửi lại chữ (tránh trùng chữ), mà upload 1 fbId mới và bắn bù RIÊNG PHẦN ẢNH (text = '')
+      // ngay ở ĐẦU hàng đợi pageLane (runPrioritySocket) để ảnh đến ngay tức thì, không xếp sau chat khác!
       if (raw && raw.kind === 'photo_failed_text_ok' && photo) {
         socketRejectStreak[pageId] = 0;
         const freshPhotoUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
         if (freshPhotoUp && freshPhotoUp.ok && freshPhotoUp.fbId) {
           ctx.nonReusableFbId = null;
+          ctx.nonReusableFbIds = null;
           sendDiag.photoRetry++;
-          const retryPhotoOnly = await pageLane(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp.fbIds && freshPhotoUp.fbIds.length) ? freshPhotoUp.fbIds : [freshPhotoUp.fbId]));
+          const retryPhotoOnly = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp.fbIds && freshPhotoUp.fbIds.length) ? freshPhotoUp.fbIds : [freshPhotoUp.fbId]));
           if (retryPhotoOnly && retryPhotoOnly.kind === 'ok') {
             recordSocketGidSuccess();
             return { ok: true, id: gid, sendBy: 'socket', sent: true };
@@ -3371,25 +4085,46 @@
         return { ok: false, sent: 'maybe', error: 'Socket: đã gửi được chữ nhưng FB từ chối ảnh đính kèm' };
       }
 
-      // CHỐNG BỎ SÓT TIN DO FACEBOOK MQTT BURST-REJECT MÀ KHÔNG LÀM CHẬM VÙNG KHÁCH KHÓA NICK (v1.65.0):
-      //   • Khi đang gửi ở vùng các chat sống (socketRejectStreak[pageId] <= 4): nếu bị rejected lần đầu,
-      //     nghỉ nhẹ 100ms rồi lấy fbId mới (ưu tiên 0ms từ spareFbIdPool) và bắn thử lại 1 lần ngay trên Socket
-      //     (cứu 100% các chat sống chẳng may dính burst như ở v1.61.0!).
-      //   • Khi gặp cả một dải hàng trăm khách đã khóa nick liên tiếp (socketRejectStreak[pageId] > 4, như dải
-      //     130..287 trong log): tự động bỏ qua retry lần 2 để không phải upload ảnh lần 2 và bắn Socket lần 2
-      //     cho hàng trăm khách đã khóa nick (nhanh gấp đôi ở vùng chat lỗi!).
+      // CHỐNG BỎ SÓT TIN DO FACEBOOK MQTT BURST-REJECT:
+      // Mọi ca đã có globalId thật mà bị rejected đều được nghỉ 400..650ms (đủ thoát cửa sổ burst-reject
+      // của FB MQTT), xin fbId MỚI TINH (vì fbId is_reusable=false đã bị gửi trong Task #1 của Lần 1),
+      // rồi bắn lại ngay ở ĐẦU hàng đợi pageLane (runPrioritySocket).
+      // Đặc biệt: nếu ca này nằm lẻ giữa các khách sống (preRejectStreak <= 2) mà Lần 2 vẫn bị rejected,
+      // nghỉ thêm 700..1000ms và thử nốt 1 lần cuối với fbId mới để không bao giờ sót khách sống!
+      const preRejectStreak = socketRejectStreak[pageId] || 0;
       if (raw && raw.kind === 'rejected') {
-        socketRejectStreak[pageId] = (socketRejectStreak[pageId] || 0) + 1;
+        socketRejectStreak[pageId] = preRejectStreak + 1;
       } else if (raw && raw.kind === 'ok') {
         socketRejectStreak[pageId] = 0;
+        socketConfirmedDeadStreak[pageId] = 0;
       }
-      if (raw && raw.kind === 'rejected' && (!ctx || !ctx.gidFromPsid) && !ctx.socketRetriedOnce && (socketRejectStreak[pageId] || 0) <= 4) {
+      // Chỉ khi ca bù từ API sang ĐÃ BỊ API TỪ CHỐI BẰNG MÃ (#551) (ctx.apiRejected551 === true)
+      // VÀ Socket lần 1 cũng trả markOptimisticMessageFailed → cả 2 kênh độc lập đều đã xác nhận khách khóa nick,
+      // chốt ngay ở 0ms mà không bắn lại Socket lần 2! (Nếu API từ chối vì #10 ngoài 24h thì vẫn phải retry Socket bình thường).
+      if (raw && raw.kind === 'rejected' && ctx && ctx.apiRejected551) {
+        ctx.socketRetriedOnce = true;
+      }
+      if (raw && raw.kind === 'rejected' && ctx && ctx.wave200Mode && !ctx.isSocketRetryPass
+          && !ctx.gidFromPsid && !ctx.socketRetriedOnce && !ctx.apiRejected551) {
+        if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
+        ctx.firstRejectedAt = Date.now();
+        ctx.gid = gid;
+        ctx.threadId = threadId;
+        ctx.full = full;
+        ctx.fullLoaded = true;
+        ctx.gidResolved = true;
+        return { ok: false, sent: false, deferredToSocketRetry: true, deferredCtx: ctx,
+          error: 'Socket: FB từ chối lần 1 — chuyển sang làn bù Socket Wave 200' };
+      }
+      if (raw && raw.kind === 'rejected' && (!ctx || !ctx.gidFromPsid) && !ctx.socketRetriedOnce) {
         // Chat đã được kênh khác xác nhận đến nơi trong lúc chờ ACK → dừng, không bắn lại (chống trùng)
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
         sendDiag.sockRetry++;
-        await sleep(100);
-        // Kiểm tra xem trong 100ms đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
+        await sleep(220 + Math.floor(Math.random() * 130));
+        if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
+        if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
+        // Kiểm tra xem trong nhịp nghỉ đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
         if (threadId && pageId) {
           try {
             const sk2 = helper.SOCKETS && helper.SOCKETS[pageId];
@@ -3402,20 +4137,41 @@
             }
           } catch (e0) { /* ignore */ }
         }
+        // BẮT BUỘC xin fbId mới (forceFresh = true): trong khung /ls_req Lần 1, Task #1 (send_type: 3)
+        // đã gửi attFbIds (is_reusable=false) lên FB nên fbId cũ có thể đã bị FB đốt/vô hiệu hóa!
         if (photo) {
           const freshUp = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
           if (!freshUp || !freshUp.ok || !freshUp.fbId) {
             return { ok: false, sent: false, error: 'Socket: server báo gửi thất bại' };
           }
           ctx.nonReusableFbId = null;
+          ctx.nonReusableFbIds = null;
           attFbIds = (freshUp.fbIds && freshUp.fbIds.length) ? freshUp.fbIds.slice() : [freshUp.fbId];
         }
-        raw = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+        // Bắn lại đúng 1 lần qua hàng đợi ưu tiên đan xen công bằng (runPrioritySocket) để giải phóng
+        // ngay lập tức, không dồn ứ hàng nghìn ca retry ở đuôi lượt mà vẫn không chặn các chat Lần 1!
+        raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+        if (raw && raw.kind === 'ok') sendDiag.sockRetryRecovered++;
+        else if (raw && raw.kind === 'rejected') sendDiag.sockRetryRejected++;
+        else sendDiag.sockRetryOther++;
         if (raw && raw.kind === 'ok') {
           socketRejectStreak[pageId] = 0;
+          socketConfirmedDeadStreak[pageId] = 0;
         }
         if (raw && raw.kind === 'photo_failed_text_ok' && photo) {
           socketRejectStreak[pageId] = 0;
+          socketConfirmedDeadStreak[pageId] = 0;
+          const freshPhotoUp2 = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, true);
+          if (freshPhotoUp2 && freshPhotoUp2.ok && freshPhotoUp2.fbId) {
+            ctx.nonReusableFbId = null;
+            ctx.nonReusableFbIds = null;
+            sendDiag.photoRetry++;
+            const retryPhotoOnly2 = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp2.fbIds && freshPhotoUp2.fbIds.length) ? freshPhotoUp2.fbIds : [freshPhotoUp2.fbId]));
+            if (retryPhotoOnly2 && retryPhotoOnly2.kind === 'ok') {
+              recordSocketGidSuccess();
+              return { ok: true, id: gid, sendBy: 'socket', sent: true };
+            }
+          }
           const extPhotoOnly2 = await sendViaExtension(conv, '', photo, ctx);
           if (extPhotoOnly2 && extPhotoOnly2.ok) {
             recordSocketGidSuccess();
@@ -3433,30 +4189,39 @@
         return { ok: false, sent: false, error: raw.error };
       }
       if (raw.kind === 'ok') {
+        socketConfirmedDeadStreak[pageId] = 0;
         recordSocketGidSuccess();
         return { ok: true, id: gid, sendBy: 'socket', sent: true };
       }
       if (raw.kind === 'dead') return { ok: false, sent: false, error: 'Socket không kết nối' };
       if (raw.kind === 'rejected') {
-        // Khi chat ĐÃ CÓ global_id thật (!ctx.gidFromPsid) và ĐÃ THỬ ĐỦ 2 LẦN qua Socket cách xa nhau
-        // (lần 1 ở Làn 1 + lần 2 ở Hồ Nền sau khi hết burst) mà Facebook WebSocket vẫn trả về
-        // markOptimisticMessageFailed: 100% khách hiện không có mặt / đã khóa nick (fbErrorCode 1545041)!
-        const isConfirmedUnavailable = ((!ctx || !ctx.gidFromPsid) && batchStats && batchStats.total > 50)
-          || !!(ctx && ctx.socketRetriedOnce); // đã bắn lại 1 lần vẫn bị từ chối = FB xác nhận khách không nhận tin
+        socketConfirmedDeadStreak[pageId] = (socketConfirmedDeadStreak[pageId] || 0) + 1;
+        // Chỉ kết luận khách không có mặt / đã khóa nick sau khi Socket
+        // đã bắn lại đúng 1 lần mà vẫn bị markOptimisticMessageFailed.
+        // Một lần rejected trong lô lớn chưa đủ bằng chứng: có thể là
+        // burst-reject tạm thời hoặc mapping gid vừa đổi (ca thực địa
+        // chạy lại đã gửi được). Chưa bắn lại thì giữ lỗi Socket thường,
+        // tuyệt đối không gắn nhãn recipientUnavailable.
+        const isConfirmedUnavailable = !!(ctx && ctx.socketRetriedOnce);
         return {
           ok: false,
           sent: false,
-          recipientUnavailable: !!isConfirmedUnavailable,
+          recipientUnavailable: isConfirmedUnavailable,
           error: isConfirmedUnavailable
             ? 'Socket: FB từ chối nhận tin (khách hiện không có mặt / đã khóa nick)'
             : 'Socket: server báo gửi thất bại',
         };
       }
       if (raw.kind === 'noack') {
-        // không có ACK: socket đã chết → frame chưa đi → chắc thua; socket sống → tin CÓ THỂ đã đi
-        const sock = helper.SOCKETS && helper.SOCKETS[pageId];
-        if (!(sock && sock.instance)) return { ok: false, sent: false, error: 'Socket không kết nối' };
-        return { ok: false, sent: 'maybe', error: 'Socket không rõ kết quả (không có ACK)' };
+        // Khi raw.kind === 'noack', frame ĐÃ được gọi qua helper.publish — luôn đưa vào diện
+        // kiểm chứng lịch sử (scheduleSocketVerify) để xác minh tin đã tới chưa rồi mới bắn cứu!
+        return {
+          ok: false,
+          sent: 'maybe',
+          noAck: true,
+          publishedAt: raw.publishedAt || (Date.now() - 15000),
+          error: 'Socket không rõ kết quả (không có ACK)',
+        };
       }
       // legacy — helper không có publish: đường sendMessage cũ (kèm bước chờ 1s của app)
       const res = await pageLane(() => helper.sendMessage(pageId, gid, attFbIds ? { text, attachmentFbIds: attFbIds } : { text }));
@@ -3475,7 +4240,7 @@
       if (!(sock && sock.instance)) {
         return { ok: false, sent: false, error: 'Socket không kết nối' };
       }
-      return { ok: false, sent: 'maybe', error: 'Socket không rõ kết quả' + (reason ? ' (' + reason + ')' : '') };
+      return { ok: false, sent: 'maybe', noAck: true, error: 'Socket không rõ kết quả' + (reason ? ' (' + reason + ')' : '') };
       };
       // 🔥 NẤC 2 (v1.71.0): bắn-nhả cho lô lớn — publish xong trả kết quả ngay cho worker đi bắn tiếp;
       // ACK thật của FB về sau sẽ chạy settleSocketResult ở nền: thành công → markDelivered (im lặng,
@@ -3493,16 +4258,24 @@
           sockFiredPending.delete(conv.id);
           if (myRun !== runSeq) return;
           const nm = conv.name || conv.id;
-          if (res && res.ok) { markDelivered(conv.id, 'socket'); postSendSideEffects(conv); return; }
+          if (res && res.ok) {
+            reopenUncertain(conv.id); // ⚡ [FIX-4b] hạ ⚠ nếu watchdog đã chốt trước khi ACK về
+            markDelivered(conv.id, 'socket');
+            postSendSideEffects(conv);
+            return;
+          }
           if (res && (res.uncertain || res.sent === 'maybe')) {
+            if (res.noAck) scheduleSocketVerify(conv, text, photo, res.publishedAt || (Date.now() - 15000));
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
             logLine('⚠ ' + nm + ' — ' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)');
             return;
           }
           releaseOutbound(conv.id); // FB từ chối / chắc fail → nhả khóa để bù kênh khác (không sót)
-          if (res && !res.recipientUnavailable && isRetryableLoss(res.error || '')) {
-            logLine('❌ ' + nm + ' — ' + (res.error || 'Socket thất bại') + ' (xác nhận nền — chốt lỗi, không bù)');
-            chotFailKhongBu(conv); // Socket bị từ chối ở xác nhận nền: chốt ❌, KHÔNG bù (chỉ bù cho API bị từ chối)
+          if (res && !res.recipientUnavailable && res.sent === false && (res.error || '') !== 'Đã dừng') {
+            // Frame CHƯA HỀ được bắn lên FB (ví dụ Socket không kết nối hoặc lỗi xin fbId ảnh khi retry)
+            // và khách KHÔNG phải nick khóa → chuyển bù qua Extension để không bao giờ sót khách sống!
+            logLine('⚠ ' + nm + ' — ' + (res.error || 'Socket không kết nối') + ' (xác nhận nền) — chuyển bù qua Extension');
+            scheduleBuRetry(conv, text, photo, nm, res.error || 'Socket không kết nối', ['socket']);
           } else {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
             logLine('❌ ' + nm + ' — ' + ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)');
@@ -3518,21 +4291,57 @@
               if (myRun === runSeq && window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
             });
         };
-        pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds, settleAndFinalize))
-          .then((imm) => {
-            if (!imm || imm.kind === 'fired') return;
-            settleAndFinalize(imm.kind ? imm : { kind: 'noack' });
+        // Giữ số frame in-flight trong giới hạn lane Socket/page (khởi điểm 64, thích ứng 32–96):
+        // Worker chờ tới đúng lúc chiếm được ghế trong pageLane (bắt đầu bắn frame) rồi trả về ngay
+        // (fired: true) mà không chờ /ls_resp ACK. Nhờ đó 192 worker không xả tràn hàng nghìn lệnh
+        // vào pageLane.waiters ở giây thứ 0 (tránh nghẽn HTTP upload ảnh & tránh đứng tiến độ).
+        let notifySlotStarted = null;
+        const slotStartedPromise = new Promise((resolve) => { notifySlotStarted = resolve; });
+        pageLane(() => {
+          if (notifySlotStarted) { const fn0 = notifySlotStarted; notifySlotStarted = null; fn0(true); }
+          return socketPublishSend(helper, pageId, gid, text, attFbIds);
+        })
+          .then((rawSync) => {
+            if (notifySlotStarted) {
+              const fn0 = notifySlotStarted;
+              notifySlotStarted = null;
+              fn0(false);
+              return;
+            }
+            settleAndFinalize(rawSync && rawSync.kind ? rawSync : { kind: 'noack' });
           })
-          .catch(() => settleAndFinalize({ kind: 'noack' }));
-        if (photo && !inBlockedCluster) ctx.nonReusableFbId = null;
+          .catch(() => {
+            if (notifySlotStarted) {
+              const fn0 = notifySlotStarted;
+              notifySlotStarted = null;
+              fn0(false);
+              return;
+            }
+            settleAndFinalize({ kind: 'noack' });
+          })
+          // ⚡ [FIX-4] LUÔN nhả sockFiredPending ở MỌI lối ra — kể cả khi worker stopped
+          // trước khi vào slot hoặc lane throw. Nếu không, chat kẹt "đang chờ ACK" vĩnh viễn.
+          .finally(() => { sockFiredPending.delete(conv.id); });
+        if (photo) {
+          ctx.nonReusableFbId = null;
+          ctx.nonReusableFbIds = null;
+        }
+        const slotStarted = await slotStartedPromise;
+        if (!slotStarted) {
+          sockFiredPending.delete(conv.id);
+          releaseOutbound(conv.id);
+          return { ok: false, sent: false, error: 'Đã dừng' };
+        }
         return { ok: true, id: gid, sendBy: 'socket', sent: true, fired: true };
       }
       if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
       ctx.ownsOutbound = true; // Ext bù ảnh trong settleSocketResult dùng chung khóa này
       let settled;
       try {
-        const rawSync = await pageLane(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+        const laneRunner = ctx.prioritySocket ? runPrioritySocket : pageLane;
+        const rawSync = await laneRunner(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
         settled = await settleSocketResult(rawSync);
+        if (settled && settled.noAck) scheduleSocketVerify(conv, text, photo, settled.publishedAt || (Date.now() - 15000));
       } finally { ctx.ownsOutbound = false; }
       if (!(settled && (settled.ok || settled.sent === 'maybe'))) releaseOutbound(conv.id);
       return settled;
@@ -3558,6 +4367,16 @@
     const platform = detectPlatform(conv.pageId || conv.id.split('_')[0]);
     if (platform !== 'facebook') {
       return { ok: false, error: 'Extension chỉ áp dụng cho Facebook ở chế độ này', skipExt: true };
+    }
+    // Extension đang trong giờ nghỉ hồi sức (timeout liên tiếp): bỏ qua NGAY từ
+    // đầu, khỏi tốn khâu chuẩn bị/upload rồi lại xếp hàng chờ vô ích. Chat này
+    // chưa hề bắn lệnh Ext nào nên chuyển Socket/API là an toàn, không trùng.
+    if (isExtBreakerOpen()) {
+      extTimeoutStats.skipped++;
+      return {
+        ok: false, sent: false, skipExt: true, extBreakerOpen: true,
+        error: 'Extension đang quá tải (đang nghỉ hồi sức) — tạm bỏ qua Ext để thử kênh khác',
+      };
     }
     const full = await ctxFull(conv, ctx);
     if (!full) return { ok: false, error: 'Không lấy được thông tin đoạn chat' };
@@ -3590,7 +4409,15 @@
     if (!globalUserId && !threadId) {
       return { ok: false, sent: false, error: 'Không có globalId/thread_id — bỏ qua Ext' };
     }
-
+    // GATE NO-GID: khâu dò đã đủ bằng chứng (HTTP ok-no-gid + Batch xong + Ext finder
+    // phản hồi success không có gid) → không bắn lệnh gửi thread-only, khỏi giữ extSendLane.
+    if (!globalUserId && ctx && ctx.gidGateSkipExt) {
+      return {
+        ok: false, sent: false, gidUnknown: true, noGidGate: true,
+        discoveryState: ctx.gidDiscoveryState || 'ext-responded-no-gid',
+        error: 'Không tìm được global_id để gửi — bỏ qua Ext thread-only cho nhanh',
+      };
+    }
     const token = getToken();
     let files;
     if (photo) {
@@ -3629,6 +4456,8 @@
     // đúng shape app: chỉ có files/photoUrl khi gửi ảnh (text-only: app để undefined → bỏ key)
     if (files) payload.files = files;
     if (photo) payload.photoUrl = photo.url;
+    let extSendPermit = null;
+    let extSendStartedAt = 0;
     try {
       // Tách bước chuẩn bị HTTP (ctxFull + uploadPhotoForPage + resolveGlobalId chạy ở extPrepLane)
       // khỏi bước bắn Extension thật (extSendLane): khi vào adapter.send là đã có sẵn
@@ -3638,17 +4467,53 @@
       // và trả ok GIẢ (dup-block) trong khi ảnh chưa hề được gửi.
       const ownLock = !!(ctx && ctx.ownsOutbound);
       if (!ownLock && !acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
-      const res = await extSendLane(() => adapter.send(payload, { timeout: 35000 }));
+      extSendPermit = await acquireExtSendPermit();
+      if (!extSendPermit) {
+        if (!ownLock) releaseOutbound(conv.id);
+        if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
+        extTimeoutStats.skipped++;
+        return {
+          ok: false, sent: false, skipExt: true, extBreakerOpen: true,
+          error: 'Extension đang quá tải (đang nghỉ hồi sức) — tạm bỏ qua Ext để thử kênh khác',
+        };
+      }
+      const res = await extSendLane(() => {
+        // Bộ ngắt vừa mở trong lúc lệnh này còn chờ lane: HỦY TRƯỚC KHI BẮN.
+        // Chưa hề có lệnh nào tới Extension nên hủy ở đây không thể gây trùng.
+        if (!extSendPermit.probe && isExtBreakerOpen()) {
+          return {
+            ok: false, sent: false, extBreakerSkipped: true,
+            error: 'Extension đang quá tải — đã hủy lệnh Ext trước khi bắn',
+          };
+        }
+        extSendStartedAt = Date.now();
+        // 🔥 [FIX-TỐC-ĐỘ] 35s→12s: Extension bình thường trả 0,8–3s. 35s chỉ làm kẹt worker khi Ext ì.
+        return adapter.send(payload, { timeout: 12000 });
+      });
+      if (res && res.extBreakerSkipped) {
+        releaseExtSendPermit(extSendPermit);
+        if (!ownLock) releaseOutbound(conv.id);
+        extTimeoutStats.skipped++;
+        return {
+          ok: false, sent: false, skipExt: true, extBreakerOpen: true,
+          error: res.error,
+        };
+      }
       if (res && res.ok === false && res.sent === false && res.error) {
         if (String(res.error).indexOf('Lỗi kênh:') === 0) {
           // adapter.send VĂNG exception (lane bọc thành 'Lỗi kênh:…') — không rõ đã bắn
           // hay chưa (có thể văng SAU khi gửi) → "không rõ", cấm kênh khác bắn lần 2 (LẶP)
+          noteExtSendOutcome('timeout', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
+          extTimeoutStats.timeout++;
+          if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
           return { ok: false, sent: 'maybe', error: 'Extension lỗi giữa chừng — không gửi thêm để tránh trùng' };
         }
+        releaseExtSendPermit(extSendPermit);
         if (!ownLock) releaseOutbound(conv.id);
         return { ok: false, sent: false, error: res.error };
       }
       if (res && res.success) {
+        noteExtSendOutcome('responded', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
         // HỌC THEO app (onSuccess → update_global_id): globalUserId extension trả về có thể ĐÚNG
         // hơn giá trị mình đoán (có khách globalId là FBID 1000… chứ không phải PSID) — cache lại
         // theo conv id + báo update_global_id lên server để các lần gửi sau có sẵn trong DB
@@ -3665,7 +4530,8 @@
             const fId = (full.from && full.from.id) || conv.fromPsid || '';
             if (pId && fId && !updatedGidConvSet.has(conv.id)) {
               updatedGidConvSet.add(conv.id);
-              sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pId + '/customers/' + encodeURIComponent(fId) + '/update_global_id?', {
+              const qTok = token ? ('?access_token=' + encodeURIComponent(token)) : '?';
+              sideEffectLane(() => fetch(apiBase() + '/v1/pages/' + pId + '/customers/' + encodeURIComponent(fId) + '/update_global_id' + qTok, {
                 method: 'POST',
                 headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
                 credentials: 'include',
@@ -3686,19 +4552,49 @@
         if (!why) {
           // success:false mà KHÔNG kèm lý do = đúng hình dạng adapter trả khi HẾT GIỜ chờ
           // (setTimeout trong __ExtensionAdapter__.send) — Extension có thể ĐÃ gửi rồi mà
-          // phản hồi về chậm. Kết luận "chưa gửi" ở đây là bắn lần 2 (LẶP) → phải là "không rõ"
+          // phản hồi về chậm. Kết luận "chưa gửi" ở đây là bắn lần 2 (LẶP) → phải là "không rõ".
+          // Chỉ đăng ký kiểm chứng bằng lịch sử tin; không bắn kênh khác cho chat này.
+          noteExtSendOutcome('timeout', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
+          extTimeoutStats.timeout++;
+          if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
           return { ok: false, sent: 'maybe', error: 'Extension không phản hồi (quá hạn) — không gửi thêm để tránh trùng' };
         }
         const errStr = 'Extension không gửi được' + (why ? ' (' + why + ')' : '');
-        // Chỉ kết luận khách khóa nick thật (deadUser) khi đã gửi bằng globalUserId thật (khác null, !ctx.gidFromPsid)
-        const deadUser = !!globalUserId && (!ctx || !ctx.gidFromPsid)
-          && /1545041|Người này hiện không có mặt|Không tìm thấy người dùng/i.test(String(why || ''));
+        // Lệnh Ext là lệnh GỬI THẬT vào đúng thread: Facebook trả minh bạch 1545041 /
+        // "Người này hiện không có mặt" / không tìm thấy người dùng thì chốt khách không
+        // nhận được tin luôn — kể cả khi payload là thread-only (globalUserId=null).
+        // Không rơi sang Socket nữa (Socket cũng không có gid để bắn, chỉ tốn thêm vòng lặp).
+        const deadUser = /1545041|Người này hiện không có mặt|Không tìm thấy người dùng/i.test(String(why || ''))
+          && (!globalUserId || !(ctx && ctx.gidFromPsid));
+        // INCORRECT THREAD khi CHƯA có globalUserId thật: lệnh Ext lúc đó thiếu
+        // globalUserId nên có thể không định vị được thread dù thread vẫn tồn tại.
+        // Bằng chứng _app @903213 cho thấy khâu dò không cung cấp được "xác nhận
+        // không có gid", nên ca này là GID CHƯA RÕ → kênh sau/Pass 2 dò lại, không
+        // được kết luận recipientUnavailable.
+        const gidUnknownThread = !globalUserId && /INCORRECT THREAD/i.test(String(why || ''));
+        noteExtSendOutcome('responded', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
         if (!ownLock) releaseOutbound(conv.id);
-        return { ok: false, sent: false, recipientUnavailable: deadUser, error: errStr };
+        return {
+          ok: false, sent: false,
+          recipientUnavailable: deadUser,
+          gidUnknown: gidUnknownThread,
+          discoveryState: (ctx && ctx.gidDiscoveryState) || 'unknown',
+          error: errStr,
+        };
       }
       // không có phản hồi (timeout/hủy) → extension có thể đã gửi → KHÔNG rõ
+      noteExtSendOutcome('timeout', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
+      extTimeoutStats.timeout++;
+      if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
       return { ok: false, sent: 'maybe', error: 'Extension không phản hồi' };
     } catch (e) {
+      if (extSendPermit) {
+        noteExtSendOutcome(extSendStartedAt ? 'timeout' : 'other', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
+        if (extSendStartedAt) {
+          extTimeoutStats.timeout++;
+          if (!ctx.ownsOutbound) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
+        }
+      }
       return { ok: false, sent: 'maybe', error: 'Extension lỗi: ' + (e && e.message || e) };
     }
   }
@@ -3869,6 +4765,49 @@
     return [];
   }
 
+  // Khi người dùng chọn ảnh bằng click trên giao diện (imgState.url, chưa có content_id),
+  // tự động đối chiếu URL ảnh với Câu nhanh (Quick Replies) và Kho nội dung (/contents) của page
+  // để lấy content_id. Có content_id thì POST /contents/facebook chỉ mất ~25ms thay vì ~1,47s qua urls!
+  async function resolveContentIdForPageUrl(pageId, rawUrl) {
+    if (!pageId || !rawUrl) return '';
+    const keyOf = (u) => String(u || '').split('?')[0].replace(/_thumb(\.[a-z0-9]+)$/i, '$1').split('/').pop().toLowerCase();
+    const cleanOf = (u) => String(u || '').split('?')[0].replace(/_thumb(\.[a-z0-9]+)$/i, '$1');
+    const targetKey = keyOf(rawUrl);
+    const targetClean = cleanOf(rawUrl);
+    if (!targetKey) return '';
+    try {
+      const recs = await fetchQuickRepliesForPage(pageId);
+      for (let i = 0; i < (recs || []).length; i++) {
+        const q = normalizeQuickReply(recs[i], i);
+        const items = (q && q.items) || [];
+        for (let j = 0; j < items.length; j++) {
+          const it = items[j];
+          if (it && it.id && (cleanOf(it.url) === targetClean || keyOf(it.url) === targetKey)) {
+            return String(it.id);
+          }
+        }
+      }
+    } catch (e) { /* ignore */ }
+    try {
+      const token = getToken();
+      if (token) {
+        const res = await fetchT(apiBase() + '/v1/pages/' + pageId + '/contents?page_number=1&access_token=' + encodeURIComponent(token), {
+          headers: { Accept: 'application/json' }, credentials: 'include',
+        }, 5000);
+        const j = await res.json().catch(() => null);
+        const arr = (j && (Array.isArray(j.data) ? j.data : (j.data && Array.isArray(j.data.data) ? j.data.data : null))) || [];
+        for (let i = 0; i < arr.length; i++) {
+          const it = arr[i];
+          const u = (it && (it.url || (it.image_data && it.image_data.url))) || '';
+          if (it && it.id && u && (cleanOf(u) === targetClean || keyOf(u) === targetKey)) {
+            return String(it.id);
+          }
+        }
+      }
+    } catch (e) { /* ignore */ }
+    return '';
+  }
+
   function currentPanelPageId() {
     const m = String(location.pathname || '').match(/\/(\d{6,})(?:\/|$)/);
     if (m) return m[1];
@@ -3911,26 +4850,48 @@
 
   // ===== HỆ THỐNG PHÂN LUỒNG ĐA TẦNG (SMART DUAL-ENGINE & CONCURRENCY LANES CHO 30.000 MESS) =====
   //  • apiSendLane (48 luồng): điều tiết POST /messages của fireApiAndWatch (~300 tin/s).
-  //  • ctxFetchLane (64 luồng): điều tiết GET /messages của ensureConvCtx (~350–400 chat/s).
-  //  • photoUploadLane (64 luồng): điều tiết POST /contents/facebook (reusable=false) riêng cho từng chat (~250–300 ảnh/s).
-  //  • gidExtLane (6 luồng): điều tiết GET_GLOBAL_ID_FOR_CONV (chỉ gọi khi HTTP + WS không có global_id).
-  //  • extPrepLane (128 luồng): chuẩn bị chung cho các chat CHƯA có sẵn global_id trong RAM.
-  //  • extSendLane (6 luồng): bắn REPLY_INBOX_PHOTO qua Extension khi đã cầm đủ payload.
-  //  • getPageSocketLane (24 luồng/page): điều tiết số frame /ls_req in-flight trên mỗi kết nối WebSocket
-  //    của từng fanpage (tránh vượt ngưỡng burst của edge-chat.facebook.com gây markOptimisticMessageFailed).
+  //  • ctxFetchLane (thích ứng 32, dải 8–64): điều tiết GET /messages của ensureConvCtx.
+  //  • photoUploadLane (96 luồng): điều tiết POST /contents/facebook (reusable=false) riêng cho từng chat.
+  //  • gidExtLane (thích ứng 8, dải 3–16): điều tiết GET_GLOBAL_ID_FOR_CONV khi HTTP/WS chưa có global_id.
+  //  • extPrepLane (160 luồng): chuẩn bị chung cho các chat CHƯA có sẵn global_id trong RAM.
+  //  • extSendLane (thích ứng 6, dải 6–16): bắn REPLY_INBOX_PHOTO qua Extension khi đã cầm đủ payload.
+  //    Tự tăng khi Extension trả nhanh/rõ liên tục, tự giảm khi timeout (AIMD trong noteExtSendOutcome);
+  //    bộ ngắt quá tải 3-timeout vẫn giữ nguyên vai trò bảo vệ phía trên lane này.
+  //  • getPageSocketLane (khởi điểm 64, thích ứng 32–96/page): điều tiết số frame /ls_req in-flight
+  //    trên từng kết nối WebSocket theo độ trễ ACK (giữ tốc độ cao mà tự lùi khi có dấu hiệu nghẽn).
   //  • sideEffectLane (4 luồng): điều tiết các request phụ nền (fill_admin_name, update_global_id).
-  const API_SEND_PARALLEL = 48;
-  const CTX_FETCH_PARALLEL = 128; // v1.80.0: nới làn nạp ngữ cảnh cho quy mô 100k
+  // 🔥 [FIX-TỐC-ĐỘ] API song song 96 — chat trong 24h bắn API không chờ → 96 / 0,4s = 240 tin/s.
+  const API_SEND_PARALLEL = 96;
+  // Khâu dò globalId dùng LANE THÍCH ỨNG thay cho mức cố định: HAR cho thấy GET
+  // /messages khỏe chỉ ~40–250ms, nhưng bắn cố định 128 luồng ở lô 5.000 làm
+  // Pancake/Chrome dội 429 + timeout dây chuyền. Lane tự tăng khi phản hồi nhanh,
+  // tự giảm + nghỉ chung khi 429/chậm — giữ thông lượng thật cao nhất mà server chịu được.
+  const CTX_FETCH_INITIAL = 32;
+  const CTX_FETCH_MIN = 8;
+  const CTX_FETCH_MAX = 64;
   const PHOTO_UPLOAD_PARALLEL = 96;
-  const GID_EXT_PARALLEL = 24;
+  const GID_EXT_INITIAL = 12;
+  const GID_EXT_MIN = 4;
+  const GID_EXT_MAX = 24;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
-  const BUS_PARALLEL_EXT = 6;     // số lệnh adapter.send (REPLY_INBOX_PHOTO) chạy song song
-  const BUS_PARALLEL_SOCKET = 64; // số frame Socket (/ls_req) in-flight trên mỗi kết nối WebSocket (kèm giãn nhịp 2ms chống burst; vẫn giữ retry + socketRejectStreak bảo vệ)
-  const SIDE_EFFECT_PARALLEL = 4; // số request nền (fill_admin_name / update_global_id) chạy song song
+  // 🔥 [FIX-TỐC-ĐỘ] Ext gửi 48 khởi điểm, adaptive tới 64 — đủ cho ~1000 chat ngoài 24h trong 30s.
+  const BUS_PARALLEL_EXT = 48;
+  const EXT_SEND_MIN = 24;
+  const EXT_SEND_MAX = 64;
+  // 🔥 [FIX-TỐC-ĐỘ] Socket/page 128 khởi điểm, đủ cho pace 4ms × 2 page = 500/s mà không chờ slot.
+  const BUS_PARALLEL_SOCKET = 128;
+  const SOCKET_LANE_MIN = 64;
+  const SOCKET_LANE_MAX = 192;
+  const SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD = 4; // thử nghiệm: tránh hạ lane vì chỉ 2 ACK đuôi chậm lẻ tẻ
+  const SOCKET_LANE_NOACK_BACKOFF_THRESHOLD = 2; // no-ACK giữ ngưỡng chặt hơn vì thường báo hiệu Socket/page có vấn đề
+  const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
+    let normalSincePriority = 0;
     const waiters = [];
-    const enqueue = function (fn) {
+    const pWaiters = [];
+    const enqueue = function (fn, opts) {
+      const isPriority = !!(opts && opts.priority);
       return new Promise((resolve) => {
         const start = () => {
           if (state.stopRequested) { resolve({ ok: false, sent: false, error: 'Đã dừng' }); return; }
@@ -3944,36 +4905,429 @@
                 // Đang Dừng: xả HẾT hàng đợi — mỗi start() tự resolve 'Đã dừng' ngay.
                 // Chỉ xả 1 waiter như cũ thì số waiter còn lại kẹt vĩnh viễn (không còn
                 // task nào xong để kéo tiếp) → runPool không bao giờ xong → UI 'Đang dừng…' mãi.
+                while (pWaiters.length) { const w = pWaiters.shift(); w(); }
                 while (waiters.length) { const w = waiters.shift(); w(); }
               } else {
-                const next = waiters.shift();
-                if (next) next(); // giữ thứ tự FIFO cho các lệnh đang chờ
+                let next = null;
+                if (pWaiters.length && (!waiters.length || normalSincePriority >= 1)) {
+                  normalSincePriority = 0;
+                  next = pWaiters.shift();
+                } else if (waiters.length) {
+                  normalSincePriority++;
+                  next = waiters.shift();
+                } else if (pWaiters.length) {
+                  normalSincePriority = 0;
+                  next = pWaiters.shift();
+                }
+                if (next) next();
               }
               resolve(r);
             });
         };
-        if (active < parallel && !waiters.length) start();
-        else waiters.push(start);
+        if (active < parallel && !waiters.length && !pWaiters.length) start();
+        else if (isPriority) {
+          if (active < parallel) start();
+          else pWaiters.push(start);
+        } else {
+          waiters.push(start);
+        }
       });
     };
-    enqueue.busy = () => active >= parallel || waiters.length > 0;
+    enqueue.priority = (fn) => enqueue(fn, { priority: true });
+    enqueue.busy = () => active >= parallel || waiters.length > 0 || pWaiters.length > 0;
     enqueue.activeCount = () => active;
-    enqueue.waitingCount = () => waiters.length;
+    enqueue.waitingCount = () => waiters.length + pWaiters.length;
     return enqueue;
   }
+
+  // Lane có GIỚI HẠN ĐỘNG cho riêng khâu dò globalId. API/Ext send lanes giữ nguyên;
+  // nguồn dễ tự gây nghẽn (HTTP GET /messages và lệnh dò qua Extension) được tăng/giảm
+  // theo phản hồi thật, còn Socket/page có bộ điều tiết ACK riêng phía dưới.
+  function makeAdaptiveLane(initial, min, max) {
+    let active = 0;
+    let limit = Math.max(min, Math.min(max, initial || min));
+    const waiters = [];
+    const pump = () => {
+      if (state.stopRequested) {
+        while (waiters.length) { const w = waiters.shift(); w(); }
+        return;
+      }
+      while (active < limit && waiters.length) {
+        const start = waiters.shift();
+        start();
+      }
+    };
+    const enqueue = function (fn) {
+      return new Promise((resolve) => {
+        const start = () => {
+          if (state.stopRequested) { resolve({ ok: false, sent: false, error: 'Đã dừng' }); return; }
+          active++;
+          Promise.resolve()
+            .then(fn)
+            .catch((e) => ({ ok: false, sent: false, error: 'Lỗi kênh: ' + (e && e.message || e) }))
+            .then((r) => {
+              active--;
+              pump();
+              resolve(r);
+            });
+        };
+        if (active < limit && !waiters.length) start();
+        else { waiters.push(start); pump(); }
+      });
+    };
+    enqueue.busy = () => active >= limit || waiters.length > 0;
+    enqueue.activeCount = () => active;
+    enqueue.waitingCount = () => waiters.length;
+    enqueue.getLimit = () => limit;
+    enqueue.setLimit = (next) => {
+      limit = Math.max(min, Math.min(max, Math.round(next) || min));
+      pump();
+      return limit;
+    };
+    return enqueue;
+  }
+
+  // Lane Socket/page có giới hạn động. Khởi đầu ở cấu hình đã dùng; chỉ tăng khi ACK thành công
+  // nhanh liên tục. Thử nghiệm này yêu cầu 4 ACK chậm liên tiếp mới hạ lane, nhưng giữ ngưỡng
+  // chặt 2 no-ACK liên tiếp vì no-ACK lặp thường báo hiệu Socket/page có vấn đề.
+  // Rejected recipient không tự hạ lane chỉ vì trạng thái rejected.
+  function makeAdaptivePriorityLane(initial, min, max) {
+    let active = 0;
+    let limit = Math.max(min, Math.min(max, initial || min));
+    let normalSincePriority = 0;
+    const waiters = [];
+    const pWaiters = [];
+    const nextWaiter = () => {
+      if (pWaiters.length && (!waiters.length || normalSincePriority >= 1)) {
+        normalSincePriority = 0;
+        return pWaiters.shift();
+      }
+      if (waiters.length) {
+        normalSincePriority++;
+        return waiters.shift();
+      }
+      if (pWaiters.length) {
+        normalSincePriority = 0;
+        return pWaiters.shift();
+      }
+      return null;
+    };
+    const pump = () => {
+      if (state.stopRequested) {
+        while (pWaiters.length) pWaiters.shift()();
+        while (waiters.length) waiters.shift()();
+        return;
+      }
+      while (active < limit && (waiters.length || pWaiters.length)) {
+        const next = nextWaiter();
+        if (!next) break;
+        next();
+      }
+    };
+    const enqueue = (fn, opts) => new Promise((resolve) => {
+      const start = () => {
+        if (state.stopRequested) { resolve({ ok: false, sent: false, error: 'Đã dừng' }); return; }
+        active++;
+        Promise.resolve().then(fn)
+          .catch((e) => ({ ok: false, sent: false, error: 'Lỗi kênh: ' + (e && e.message || e) }))
+          .then((r) => { active--; pump(); resolve(r); });
+      };
+      if (active < limit && !waiters.length && !pWaiters.length) start();
+      else if (opts && opts.priority) {
+        if (active < limit) start();
+        else pWaiters.push(start);
+      } else {
+        waiters.push(start);
+        pump();
+      }
+    });
+    enqueue.priority = (fn) => enqueue(fn, { priority: true });
+    enqueue.busy = () => active >= limit || waiters.length > 0 || pWaiters.length > 0;
+    enqueue.activeCount = () => active;
+    enqueue.waitingCount = () => waiters.length + pWaiters.length;
+    enqueue.getLimit = () => limit;
+    enqueue.setLimit = (next) => {
+      limit = Math.max(min, Math.min(max, Math.round(next) || min));
+      pump();
+      return limit;
+    };
+    return enqueue;
+  }
+
+  const socketPageLaneCtl = Object.create(null);
+  function noteSocketPageLaneOutcome(pageId, kind, latencyMs) {
+    try {
+      const pid = String(pageId || '');
+      const lane = pid && pageSocketLanes[pid];
+      if (!lane) return;
+      const ctl = socketPageLaneCtl[pid] || (socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0, noAckStreak: 0 });
+      const ms = Math.max(0, Number(latencyMs) || 0);
+      if (kind === 'ok' && ms < 2500) {
+        ctl.fastOk++;
+        ctl.slowAck = 0;
+        ctl.noAckStreak = 0;
+        if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX) {
+          ctl.fastOk = 0;
+          const next = lane.setLimit(lane.getLimit() + 8);
+          logLine('⚡ Socket ACK nhanh ổn định — tăng lane page ' + pid + ' lên ' + next + '.');
+        }
+      } else if (kind === 'noack') {
+        ctl.fastOk = 0;
+        ctl.slowAck = 0;
+        ctl.noAckStreak++;
+        if (ctl.noAckStreak >= SOCKET_LANE_NOACK_BACKOFF_THRESHOLD && lane.getLimit() > SOCKET_LANE_MIN) {
+          ctl.noAckStreak = 0;
+          const next = lane.setLimit(Math.max(SOCKET_LANE_MIN, Math.floor(lane.getLimit() * 0.8)));
+          logLine('🐢 Socket no-ACK lặp ' + SOCKET_LANE_NOACK_BACKOFF_THRESHOLD + ' lần — giảm lane page ' + pid + ' xuống ' + next + '.');
+        }
+      } else if (kind === 'ok' || kind === 'rejected') {
+        ctl.fastOk = 0;
+        ctl.noAckStreak = 0;
+        if (ms >= 6000) {
+          ctl.slowAck++;
+          if (ctl.slowAck >= SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD && lane.getLimit() > SOCKET_LANE_MIN) {
+            ctl.slowAck = 0;
+            const next = lane.setLimit(Math.max(SOCKET_LANE_MIN, Math.floor(lane.getLimit() * 0.8)));
+            logLine('🐢 Socket ACK chậm liên tiếp ' + SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD + ' lần — giảm lane page ' + pid + ' xuống ' + next + '.');
+          }
+        } else {
+          ctl.slowAck = 0;
+        }
+      }
+      // Rejected không tự giảm luồng trừ khi ACK của nó thật sự chậm; trạng thái recipient riêng biệt.
+    } catch (e) { /* điều tiết lane không được làm hỏng gửi */ }
+  }
+
+  function getPageSocketLaneRange() {
+    const values = Object.keys(pageSocketLanes).map((pid) => pageSocketLanes[pid].getLimit());
+    if (!values.length) return String(BUS_PARALLEL_SOCKET);
+    const lo = Math.min.apply(Math, values), hi = Math.max.apply(Math, values);
+    return lo === hi ? String(lo) : (lo + '–' + hi);
+  }
+  function getPageSocketLaneStats() {
+    const pids = Object.keys(pageSocketLanes);
+    const result = { pages: pids.length, activeTotal: 0, waitingTotal: 0, activeMaxPerPage: 0, waitingMaxPerPage: 0, limits: '' };
+    const limitCounts = Object.create(null);
+    pids.forEach((pid) => {
+      const lane = pageSocketLanes[pid];
+      const active = lane.activeCount();
+      const waiting = lane.waitingCount();
+      const limit = lane.getLimit();
+      result.activeTotal += active;
+      result.waitingTotal += waiting;
+      result.activeMaxPerPage = Math.max(result.activeMaxPerPage, active);
+      result.waitingMaxPerPage = Math.max(result.waitingMaxPerPage, waiting);
+      limitCounts[limit] = (limitCounts[limit] || 0) + 1;
+    });
+    result.limits = Object.keys(limitCounts).sort((a, b) => Number(a) - Number(b))
+      .map((limit) => limit + '×' + limitCounts[limit]).join(', ') || 'chưa tạo lane';
+    return result;
+  }
+
   const apiSendLane = makeLane(API_SEND_PARALLEL);
-  const ctxFetchLane = makeLane(CTX_FETCH_PARALLEL);
+  const ctxFetchLane = makeAdaptiveLane(CTX_FETCH_INITIAL, CTX_FETCH_MIN, CTX_FETCH_MAX);
   const photoUploadLane = makeLane(PHOTO_UPLOAD_PARALLEL);
-  const gidExtLane = makeLane(GID_EXT_PARALLEL);
+  const gidExtLane = makeAdaptiveLane(GID_EXT_INITIAL, GID_EXT_MIN, GID_EXT_MAX);
+
+  // BỘ ĐIỀU TIẾT DÒ GLOBAL_ID (AIMD): phản hồi nhanh/ổn định → tăng dần để lấy
+  // tốc độ thật; 429/timeout/chậm → giảm mạnh + nghỉ chung, tránh cả nghìn request
+  // cùng đâm vào server đang nghẽn rồi cùng chết (đúng bệnh lô 5.000).
+  const gidHttpCtl = { good: 0, bad: 0, coolUntil: 0, backoffStreak: 0 };
+  const gidExtCtl = { good: 0, bad: 0 };
+  async function waitGidHttpCooldown() {
+    let waited = false;
+    while (!state.stopRequested && Date.now() < gidHttpCtl.coolUntil) {
+      waited = true;
+      await sleep(Math.min(250, Math.max(25, gidHttpCtl.coolUntil - Date.now())));
+    }
+    // Rải nhịp ngẫu nhiên sau cơn 429: tránh cả lane cùng lao lại đúng 1 ms.
+    if (waited && !state.stopRequested) await sleep(Math.floor(Math.random() * 180));
+  }
+  function noteGidHttpResult(ok, status, latencyMs) {
+    try {
+      if (status === 429) {
+        gidHttpCtl.backoffStreak = Math.min(6, (gidHttpCtl.backoffStreak || 0) + 1);
+        gidHttpCtl.coolUntil = Date.now() + Math.min(10000, 1200 * gidHttpCtl.backoffStreak);
+        gidHttpCtl.good = 0;
+        gidHttpCtl.bad = 0;
+        ctxFetchLane.setLimit(ctxFetchLane.getLimit() * 0.5);
+        return;
+      }
+      if (!ok) {
+        gidHttpCtl.good = 0;
+        gidHttpCtl.bad++;
+        if (gidHttpCtl.bad >= 3) {
+          gidHttpCtl.bad = 0;
+          ctxFetchLane.setLimit(ctxFetchLane.getLimit() * 0.75);
+        }
+        return;
+      }
+      if (latencyMs > 5000) {
+        gidHttpCtl.good = 0;
+        gidHttpCtl.bad++;
+        if (gidHttpCtl.bad >= 4) {
+          gidHttpCtl.bad = 0;
+          ctxFetchLane.setLimit(Math.max(16, Math.round(ctxFetchLane.getLimit() * 0.85)));
+        }
+        return;
+      }
+      gidHttpCtl.bad = 0;
+      gidHttpCtl.backoffStreak = 0;
+      if (latencyMs < 1500) {
+        gidHttpCtl.good++;
+        if (gidHttpCtl.good >= 10) {
+          gidHttpCtl.good = 0;
+          ctxFetchLane.setLimit(ctxFetchLane.getLimit() + 4);
+        }
+      } else {
+        gidHttpCtl.good = Math.max(0, gidHttpCtl.good - 1);
+      }
+    } catch (e) { /* điều tiết lỗi không được làm hỏng lượt gửi */ }
+  }
+  function noteGidExtResult(responded, timedOut, latencyMs) {
+    try {
+      if (timedOut || !responded || latencyMs > 12000) {
+        gidExtCtl.good = 0;
+        gidExtCtl.bad++;
+        if (gidExtCtl.bad >= 3) {
+          gidExtCtl.bad = 0;
+          gidExtLane.setLimit(gidExtLane.getLimit() * 0.7);
+        }
+        return;
+      }
+      gidExtCtl.bad = 0;
+      if (latencyMs < 5000) {
+        gidExtCtl.good++;
+        if (gidExtCtl.good >= 10) {
+          gidExtCtl.good = 0;
+          gidExtLane.setLimit(gidExtLane.getLimit() + 2);
+        }
+      } else {
+        gidExtCtl.good = Math.max(0, gidExtCtl.good - 2);
+      }
+    } catch (e) { /* ignore */ }
+  }
+  async function waitForGidDiscoveryIdle(maxMs) {
+    const startedAt = Date.now();
+    while (!state.stopRequested && (Date.now() - startedAt) < (maxMs || 8000)) {
+      const busy = (ctxFetchLane.activeCount() + ctxFetchLane.waitingCount())
+        + (gidExtLane.activeCount() + gidExtLane.waitingCount());
+      if (!busy) return true;
+      await sleep(200);
+    }
+    return false;
+  }
   const extPrepLane = makeLane(PREP_PARALLEL_EXT);
-  const extSendLane = makeLane(BUS_PARALLEL_EXT);
+  const extSendLane = makeAdaptiveLane(BUS_PARALLEL_EXT, EXT_SEND_MIN, EXT_SEND_MAX);
   const extLane = extPrepLane;
+
+  // ===== BỘ NGẮT SỨC KHỎE EXTENSION KHI GỬI (CIRCUIT BREAKER) =====
+  // Mọi lệnh REPLY_INBOX_PHOTO đều đi qua đúng 1 Pancake Extension. Nếu Extension
+  // nghẽn/mất phản hồi mà vẫn tiếp tục nạp lệnh, mỗi lệnh giữ lane 35s rồi timeout
+  // theo cụm 6 — đúng cảnh cả nghìn chat phía sau bị "khung delay" ăn hết thời gian.
+  // Sau 3 timeout liên tiếp: NGỪNG nạp thêm lệnh Ext trong 45s (tăng dần tối đa
+  // 180s), chat chưa bắn Ext sẽ đi Socket/API ngay hoặc chờ Pass 2. Hết giờ nghỉ
+  // chỉ cho 1 lệnh THĂM DÒ; có phản hồi thì mở lại, timeout tiếp thì nghỉ tiếp.
+  // Lệnh đã bắn rồi mà timeout vẫn là "không rõ" — chỉ kiểm chứng bằng lịch sử
+  // tin, TUYỆT ĐỐI không bắn lại mò (lệnh gốc có thể vẫn nằm trong Extension).
+  // 🔥 [FIX-TỐC-ĐỘ] Chịu được 12 timeout liên tiếp trước khi ngắt (thay vì 3) — tránh dừng Ext vì
+  // vài ca chat chết riêng lẻ. Nghỉ 15s (thay vì 45s) nếu thật sự mở ngắt.
+  const EXT_SEND_BREAKER_THRESHOLD = 12;
+  const EXT_SEND_BREAKER_BASE_MS = 15000;
+  const EXT_SEND_BREAKER_MAX_MS = 45000;
+  const extSendCtl = { timeoutStreak: 0, openUntil: 0, openStreak: 0, probeInFlight: false, probeToken: 0, fastStreak: 0 };
+  function isExtBreakerOpen() {
+    return Date.now() < extSendCtl.openUntil;
+  }
+  async function acquireExtSendPermit() {
+    while (!state.stopRequested) {
+      const now = Date.now();
+      if (now < extSendCtl.openUntil) return null; // đang nghỉ hồi sức — bỏ qua Ext ngay
+      if (extSendCtl.probeInFlight) { await sleep(250); continue; } // chờ kết quả lệnh thăm dò
+      if (extSendCtl.openUntil) {
+        extSendCtl.probeInFlight = true;
+        extSendCtl.probeToken++;
+        return { probe: true, token: extSendCtl.probeToken };
+      }
+      return { probe: false, token: 0 };
+    }
+    return null;
+  }
+  function releaseExtSendPermit(permit) {
+    if (permit && permit.probe && extSendCtl.probeToken === permit.token) {
+      extSendCtl.probeInFlight = false;
+    }
+  }
+  function noteExtSendOutcome(kind, permit, latencyMs) {
+    try {
+      const now = Date.now();
+      if (kind === 'responded') {
+        // Extension CÓ trả lời (dù thành công hay báo lỗi rõ ràng) = còn sống.
+        extSendCtl.timeoutStreak = 0;
+        // AIMD làn Ext gửi: trả nhanh (<5s) tích lũy 10 lần → tăng +2 slot (tối đa 24).
+        // Có 1 lệnh hơi chậm (>5s nhưng không timeout) chỉ trừ nhẹ bộ đếm chứ không xóa về 0.
+        if (latencyMs != null) {
+          if (latencyMs < 5000) {
+            extSendCtl.fastStreak++;
+            if (extSendCtl.fastStreak >= 10) {
+              extSendCtl.fastStreak = 0;
+              extSendLane.setLimit(extSendLane.getLimit() + 2);
+            }
+          } else {
+            extSendCtl.fastStreak = Math.max(0, extSendCtl.fastStreak - 2);
+          }
+        }
+        if (permit && permit.probe) {
+          releaseExtSendPermit(permit);
+          extSendCtl.openUntil = 0;
+          extSendCtl.openStreak = 0;
+          logLine('🟢 Extension đã phản hồi lại — đóng bộ ngắt quá tải, gửi qua Ext bình thường.');
+        } else if (!extSendCtl.probeInFlight && extSendCtl.openUntil && now >= extSendCtl.openUntil) {
+          extSendCtl.openUntil = 0;
+          extSendCtl.openStreak = 0;
+        }
+        return;
+      }
+      if (kind !== 'timeout') { releaseExtSendPermit(permit); return; }
+      // Timeout = Extension đang ì: cắt chuỗi tăng + giảm ngay limit làn Ext gửi
+      // (×0.6, sàn 6) trước cả khi bộ ngắt 3-timeout kịp mở.
+      extSendCtl.fastStreak = 0;
+      extSendLane.setLimit(extSendLane.getLimit() * 0.6);
+      // Đang có lệnh thăm dò quyết định sức khỏe: kết quả của các lệnh thường
+      // phát ra từ trước lúc mở ngắt không được tự ý mở/đóng ngắt nữa.
+      if (!permit || !permit.probe) {
+        if (extSendCtl.probeInFlight) return;
+      }
+      if (permit && permit.probe) {
+        releaseExtSendPermit(permit);
+        extSendCtl.openStreak = Math.min(4, (extSendCtl.openStreak || 0) + 1);
+        const backoffMs = Math.min(EXT_SEND_BREAKER_MAX_MS,
+          EXT_SEND_BREAKER_BASE_MS * Math.pow(2, extSendCtl.openStreak - 1));
+        extSendCtl.openUntil = now + backoffMs;
+        extSendCtl.timeoutStreak = 0;
+        logLine('🧯 Extension vẫn không phản hồi ở lệnh thăm dò — tạm ngừng bắn Ext '
+          + Math.round(backoffMs / 1000) + 's; chat sau đi Socket/API hoặc chờ Pass 2.');
+        return;
+      }
+      extSendCtl.timeoutStreak++;
+      if (extSendCtl.timeoutStreak >= EXT_SEND_BREAKER_THRESHOLD && !isExtBreakerOpen()) {
+        extSendCtl.openStreak = 1;
+        extSendCtl.openUntil = now + EXT_SEND_BREAKER_BASE_MS;
+        extSendCtl.timeoutStreak = 0;
+        logLine('🧯 Extension không phản hồi ' + EXT_SEND_BREAKER_THRESHOLD
+          + ' lần liên tiếp — tạm ngừng bắn Ext 45s để tránh cả nghìn lệnh cùng chờ 35s; chat sau sẽ thử Socket/API trước.');
+      }
+    } catch (e) { releaseExtSendPermit(permit); }
+  }
   const socketLane = makeLane(BUS_PARALLEL_SOCKET);
   const pageSocketLanes = {};
   function getPageSocketLane(pageId) {
     const pid = String(pageId || '');
     if (!pid) return socketLane;
-    if (!pageSocketLanes[pid]) pageSocketLanes[pid] = makeLane(BUS_PARALLEL_SOCKET);
+    if (!pageSocketLanes[pid]) {
+      pageSocketLanes[pid] = makeAdaptivePriorityLane(BUS_PARALLEL_SOCKET, SOCKET_LANE_MIN, SOCKET_LANE_MAX);
+      socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0, noAckStreak: 0 };
+    }
     return pageSocketLanes[pid];
   }
   const sideEffectLane = makeLane(SIDE_EFFECT_PARALLEL);
@@ -3985,7 +5339,7 @@
     try {
       const h = window.__MqttHelper__;
       const sk = h && h.SOCKETS && h.SOCKETS[pageId];
-      return isSocketAlive(sk);
+      return isSocketSynced(sk);
     } catch (e) { return false; }
   }
 
@@ -4004,7 +5358,18 @@
     if (!ctx.threadResolved) {
       let threadId = full.thread_id || full.threadId || conv.threadId || '';
       if (!threadId && !ctx.fastOnly && typeof window.__syncMissingThreadId__ === 'function') {
-        try { threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id); } catch (e) { /* ignore */ }
+        try {
+          threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id);
+          if (threadId) {
+            full.thread_id = threadId;
+            full.threadId = threadId;
+            conv.threadId = threadId;
+            const rConv = getReduxConvById(conv.id, 0);
+            const tKey = (rConv && (rConv.thread_key || rConv.threadKey)) || full.thread_key || ('t_' + threadId);
+            full.thread_key = tKey;
+            conv.threadKey = tKey;
+          }
+        } catch (e) { /* ignore */ }
       }
       if (!threadId && ctx.fastOnly) {
         ctx.deferredToExt = true;
@@ -4013,30 +5378,13 @@
       ctx.threadId = threadId || null;
       ctx.threadResolved = true;
     }
-    const skipPhotoForBlockedCluster = !!(ctx.hasTextMsg && (socketRejectStreak[pageId] || 0) >= 3 && isPageSocketReady(pageId));
     if (!ctx.gidResolved && ctx.threadId) {
-      if (ctx.fastOnly && photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds && !skipPhotoForBlockedCluster) {
-        const [gidRes, upRes] = await Promise.all([
-          resolveGlobalId(full, ctx.threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx),
-          uploadOneTimePhoto(pageId, photo, conv.id, ctx, false),
-        ]);
-        ctx.gid = gidRes;
-        if (upRes && upRes.ok && upRes.fbId) ctx.nonReusableFbId = upRes.fbId;
-        if (upRes && upRes.ok && upRes.fbIds && upRes.fbIds.length > 1) ctx.nonReusableFbIds = upRes.fbIds;
-        if (ctx.deferredToExt) {
-          // Chưa dùng ở Làn 1 → nhường ngay fbId này vào spareFbIdPool[pageId] cho chat sống tiếp theo dùng ở 0ms!
-          recycleUnusedFbId(pageId, ctx);
-          return ctx;
-        }
-        ctx.gidResolved = true;
-      } else {
-        ctx.gid = await resolveGlobalId(full, ctx.threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
-        if (ctx.deferredToExt) {
-          recycleUnusedFbId(pageId, ctx);
-          return ctx;
-        }
-        ctx.gidResolved = true;
+      ctx.gid = await resolveGlobalId(full, ctx.threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
+      if (ctx.deferredToExt) {
+        recycleUnusedFbId(pageId, ctx);
+        return ctx;
       }
+      ctx.gidResolved = true;
     }
     // Nếu không tìm thấy cả globalId thật lẫn xác nhận hội thoại từ Extension → không tốn công upload ảnh
     const canSend = !!((ctx.gid && !ctx.gidFromPsid) || (ctx.threadId && !ctx.noGidConfirmedByExt));
@@ -4044,8 +5392,7 @@
       recycleUnusedFbId(pageId, ctx);
       return ctx;
     }
-    const skipNow = !!(ctx.hasTextMsg && (socketRejectStreak[pageId] || 0) >= 3 && ctx.gid && !ctx.gidFromPsid && isPageSocketReady(pageId));
-    if (photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds && canSend && !skipNow) {
+    if (photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds && canSend) {
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
       if (up && up.ok && up.fbId) ctx.nonReusableFbId = up.fbId;
       if (up && up.ok && up.fbIds && up.fbIds.length > 1) ctx.nonReusableFbIds = up.fbIds;
@@ -4060,10 +5407,14 @@
     const hasExt = seq.indexOf('ext') > -1;
     if (!hasSock || !hasExt) return seq;
     const hint = channelHints[conv.id];
-    const sockReady = isPageSocketReady(pageId);
+    const isSmallBatch = !!(batchStats && batchStats.total > 0 && batchStats.total <= 20);
+    // Ở lô nhỏ (<=20 tin): chỉ ưu tiên Socket khi Socket của page ĐÃ ẤM SẴN (isPageSocketReady);
+    // nếu Socket đang phải khởi tạo từ đầu (socketWarmPromises), bắn ngay qua Extension (~0.8s)
+    // để không phải đứng đợi getBusinessWSContext + sendInitMessages (~3s).
+    const sockReady = isPageSocketReady(pageId) || (!isSmallBatch && !!(pageId && socketWarmPromises[pageId]));
     const hasRealGid = !!(ctx && ctx.gid && !ctx.gidFromPsid);
     // Khớp 100% với __sendBySocketCacheFB__ trong _app (@927067 & @937200):
-    // CHỈ ưu tiên bắn qua Socket trước khi WebSocket đang kết nối (sockReady) VÀ ĐÃ CÓ global_id THẬT (hasRealGid)!
+    // Ưu tiên bắn qua Socket trước khi WebSocket đang kết nối (hoặc đang khởi động ở đầu lượt lô lớn) VÀ ĐÃ CÓ global_id THẬT (hasRealGid)!
     // Tuyệt đối không ưu tiên Socket khi chưa có global_id thật (vì Socket không nhận from_psid).
     const preferSocket = sockReady && hasRealGid && (hint === 'socket' || hasRealGid);
     const first = preferSocket ? 'socket' : 'ext';
@@ -4101,9 +5452,11 @@
       const textOutWin = !photo && idleLong && !isRecordCtx7Days(full);
       const photoOutWin = !!photo && idleLong && !isRecordCtx7Days(full);
       const noApiPhoto = !!(photo && !photo.fbId);
+      const alreadyTriedApi = !!(opts.deferredCtx && Array.isArray(opts.deferredCtx.triedChannels) && opts.deferredCtx.triedChannels.indexOf('api') > -1);
       const pidQuick = (full && (full.page_id || full.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
       const goDirect = batchSkipApi
         || isApiBlockedForPage(pidQuick)
+        || alreadyTriedApi
         || noApiPhoto
         || (photo && hint && hint !== 'api')
         || textOutWin
@@ -4113,7 +5466,7 @@
         if (textOutWin || photoOutWin || noApiPhoto) {
           // Với chat đã ngoài cửa sổ 24h (!isRecordCtx7Days) khi chạy lô lớn (>50 chat):
           // không gọi lại Graph API ở cuối (vì 100% bị FB trả #551/#10, tốn hàng trăm request HTTP vô ích!)
-          const skipFutileApi = batchSkipApi || noApiPhoto || ((textOutWin || photoOutWin) && batchStats && batchStats.total > 50);
+          const skipFutileApi = batchSkipApi || alreadyTriedApi || noApiPhoto || ((textOutWin || photoOutWin) && batchStats && batchStats.total > 50);
           const baseOutPlan = ['ext', 'socket', 'api'].filter((x) => !(skipFutileApi && x === 'api'));
           directOpts = {
             plan: baseOutPlan,
@@ -4121,14 +5474,18 @@
             fastOnly: !!opts.fastOnly,
             deferredCtx: opts.deferredCtx || null,
             sockFired: !!opts.sockFired,
+            wave200Mode: !!opts.wave200Mode,
+            isSocketRetryPass: !!opts.isSocketRetryPass,
           };
-        } else if (batchSkipApi) {
+        } else if (batchSkipApi || alreadyTriedApi) {
           directOpts = {
             skipApi: true,
             dynamicDirect: true,
             fastOnly: !!opts.fastOnly,
             deferredCtx: opts.deferredCtx || null,
             sockFired: !!opts.sockFired,
+            wave200Mode: !!opts.wave200Mode,
+            isSocketRetryPass: !!opts.isSocketRetryPass,
           };
         } else {
           directOpts = {
@@ -4137,8 +5494,11 @@
             fastOnly: !!opts.fastOnly,
             deferredCtx: opts.deferredCtx || null,
             sockFired: !!opts.sockFired,
+            wave200Mode: !!opts.wave200Mode,
+            isSocketRetryPass: !!opts.isSocketRetryPass,
           };
         }
+        directOpts.prioritySocket = !!opts.prioritySocket || !!opts.isSocketRetryPass;
         if (opts.awaitDirect) {
           return sendOne(conv, text, photo, directOpts);
         }
@@ -4170,12 +5530,28 @@
         });
         return { ok: true, id: '', sendBy: 'direct', sent: true, fired: true };
       }
-      return fireApiAndWatch(conv, text, photo);
+      if (opts.wave200Mode && !opts.syncMultiPart) {
+        // Wave 200 + Gửi nhanh: đưa API qua apiSendLane (48 luồng), nhường worker ngay;
+        // phản hồi OK/lỗi rõ/không rõ vẫn được chốt ở nền như luồng gốc v1.91.72.
+        return fireApiAndWatch(conv, text, photo);
+      }
+      if (!opts.syncMultiPart) {
+        return fireApiAndWatch(conv, text, photo);
+      }
     }
     // ngữ cảnh dùng chung cho các kênh của CÙNG 1 chat: conversation, threadId, globalId, nonReusableFbId…
     const ctx = (opts.deferredCtx && typeof opts.deferredCtx === 'object') ? opts.deferredCtx : {};
     ctx.fastOnly = !!opts.fastOnly;
     ctx.sockFired = !!opts.sockFired;
+    ctx.wave200Mode = !!opts.wave200Mode;
+    ctx.isSocketRetryPass = !!opts.isSocketRetryPass;
+    ctx.prioritySocket = !!opts.prioritySocket || !!opts.isSocketRetryPass;
+    if (ctx.isSocketRetryPass) {
+      ctx.socketRetriedOnce = true;
+      ctx.wave200Mode = false;
+      ctx.nonReusableFbId = null;
+      ctx.nonReusableFbIds = null;
+    }
     ctx.hasTextMsg = !!(text && String(text).trim().length > 0);
     ctx.deferredToExt = false;
     if (!ctx.fastOnly && ctx.gidResolved && !ctx.gid) {
@@ -4222,7 +5598,13 @@
     if (opts.dynamicDirect && conv.type !== 'comment' && (seq[0] === 'ext' || seq[0] === 'socket')) {
       const fastGid0 = peekFastGlobalId(conv, peeked0, '');
       const tid0 = (peeked0 && (peeked0.thread_id || peeked0.threadId)) || conv.threadId || '';
-      if (fastGid0 && (tid0 || isPageSocketReady(pid0))) {
+      if (fastGid0 && (tid0 || isPageSocketReady(pid0) || (pid0 && socketWarmPromises[pid0]))) {
+        const srvGid0 = peeked0 && (gidFromPayload(peeked0) || peeked0.globalId
+          || (peeked0.customers && peeked0.customers[0] && peeked0.customers[0].global_id));
+        if (!ctx.fastHitCounted) {
+          ctx.fastHitCounted = true;
+          gidStats.cacheHit++;
+        }
         ctx.full = peeked0;
         ctx.fullLoaded = true;
         if (tid0) {
@@ -4232,13 +5614,23 @@
         ctx.gid = String(fastGid0);
         ctx.gidResolved = true;
         ctx.gidFromPsid = false;
-        ctx.gidFromServerOrCache = true;
+        ctx.gidFromServerOrCache = !!(srvGid0 && String(srvGid0) === String(fastGid0));
       } else {
         await extPrepLane(() => prepareDirectCtx(conv, photo, ctx));
         if (ctx.deferredToExt) {
           return { ok: false, sent: false, deferredToExt: true, deferredCtx: ctx };
         }
         if (ctx.noGidConfirmedByExt && (!ctx.gid || ctx.gidFromPsid)) {
+          if (ctx.gidGateSkipExt) {
+            // GATE NO-GID: HTTP/Batch/WS/Ext đều đã xác nhận không có global_id ở khâu dò.
+            // Không bắn REPLY_INBOX_PHOTO thread-only nữa — đây là nút nghẽn 6 luồng ở đuôi lô.
+            recycleUnusedFbId(pid0, ctx);
+            return {
+              ok: false, sent: false, gidUnknown: true, noGidGate: true,
+              discoveryState: ctx.gidDiscoveryState || 'ext-responded-no-gid',
+              error: 'Không tìm được global_id để gửi (server/Batch/WS/Ext đều không có) — bỏ qua Ext thread-only cho nhanh',
+            };
+          }
           // Chưa hề có tin nào được bắn cho chat này, nên cứu hộ ở đây không thể gây trùng:
           // thử Extension bằng thread_id trước, sau đó API bằng conversation_id (đúng fallback
           // của luồng gửi tay trong _app: extension -> socket -> api). Không còn chốt oan
@@ -4261,6 +5653,9 @@
 
     const tried = Array.isArray(ctx.triedErrors) ? ctx.triedErrors.slice() : [];
     const triedCh = Array.isArray(ctx.triedChannels) ? ctx.triedChannels.slice() : [];
+    // Chỉ đánh dấu "gid chưa rõ" khi một kênh thật sự cho biết đang thiếu gid.
+    // Lỗi API độc lập (chưa hề cần gid) không được kéo cả chat sang Pass 2 oan.
+    let sawGidUnknown = !!(ctx.gidUnknown && !ctx.gid && conv.type !== 'comment');
     if (triedCh.length) {
       seq = seq.filter((x) => triedCh.indexOf(x) < 0);
     }
@@ -4279,6 +5674,9 @@
         : (ctx.fullLoaded && ctx.gidResolved
           ? await channels[ch]()
           : await busEnqueue(() => channels[ch](), ch));
+      if (r && r.deferredToSocketRetry) {
+        return { ok: false, sent: false, deferredToSocketRetry: true, deferredCtx: r.deferredCtx || ctx };
+      }
       if (r && r.deferredToExt) {
         ctx.triedErrors = tried.slice();
         ctx.triedChannels = triedCh.slice();
@@ -4290,6 +5688,7 @@
       }
       triedCh.push(ch);
       tried.push((ch === 'ext' ? 'Ext' : ch) + ': ' + (r.error || 'fail'));
+      if (r.gidUnknown) sawGidUnknown = true;
       // "không rõ" = tin CÓ THỂ đã đi — thử tiếp kênh khác sẽ gửi TRÙNG → dừng ngay
       if (r.sent === 'maybe') {
         recycleUnusedFbId(pid0, ctx);
@@ -4304,7 +5703,12 @@
       // Nếu vừa dùng from_psid phỏng đoán (ctx.gidFromPsid === true) hoặc lỗi thiếu globalId/thread_id:
       // bắt buộc mở khóa ctx.gidResolved = false để kênh kế tiếp dò lại global_id thật (nhỡ WebSocket
       // hoặc Extension vừa nạp xong), tuyệt đối không bắn tiếp bằng from_psid sai!
-      if ((ctx && ctx.gidFromPsid) || (conv.fromPsid && /globalId|thread_id/i.test(r.error || ''))) {
+      // Riêng Ext INCORRECT THREAD khi CHƯA có globalId thật: KHÔNG reset
+      // gidDiscoveryRan — Socket kế tiếp vẫn được kiểm tra cache/WS ở 0ms
+      // trong resolveGlobalId, nhưng không mở lại toàn bộ cuộc đua
+      // HTTP/WS/Ext lần thứ hai cho cùng một ca.
+      const incorrectThreadNoGid = /INCORRECT THREAD/i.test(r.error || '') && !(ctx && ctx.gid && !ctx.gidFromPsid);
+      if ((ctx && ctx.gidFromPsid) || (conv.fromPsid && /globalId|thread_id/i.test(r.error || '')) || incorrectThreadNoGid) {
         ctx.gidForceFind = true;
         ctx.gidResolved = false;
         ctx.gidFromPsid = false;
@@ -4316,7 +5720,12 @@
       }
     }
     recycleUnusedFbId(pid0, ctx);
-    return { ok: false, sent: false, tried: triedCh.slice(), error: tried.join(' | ') };
+    return {
+      ok: false, sent: false, tried: triedCh.slice(),
+      gidUnknown: !!(sawGidUnknown && !(ctx.gid && !ctx.gidFromPsid)),
+      discoveryState: (ctx && ctx.gidDiscoveryState) || '',
+      error: tried.join(' | '),
+    };
   }
 
   // ===== CACHE BỀN VỮNG GLOBAL_ID (LOCALSTORAGE + INDEXEDDB "fb_meta_data") & VÁ MQTTHELPER =====
@@ -4595,10 +6004,60 @@
   // phải trả phí kết nối + đồng bộ thread map ~10s (initSocket). Làm nóng ngay lúc bắn lô —
   // chạy song song các bắn API — nên khi nào cần bù Socket thì chỉ còn ~1–2s của sendMessage.
   const socketWarmPromises = {}; // pageId → Promise kết nối socket (đang chạy dở)
-  const batchGidFetchedPages = {}; // pageId → đã gọi BATCH_GET_GLOBAL_ID (@897543) trong phiên
+  const batchGidFetchedPages = {}; // pageId → BATCH_GET_GLOBAL_ID (@897543) đã THÀNH CÔNG trong phiên
   const batchGidPromises = {}; // pageId → Promise BATCH_GET_GLOBAL_ID đang chạy
 
-  function warmUpSockets(targets) {
+  // Nạp HÀNG LOẠT { threadId → globalId } mà Extension đã biết trong IndexedDB:
+  // 1 lệnh/page thay vì dò từng chat. Chỉ đánh dấu "đã nạp" khi THÀNH CÔNG; lần
+  // gọi hỏng/timeout được phép gọi lại ở lượt sau hoặc trước Pass 2, vì IndexedDB
+  // của Extension liên tục được loadThread/gửi tay bổ sung thêm mapping mới.
+  function requestBatchGlobalIds(pid, force) {
+    if (!pid || typeof pid === 'object') return Promise.resolve(0);
+    const pageId = String(pid || '').trim();
+    if (!pageId || pageId.indexOf('[object') > -1) return Promise.resolve(0);
+    if (batchGidPromises[pageId]) return batchGidPromises[pageId];
+    if (batchGidFetchedPages[pageId]) return Promise.resolve(0);
+    const adapter = window.__ExtensionAdapter__;
+    if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(0);
+    const promise = Promise.resolve().then(() => adapter.send({
+      type: 'BATCH_GET_GLOBAL_ID',
+      pageId: pageId,
+      // Khớp payload app (@897543): app luôn kèm timeRangeMin. Gửi 0 = lấy mọi mốc,
+      // tránh Extension hiểu thiếu trường là không có mapping nào trong khoảng lọc.
+      timeRangeMin: 0,
+    }, { timeout: 2000 })).then((res) => {
+      delete batchGidPromises[pageId];
+      batchGidFetchedPages[pageId] = true;
+      const list = res && res.success && res.data && res.data.threadsWithGlobalId;
+      if (!Array.isArray(list)) {
+        gidStats.batchFail++;
+        return 0;
+      }
+      gidStats.batchReturned += list.length;
+      let applied = 0;
+      list.forEach((it) => {
+        if (it && it.threadId && it.globalId && typeof window.__botfakeSaveGid__ === 'function') {
+          const mapKey = String(pageId) + '_' + String(it.threadId);
+          if (!persistentGidMap[mapKey]) applied++;
+          window.__botfakeSaveGid__(mapKey, pageId, it.threadId, String(it.globalId));
+        }
+      });
+      gidStats.batchMappings += applied;
+      if (list.length > 0) {
+        try { logLine('🧭 BATCH_GET_GLOBAL_ID ' + pageId + ': threadsWithGlobalId=' + list.length + ' · nạp mới=' + applied); } catch (e) { /* ignore */ }
+      }
+      return applied;
+    }).catch(() => {
+      gidStats.batchFail++;
+      delete batchGidPromises[pageId];
+      batchGidFetchedPages[pageId] = true;
+      return 0;
+    });
+    batchGidPromises[pageId] = promise;
+    return promise;
+  }
+
+  function warmUpSockets(targets, opts) {
     try {
       preloadPersistentGlobalIds();
       const h = window.__MqttHelper__;
@@ -4609,25 +6068,8 @@
         const pid = c.pageId || String(c.id || '').split('_')[0];
         if (!pid || seen[pid]) return;
         seen[pid] = true;
-        // 1) Gọi BATCH_GET_GLOBAL_ID (@897543 trong _app) 1 lần/page để nạp hàng loạt { threadId, globalId }
-        //    từ IndexedDB của Extension vào cache RAM + localStorage chỉ bằng 1 lệnh duy nhất!
-        if (adapter && typeof adapter.send === 'function' && !batchGidFetchedPages[pid]) {
-          batchGidFetchedPages[pid] = true;
-          batchGidPromises[pid] = Promise.resolve().then(() => adapter.send({
-            type: 'BATCH_GET_GLOBAL_ID',
-            pageId: pid,
-          }, { timeout: 15000 })).then((res) => {
-            delete batchGidPromises[pid];
-            const list = res && res.success && res.data && res.data.threadsWithGlobalId;
-            if (Array.isArray(list)) {
-              list.forEach((it) => {
-                if (it && it.threadId && it.globalId && typeof window.__botfakeSaveGid__ === 'function') {
-                  window.__botfakeSaveGid__(String(pid) + '_' + String(it.threadId), pid, it.threadId, String(it.globalId));
-                }
-              });
-            }
-          }).catch(() => { delete batchGidPromises[pid]; return null; });
-        }
+        // 1) Gọi BATCH_GET_GLOBAL_ID (@897543 trong _app) 1 lần/page trong phiên để nạp hàng loạt { threadId, globalId }
+        if (adapter && typeof adapter.send === 'function') requestBatchGlobalIds(pid, false);
         if (!h || typeof h.initSocket !== 'function') return;
         syncSocketMappingsToCache(h, pid);
         try {
@@ -4639,7 +6081,7 @@
           }
           if (h.SOCKETS && h.SOCKETS[pid]) {
             h.SOCKETS[pid].maxLoadThreadCount = Math.max(h.SOCKETS[pid].maxLoadThreadCount || 0, 5000);
-            if (h.SOCKETS[pid].instance && typeof h.wakingUpLoadThread === 'function') {
+            if (isSocketSynced(h.SOCKETS[pid]) && typeof h.wakingUpLoadThread === 'function') {
               h.wakingUpLoadThread(pid);
             }
           }
@@ -4649,15 +6091,16 @@
         if (socketWarmPromises[pid]) return; // đang kết nối dở — khỏi làm trùng
         socketWarmPromises[pid] = Promise.resolve()
           .then(() => h.initSocket(pid))
-          .then((res) => {
+          .then(async (res) => {
+            await waitForSocketSynced(h, pid, 2500);
             delete socketWarmPromises[pid];
             syncSocketMappingsToCache(h, pid);
-            // Chủ động kích hoạt cuộn tải trước threadMappingStoreV2 ở nền (đã vá ~60–80ms/trang)
+            // Chủ động kích hoạt cuộn tải trước threadMappingStoreV2 ở nền sau khi socket đã subscribe /ls_resp
             try {
               if (h.SOCKETS && h.SOCKETS[pid]) {
                 h.SOCKETS[pid].maxLoadThreadCount = Math.max(h.SOCKETS[pid].maxLoadThreadCount || 0, 5000);
               }
-              if (typeof h.wakingUpLoadThread === 'function' && h.SOCKETS && h.SOCKETS[pid]) {
+              if (typeof h.wakingUpLoadThread === 'function' && h.SOCKETS && h.SOCKETS[pid] && isSocketSynced(h.SOCKETS[pid])) {
                 h.wakingUpLoadThread(pid);
               }
             } catch (e2) { /* ignore */ }
@@ -4668,23 +6111,16 @@
     } catch (e) { /* ignore */ }
   }
 
-  // Chờ BATCH_GET_GLOBAL_ID nạp xong vào RAM trước khi phân loại fastList/discoveryList trong sendBatch
-  async function waitInitialGidWarmup(targets, maxWaitMs) {
+  // Đồng bộ tức thì (0ms) global_id từ WebSocket RAM cache trước khi bắn — tuyệt đối không chặn đầu lượt!
+  async function waitInitialGidWarmup(targets) {
     try {
-      const prs = [];
-      const seen = {};
-      (targets || []).forEach((c) => {
-        const pid = (c && c.pageId) || String((c && c.id) || '').split('_')[0];
-        if (!pid || seen[pid]) return;
-        seen[pid] = true;
-        if (batchGidPromises[pid]) prs.push(batchGidPromises[pid]);
-      });
-      if (prs.length) {
-        await Promise.race([Promise.all(prs), sleep(maxWaitMs || 1500)]);
-      }
       const h = window.__MqttHelper__;
       if (h) {
-        Object.keys(seen).forEach((pid) => syncSocketMappingsToCache(h, pid));
+        const seen = {};
+        (targets || []).forEach((c) => {
+          const pid = (c && c.pageId) || String((c && c.id) || '').split('_')[0];
+          if (pid && !seen[pid]) { seen[pid] = true; syncSocketMappingsToCache(h, pid); }
+        });
       }
     } catch (e) { /* ignore */ }
   }
@@ -4697,7 +6133,45 @@
   const buStats = { ok: 0, cancelled: 0, byWhy: {} };
   // Đếm các lần BẮN LẠI cùng nội dung ngay trong 1 lần gửi Socket (retry khi FB báo
   // rejected + bắn lại riêng ảnh) — in vào TỔNG HỢP để đối chiếu với phản ánh lặp của khách
-  const sendDiag = { sockRetry: 0, photoRetry: 0 };
+  const sendDiag = {
+    sockRetry: 0, sockRetryRecovered: 0, sockRetryRejected: 0, sockRetryOther: 0, photoRetry: 0,
+    recipientUnavailable: 0,
+    socketAckOk: 0, socketAckRejected: 0, socketNoAck: 0,
+    socketAckMsTotal: 0, socketAckMsMax: 0,
+    socketAckLt250: 0, socketAck250To999: 0, socketAck1To2s: 0, socketAck2To5s: 0, socketAckGte5s: 0,
+    apiQueued: 0, apiStarted: 0, apiFetchAttempts: 0, apiSuccess: 0, apiRejected: 0, apiUnknown: 0,
+    api429: 0, api429Retries: 0, apiCancelled: 0, apiFallback: 0,
+    apiQueueWaitMsTotal: 0, apiQueueWaitMsMax: 0, apiFetchMsTotal: 0, apiFetchMsMax: 0,
+    apiStatusCounts: Object.create(null),
+  };
+  const waveDiag = {
+    waveSize: 0, configuredGapMs: 0, quickEnabled: false, plannedWaves: 0, wavesStarted: 0,
+    gateWaitMsTotal: 0, gateWaitMsMax: 0,
+    maxMainInFlight: 0, mainCapMinObserved: 0, mainCapFinal: 0, mainCapDownshifts: 0, mainCapUpshifts: 0,
+    maxSocketRetryQueue: 0, maxSocketRetryActive: 0,
+    maxSocketCooldown: 0, maxSocketLaneActiveTotal: 0, maxSocketLaneWaitingTotal: 0,
+    maxSocketLaneActivePerPage: 0, maxSocketLaneWaitingPerPage: 0,
+    maxExtQueue: 0, maxExtActive: 0, maxApiWaiting: 0,
+  };
+
+  function recordSocketAckOutcome(kind, elapsedMs, pageId) {
+    try {
+      const ms = Math.max(0, Number(elapsedMs) || 0);
+      noteSocketPageLaneOutcome(pageId, kind, ms);
+      if (kind === 'ok') sendDiag.socketAckOk++;
+      else if (kind === 'rejected') sendDiag.socketAckRejected++;
+      else if (kind === 'noack') sendDiag.socketNoAck++;
+      if (kind === 'ok' || kind === 'rejected' || kind === 'noack') {
+        sendDiag.socketAckMsTotal += ms;
+        sendDiag.socketAckMsMax = Math.max(sendDiag.socketAckMsMax, ms);
+        if (ms < 250) sendDiag.socketAckLt250++;
+        else if (ms < 1000) sendDiag.socketAck250To999++;
+        else if (ms < 2000) sendDiag.socketAck1To2s++;
+        else if (ms < 5000) sendDiag.socketAck2To5s++;
+        else sendDiag.socketAckGte5s++;
+      }
+    } catch (e) { /* diagnostics must never affect sending */ }
+  }
   function buWhyBucket(why) {
     const w = String(why || '');
     if (w.indexOf('API từ chối') === 0) return 'API tu choi';
@@ -4705,6 +6179,7 @@
     if (w.indexOf('gửi thẳng') === 0) return 'Gui thang fail';
     if (w.indexOf('gửi chưa được') === 0) return 'Lan dau fail';
     if (w.indexOf('bù ') === 0) return 'Chuoi bu';
+    if (w.indexOf('kiểm chứng') > -1) return 'Kiem chung ACK';
     return 'Khac';
   }
   const BU_RETRY_MS = 1000;     // Socket: kênh dự phòng cuối (1s)
@@ -4723,8 +6198,18 @@
   // (fetch treo, ACK mất, bù văng lỗi…) → tự chốt ⚠ để pending về 0: TỔNG HỢP luôn kết thúc,
   // nút Chạy/Dừng luôn nhả. KHÔNG gửi lại (tránh trùng); ACK thật về sau markDelivered tự sửa số.
   const pendingBg = {}; // convId → { at, name, via }
+  // Sổ kiểm chứng sau khi Socket mất ACK (khai báo sớm tại đây để getBatchSummaryCounts
+  // tính được số ca đang chờ kiểm chứng vào "pending" — lượt không kết thúc, nút Gửi không
+  // nhả cho tới khi kiểm chứng chốt, tránh người dùng bấm lượt mới làm hủy đường bắn cứu).
+  const sockVerifyPending = {}; // convId → runSeq đang có kiểm chứng chờ (chống đăng ký trùng)
+  const sockVerifyFired = {}; // convId → runSeq đã bắn cứu sau kiểm chứng (mỗi lượt tối đa 1 lần/chat)
+  const verifyStats = { found: 0, fired: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
+  const extVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng sau khi Ext timeout
+  const extTimeoutStats = { timeout: 0, skipped: 0, found: 0, notFound: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
   let bgWatchdogTimer = null;
-  const BG_SETTLE_DEADLINE_MS = 90000;
+  // ⚡ [FIX-5] Với bắn-nhả 192 slot, đuôi hàng đợi retry Socket/Ext có thể chờ >90s khi lô lớn.
+  // 180s đủ dung sai — không chốt ⚠ oan khi lane còn việc thật.
+  const BG_SETTLE_DEADLINE_MS = 180000;
   function noteBgPending(conv, via) {
     if (!conv || !conv.id) return;
     pendingBg[conv.id] = { at: Date.now(), name: conv.name || conv.id, via: via || '' };
@@ -4806,7 +6291,9 @@
     const unsureTotal = summaryCounters.unsure;
     const skipLateTotal = summaryCounters.skipLate;
     const settled = okTotal + failTotal + unsureTotal + skipLateTotal;
-    const pending = Math.max(0, (batchStats.total || 0) - settled);
+    const verifyPendingNow = Object.keys(sockVerifyPending).filter((id) => sockVerifyPending[id] === runSeq).length;
+    const extVerifyPendingNow = Object.keys(extVerifyPending).filter((id) => extVerifyPending[id] === runSeq).length;
+    const pending = Math.max(0, (batchStats.total || 0) - settled) + verifyPendingNow + extVerifyPendingNow;
     return {
       total: batchStats.total || 0,
       okTotal, okApi, okExt, okSocket,
@@ -4822,7 +6309,20 @@
       if (!batchStats.active && !batchStats.total) return;
       const c = getBatchSummaryCounts();
       const pct = c.total ? ((c.okTotal / c.total) * 100).toFixed(1) : '0.0';
-      const elapsedSec = batchStats.startedAt ? Math.max(1, Math.round((Date.now() - batchStats.startedAt) / 1000)) : 0;
+      const elapsedMs = batchStats.startedAt ? Math.max(1, Date.now() - batchStats.startedAt) : 0;
+      const elapsedSec = elapsedMs ? Math.max(1, Math.round(elapsedMs / 1000)) : 0;
+      const elapsedExactSec = elapsedMs / 1000;
+      const settledPerSec = elapsedExactSec > 0 ? c.settled / elapsedExactSec : 0;
+      const successPerSec = elapsedExactSec > 0 ? c.okTotal / elapsedExactSec : 0;
+      const eligibleAfterUnavailable = Math.max(0, c.total - sendDiag.recipientUnavailable);
+      const eligibleSuccessPct = eligibleAfterUnavailable ? (c.okTotal / eligibleAfterUnavailable) * 100 : 0;
+      const socketAckCount = sendDiag.socketAckOk + sendDiag.socketAckRejected + sendDiag.socketNoAck;
+      const socketAckAvgMs = socketAckCount ? Math.round(sendDiag.socketAckMsTotal / socketAckCount) : 0;
+      const socketLaneFinal = getPageSocketLaneStats();
+      const apiStartedSafe = Math.max(1, sendDiag.apiStarted);
+      const apiFetchSafe = Math.max(1, sendDiag.apiFetchAttempts);
+      const apiStatuses = Object.keys(sendDiag.apiStatusCounts).sort((a, b) => Number(a) - Number(b))
+        .map((status) => status + '×' + sendDiag.apiStatusCounts[status]).join(', ') || 'không có';
       const byCh = [];
       if (c.okApi) byCh.push('API: ' + c.okApi);
       if (c.okExt) byCh.push('Ext: ' + c.okExt);
@@ -4849,6 +6349,8 @@
       if (isDoneAll && !batchStats.finalLogged && c.total > 0) {
         batchStats.finalLogged = true;
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
+        logLine('🧾 GHI NHỚ LỖI: thêm mới ' + unavailableAddedThisRun.size + ' ID Socket confirmed-unavailable · tổng đang nhớ '
+          + unavailableConversationIds.size + ' (chỉ tự bỏ chọn khi tải/chọn danh sách sau).');
         logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total
           + ' tin (' + pct + '%)' + chStr
           + ' | ❌ Lỗi: ' + c.failTotal
@@ -4857,20 +6359,77 @@
           + ((buStats.ok || buStats.cancelled)
             ? ' | 🔁 Bù OK: ' + buStats.ok + ' (' + Object.keys(buStats.byWhy).map((k) => k + ': ' + buStats.byWhy[k]).join(' · ') + ') · hủy bù tránh trùng: ' + buStats.cancelled
             : '')
-          + ((sendDiag.sockRetry || sendDiag.photoRetry)
-            ? ' | 🔂 Socket bắn lại sau rejected: ' + sendDiag.sockRetry + ' · bắn lại ảnh: ' + sendDiag.photoRetry
+          + ((verifyStats.found || verifyStats.fired || verifyStats.unknown)
+            ? ' | 🔎 Kiểm chứng ACK: đã đến nơi ' + verifyStats.found + ' · bắn cứu ' + verifyStats.fired + ' · không kiểm chứng được ' + verifyStats.unknown
+            : '')
+          + ((extTimeoutStats.timeout || extTimeoutStats.skipped || extTimeoutStats.found || extTimeoutStats.notFound || extTimeoutStats.unknown)
+            ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy tin ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
             : '')
           + ' | ⏱ Tổng thời gian: ' + elapsedSec + 's');
+        logLine('⚡ TỐC ĐỘ: đã chốt ' + c.settled + '/' + c.total + ' (' + settledPerSec.toFixed(2) + '/giây; '
+          + (settledPerSec * 60).toFixed(0) + '/phút) · thành công ' + c.okTotal + ' (' + successPerSec.toFixed(2)
+          + '/giây; ' + (successPerSec * 60).toFixed(0) + '/phút) · loại chat FB xác nhận unavailable '
+          + sendDiag.recipientUnavailable + ' → mục tiêu còn ' + eligibleAfterUnavailable + ', thành công '
+          + c.okTotal + '/' + eligibleAfterUnavailable + ' (' + eligibleSuccessPct.toFixed(1) + '%) · đang chờ ' + c.pending
+          + ' · lỗi ' + c.failTotal + ' · không rõ ' + c.unsureTotal + ' · bỏ qua ' + c.skipTotal);
+        logLine('🌊 WAVE: script ' + APP_VERSION + ' · ' + waveDiag.wavesStarted + '/' + waveDiag.plannedWaves + ' wave · size ' + waveDiag.waveSize
+          + ' · gap cấu hình ' + waveDiag.configuredGapMs + 'ms · Gửi nhanh ' + (waveDiag.quickEnabled ? 'BẬT' : 'TẮT')
+          + ' · main cap ' + waveDiag.mainCapMinObserved + '–96 (cuối ' + waveDiag.mainCapFinal + ', hạ/tăng ' + waveDiag.mainCapDownshifts + '/' + waveDiag.mainCapUpshifts + ') / active max ' + waveDiag.maxMainInFlight
+          + ' · Socket/page cap ' + SOCKET_LANE_MIN + '–' + SOCKET_LANE_MAX + ' · wave→cổng TB/max '
+          + (waveDiag.wavesStarted ? Math.round(waveDiag.gateWaitMsTotal / waveDiag.wavesStarted) : 0) + '/' + waveDiag.gateWaitMsMax + 'ms'
+          + ' · peak Socket queue/active/cool ' + waveDiag.maxSocketRetryQueue + '/' + waveDiag.maxSocketRetryActive + '/' + waveDiag.maxSocketCooldown
+          + ' · peak Ext queue/active ' + waveDiag.maxExtQueue + '/' + waveDiag.maxExtActive
+          + ' · peak Socket/page active total/per-page ' + waveDiag.maxSocketLaneActiveTotal + '/' + waveDiag.maxSocketLaneActivePerPage
+          + ' · peak Socket/page waiting total/per-page ' + waveDiag.maxSocketLaneWaitingTotal + '/' + waveDiag.maxSocketLaneWaitingPerPage
+          + ' · Socket/page limits cuối [' + socketLaneFinal.limits + ']'
+          + ' · backoff chậm/no-ACK ' + SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD + '/' + SOCKET_LANE_NOACK_BACKOFF_THRESHOLD
+          + ' · peak API waiting ' + waveDiag.maxApiWaiting);
+        logLine('📡 SOCKET: ACK OK/rejected/no-ACK ' + sendDiag.socketAckOk + '/' + sendDiag.socketAckRejected + '/' + sendDiag.socketNoAck
+          + ' · ACK TB/max ' + socketAckAvgMs + '/' + sendDiag.socketAckMsMax + 'ms'
+          + ' · buckets <250/250-999/1-2s/2-5s/≥5s '
+          + sendDiag.socketAckLt250 + '/' + sendDiag.socketAck250To999 + '/' + sendDiag.socketAck1To2s + '/'
+          + sendDiag.socketAck2To5s + '/' + sendDiag.socketAckGte5s
+          + ' · retry lần ' + sendDiag.sockRetry + ' (cứu ' + sendDiag.sockRetryRecovered + ' · rejected '
+          + sendDiag.sockRetryRejected + ' · khác ' + sendDiag.sockRetryOther + ') · retry ảnh ' + sendDiag.photoRetry
+          + ' · người nhận rejected cuối ' + sendDiag.recipientUnavailable);
+        logLine('🌐 API NỀN: queued/started/fetch ' + sendDiag.apiQueued + '/' + sendDiag.apiStarted + '/' + sendDiag.apiFetchAttempts
+          + ' · OK/rejected/không rõ ' + sendDiag.apiSuccess + '/' + sendDiag.apiRejected + '/' + sendDiag.apiUnknown
+          + ' · HTTP status [' + apiStatuses + '] · 429/retry ' + sendDiag.api429 + '/' + sendDiag.api429Retries
+          + ' · fallback ' + sendDiag.apiFallback + ' · hủy ' + sendDiag.apiCancelled
+          + ' · queue wait TB/max ' + Math.round(sendDiag.apiQueueWaitMsTotal / apiStartedSafe) + '/' + sendDiag.apiQueueWaitMsMax + 'ms'
+          + ' · fetch TB/max ' + Math.round(sendDiag.apiFetchMsTotal / apiFetchSafe) + '/' + sendDiag.apiFetchMsMax + 'ms');
+        logLine('🧭 Chẩn đoán globalId: cache ' + gidStats.cacheHit
+          + ' · HTTP ' + gidStats.httpHit
+          + ' · WS ' + gidStats.wsHit
+          + ' · Ext ' + gidStats.extHit
+          + ' · HTTP không có gid ' + gidStats.httpNoGid
+          + ' · HTTP lỗi ' + gidStats.httpFail + ' (429×' + gidStats.http429 + ')'
+          + ' · Ext chưa rõ ' + gidStats.extUnknown
+          + ' · lần dò chưa ra ' + gidStats.unknown
+          + ' · batch nạp ' + gidStats.batchMappings + '/' + gidStats.batchReturned + ' mapping (lỗi ' + gidStats.batchFail + ')'
+          + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
+          + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
+          + ' · lane HTTP ' + ctxFetchLane.getLimit()
+          + ' / Ext dò ' + gidExtLane.getLimit()
+          + ' / Ext gửi ' + extSendLane.getLimit()
+          + ' / Socket/page ' + getPageSocketLaneRange());
       }
     } catch (e) { /* ignore */ }
   }
 
   function updateBatchSummaryUI() {
+    // Trong khi phát từng chat, chưa cần quét các map pending và dựng lại tổng hợp liên tục.
+    // Defer thẳng trước khi tính counter, tránh tạo thêm CPU load cho tất cả các tab.
+    const isLargeSending = batchStats.total > 200 && state.sending && !batchStats.loopFinished;
+    if (isLargeSending) {
+      if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 1000);
+      return;
+    }
     const c = getBatchSummaryCounts();
     const isDoneAll = batchStats.loopFinished && (c.pending === 0 || state.stopRequested);
-    // Khi chạy lô lớn (>200 chat) và chưa kết thúc: throttle cập nhật DOM 80ms/lần để không treo UI Chrome
+    // Khi lô lớn còn ACK/bù nền, chỉ dựng lại tổng hợp 1 lần/giây; chốt cuối vẫn flush ngay.
     if (!isDoneAll && c.total > 200) {
-      if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 80);
+      if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 1000);
       return;
     }
     if (summaryUiTimer) { clearTimeout(summaryUiTimer); summaryUiTimer = null; }
@@ -4969,9 +6528,11 @@
       return;
     }
     const myRun = runSeq;
-    // Chỉ bật gidForceFind khi đã từng thử 'ext' hoặc 'socket' mà thất bại; nếu mới chỉ thử 'api'
-    // (API từ chối ngoài 24h) thì global_id trong cache/GET /messages vẫn hoàn toàn hợp lệ!
-    const hadDirectFail = triedCh.indexOf('ext') > -1 || triedCh.indexOf('socket') > -1 || done.length > 0;
+    // Chỉ bật gidForceFind khi đã từng thử 'ext' hoặc 'socket' bị từ chối thực sự; nếu mới chỉ thử 'api'
+    // hoặc đang cứu ca Socket mất ACK thì global_id trong cache/GET /messages vẫn hoàn toàn hợp lệ!
+    const isNoAckRescue = /mất ACK/i.test(String(why || ''));
+    const isApi551 = /\(#551\)|Người này hiện không có mặt/i.test(String(why || ''));
+    const hadDirectFail = !isNoAckRescue && (triedCh.indexOf('ext') > -1 || triedCh.indexOf('socket') > -1 || done.length > 0);
     const delay = hadDirectFail ? (150 + Math.min(buRetrySeq++, 6) * BU_SPREAD_MS) : BU_RETRY_EXT_MS;
     logLine('⏳ ' + name + ' — ' + why + ' — đang bù'
       + (remaining.length > 1 ? ' (Socket/Extension)' : (' qua ' + (remaining[0] === 'ext' ? 'Extension' : 'Socket'))) + '…');
@@ -4985,7 +6546,7 @@
       }
       if (deliveredIds[conv.id]) return; // trong lúc chờ, tin đã đến nơi qua đường khác — thôi
       if (uncertainIds[conv.id] || finalFailedIds[conv.id]) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2
-      const buCtx = { gidForceFind: hadDirectFail };
+      const buCtx = { gidForceFind: hadDirectFail, isBuRetry: true, apiRejected551: isApi551 };
       busEnqueue(async () => {
         // Kiểm tra LẠI ngay trước khi bắn: trong lúc xếp hàng chờ lane (có thể cả phút ở
         // lô lớn), ACK của lần đầu có thể đã về hoặc watchdog đã chốt — kiểm tra ở timer
@@ -5021,6 +6582,7 @@
         }
         const ch = out.ch;
         const r = out.r;
+        const hasMoreAfterSocket = (ch === 'socket') && !isApi551 && remaining.some((c) => c !== 'socket' && triedCh.indexOf(c) < 0 && done.indexOf(c) < 0);
         if (r && r.ok) {
           markDelivered(conv.id, ch);
           postSendSideEffects(conv);
@@ -5031,7 +6593,7 @@
         } else if (r && r.sent === 'maybe') {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
           logLine('⚠ ' + name + ' — bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
-        } else if (r && r.recipientUnavailable) {
+        } else if (r && r.recipientUnavailable && !hasMoreAfterSocket) {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
           logLine('❌ ' + name + ' — bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
             + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)');
@@ -5060,78 +6622,371 @@
     if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
   }
 
+  /* ===== KIỂM CHỨNG SAU KHI SOCKET MẤT ACK (v1.91.44) =====
+   * Tại thời điểm mất ACK (noack) không thể phân biệt "tin chưa đi (socket chết ngầm)"
+   * với "tin đã đi nhưng gói /ls_resp bị mất" → vẫn chốt ⚠ và cấm bắn lại như cũ.
+   * Kiểm chứng chạy NỀN bằng kênh độc lập — đọc lại lịch sử chat qua API:
+   *   • Thấy tin của page khớp nội dung + mốc giờ → tin ĐÃ đến nơi (chỉ mất ACK)
+   *     → lật ✅ (markDelivered tự sửa số trong TỔNG HỢP, đúng mẫu "ACK trễ").
+   *   • Đọc được lịch sử mà KHÔNG thấy tin → tin chắc chắn chưa tới FB (publish rơi
+   *     vào socket chết ngầm) → nhả khóa outbound, mở lại chốt ⚠, bù đúng 1 vòng
+   *     qua scheduleBuRetry (đủ guard chống trùng như đường bù API).
+   *   • Không đọc được lịch sử / thiếu dữ kiện → GIỮ NGUYÊN ⚠, tuyệt đối không bắn mò. */
+  const SOCK_VERIFY_DELAY_MS = 1500; // chờ 1.5s sau thời điểm mất ACK (lúc này đã qua 8–15s kể từ publish) rồi đọc lịch sử và bắn cứu ngay nếu chưa có tin
+  // sockVerifyPending / sockVerifyFired / verifyStats: khai báo ở vùng sổ nền (cạnh pendingBg)
+  // để getBatchSummaryCounts tính được ca đang chờ kiểm chứng vào "pending" giữ lượt.
+
+  function reopenUncertain(convId) {
+    if (!convId || !uncertainIds[convId]) return;
+    delete uncertainIds[convId];
+    summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1);
+    updateBatchSummaryUI();
+  }
+
+  function normalizeMsgText(s) {
+    return String(s == null ? '' : s)
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/div>\s*<div[^>]*>/gi, '\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#0?39;|&apos;/gi, "'")
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAt) {
+    if (!Array.isArray(msgs) || !msgs.length) return false;
+    const batchStart = (batchStats && batchStats.startedAt) || sentAt;
+    // Chỉ xét tin được tạo trong lượt gửi hiện tại (trừ 3s lệch đồng hồ) và từ lúc bắt đầu bắn chat này (trừ 5s):
+    // TUYỆT ĐỐI không nhìn lùi 60–75s về lượt gửi trước đó (tránh khớp nhầm tin của lượt cũ gây BÙ THIẾU)!
+    const minTime = Math.max(batchStart - 3000, sentAt - 5000);
+    return msgs.some((m) => {
+      if (!m || m.is_removed) return false;
+      if (!m.from || String(m.from.id) !== String(pageId)) return false; // chỉ tin DO PAGE gửi
+      const rawT = String(m.inserted_at || '');
+      if (!rawT) return false;
+      const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
+      if (isNaN(t) || t < minTime) return false;
+      const normMsg = normalizeMsgText(m.message);
+      if (want && (normMsg === want || normMsg.indexOf(want) > -1)) return true;
+      if (!want && photo && Array.isArray(m.attachments) && m.attachments.length > 0) return true;
+      if (t >= sentAt - 2000 && (normMsg || (Array.isArray(m.attachments) && m.attachments.length > 0))) return true;
+      return false;
+    });
+  }
+
+  function scheduleSocketVerify(conv, text, photo, publishedAtMs) {
+    if (!conv || !conv.id) return;
+    const want = normalizeMsgText(text);
+    if (!want && !photo) return;
+    if (sockVerifyPending[conv.id]) return; // đã có 1 kiểm chứng đang chờ cho chat này
+    if (sockVerifyFired[conv.id] === runSeq) return; // lượt này đã cứu 1 lần rồi — giữ ⚠, không cứu vòng 2
+    const myRun = runSeq;
+    sockVerifyPending[conv.id] = myRun;
+    const nm = conv.name || conv.id;
+    const sentAt = publishedAtMs || Date.now();
+    const verifyDelay = (batchStats && batchStats.total > 50) ? 3000 : SOCK_VERIFY_DELAY_MS;
+    setTimeout(async () => {
+      try {
+        if (myRun !== runSeq) return; // đã sang lượt mới — giữ nguyên ⚠ lượt cũ, không bắn lẫn
+        if (state.stopRequested) return; // đang dừng — không bắn cứu
+        if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return; // kênh khác đã chốt xong
+        let f = null;
+        try { f = peekConv(conv); } catch (e) { f = null; }
+        if (!f || !(f.page_id || f.pageId)) {
+          try { f = await ctxFull(conv, {}); } catch (e) { f = null; }
+        }
+        f = f || conv;
+        const pageId = f.page_id || f.pageId || conv.pageId || String(conv.id || '').split('_')[0];
+        const convId = f.id || conv.id;
+        const custId = String(f.customerId || conv.customerId
+          || (f.customers && f.customers[0] && f.customers[0].id)
+          || (conv.customers && conv.customers[0] && conv.customers[0].id) || '');
+        if (!pageId) { verifyStats.unknown++; return; }
+        const url = apiBase() + '/v1/pages/' + pageId
+          + '/conversations/' + encodeURIComponent(convId)
+          + '/messages?customer_id=' + encodeURIComponent(custId)
+          + '&user_view=true&is_new_api=true&separate_pos=true';
+        const res = await ctxFetchLane(() => fetchJson(url, 2));
+        if (!res || !res.ok || !res.data || res.data.success === false) {
+          verifyStats.unknown++;
+          logLine('🔎 ' + nm + ' — không kiểm chứng được tin Socket (đọc lịch sử lỗi) — giữ ⚠ như cũ, không gửi lại');
+          return;
+        }
+        try {
+          const hGid = gidFromPayload(res.data);
+          const tid = f.thread_id || f.threadId || conv.threadId || '';
+          if (hGid && typeof window.__botfakeSaveGid__ === 'function') {
+            window.__botfakeSaveGid__(convId, pageId, tid, String(hGid));
+          }
+        } catch (e0) { /* ignore */ }
+        const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
+        if (!Array.isArray(msgs)) {
+          verifyStats.unknown++;
+          logLine('🔎 ' + nm + ' — không kiểm chứng được tin Socket (lịch sử lạ) — giữ ⚠ như cũ, không gửi lại');
+          return;
+        }
+        const found = isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAt);
+        if (found) {
+          verifyStats.found++;
+          markDelivered(conv.id, 'socket');
+          try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
+          logLine('🔎 ' + nm + ' — kiểm chứng: tin ĐÃ đến nơi (Socket chỉ mất ACK) — tính ✅ Socket');
+          return;
+        }
+        // Đọc được lịch sử mà không thấy tin → publish chưa hề tới FB (socket chết ngầm)
+        verifyStats.fired++;
+        sockVerifyFired[conv.id] = myRun;
+        reopenUncertain(conv.id);
+        releaseOutbound(conv.id); // tin chắc chưa đi → nhả khóa để kênh cứu được bắn (đúng luật khóa outbound)
+        noteBgPending(conv, 'verify-bu');
+        logLine('🔎 ' + nm + ' — kiểm chứng: CHƯA thấy tin trong lịch sử — bắn cứu 1 vòng qua Extension');
+        scheduleBuRetry(conv, text, photo, nm, 'Socket mất ACK (kiểm chứng chưa thấy tin)', ['socket']);
+      } catch (e) {
+        verifyStats.unknown++;
+        logLine('🔎 ' + nm + ' — kiểm chứng lỗi (' + (e && e.message || e) + ') — giữ ⚠ như cũ, không gửi lại');
+      } finally {
+        delete sockVerifyPending[conv.id]; // nhả sổ chờ ở mọi lối ra — lượt chỉ được kết thúc sau khi kiểm chứng chốt xong
+        // Dù kiểm chứng thấy/không thấy/lỗi cũng phải tính lại pending và
+        // nhả nút Đang gửi; thiếu bước này UI treo ở “còn 1 tin đang xác
+        // nhận/bù nền” dù ca đó đã được đếm ⚠ từ trước.
+        try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
+        try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
+      }
+    }, verifyDelay);
+  }
+
+  // KIỂM CHỨNG SAU KHI EXTENSION TIMEOUT: lệnh Ext đã phát đi nhưng adapter
+  // không trả phản hồi. Khác Socket mất ACK, lệnh Ext gốc vẫn có thể nằm trong
+  // hàng đợi của Extension và đi sau đó — vì vậy kiểm chứng này CHỈ được phép
+  // lật ⚠ thành ✅ khi thấy đúng tin trong lịch sử. Không thấy tin thì vẫn giữ
+  // ⚠, không bắn cứu, không mở khóa outbound (tránh trùng tuyệt đối).
+  const EXT_VERIFY_DELAY_MS = 20000; // sau mốc adapter timeout 35s → tổng phân xử khoảng 55–60s
+  function scheduleExtTimeoutVerify(conv, text, photo, sentAtMs) {
+    if (!conv || !conv.id || !sentAtMs) return;
+    const want = normalizeMsgText(text);
+    if (!want && !photo) return;
+    if (extVerifyPending[conv.id]) return;
+    if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+    const myRun = runSeq;
+    extVerifyPending[conv.id] = myRun;
+    const nm = conv.name || conv.id;
+    const delayMs = EXT_VERIFY_DELAY_MS + Math.floor(Math.random() * 5000); // rải nhịp khi timeout theo cụm
+    setTimeout(async () => {
+      try {
+        if (myRun !== runSeq) return;
+        if (state.stopRequested) return;
+        if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+        let f = null;
+        try { f = peekConv(conv); } catch (e) { f = null; }
+        if (!f || !(f.page_id || f.pageId)) {
+          try { f = await ctxFull(conv, {}); } catch (e) { f = null; }
+        }
+        f = f || conv;
+        const pageId = f.page_id || f.pageId || conv.pageId || String(conv.id || '').split('_')[0];
+        const convId = f.id || conv.id;
+        const custId = String(f.customerId || conv.customerId
+          || (f.customers && f.customers[0] && f.customers[0].id)
+          || (conv.customers && conv.customers[0] && conv.customers[0].id) || '');
+        if (!pageId) { extTimeoutStats.unknown++; return; }
+        const url = apiBase() + '/v1/pages/' + pageId
+          + '/conversations/' + encodeURIComponent(convId)
+          + '/messages?customer_id=' + encodeURIComponent(custId)
+          + '&user_view=true&is_new_api=true&separate_pos=true';
+        const res = await ctxFetchLane(() => fetchJson(url, 1, { timeoutMs: 8000 }));
+        if (!res || !res.ok || !res.data || res.data.success === false) {
+          extTimeoutStats.unknown++;
+          return;
+        }
+        const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
+        if (!Array.isArray(msgs)) { extTimeoutStats.unknown++; return; }
+        const found = isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAtMs);
+        if (found) {
+          extTimeoutStats.found++;
+          markDelivered(conv.id, 'ext');
+          try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
+          logLine('🔎 ' + nm + ' — kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi — tính ✅ Ext');
+          return;
+        }
+        extTimeoutStats.notFound++;
+        // Không log từng ca "chưa thấy" để tránh ngập log khi timeout theo cụm;
+        // số tổng nằm ở dòng TỔNG HỢP. Vẫn giữ ⚠ và không bắn lại.
+      } catch (e) {
+        extTimeoutStats.unknown++;
+      } finally {
+        delete extVerifyPending[conv.id];
+        // Ca Ext timeout đã được đếm ⚠ ngay khi timeout; kiểm chứng nền
+        // chỉ có thể lật ✅ nếu thấy tin. Khi nó kết thúc mà không thấy
+        // tin, vẫn phải tính lại pending để lượt gửi chốt hẳn, không treo
+        // UI ở trạng thái đang xác nhận.
+        try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
+        try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
+      }
+    }, delayMs);
+  }
+
   // Nhóm chat theo NỘI DUNG sẽ gửi: chat thuộc câu nào → ĐÚNG chữ của câu đó;
   // chat lẻ (không thuộc câu nào) → câu đang gõ trên ô textarea. Trả về [{text, list}].
   function buildSendGroups(matches, savedLists, typedText) {
     return [{ text: typedText || '', list: (matches || []).slice() }];
   }
 
+  async function readClipboardText() {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
+        const txt = await Promise.race([
+          navigator.clipboard.readText(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('clipboard timeout')), 800)),
+        ]);
+        if (typeof txt === 'string' && txt.trim()) {
+          state.lastCopiedText = txt;
+          return txt;
+        }
+      }
+    } catch (e) { /* trình duyệt chưa cấp quyền hoặc chặn readText -> dùng bản copy gần nhất trên trang */ }
+    return state.lastCopiedText || '';
+  }
+
   async function sendToAll() {
-    if (state.sending) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
-    // Cờ listIncomplete CHỈ nói về lần QUÉT DANH SÁCH TRÊN TRANG (scanFullList: API trả thiếu
-    // so với màn hình). Chat của "câu đã lưu" / "list vừa gửi" là dữ liệu tự thân (items) →
-    // không phụ thuộc lần quét trang, nên không chặn oan (trước đây bị chặn → phải tải lại).
+    try { markSendIdleIfSettled(); } catch (e0) { /* ignore */ }
+    if (state.sending || state.confirmingSend) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
+    if (state.sendListFrozen) {
+      logLine('⏳ Danh sách đang được xử lý — chờ lượt gửi/cập nhật hiện tại hoàn tất rồi chạy lượt mới.');
+      return;
+    }
     if (state.listIncomplete) {
       alert('Danh sách tải CHƯA ĐẦY ĐỦ nên chưa thể gửi.\nHãy bấm “⚡ Tải danh sách” để tải lại cho đủ rồi mới gửi.');
       logLine('⛔ Chặn gửi: danh sách tải chưa đầy đủ — bấm ⚡ Tải danh sách để tải lại.');
       return;
     }
-    // LƯU Ý: panel nằm trong shadow DOM → phải lấy phần tử qua shadow.getElementById,
-    // document.querySelector sẽ không thấy (đây là nguyên nhân lỗi "Hãy nhập nội dung câu cần gửi")
-    const msgEl = shadow && shadow.getElementById('ssb-msg');
-    const typedText = (msgEl && msgEl.value || '').trim() || ((state.quickReply && state.quickReply.text) || ''); // câu nhanh khôi phục sau F5 mà ô câu trống → dùng chữ của câu nhanh
-    const imgState = state.image || null;
-    let targets = state.matches.filter((m) => m.checked);
-    if (!targets.length) {
-      alert('Chưa có đoạn chat nào được chọn.\nHãy bấm ⚡ Tải danh sách rồi ☑ Chọn tất cả.');
+    state.confirmingSend = true;
+    // Chốt lần cuối ngay trước hộp xác nhận: kể cả checklist cũ/stale vẫn không đưa ID đã nhớ vào snapshot gửi.
+    let suppressedRemembered = 0;
+    state.matches.forEach((m) => {
+      if (m && isRememberedUnavailable(m.id)) {
+        if (m.checked) suppressedRemembered++;
+        m.checked = false;
+        m.knownUnavailable = true;
+      }
+    });
+    if (suppressedRemembered) {
+      state.listKey = '';
+      logLine('🧹 Đã tự bỏ chọn ' + suppressedRemembered + ' ID Socket unavailable đã nhớ trước khi tạo snapshot gửi.');
+      render();
+    }
+    const selectedSnapshot = state.matches.filter((m) => m && m.checked && !isRememberedUnavailable(m.id)).map((m) => ({ ...m }));
+    if (!selectedSnapshot.length) {
+      state.confirmingSend = false;
+      applyRunStopButtons();
+      alert('Chưa có đoạn chat nào được chọn.\nHãy bấm ⚡ Tải danh sách rồi ☑ Chọn tất cả (hoặc Alt+Click chọn chat).');
       return;
     }
-    // loại dòng trùng id — 1 chat chỉ được gửi 1 lần
+    freezeSendChecklist();
+    let sendConfirmed = false;
+    let typedText = '';
+    const useClipboardMode = state.msgSource === 'clipboard';
+    try {
+      if (useClipboardMode) {
+        const rawClip = await readClipboardText();
+        typedText = String(rawClip || '').trim();
+        const clipPreviewEl = shadow && shadow.getElementById('ssb-clip-preview-text');
+        if (clipPreviewEl) {
+          clipPreviewEl.textContent = typedText
+            ? ('Nội dung Clipboard vừa đọc: “' + clip(typedText, 120) + '”')
+            : '(Clipboard hiện đang trống hoặc chưa cấp quyền đọc Clipboard)';
+        }
+      } else {
+        const msgEl = shadow && shadow.getElementById('ssb-msg');
+        typedText = (msgEl && msgEl.value || '').trim() || ((state.quickReply && state.quickReply.text) || '');
+      }
+      // Nhường 20ms để chu kỳ keydown/keyup của phím Tab hoàn tất trước khi mở hộp thoại modal alert/confirm
+      await sleep(20);
+      const imgState = state.image || null;
+      let targets = selectedSnapshot.slice();
+      {
+        const seenIds = new Set();
+        const uniq = [];
+        targets.forEach((m) => {
+          if (!seenIds.has(m.id)) { seenIds.add(m.id); uniq.push(m); }
+        });
+        if (uniq.length !== targets.length) {
+          logLine('⚠ Loại ' + (targets.length - uniq.length) + ' dòng trùng lặp trong danh sách gửi');
+        }
+        targets = uniq;
+      }
+      if (state.sentIds && state.sentIds.size > 0) {
+        const before = targets.length;
+        targets = targets.filter((m) => !state.sentIds.has(m.id));
+        if (targets.length < before) {
+          logLine('⏩ Bỏ qua ' + (before - targets.length) + ' chat đã gửi — chỉ gửi phần còn lại.');
+        }
+      }
+      let sendGroups = buildSendGroups(targets, state.savedLists, typedText);
+      const textsAll = sendGroups.map((g) => g.text).filter((t) => t && t.trim());
+      if (!textsAll.length && !imgState && !(state.quickReply && state.quickReply.items && state.quickReply.items.length)) {
+        if (useClipboardMode) {
+          alert('📋 Đang ở chế độ gửi bằng dữ liệu Clipboard nhưng Clipboard hiện đang trống (hoặc chưa cho phép quyền đọc Clipboard).\nHãy copy nội dung tin cần gửi rồi bấm Chạy / phím Tab lại.');
+        } else {
+          alert('Hãy nhập nội dung câu cần gửi (hoặc chọn ảnh).');
+        }
+        return;
+      }
+      const names = targets.slice(0, MAX_NAME_LIST).map((m) => m.name || m.id).join(', ')
+        + (targets.length > MAX_NAME_LIST ? ', …' : '');
+      const nComment = targets.filter((m) => m.type === 'comment').length;
+      const warnComment = nComment
+        ? '\n\n⚠ Trong đó ' + nComment + ' chat loại BÌNH LUẬN — sẽ gửi dưới dạng TRẢ LỜI BÌNH LUẬN (công khai dưới bài viết)!'
+        : '';
+      const imgNote = imgState ? '\n\n📷 Kèm ảnh: ' + (imgState.name || 'ảnh')
+        : (state.quickReply && state.quickReply.items && state.quickReply.items.length)
+          ? '\n\n⚡ Câu nhanh "' + state.quickReply.shortcut + '" — ' + state.quickReply.items.length + ' ảnh (bắt bằng Alt+Q)' : '';
+      const modeTag = useClipboardMode ? ' [📋 TỪ CLIPBOARD]' : ' [📝 CÂU TRÊN GIAO DIỆN]';
+      const textNote = textsAll.length > 1
+        ? '\n\n📝 ' + textsAll.length + ' nội dung — mỗi câu được gửi đúng chữ đã lưu: '
+          + textsAll.map((t) => '“' + clip(t, 40) + '”').join(', ')
+        : '';
+      if (!confirm('Gửi ' + (textsAll.length > 1 ? textsAll.length + ' nội dung' : (textsAll.length ? '1 câu' + modeTag : 'ảnh'))
+        + ' tới ' + targets.length + ' đoạn chat đã chọn?\n\n'
+        + (textsAll.length === 1 ? '“' + clip(textsAll[0] || '(chỉ gửi ảnh)', 160) + '”' : '(mỗi câu đúng nội dung đã lưu)')
+        + textNote + imgNote + '\n\nNhận: ' + names + warnComment)) return;
+      clearHighlightRowsNow();
+      sendConfirmed = true;
+    } finally {
+      state.confirmingSend = false;
+      if (!sendConfirmed) {
+        unfreezeSendChecklist(selectedSnapshot.map((m) => m.id));
+        render();
+      }
+    }
+    if (state.matches.length) {
+      clearSelection();
+      logLine('🧹 Đã xóa checkbox/chọn chat ngay khi bắt đầu lượt gửi.');
+    }
+    const imgState = state.image || null;
+    let targets = selectedSnapshot.slice();
     {
       const seenIds = new Set();
       const uniq = [];
       targets.forEach((m) => {
         if (!seenIds.has(m.id)) { seenIds.add(m.id); uniq.push(m); }
       });
-      if (uniq.length !== targets.length) {
-        logLine('⚠ Loại ' + (targets.length - uniq.length) + ' dòng trùng lặp trong danh sách gửi');
-      }
       targets = uniq;
     }
-    // Bỏ qua chat đã gửi ở lượt trước (khi bấm "▶ Charging tiếp")
     if (state.sentIds && state.sentIds.size > 0) {
-      const before = targets.length;
       targets = targets.filter((m) => !state.sentIds.has(m.id));
-      if (targets.length < before) {
-        logLine('⏩ Bỏ qua ' + (before - targets.length) + ' chat đã gửi — chỉ gửi phần còn lại.');
-      }
     }
-    // nội dung sẽ gửi: câu đã tích → chữ của TỪNG CÂU; chat lẻ → ô đang gõ
     let sendGroups = buildSendGroups(targets, state.savedLists, typedText);
-    const textsAll = sendGroups.map((g) => g.text).filter((t) => t && t.trim());
-    if (!textsAll.length && !imgState && !(state.quickReply && state.quickReply.items && state.quickReply.items.length)) { alert('Hãy nhập nội dung câu cần gửi (hoặc chọn ảnh).'); return; }
-    const names = targets.slice(0, MAX_NAME_LIST).map((m) => m.name || m.id).join(', ')
-      + (targets.length > MAX_NAME_LIST ? ', …' : '');
-    const nComment = targets.filter((m) => m.type === 'comment').length;
-    const warnComment = nComment
-      ? '\n\n⚠ Trong đó ' + nComment + ' chat loại BÌNH LUẬN — sẽ gửi dưới dạng TRẢ LỜI BÌNH LUẬN (công khai dưới bài viết)!'
-      : '';
-    const imgNote = imgState ? '\n\n📷 Kèm ảnh: ' + (imgState.name || 'ảnh')
-      : (state.quickReply && state.quickReply.items && state.quickReply.items.length)
-        ? '\n\n⚡ Câu nhanh "' + state.quickReply.shortcut + '" — ' + state.quickReply.items.length + ' ảnh (bắt bằng Alt+Q)' : '';
-    const textNote = textsAll.length > 1
-      ? '\n\n📝 ' + textsAll.length + ' nội dung — mỗi câu được gửi đúng chữ đã lưu: '
-        + textsAll.map((t) => '“' + clip(t, 40) + '”').join(', ')
-      : '';
-    if (!confirm('Gửi ' + (textsAll.length > 1 ? textsAll.length + ' nội dung' : (textsAll.length ? '1 câu' : 'ảnh'))
-      + ' tới ' + targets.length + ' đoạn chat đã chọn?\n\n'
-      + (textsAll.length === 1 ? '“' + clip(textsAll[0] || '(chỉ gửi ảnh)', 120) + '”' : '(mỗi câu đúng nội dung đã lưu)')
-      + textNote + imgNote + '\n\nNhận: ' + names + warnComment)) return;
 
     // ĐÁNH DẤU ĐANG GỬI NGAY từ trước bước lọc: bước lọc tag/tải ảnh có thể chờ API —
     // không chặn đúp ở đây thì bấm lần 2 chạy song song lần 1 (log hiện 2 dòng lọc)
     state.sending = true;
     state.stopRequested = false;
+    if (preloadSelectedTimer) { clearTimeout(preloadSelectedTimer); preloadSelectedTimer = null; }
+    preloadSelectedSeq++;
     applyRunStopButtons();
     startKeepAliveAudio();
     batchSkipApi = false;
@@ -5139,6 +6994,7 @@
     // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
     // bù của lượt trước đang chờ sẽ tự hủy (runSeq) — không gửi lẫn vào lượt mới
     runSeq++;
+    unavailableAddedThisRun.clear();
     buRetrySeq = 0;
     Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
     Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
@@ -5152,6 +7008,13 @@
     Object.keys(skippedLateIds).forEach((k) => { delete skippedLateIds[k]; });
     Object.keys(spareFbIdPool).forEach((k) => { delete spareFbIdPool[k]; });
     Object.keys(socketRejectStreak).forEach((k) => { delete socketRejectStreak[k]; });
+    Object.keys(socketConfirmedDeadStreak).forEach((k) => { delete socketConfirmedDeadStreak[k]; });
+    gidHttpCtl.good = 0;
+    gidHttpCtl.bad = 0;
+    gidHttpCtl.backoffStreak = 0;
+    if (ctxFetchLane && typeof ctxFetchLane.setLimit === 'function' && ctxFetchLane.getLimit() < CTX_FETCH_INITIAL) {
+      ctxFetchLane.setLimit(CTX_FETCH_INITIAL);
+    }
     summaryCounters.okApi = 0;
     summaryCounters.okExt = 0;
     summaryCounters.okSocket = 0;
@@ -5164,18 +7027,25 @@
     batchStats.startedAt = Date.now();
     batchStats.loopFinished = false;
     buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
-    sendDiag.sockRetry = 0; sendDiag.photoRetry = 0;
+    verifyStats.found = 0; verifyStats.fired = 0; verifyStats.unknown = 0;
+    extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
+    extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
+    extSendCtl.probeInFlight = false; // lượt mới không được kẹt bởi thăm dò của lượt cũ đã dừng
+    resetGidStats();
+    Object.keys(sendDiag).forEach((k) => { sendDiag[k] = k === 'apiStatusCounts' ? Object.create(null) : 0; });
+    Object.keys(waveDiag).forEach((k) => { waveDiag[k] = 0; });
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
     // Khởi động warmUpSockets + BATCH_GET_GLOBAL_ID NGAY TỪ ĐẦU (chạy song song với lọc tag + upload ảnh)
-    try { warmUpSockets(targets); } catch (e) { /* ignore */ }
+    try { warmUpSockets(targets, { forceBatch: true }); } catch (e) { /* ignore */ }
 
 
     // Chuẩn bị ảnh (nếu có): upload 1 lần → gắn attachment cho từng page
     let photo = null;
     const fbIdByPage = {};
     const apiFbIdsByPage = {};
+    const contentIdByPage = {};
     const qrPhotoByPage = {};
     const qrSel = state.quickReply;
     if (qrSel && Array.isArray(qrSel.items) && qrSel.items.length) {
@@ -5233,7 +7103,8 @@
           logLine('⛔ Không tải được ảnh (' + up.error + ') — HỦY gửi để tránh gửi thiếu ảnh.');
           state.sending = false;
           batchStats.active = false;
-          reportExtJob({ phase: 'idle' });
+          unfreezeSendChecklist();
+            reportExtJob({ phase: 'idle' });
           stopKeepAliveAudio();
           render();
           return;
@@ -5253,11 +7124,19 @@
       });
       for (let i = 0; i < pageIds.length; i++) {
         if (state.stopRequested) break;
-        const up2 = await uploadPhotoForPage(pageIds[i], photo);
+        let pagePhoto = photo;
+        if (!photo.id && photo.url) {
+          const cid = await resolveContentIdForPageUrl(pageIds[i], photo.url);
+          if (cid) {
+            contentIdByPage[pageIds[i]] = cid;
+            pagePhoto = Object.assign({}, photo, { id: cid });
+          }
+        }
+        const up2 = await uploadPhotoForPage(pageIds[i], pagePhoto);
         if (up2.ok) {
           fbIdByPage[pageIds[i]] = up2.fbId;
           apiFbIdsByPage[pageIds[i]] = up2.fbIds || [up2.fbId];
-          logLine('☁️ Page ' + pageIds[i] + ': gắn ảnh OK');
+          logLine('☁️ Page ' + pageIds[i] + ': gắn ảnh OK' + (contentIdByPage[pageIds[i]] ? ' (content_id)' : ''));
         } else {
           logLine('⚠ Page ' + pageIds[i] + ': không gắn được ảnh (' + up2.error + ') — chat page này sẽ báo lỗi');
         }
@@ -5266,9 +7145,9 @@
     // Gửi theo lượt: hỗ trợ tới 50.000 tin/lượt cho quy mô 20.000–30.000 tin nhắn
     const waveEl = shadow && shadow.getElementById('ssb-wave');
     const gapEl = shadow && shadow.getElementById('ssb-gap');
-    const WAVE_SIZE = Math.max(1, Math.min(100000, parseInt((waveEl && waveEl.value) || '30000', 10) || 30000));
-    const gapRaw = parseInt((gapEl && gapEl.value) || '500', 10);
-    const WAVE_GAP = isNaN(gapRaw) ? 0 : Math.max(0, Math.min(60000, gapRaw));
+    const WAVE_SIZE = Math.max(1, Math.min(100000, parseInt((waveEl && waveEl.value) || '200', 10) || 200));
+    const gapRaw = parseInt((gapEl && gapEl.value) || '250', 10);
+    const WAVE_GAP = isNaN(gapRaw) ? 250 : Math.max(0, Math.min(60000, gapRaw));
     // gửi theo từng nhóm nội dung (câu khác câu → chữ khác chữ)
     sendGroups = buildSendGroups(targets, state.savedLists, typedText);
     // v1.82.5 — cùng 1 chat chỉ nằm 1 nhóm: nếu 2 câu cùng chứa 1 chat thì giữ lần đầu, không bắn 2 lần.
@@ -5297,18 +7176,23 @@
       }
     }
     const totalAll = sendGroups.reduce((n2, g) => n2 + g.list.length, 0);
+    waveDiag.waveSize = WAVE_SIZE;
+    waveDiag.configuredGapMs = WAVE_GAP;
+    // runGroupWaves200 vẫn chạy 1 wave đơn cho lô ≤ WAVE_SIZE; luôn đếm đúng số wave dự kiến.
+    waveDiag.plannedWaves = sendGroups.reduce((n2, g) => n2 + Math.ceil(g.list.length / WAVE_SIZE), 0);
     batchStats.total = totalAll;
     batchStats.startedAt = Date.now();
     updateBatchSummaryUI();
     const useWaves = totalAll > WAVE_SIZE;
     logLine(useWaves
-      ? '🚀 Bắt đầu gửi ' + totalAll + ' chat THEO LƯỢT: mỗi lượt ' + WAVE_SIZE + ' tin, cách nhau ' + WAVE_GAP + 'ms…'
-      : '🚀 Bắt đầu gửi ' + totalAll + ' chat (1 lượt — ' + WAVE_SIZE + ' tin/lượt)…');
+      ? '🚀 Bắt đầu gửi ' + totalAll + ' chat THEO WAVE ' + WAVE_SIZE + ' TIN (4 làn chính + 2 làn bù song song)…'
+      : '🚀 Bắt đầu gửi ' + totalAll + ' chat (Wave tối đa ' + WAVE_SIZE + ' tin — 4 làn chính + 2 làn bù)…');
 
     let ok = 0, fail = 0, done = 0, unsure = 0, firedN = 0;
     let lastSpeedLogAt = Date.now();
     const quickEl0 = shadow && shadow.getElementById('ssb-quick');
     const quickOn = !!(quickEl0 && quickEl0.checked);
+    waveDiag.quickEnabled = quickOn;
 
     // CÂU NHANH NHIỀU ĐOẠN: gửi từng đoạn theo đúng thứ tự như gửi tay — mỗi đoạn qua
     // sendOne như 1 tin thường. Chưa đoạn nào đến nơi mà lỗi → trả nguyên kết quả để xử lý
@@ -5328,11 +7212,16 @@
         const pArg = (pt.items && pt.items.length)
           ? { items: pt.items, url: pt.items[0].url, id: pt.items[0].id, fbId: (pt.apiFbIds && pt.apiFbIds[0]) || '', fbIds: pt.apiFbIds || [], w: pt.items[0].w || 0, h: pt.items[0].h || 0 }
           : null;
-        // CÂU NHIỀU ĐOẠN: MỌI đoạn đều gửi ĐỒNG BỘ (kể cả đoạn 0). Đoạn 0 bắn-nhả sẽ nằm
-        // trong apiSendLane trong khi đoạn 1 đi thẳng → đảo thứ tự; ACK đoạn 0 về còn set
-        // deliveredIds làm đoạn 2+ bị guard chặn trả ok giả. Đồng bộ hết = xác nhận thật,
-        // đúng thứ tự; nhả khóa chống trùng giữa các đoạn.
-        const ptOpts = Object.assign({}, sendOpts, { quick: false, sockFired: false });
+        // CÂU NHIỀU ĐOẠN: MỌI đoạn đều gửi ĐỒNG BỘ (kể cả đoạn 0) nhưng vẫn giữ dynamicDirect
+        // (0ms Fast-Path chọn Socket cho chat ngoài 24h). Đoạn 1+ dùng prioritySocket để phát
+        // nối đuôi ngay sau đoạn 0 mà không bị xếp sau hàng đợi của các chat khác.
+        const ptOpts = Object.assign({}, sendOpts, {
+          quick: sendOpts.quick,
+          awaitDirect: true,
+          sockFired: false,
+          syncMultiPart: true,
+          prioritySocket: i > 0,
+        });
         if (i > 0) {
           ptOpts.fastOnly = false;
           ptOpts.deferredCtx = null;
@@ -5370,7 +7259,8 @@
       // 🚀 Tối ưu quyết định cho 20.000–30.000 tin:
       // Nếu đang bật Chế độ nhanh (quickOn) và chat ngoài 24h ĐÃ CÓ SẴN global_id thật trong RAM/WebSocket
       // hoặc Socket đang mở → bỏ qua pre-ctx ở ngoài (để resolveGlobalId bên trong tự gọi ensureConvCtx khi cần).
-      let skipPreCtx = isDeferredPass;
+      // Wave 200: không giữ worker để nạp ctx trước riêng lẻ; sendOne/prepareDirectCtx tự lấy dữ liệu thiếu.
+      let skipPreCtx = isDeferredPass || !!(itemOpts && itemOpts.wave200Mode);
       if (!skipPreCtx && quickOn && c.type !== 'comment') {
         const full0 = peekConv(c) || c;
         const pid0 = (full0 && (full0.page_id || full0.pageId)) || c.pageId || String(c.id || '').split('_')[0];
@@ -5388,9 +7278,12 @@
         awaitDirect: true,
         fastOnly: !!(itemOpts && itemOpts.fastOnly),
         deferredCtx: (itemOpts && itemOpts.deferredCtx) || null,
-        // 🔥 Nấc 2 chỉ bật cho lô lớn (>50 tin): bắn-nhả qua Socket + xác nhận nền.
-        // Lô nhỏ vẫn chờ ACK trực tiếp để báo kết quả tức thì như cũ.
-        sockFired: totalAll > 50,
+        wave200Mode: !!(itemOpts && itemOpts.wave200Mode),
+        isSocketRetryPass: !!(itemOpts && itemOpts.isSocketRetryPass),
+        // 🔥 [FIX-TỐC-ĐỘ] Bật bắn-nhả: worker chỉ giữ ~6ms (pace + publish), ACK do firedCb xử lý nền.
+        // Không bật → 96 slot × (1/2,5s ACK) = 38 tin/s trần cứng. Bật → pace là limiter (~250/s/page).
+        // Vẫn giữ chống trùng qua sockFiredPending + outboundLock. ACK rejected → tự bù qua scheduleBuRetry.
+        sockFired: true,
       };
       let r;
       if (photo) {
@@ -5412,7 +7305,7 @@
         } else {
           const photoArg = photo.qr
             ? { items: qrPage.items, url: qrPage.url, id: qrPage.id, fbId: fbIdByPage[p] || '', fbIds: apiFbIdsByPage[p] || [], w: qrPage.w || 0, h: qrPage.h || 0 }
-            : { url: photo.url, id: photo.id, fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h };
+            : { url: photo.url, id: photo.id || contentIdByPage[p] || '', fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h };
           const fbId = photoArg.fbId || '';
           if (!fbId && c.type === 'comment') {
             done++;
@@ -5429,9 +7322,13 @@
       }
       // Nếu đang ở Làn Nhanh (fastOnly) mà chat này cần hỏi Extension / gửi qua Extension → đẩy sang hồ nền
       // extBacklogQueue mà chưa tăng done, giúp worker của Làn Nhanh giải phóng ngay ở 0ms!
-      if (r && r.deferredToExt) {
+      if (r && (r.deferredToExt || r.deferredToSocketRetry)) {
         return r;
       }
+      // Persistent skip is deliberately narrow: only the exact Socket confirmed-unavailable result.
+      rememberConfirmedSocketUnavailable(c, r);
+      if (r && r.recipientUnavailable) sendDiag.recipientUnavailable++;
+      if (itemOpts && (itemOpts.isSocketRetryPass || itemOpts.isExtBacklogPass)) clearBgPending(c.id);
       const via = r.ok ? (r.sendBy === 'direct' ? ' — gửi thẳng Socket/Ext'
         : r.sendBy === 'socket' ? ' — qua Socket'
         : r.sendBy === 'extension' ? ' — qua Extension' : '') : '';
@@ -5467,28 +7364,19 @@
       if (totalAll > 200 && Date.now() - lastSpeedLogAt >= 30000) {
         lastSpeedLogAt = Date.now();
         const elapsedS = Math.max(1, (Date.now() - batchStats.startedAt) / 1000);
-        const rate = done / elapsedS; // tin/giây từ đầu lượt
+        const rate = done / elapsedS; // chat đã xử lý/giây từ đầu lượt
+        const successRate = ok / elapsedS;
         const remainS = rate > 0 ? Math.round((totalAll - done) / rate) : 0;
         const fmtDur = (sec) => sec >= 3600 ? (sec / 3600).toFixed(1) + ' giờ' : Math.max(1, Math.round(sec / 60)) + ' phút';
-        logLine('📊 Đã xử lý ' + done + '/' + totalAll + ' · tốc độ ' + (rate * 60).toFixed(0) + ' tin/phút'
+        logLine('📊 Đã xử lý ' + done + '/' + totalAll + ' · tốc độ xử lý ' + (rate * 60).toFixed(0) + '/phút'
+          + ' · thành công ' + ok + '/' + totalAll + ' (' + (successRate * 60).toFixed(0) + ' tin/phút)'
           + ' · dự kiến còn ~' + fmtDur(remainS) + ' nữa');
       }
       return r;
     };
 
-    // 🚀 KIẾN TRÚC ĐA TẦNG KHÔNG CHẶN ĐẦU (TWO-PASS NON-BLOCKING PIPELINE v1.61.0 CHO 20.000–30.000 TIN):
-    //   • Làn 1 (fastHttpSocketPool — 96 worker song song, fastOnly=true):
-    //     Quét xuyên suốt từ chat 1 đến hết danh sách (2.356 / 5.089 / 20.000 chat) mà KHÔNG BAO GIỜ đứng chờ Extension!
-    //     Mọi chat lấy được global_id từ RAM / WebSocket / Server Pancake (GET /messages) đều được upload ảnh
-    //     và bắn thẳng qua Socket/API ngay lập tức. Chat nào thiếu global_id trên Server Pancake (cần hỏi Extension)
-    //     được đẩy sang extBacklogQueue trong 0ms để worker của Làn 1 lập tức bắn tiếp các chat phía sau (301..20.000)!
-    //   • Làn 2 (extBacklogWorkers — 16 worker chạy song song ở nền ngay từ giây thứ 0):
-    //     Âm thầm rút các chat từ extBacklogQueue để hỏi Extension / WebSocket loadThread mà không bao giờ
-    //     chiếm mất bất kỳ ghế nào của Làn 1!
-    const FAST_HTTP_SOCKET_POOL = 192; // v1.80.0: 160→192 worker làn nhanh
-    const EXT_BACKLOG_WORKERS = 48;
-    // Worker văng exception → chốt ⚠ cho đúng chat đó rồi ĐI TIẾP, không để sập cả pool
-    // (pool sập = các worker còn lại thành mồ côi, chat kẹt pending vĩnh viễn)
+    // Gửi được điều phối ngay trong tab Pancake hiện tại (không dispatch từng target qua service worker).
+    // Wave 200: worker chính có semaphore tổng; ACK/socket retry và Extension chạy ở hàng đợi riêng.
     const settleInternalError = (c, e) => {
       done++; unsure++;
       if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
@@ -5496,128 +7384,390 @@
         + ') — không rõ tin đã đi chưa, KHÔNG gửi thêm');
       return { ok: false, uncertain: true, error: 'lỗi nội bộ' };
     };
-    let gtextRef = '';
-    const sendBatch = async (gtext, batch) => {
-      gtextRef = gtext;
-      extNullStreak = 0;
-      // Đánh thức WebSocket loadThread ngay đầu lượt cho mọi page có trong batch
+    // 🔥 [FIX-TỐC-ĐỘ] Nâng từ 96 → 192 main slots. Với sockFired: true, mỗi slot quay vòng ~10ms
+    // → 192 × 100/s = 19.200/s theoretical, chỉ bị paceSocketPublish (4ms) chặn.
+    // Ext tăng 32→128, Socket retry tăng 44→96 để bù khi có rejected hàng loạt.
+    const WAVE_MAIN_LANES = 4;
+    const WAVE_PER_LANE = 48;
+    const WAVE_MAIN_TOTAL_CAP = 192;
+    const WAVE_SOCKET_RETRY_WORKERS = 96;
+    const WAVE_EXT_WORKERS = 128;
+    const WAVE_EXT_BACKLOG_HIGH_WATER = 96;
+    const WAVE_API_BACKLOG_HIGH_WATER = 96;
+
+    const runGroupWaves200 = async (gtext, fullList) => {
+      // Điều phối worker, retry và wave ngay trong tab Pancake; không chuyển job sang service worker.
+      const socketRetryQueue = [];
+      const socketRetryWaiters = [];
+      const socketCoolTimers = new Map();
+      const extBacklogQueue = [];
+      const extWaiters = [];
+      const allMainPromises = [];
+      let mainWavesLoopDone = false;
+      let inFlightMainCount = 0;
+      let pendingSocketCoolCount = 0;
+      let activeSocketRetryWorkers = 0;
+      let activeExtWorkers = 0;
+      let waveGateCheckFn = null;
+      const mainSlotWaiters = [];
+      let lastSocketPressureSampleAt = 0;
+      waveDiag.mainCapMinObserved = waveDiag.mainCapMinObserved
+        ? Math.min(waveDiag.mainCapMinObserved, WAVE_MAIN_TOTAL_CAP) : WAVE_MAIN_TOTAL_CAP;
+      const recordWavePressure = () => {
+        waveDiag.maxMainInFlight = Math.max(waveDiag.maxMainInFlight, inFlightMainCount);
+        waveDiag.maxSocketRetryQueue = Math.max(waveDiag.maxSocketRetryQueue, socketRetryQueue.length);
+        waveDiag.maxSocketRetryActive = Math.max(waveDiag.maxSocketRetryActive, activeSocketRetryWorkers);
+        waveDiag.maxSocketCooldown = Math.max(waveDiag.maxSocketCooldown, pendingSocketCoolCount);
+        waveDiag.maxExtQueue = Math.max(waveDiag.maxExtQueue, extBacklogQueue.length);
+        waveDiag.maxExtActive = Math.max(waveDiag.maxExtActive, activeExtWorkers);
+        waveDiag.maxApiWaiting = Math.max(waveDiag.maxApiWaiting, apiSendLane.waitingCount());
+        // Telemetry-only scan: sample per-page lane maps at most 10 times/second instead of
+        // iterating all page lanes on every send/ACK callback. This does not throttle send work.
+        const now = Date.now();
+        if (now - lastSocketPressureSampleAt < 100) return;
+        lastSocketPressureSampleAt = now;
+        const socketLaneStats = getPageSocketLaneStats();
+        waveDiag.maxSocketLaneActiveTotal = Math.max(waveDiag.maxSocketLaneActiveTotal, socketLaneStats.activeTotal);
+        waveDiag.maxSocketLaneWaitingTotal = Math.max(waveDiag.maxSocketLaneWaitingTotal, socketLaneStats.waitingTotal);
+        waveDiag.maxSocketLaneActivePerPage = Math.max(waveDiag.maxSocketLaneActivePerPage, socketLaneStats.activeMaxPerPage);
+        waveDiag.maxSocketLaneWaitingPerPage = Math.max(waveDiag.maxSocketLaneWaitingPerPage, socketLaneStats.waitingMaxPerPage);
+      };
+
+      // Fixed main semaphore: retain the tested 96-flight ceiling; only telemetry/UI work is throttled.
+      const acquireMainSlot = () => {
+        if (state.stopRequested) return Promise.resolve(false);
+        if (inFlightMainCount < WAVE_MAIN_TOTAL_CAP) {
+          inFlightMainCount++;
+          recordWavePressure();
+          return Promise.resolve(true);
+        }
+        return new Promise((resolve) => mainSlotWaiters.push(resolve));
+      };
+      const releaseMainSlot = () => {
+        if (state.stopRequested) {
+          inFlightMainCount = Math.max(0, inFlightMainCount - 1);
+          while (mainSlotWaiters.length) mainSlotWaiters.shift()(false);
+        } else if (mainSlotWaiters.length) {
+          // Pass the released slot directly to the next waiter; in-flight count remains unchanged.
+          mainSlotWaiters.shift()(true);
+        } else {
+          inFlightMainCount = Math.max(0, inFlightMainCount - 1);
+        }
+        recordWavePressure();
+      };
+      const isAllGroupWorkDone = () => mainWavesLoopDone
+        && inFlightMainCount <= 0
+        && pendingSocketCoolCount <= 0
+        && socketRetryQueue.length === 0
+        && activeSocketRetryWorkers <= 0
+        && extBacklogQueue.length === 0
+        && activeExtWorkers <= 0;
+
+      const checkWakeAllWaiters = () => {
+        if (waveGateCheckFn) { try { waveGateCheckFn(); } catch (e) { /* ignore */ } }
+        if (isAllGroupWorkDone() || state.stopRequested) {
+          while (socketRetryWaiters.length) socketRetryWaiters.shift()(null);
+          while (extWaiters.length) extWaiters.shift()(null);
+        }
+      };
+
+      const enqueueReadySocketRetry = (item) => {
+        if (state.stopRequested || !item || !item.c || deliveredIds[item.c.id]) {
+          if (item && item.c && item.c.id) {
+            clearBgPending(item.c.id);
+            releaseOutbound(item.c.id);
+          }
+          checkWakeAllWaiters();
+          return;
+        }
+        if (socketRetryWaiters.length) socketRetryWaiters.shift()(item);
+        else socketRetryQueue.push(item);
+        recordWavePressure();
+        if (waveGateCheckFn) { try { waveGateCheckFn(); } catch (e) { /* ignore */ } }
+      };
+
+      const pushToSocketRetry = (item) => {
+        if (!item || !item.c || !item.c.id) return;
+        noteBgPending(item.c, 'wave200-socket-retry');
+        const pid = item.c.pageId || String(item.c.id).split('_')[0];
+        const deadStreak = socketConfirmedDeadStreak[pid] || 0;
+        const firstAt = (item.deferredCtx && item.deferredCtx.firstRejectedAt) || Date.now();
+        const coolTargetMs = deadStreak >= 3
+          ? 260 + Math.floor(Math.random() * 190)
+          : 620 + Math.floor(Math.random() * 280);
+        const waitMs = Math.max(0, coolTargetMs - (Date.now() - firstAt));
+        if (waitMs <= 15) { enqueueReadySocketRetry(item); return; }
+        pendingSocketCoolCount++;
+        const timerId = setTimeout(() => {
+          socketCoolTimers.delete(timerId);
+          pendingSocketCoolCount = Math.max(0, pendingSocketCoolCount - 1);
+          enqueueReadySocketRetry(item);
+          checkWakeAllWaiters();
+        }, waitMs);
+        socketCoolTimers.set(timerId, item);
+      };
+
+      const pushToExtBacklog = (item) => {
+        if (!item || !item.c || !item.c.id) return;
+        noteBgPending(item.c, 'wave200-extension');
+        if (extWaiters.length) extWaiters.shift()(item);
+        else extBacklogQueue.push(item);
+        recordWavePressure();
+        if (waveGateCheckFn) { try { waveGateCheckFn(); } catch (e) { /* ignore */ } }
+      };
+
+      const popQueueItem = (queue, waiters) => {
+        if (queue.length) return Promise.resolve(queue.shift());
+        if (isAllGroupWorkDone() || state.stopRequested) return Promise.resolve(null);
+        return new Promise((resolve) => waiters.push(resolve));
+      };
+
+      const settleInternalError = (c, e) => {
+        if (c && c.id) {
+          clearBgPending(c.id);
+          releaseOutbound(c.id);
+        }
+        done++; unsure++;
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+        logLine('⚠ ' + (c.name || c.id) + ' — lỗi nội bộ (' + clip(String(e && e.message || e), 80)
+          + ') — không rõ tin đã đi chưa, KHÔNG gửi thêm');
+        updateBatchSummaryUI();
+      };
+
+      const runSocketRetryWorker = async () => {
+        while (!state.stopRequested) {
+          const item = await popQueueItem(socketRetryQueue, socketRetryWaiters);
+          if (!item) break;
+          activeSocketRetryWorkers++;
+          recordWavePressure();
+          try {
+            if (state.stopRequested || deliveredIds[item.c.id]) {
+              clearBgPending(item.c.id);
+              releaseOutbound(item.c.id);
+              continue;
+            }
+            releaseOutbound(item.c.id);
+            sendDiag.sockRetry++;
+            const r = await sendOneAndLog(item.c, gtext, {
+              fastOnly: false,
+              wave200Mode: false,
+              isSocketRetryPass: true,
+              deferredCtx: item.deferredCtx || {},
+            });
+            if (r && r.ok && !r.skippedDup) sendDiag.sockRetryRecovered++;
+            else if (r && r.recipientUnavailable) sendDiag.sockRetryRejected++;
+            else sendDiag.sockRetryOther++;
+            if (r && r.deferredToExt) pushToExtBacklog({ c: item.c, deferredCtx: r.deferredCtx || item.deferredCtx || {} });
+            else if (r && r.deferredToSocketRetry) pushToSocketRetry({ c: item.c, deferredCtx: r.deferredCtx || item.deferredCtx || {} });
+          } catch (e) { sendDiag.sockRetryOther++; settleInternalError(item.c, e); }
+          finally {
+            activeSocketRetryWorkers = Math.max(0, activeSocketRetryWorkers - 1);
+            recordWavePressure();
+            checkWakeAllWaiters();
+          }
+        }
+      };
+
+      const runExtWorker = async () => {
+        while (!state.stopRequested) {
+          const item = await popQueueItem(extBacklogQueue, extWaiters);
+          if (!item) break;
+          activeExtWorkers++;
+          recordWavePressure();
+          try {
+            if (state.stopRequested || deliveredIds[item.c.id]) {
+              clearBgPending(item.c.id);
+              continue;
+            }
+            const r = await sendOneAndLog(item.c, gtext, {
+              fastOnly: false,
+              wave200Mode: true,
+              isExtBacklogPass: true,
+              deferredCtx: item.deferredCtx || {},
+            });
+            if (r && r.deferredToSocketRetry) pushToSocketRetry({ c: item.c, deferredCtx: r.deferredCtx || item.deferredCtx || {} });
+            else if (r && r.deferredToExt) pushToExtBacklog({ c: item.c, deferredCtx: r.deferredCtx || item.deferredCtx || {} });
+          } catch (e) { settleInternalError(item.c, e); }
+          finally {
+            activeExtWorkers = Math.max(0, activeExtWorkers - 1);
+            recordWavePressure();
+            checkWakeAllWaiters();
+          }
+        }
+      };
+
+      const socketWorkers = Array.from({ length: Math.min(WAVE_SOCKET_RETRY_WORKERS, Math.max(1, fullList.length)) }, () => runSocketRetryWorker());
+      const extensionWorkers = Array.from({ length: Math.min(WAVE_EXT_WORKERS, Math.max(1, fullList.length)) }, () => runExtWorker());
+
+      let gidPrefetchBusy = false;
+      const prefetchNextWaveGids = (items) => {
+        if (gidPrefetchBusy || !items || !items.length || state.stopRequested) return;
+        gidPrefetchBusy = true;
+        runPool(items, async (c) => {
+          if (state.stopRequested || !c || !c.id || c.type === 'comment') return;
+          if (gidStats.httpNoGid >= 12 && gidStats.httpHit === 0) return;
+          const full = peekConv(c) || c;
+          const idleMs = getConvIdleMs(c, full);
+          if (isNaN(idleMs) || idleMs <= 86400000 || peekFastGlobalId(c, full, '')) return;
+          if (ctxFetchLane.waitingCount() > 24) return;
+          try { await ensureConvCtx(c, { force: true }); } catch (e) { /* prefetch is opportunistic */ }
+        }, 8).catch(() => {}).finally(() => { gidPrefetchBusy = false; });
+      };
+
+      const computeSmartGap = () => {
+        if (WAVE_GAP <= 0) return 0;
+        const retryLoad = socketRetryQueue.length + activeSocketRetryWorkers + pendingSocketCoolCount;
+        const extLoad = extBacklogQueue.length + activeExtWorkers;
+        // 🔥 [FIX-TỐC-ĐỘ] Chỉ chờ khi có tải thật sự: lane bù API/Ext/Socket đều nhẹ → gap 0.
+        if (inFlightMainCount <= WAVE_MAIN_TOTAL_CAP * 0.6 && retryLoad <= 60 && extLoad <= 100) return 0;
+        if (inFlightMainCount <= WAVE_MAIN_TOTAL_CAP * 0.8 && retryLoad <= 100) return Math.min(WAVE_GAP, 30);
+        return Math.min(Math.max(WAVE_GAP, 60), 120);
+      };
+      const totalWaves = Math.max(1, Math.ceil(fullList.length / WAVE_SIZE));
       try {
-        const mh = window.__MqttHelper__;
-        if (mh && typeof mh.wakingUpLoadThread === 'function') {
-          const seenP = new Set();
-          for (let i = 0; i < batch.length; i++) {
-            const p0 = batch[i].pageId || String(batch[i].id || '').split('_')[0];
-            if (p0 && !seenP.has(p0)) {
-              seenP.add(p0);
-              try { mh.wakingUpLoadThread(p0); } catch (e0) { /* ignore */ }
+        for (let waveStart = 0; waveStart < fullList.length && !state.stopRequested; waveStart += WAVE_SIZE) {
+          const waveSlice = fullList.slice(waveStart, waveStart + WAVE_SIZE);
+          const waveNo = Math.floor(waveStart / WAVE_SIZE) + 1;
+          const waveStartedAt = Date.now();
+          waveDiag.wavesStarted++;
+          const laneSize = Math.max(1, Math.ceil(waveSlice.length / WAVE_MAIN_LANES));
+          const laneChunks = [];
+          for (let lane = 0; lane < WAVE_MAIN_LANES; lane++) {
+            const chunk = waveSlice.slice(lane * laneSize, (lane + 1) * laneSize);
+            if (chunk.length) laneChunks.push(chunk);
+          }
+          let waveDoneCount = 0;
+          // 🔥 [FIX-TỐC-ĐỘ] Mở wave N+1 khi wave N đạt 40% (thay vì 78%) → gối wave sớm, tổng thời gian wave không bị "rỗng".
+          const fastGateTarget = Math.max(1, Math.ceil(waveSlice.length * 0.4));
+          const softGateTarget = Math.max(1, Math.ceil(waveSlice.length * 0.25));
+          let resolveGate = null;
+          let gateOpened = false;
+          const openGate = () => {
+            if (gateOpened) return;
+            gateOpened = true;
+            const gateWaitMs = Math.max(0, Date.now() - waveStartedAt);
+            waveDiag.gateWaitMsTotal += gateWaitMs;
+            waveDiag.gateWaitMsMax = Math.max(waveDiag.gateWaitMsMax, gateWaitMs);
+            if (resolveGate) { const resolve = resolveGate; resolveGate = null; resolve(); }
+          };
+          const evaluateGate = () => {
+            recordWavePressure();
+            if (gateOpened) return;
+            if (state.stopRequested) { openGate(); return; }
+            const retryBacklog = socketRetryQueue.length + pendingSocketCoolCount + activeSocketRetryWorkers;
+            const extBacklog = extBacklogQueue.length + activeExtWorkers;
+            const apiBacklog = apiSendLane.waitingCount();
+            // Gate theo phần trăm cap hiện tại để bộ điều tiết vẫn gối wave đúng khi tự hạ luồng.
+            // 🔥 [FIX-TỐC-ĐỘ] Cho phép ~92% cap trước khi chặn (thay vì 65%) — tận dụng hết slot.
+            const gateActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.92);
+            const fastActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.75);
+            const softActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.85);
+            // Có backpressure: không mở wave mới khi lane bù hoặc hàng đợi API đã quá sâu.
+            if (inFlightMainCount > gateActiveLimit || retryBacklog > 80
+                || extBacklog > WAVE_EXT_BACKLOG_HIGH_WATER
+                || apiBacklog > WAVE_API_BACKLOG_HIGH_WATER) return;
+            if (waveDoneCount >= waveSlice.length) { openGate(); return; }
+            if (waveDoneCount >= fastGateTarget && inFlightMainCount <= fastActiveLimit) { openGate(); return; }
+            if (Date.now() - waveStartedAt >= 1600 && waveDoneCount >= softGateTarget && inFlightMainCount <= softActiveLimit) openGate();
+          };
+          waveGateCheckFn = evaluateGate;
+          const gateTimer = setInterval(evaluateGate, 60);
+          const gatePromise = new Promise((resolve) => { resolveGate = resolve; evaluateGate(); });
+
+          const runMainItem = async (c) => {
+            if (state.stopRequested) return null;
+            const gotMainSlot = await acquireMainSlot();
+            if (!gotMainSlot) return null;
+            try {
+              let r;
+              try { r = await sendOneAndLog(c, gtext, { fastOnly: true, wave200Mode: true }); }
+              catch (e) { settleInternalError(c, e); return null; }
+              if (r && r.deferredToSocketRetry) pushToSocketRetry({ c, deferredCtx: r.deferredCtx || {} });
+              else if (r && r.deferredToExt) pushToExtBacklog({ c, deferredCtx: r.deferredCtx || {} });
+              else if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
+                logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
+                state.stopRequested = true;
+              }
+              return r;
+            } finally {
+              waveDoneCount++;
+              releaseMainSlot();
+              evaluateGate();
+              checkWakeAllWaiters();
+            }
+          };
+
+          const lanePromises = laneChunks.map((chunk) => runPool(chunk, runMainItem, Math.min(WAVE_PER_LANE, chunk.length)));
+          const wavePromise = Promise.all(lanePromises);
+          allMainPromises.push(wavePromise);
+          if (waveStart + WAVE_SIZE < fullList.length) {
+            prefetchNextWaveGids(fullList.slice(waveStart + WAVE_SIZE, waveStart + 2 * WAVE_SIZE));
+          }
+          try { await gatePromise; }
+          finally {
+            clearInterval(gateTimer);
+            if (waveGateCheckFn === evaluateGate) waveGateCheckFn = null;
+          }
+          if (waveStart + WAVE_SIZE < fullList.length && !state.stopRequested) {
+            const smartGap = computeSmartGap();
+            const socketLaneNow = getPageSocketLaneStats();
+            logLine('🌊 Wave ' + waveNo + '/' + totalWaves + ' — qua cổng ' + waveDoneCount + '/' + waveSlice.length
+              + ' sau ' + Math.max(0, Date.now() - waveStartedAt) + 'ms; main đang bay ' + inFlightMainCount
+              + ' · retry Socket queue/active/cool ' + socketRetryQueue.length + '/' + activeSocketRetryWorkers + '/' + pendingSocketCoolCount
+              + ' · Ext queue/active ' + extBacklogQueue.length + '/' + activeExtWorkers
+              + ' · Socket/page active/wait ' + socketLaneNow.activeTotal + '/' + socketLaneNow.waitingTotal
+              + ' (max/page ' + socketLaneNow.activeMaxPerPage + '/' + socketLaneNow.waitingMaxPerPage + '; lane ' + socketLaneNow.limits + ')'
+              + ' · API đang chờ ' + apiSendLane.waitingCount() + ' — gap kế tiếp ' + smartGap + 'ms.');
+            if (smartGap > 0) await sleep(smartGap);
+          } else if (!state.stopRequested) {
+            const socketLaneNow = getPageSocketLaneStats();
+            logLine('🌊 Wave ' + waveNo + '/' + totalWaves + ' — cổng cuối ' + waveDoneCount + '/' + waveSlice.length
+              + ' sau ' + Math.max(0, Date.now() - waveStartedAt) + 'ms; main đang bay ' + inFlightMainCount
+              + ' · retry Socket queue/active/cool ' + socketRetryQueue.length + '/' + activeSocketRetryWorkers + '/' + pendingSocketCoolCount
+              + ' · Ext queue/active ' + extBacklogQueue.length + '/' + activeExtWorkers
+              + ' · Socket/page active/wait ' + socketLaneNow.activeTotal + '/' + socketLaneNow.waitingTotal
+              + ' (max/page ' + socketLaneNow.activeMaxPerPage + '/' + socketLaneNow.waitingMaxPerPage + '; lane ' + socketLaneNow.limits + ')'
+              + ' · API đang chờ ' + apiSendLane.waitingCount() + '.');
+          }
+        }
+        await Promise.all(allMainPromises);
+      } finally {
+        mainWavesLoopDone = true;
+        if (state.stopRequested) {
+          socketCoolTimers.forEach((item, timerId) => {
+            try { clearTimeout(timerId); } catch (e) { /* ignore */ }
+            if (item && item.c && item.c.id) {
+              clearBgPending(item.c.id);
+              releaseOutbound(item.c.id);
+            }
+          });
+          socketCoolTimers.clear();
+          pendingSocketCoolCount = 0;
+          while (socketRetryQueue.length) {
+            const item = socketRetryQueue.shift();
+            if (item && item.c && item.c.id) {
+              clearBgPending(item.c.id);
+              releaseOutbound(item.c.id);
+            }
+          }
+          while (extBacklogQueue.length) {
+            const item = extBacklogQueue.shift();
+            if (item && item.c && item.c.id) {
+              clearBgPending(item.c.id);
+              releaseOutbound(item.c.id);
             }
           }
         }
-      } catch (e) { /* ignore */ }
-
-      const extBacklogQueue = [];
-      const extWaiters = [];
-      let fastScanFinished = false;
-
-      const pushToExtBacklog = (item) => {
-        if (extWaiters.length > 0) {
-          const w = extWaiters.shift();
-          w(item);
-        } else {
-          extBacklogQueue.push(item);
-        }
-      };
-
-      const popFromExtBacklog = () => {
-        if (extBacklogQueue.length > 0) {
-          return Promise.resolve(extBacklogQueue.shift());
-        }
-        if (fastScanFinished || state.stopRequested) {
-          return Promise.resolve(null);
-        }
-        return new Promise((resolve) => {
-          extWaiters.push(resolve);
-        });
-      };
-
-      const runExtBacklogWorker = async () => {
-        while (!state.stopRequested) {
-          const item = await popFromExtBacklog();
-          if (!item || state.stopRequested) break;
-          let r;
-          try {
-            r = await sendOneAndLog(item.c, gtextRef, {
-              fastOnly: false,
-              deferredCtx: item.deferredCtx || null,
-            });
-          } catch (e) { settleInternalError(item.c, e); continue; }
-          if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
-            logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
-            state.stopRequested = true;
-            break;
-          }
-        }
-      };
-
-      // ⚡ GID PREFETCH (v1.70.0): pipeline chạy nền SONG SONG với làn gửi, đi trước để nạp sẵn
-      // ngữ cảnh + global_id (GET /messages, có dedupe inflight trong ensureConvCtx) cho các chat
-      // phía sau — tới lượt worker gửi thì gid đã có sẵn trong cache (0ms), không phải đứng chờ HTTP.
-      // Không await: prefetch chậm hơn làn gửi cũng vô hại (toàn cache hit), nhanh hơn thì làn gửi bứt tốc.
-      runPool(batch, async (c) => {
-        if (state.stopRequested) return;
-        try { await ensureConvCtx(c, { force: true }); } catch (e) { /* ignore */ }
-      }, 96).catch(() => {}); // v1.80.0: 48→96 — ở lô 34k, 48 worker × ~0,75s/GET ≈ 64 chat/s, khớp đúng tốc độ đo được → đây là nút thắt
-
-      const extWorkers = [];
-      const nExtWorkers = Math.min(EXT_BACKLOG_WORKERS, Math.max(1, batch.length));
-      for (let w = 0; w < nExtWorkers; w++) {
-        extWorkers.push(runExtBacklogWorker());
+        waveDiag.mainCapFinal = WAVE_MAIN_TOTAL_CAP;
+        checkWakeAllWaiters();
       }
 
-      const runFastItem = async (c) => {
-        if (state.stopRequested) return null;
-        let r;
-        try { r = await sendOneAndLog(c, gtextRef, { fastOnly: true }); }
-        catch (e) { return settleInternalError(c, e); }
-        if (r && r.deferredToExt) {
-          pushToExtBacklog({ c, deferredCtx: r.deferredCtx || null });
-          return r;
-        }
-        if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
-          logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
-          state.stopRequested = true;
-        }
-        return r;
-      };
-
-      try {
-        await runPool(batch, runFastItem, Math.min(FAST_HTTP_SOCKET_POOL, batch.length));
-      } finally {
-        fastScanFinished = true;
-        while (extWaiters.length > 0) {
-          const w = extWaiters.shift();
-          w(null);
-        }
-      }
-      await Promise.all(extWorkers);
-    };
-
-    const runWaves = async (gtext, list) => {
-      const totalWaves = Math.ceil(list.length / WAVE_SIZE);
-      for (let i2 = 0; i2 < list.length && !state.stopRequested; i2 += WAVE_SIZE) {
-        await sendBatch(gtext, list.slice(i2, i2 + WAVE_SIZE));
-        const waveNo = Math.ceil(Math.min(i2 + WAVE_SIZE, list.length) / WAVE_SIZE);
-        if (i2 + WAVE_SIZE < list.length && !state.stopRequested) {
-          logLine('🌊 Lượt ' + waveNo + '/' + totalWaves + ' xong (' + done + ' tin) — nghỉ ' + WAVE_GAP + 'ms rồi lượt tiếp…');
-          await sleep(WAVE_GAP);
-        }
-      }
+      await Promise.all([...socketWorkers, ...extensionWorkers]);
     };
 
     let sendErr = null;
     try {
       try {
-        warmUpSockets(targets);
         await waitInitialGidWarmup(targets, 1500);
       } catch (e) { /* làm nóng lỗi không được làm hỏng lô */ }
       // SW gửi inbox thất bại: jwt → #551; cookie jar → Invalid access_token. Chỉ tab pancake.vn.
@@ -5626,8 +7776,7 @@
         if (sendGroups.length > 1) {
           logLine('📤 [' + (gi + 1) + '/' + sendGroups.length + '] nội dung “' + clip(g.text, 50) + '” → ' + g.list.length + ' chat');
         }
-        if (useWaves) await runWaves(g.text, g.list);
-        else await sendBatch(g.text, g.list);
+        await runGroupWaves200(g.text, g.list);
       }
     } catch (e) {
       sendErr = e;
@@ -5672,12 +7821,6 @@
             + ' (trung bình ' + (totalAll / Math.max(1, (Date.now() - batchStats.startedAt) / 1000) * 60).toFixed(0) + ' tin/phút).'));
     }
     updateBatchSummaryUI();
-    // Gửi xong → TỰ BỎ CHỌN các đoạn chat đã đánh dấu (giống nút "Xóa"): dấu chọn đã "tiêu" vào
-    // lượt gửi này, để sẵn sàng chọn lượt mới — và bấm chạy lại không bao giờ dính dấu cũ (chống trùng).
-    if (state.matches.length) {
-      clearSelection();
-      logLine('🧹 Đã tự bỏ chọn các chat vừa gửi.');
-    }
     render();
   }
 
@@ -5812,10 +7955,16 @@
   }
 
   function buildPanel() {
-    if (document.getElementById(PANEL_ID)) return;
+    const existingHost = document.getElementById(PANEL_ID);
+    if (existingHost) {
+      if (existingHost.getAttribute('data-tab-clip') === '1' && shadow) return;
+      try { existingHost.remove(); } catch (e0) { /* ignore */ }
+      shadow = null;
+    }
     ensureStyle();
     const host = document.createElement('div');
     host.id = PANEL_ID;
+    host.setAttribute('data-tab-clip', '1');
     host.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:2147483646;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;';
     shadow = host.attachShadow({ mode: 'open' });
     shadow.innerHTML = `
@@ -5940,7 +8089,7 @@
         </div>
         <div class="body" id="ssb-body">
           <div class="row" style="align-items:center;gap:6px">
-            <button class="b b-green" id="ssb-send" style="flex:1">▶ Chạy</button>
+            <button class="b b-green" id="ssb-send" style="flex:1" title="Bấm nút này hoặc nhấn phím Tab để chạy (có bảng xác nhận trước khi gửi)">▶ Chạy (Tab)</button>
             <button class="b b-red" id="ssb-stop" disabled style="flex:1">⏹ Dừng</button>
           </div>
           <div class="prog"><i id="ssb-bar"></i></div>
@@ -5950,6 +8099,7 @@
             <div class="snippet-box" id="ssb-target">Chưa chọn — bấm ⚡ Tải danh sách rồi <b>Chọn tất cả</b></div>
             <div class="row" style="margin-top:6px">
               <button class="b b-blue" id="ssb-selall" title="Chọn toàn bộ chat trong danh sách đã tải">☑ Chọn tất cả</button>
+              <button class="b b-gray" id="ssb-deselect-one" title="Bấm nút này, rồi click một đoạn chat trên danh sách Pancake để bỏ chọn chat đó">⊖ Bỏ chọn 1 chat</button>
               <button class="b b-gray" id="ssb-to-end">⬇ Từ đây xuống cuối</button>
               <button class="b b-gray" id="ssb-clear">Xóa</button>
             </div>
@@ -5961,8 +8111,15 @@
           <div class="prog scan"><i id="ssb-scanbar"></i></div>
           <div class="prog-stat scan" id="ssb-scanstat">Tải DS: 0%</div>
           <div>
-            <div class="label">2) Câu cần gửi</div>
+            <div class="row" style="align-items:center;justify-content:space-between;margin-bottom:4px">
+              <div class="label" style="margin:0">2) Câu cần gửi</div>
+              <button class="b b-blue" id="ssb-msg-mode" type="button" style="padding:3px 8px;font-size:11px" title="Bấm để chuyển đổi qua lại giữa 2 chế độ: Gửi bằng câu trên giao diện ↔ Gửi bằng dữ liệu đang copy trên Clipboard">📝 Chế độ: Câu trên giao diện</button>
+            </div>
             <textarea id="ssb-msg" placeholder="Nhập 1 câu sẽ gửi cho tất cả đoạn chat ở trên…"></textarea>
+            <div class="snippet-box" id="ssb-clip-box" style="display:none;border-color:#a855f7;color:#f3e8ff;background:#1e1033">
+              📋 <b>Đang bật: Gửi bằng dữ liệu trên Clipboard</b><br>
+              <span id="ssb-clip-preview-text" style="color:#d8b4fe;font-size:10.5px">Khi bấm <b>▶ Chạy</b> hoặc nhấn phím <b>Tab</b>, script sẽ tự lấy nội dung đang copy trên Clipboard và hiện hộp xác nhận trước khi gửi.</span>
+            </div>
             <div class="row" style="align-items:center">
               <button class="b b-gray" id="ssb-img-pick" title="Bấm nút này rồi CLICK vào 1 ảnh bất kỳ trên giao diện Pancake (ảnh trong chat, ảnh mẫu…) — ảnh đó sẽ được dùng làm ảnh gửi">🖼 Chọn ảnh trên trang</button>
               <span class="hint" id="ssb-img-info">Chưa chọn — bấm nút rồi click 1 ảnh trên giao diện (hoặc Ctrl+V dán ảnh)</span>
@@ -5976,11 +8133,11 @@
             </div>
             <div id="ssb-qr-photos" style="display:none;margin:2px 0 4px;gap:6px;flex-wrap:wrap;align-items:center" title="Ảnh của câu nhanh đang chọn — bấm vào ảnh để mở lớn"></div>
             <div class="row" style="align-items:center">
-              <span class="hint">Mỗi lượt:</span>
-              <input type="number" id="ssb-wave" value="30000" min="1" max="100000" step="500" style="width:72px" title="Số tin mỗi lượt (tối đa 100.000)">
-              <span class="hint">tin — nghỉ</span>
-              <input type="number" id="ssb-gap" value="0" min="0" step="50" style="width:72px" title="Số ms nghỉ giữa các lượt">
-              <span class="hint">ms giữa các lượt</span>
+              <span class="hint">Mỗi đợt:</span>
+              <input type="number" id="ssb-wave" value="200" min="1" max="100000" step="25" style="width:72px" title="Số chat mỗi đợt Wave 200 (mặc định 200)">
+              <span class="hint">chat — nghỉ</span>
+              <input type="number" id="ssb-gap" value="250" min="0" step="50" style="width:72px" title="Nghỉ tối đa giữa các đợt; cổng Wave 200 tự điều chỉnh theo tải">
+              <span class="hint">ms giữa các đợt</span>
               <label class="hint" style="display:flex;align-items:center;gap:4px;cursor:pointer" title="Bắn API không chờ server xác nhận — nhanh hơn hẳn; chat bị API từ chối rõ ràng sẽ tự bù Socket/Ext trong nền">
                 <input type="checkbox" id="ssb-quick" checked style="accent-color:#22c55e;margin:0"> ⚡ Gửi nhanh
               </label>
@@ -5992,6 +8149,10 @@
           </div>
           <div class="summary-box" id="ssb-summary"></div>
           <div class="log" id="ssb-log"></div>
+          <div class="row" style="margin-top:6px;align-items:center;gap:6px;justify-content:flex-end">
+            <span class="hint">chỉ nhớ lỗi Socket xác nhận khách vắng mặt/đã khóa nick</span>
+            <button class="b b-gray" id="ssb-clear-unavailable" title="Xóa các ID lỗi đã nhớ; thao tác cần xác nhận hai lần">🧹 Xóa nhớ lỗi (0)</button>
+          </div>
         </div>
         <div class="rs" id="ssb-rs" title="Kéo góc này để đổi cỡ panel — đúp chuột để về mặc định"></div>
       </div>
@@ -6010,6 +8171,7 @@
     };
     on('ssb-toggle', 'click', () => {
       state.enabled = !state.enabled;
+      if (!state.enabled) state.deselectMode = false;
       highlightRows(); // bật: tô lại / tắt: gỡ hết màu
       render();
     });
@@ -6399,10 +8561,30 @@
         logLine('📷 Đã dán ảnh từ clipboard: ' + (file.name || 'ảnh'));
       } catch (err) { /* ignore */ }
     });
+    on('ssb-clear-unavailable', 'click', () => {
+      if (state.sendListFrozen || state.confirmingSend) return;
+      const count = unavailableConversationIds.size;
+      if (!count) return;
+      if (!confirm('Xác nhận lần 1: xóa toàn bộ ' + count + ' ID đã nhớ là Socket xác nhận bị Facebook từ chối? Các chat đó sẽ có thể được chọn lại.')) return;
+      if (!confirm('Xác nhận lần cuối: bấm OK để xóa vĩnh viễn bộ nhớ lỗi này, hoặc Cancel để giữ nguyên.')) return;
+      const removed = clearRememberedUnavailableIds();
+      logLine('🧹 Đã xóa bộ nhớ ' + removed + ' ID unavailable; các chat vẫn để bỏ chọn, có thể tự tick lại.');
+      render();
+    });
+    on('ssb-deselect-one', 'click', () => {
+      if (!state.enabled || state.sendListFrozen || state.confirmingSend) return;
+      state.deselectMode = !state.deselectMode;
+      if (state.deselectMode) state.pickMode = false;
+      logLine(state.deselectMode
+        ? '👆 Bỏ chọn 1 chat: giờ hãy click đúng dòng chat trong danh sách Pancake (Esc để hủy).'
+        : 'Đã hủy chế độ bỏ chọn 1 chat.');
+      render();
+    });
     on('ssb-selall', 'click', async () => {
-      if (!state.allRows || !state.allRows.size) {
-        logLine('⚡ Chưa tải danh sách — tự tải rồi chọn tất cả…');
-        await scanFullList();
+      if (state.sendListFrozen) return;
+      if (!state.allRows || !state.allRows.size || state.allRowsPartial) {
+        logLine('⚡ Chưa tải đủ danh sách — tự tải toàn bộ rồi chọn tất cả…');
+        await scanFullList({ full: true, restartIfBusy: true });
       }
       const rows = sourceRows();
       if (!rows.length) {
@@ -6415,10 +8597,13 @@
       state.rangeStart = null;
       state.rangeEnd = null;
       computeMatches();
-      logLine('☑ Đã chọn tất cả ' + state.matches.length + ' chat');
+      const skippedUnavailable = state.matches.filter((m) => m.knownUnavailable).length;
+      logLine('☑ Đã tải ' + state.matches.length + ' chat; đã chọn ' + (state.matches.length - skippedUnavailable)
+        + ', tự bỏ chọn ' + skippedUnavailable + ' ID lỗi đã nhớ');
       render();
     });
     on('ssb-to-end', 'click', async () => {
+      if (state.sendListFrozen) return;
       // Chọn TẤT CẢ chat từ chat đang mở (trong app) trở xuống cuối danh sách
       const info = selectedRowInfo();
       if (!info) {
@@ -6429,10 +8614,8 @@
       const btn = root.getElementById('ssb-to-end');
       if (btn) btn.disabled = true;
       try {
-        if (!state.allRows || !state.allRows.size) {
-          logLine('⚡ Chưa tải danh sách — tự tải qua API để lấy tới cuối…');
-          await scanFullList();
-        }
+        logLine('⚡ Đang tự tải danh sách qua API để lấy từ ' + (info.name || info.id) + ' tới cuối…');
+        await scanFullList({ full: true, restartIfBusy: true });
         const rows = sourceRows();
         const idx = rows.findIndex((r) => r.id === info.id);
         if (idx < 0) {
@@ -6453,24 +8636,27 @@
         computeMatches();
         logLine('⬇ CHỌN TỪ ĐÂY XUỐNG CUỐI: ' + (info.name || info.id) + ' → cuối danh sách — '
           + state.matches.length + ' chat trong lựa chọn');
+        schedulePreloadSelectedChats(true);
       } finally {
         if (btn) btn.disabled = false;
         render();
       }
     });
     on('ssb-clear', 'click', () => {
+      if (state.sendListFrozen) return;
       clearSelection();
       logLine('Đã xóa lựa chọn');
       render();
     });
     on('ssb-scan', 'click', async () => {
+      if (state.sendListFrozen) return;
       if (state.scanning) {
         state.scanStopRequested = true;
         logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
         applyScanButtons();
         return;
       }
-      await scanFullList();
+      await scanFullList({ full: true });
       render();
     });
     // Nhóm chat của lượt gửi gần nhất — chọn lại tại chỗ, không quét lại danh sách
@@ -6554,18 +8740,18 @@
       const gapEl = root.getElementById('ssb-gap');
       const quickEl = root.getElementById('ssb-quick');
       try {
-        const w = localStorage.getItem('ssb_wave_size_v2');
+        const w = localStorage.getItem('ssb_wave_size_w200_v1');
         if (w && waveEl) waveEl.value = w;
-        const g = localStorage.getItem('ssb_wave_gap_v2');
+        const g = localStorage.getItem('ssb_wave_gap_w200_v1');
         if (g !== null && g !== '' && gapEl) gapEl.value = g;
         const q = localStorage.getItem('ssb_quick');
         if (q !== null && q !== '' && quickEl) quickEl.checked = q !== '0';
       } catch (e) { /* ignore */ }
       if (waveEl) waveEl.addEventListener('change', () => {
-        try { localStorage.setItem('ssb_wave_size_v2', String(waveEl.value)); } catch (e) { /* ignore */ }
+        try { localStorage.setItem('ssb_wave_size_w200_v1', String(waveEl.value)); } catch (e) { /* ignore */ }
       });
       if (gapEl) gapEl.addEventListener('change', () => {
-        try { localStorage.setItem('ssb_wave_gap_v2', String(gapEl.value)); } catch (e) { /* ignore */ }
+        try { localStorage.setItem('ssb_wave_gap_w200_v1', String(gapEl.value)); } catch (e) { /* ignore */ }
       });
       if (quickEl) quickEl.addEventListener('change', () => {
         try { localStorage.setItem('ssb_quick', quickEl.checked ? '1' : '0'); } catch (e) { /* ignore */ }
@@ -6578,21 +8764,63 @@
       const pagesArr = (st0 && st0.pages && st0.pages.activated) || [];
       warmUpSockets(pagesArr.map((x) => ({ pageId: x && x.id })));
     } catch (e) { /* ignore */ }
-        on('ssb-send', 'click', () => {
-      if (state.sending) return;
+    const applyMsgSourceModeUI = () => {
+      const modeBtn = root.getElementById('ssb-msg-mode');
+      const msgEl2 = root.getElementById('ssb-msg');
+      const clipBox = root.getElementById('ssb-clip-box');
+      const isClip = state.msgSource === 'clipboard';
+      if (modeBtn) {
+        modeBtn.textContent = isClip ? '📋 Chế độ: Dữ liệu Clipboard' : '📝 Chế độ: Câu trên giao diện';
+        modeBtn.style.background = isClip ? '#9333ea' : '#2563eb';
+        modeBtn.style.color = '#fff';
+      }
+      if (msgEl2) msgEl2.style.display = isClip ? 'none' : '';
+      if (clipBox) clipBox.style.display = isClip ? '' : 'none';
+    };
+    applyMsgSourceModeUI();
+    on('ssb-msg-mode', 'click', async () => {
+      state.msgSource = (state.msgSource === 'clipboard') ? 'ui' : 'clipboard';
+      try { localStorage.setItem(MSG_MODE_KEY, state.msgSource); } catch (e) { /* ignore */ }
+      applyMsgSourceModeUI();
+      if (state.msgSource === 'clipboard') {
+        const previewEl = root.getElementById('ssb-clip-preview-text');
+        const txt = String(await readClipboardText() || '').trim();
+        if (previewEl) {
+          previewEl.textContent = txt
+            ? ('Đang có trên Clipboard: “' + clip(txt, 120) + '” — bấm ▶ Chạy (hoặc phím Tab) để xác nhận & gửi.')
+            : 'Khi bấm ▶ Chạy hoặc nhấn phím Tab, script sẽ tự lấy nội dung đang copy trên Clipboard và hiện hộp xác nhận trước khi gửi.';
+        }
+        logLine('📋 Đã chuyển sang chế độ: GỬI BẰNG DỮ LIỆU TRÊN CLIPBOARD');
+      } else {
+        logLine('📝 Đã chuyển sang chế độ: GỬI BẰNG CÂU TRÊN GIAO DIỆN');
+      }
+    });
+    const triggerSendRun = () => {
+      try { markSendIdleIfSettled(); } catch (e0) { /* ignore */ }
+      if (state.confirmingSend) return;
+      if (state.sending) {
+        logLine('⏳ Đang trong lượt gửi — hãy chờ hoàn tất hoặc bấm ⏹ Dừng trước khi chạy lượt mới.');
+        return;
+      }
       if (state.sentIds && state.sentIds.size > 0) {
         logLine('⏩ Có ' + state.sentIds.size + ' chat đã gửi ở lượt trước — sẽ bỏ qua, chỉ gửi phần còn lại.');
       }
       sendToAll().catch((err) => {
+        state.confirmingSend = false;
         // Đường chốt cuối: exception nào thoát khỏi sendToAll cũng phải nhả nút + tắt overlay
         logLine('⛔ Lỗi ngoài dự kiến khi gửi: ' + (err && err.message || err) + ' — dừng lượt.');
         state.stopRequested = true;
         batchStats.loopFinished = true;
         markSendIdleIfSettled();
+        if (!state.sending) {
+          unfreezeSendChecklist();
+          }
         reportExtJob({ phase: 'idle' });
         render();
       });
-    });
+    };
+    window.__botfakeTriggerSend__ = triggerSendRun;
+    on('ssb-send', 'click', triggerSendRun);
     const requestStop = () => {
       if (!state.sending) return;
       state.stopRequested = true;
@@ -6652,15 +8880,26 @@
   }
 
   let logFlushTimer = null;
+  let logPersistTimer = null;
+  function persistLogStorage() {
+    if (logPersistTimer) { clearTimeout(logPersistTimer); logPersistTimer = null; }
+    try { localStorage.setItem(LOG_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
+  }
+  function scheduleLogStorageSave() {
+    if (logPersistTimer) return;
+    // Log giữ tối đa 300 dòng; không ghi toàn bộ JSON vào localStorage mỗi 80ms khi chạy lô lớn.
+    logPersistTimer = setTimeout(persistLogStorage, 1000);
+  }
   function flushLogUI() {
     logFlushTimer = null;
-    try { localStorage.setItem(LOG_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
+    scheduleLogStorageSave();
     const el = shadow && shadow.getElementById('ssb-log');
     if (el) {
       el.textContent = state.log.join('\n');
       el.scrollTop = el.scrollHeight;
     }
   }
+  try { window.addEventListener('pagehide', persistLogStorage); } catch (e) { /* ignore */ }
 
   function logLine(s) {
     const t = new Date();
@@ -6674,10 +8913,10 @@
       console.log('[SSB]', s);
       return;
     }
-    // Khi chạy lô lớn (>200 chat) và đang bắn: throttle cập nhật DOM #ssb-log & localStorage 80ms/lần
-    // (tránh 30.000 lần Forced Synchronous Reflow scrollHeight + IPC Disk Write gây đơ trình duyệt!)
+    // Khi chạy lô lớn (>200 chat): chỉ cập nhật DOM log 1 lần/giây;
+    // nhịp gửi/counters không bị chặn, chỉ phần trình bày log được gộp.
     if (state.sending && batchStats.total > 200) {
-      if (!logFlushTimer) logFlushTimer = setTimeout(flushLogUI, 80);
+      if (!logFlushTimer) logFlushTimer = setTimeout(flushLogUI, 1000);
       return;
     }
     if (logFlushTimer) { clearTimeout(logFlushTimer); logFlushTimer = null; }
@@ -6688,6 +8927,11 @@
     if (!shadow) return;
     const scan = shadow.getElementById('ssb-scan');
     if (!scan) return;
+    if (state.sendListFrozen) {
+      scan.disabled = true;
+      scan.textContent = '🔒 Đang gửi — tạm khóa tải danh sách';
+      return;
+    }
     scan.disabled = false;
     if (state.scanning) {
       scan.textContent = state.scanStopRequested
@@ -6701,11 +8945,21 @@
     const send = shadow.getElementById('ssb-send');
     const stop = shadow.getElementById('ssb-stop');
     const busy = !!state.sending;
+    const locked = !!(state.sendListFrozen || state.confirmingSend);
+    ['ssb-selall', 'ssb-deselect-one', 'ssb-to-end', 'ssb-clear'].forEach((id) => {
+      const btn = shadow.getElementById(id);
+      if (btn) btn.disabled = locked || (id === 'ssb-deselect-one' && !state.enabled);
+    });
+    const clearUnavailable = shadow.getElementById('ssb-clear-unavailable');
+    if (clearUnavailable) {
+      clearUnavailable.textContent = '🧹 Xóa nhớ lỗi (' + unavailableConversationIds.size + ')';
+      clearUnavailable.disabled = locked || unavailableConversationIds.size === 0;
+    }
     if (send) {
-      send.disabled = busy;
+      send.disabled = busy || locked;
       send.textContent = busy
         ? (state.stopRequested ? '⏳ Đang dừng…' : '⏳ Đang gửi…')
-        : '▶ Chạy';
+        : (locked ? '🔒 Đang khóa danh sách…' : '▶ Chạy (Tab)');
     }
     if (stop) {
       stop.disabled = !busy;
@@ -6721,9 +8975,11 @@
     if (!batchStats.loopFinished && !state.stopRequested) return;
     if (state.stopRequested) {
       state.sending = false;
+      unfreezeSendChecklist();
       applyRunStopButtons();
       stopKeepAliveAudio();
       reportExtJob({ phase: 'idle' });
+      render();
       return;
     }
     let pending = 0;
@@ -6733,21 +8989,45 @@
       return;
     }
     state.sending = false;
+    unfreezeSendChecklist();
     applyRunStopButtons();
     stopKeepAliveAudio();
     reportExtJob({ phase: 'idle' });
+    render();
   }
 
-  function setProgress(done, total, ok) {
-    const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  let progressUiTimer = null;
+  let progressUiLastAt = 0;
+  let pendingProgressSnapshot = null;
+  function flushProgressUi() {
+    progressUiTimer = null;
+    const snap = pendingProgressSnapshot;
+    pendingProgressSnapshot = null;
+    if (!snap) return;
+    progressUiLastAt = Date.now();
     const bar = shadow && shadow.getElementById('ssb-bar');
-    if (bar) bar.style.width = pct + '%';
+    if (bar) bar.style.width = snap.pct + '%';
     const st = shadow && shadow.getElementById('ssb-progstat');
-    if (st) {
-      const okN = (ok != null) ? ok : done;
-      st.textContent = pct + '% · ✅ ' + (okN || 0) + '/' + (total || 0);
+    if (st) st.textContent = snap.pct + '% · ✅ ' + (snap.ok || 0) + '/' + (snap.total || 0);
+    reportExtJob({ phase: 'send', pct: snap.pct, ok: snap.ok, total: snap.total, done: snap.done });
+  }
+  function setProgress(done, total, ok) {
+    const snap = {
+      pct: total ? Math.min(100, Math.round((done / total) * 100)) : 0,
+      ok: (ok != null) ? ok : done,
+      total: total || 0,
+      done: done || 0,
+    };
+    const immediate = total <= 200 || done >= total || !state.sending;
+    const elapsed = Date.now() - progressUiLastAt;
+    if (immediate || elapsed >= 250) {
+      if (progressUiTimer) { clearTimeout(progressUiTimer); progressUiTimer = null; }
+      pendingProgressSnapshot = snap;
+      flushProgressUi();
+      return;
     }
-    reportExtJob({ phase: 'send', pct: pct, ok: (ok != null) ? ok : done, total: total, done: done });
+    pendingProgressSnapshot = snap;
+    if (!progressUiTimer) progressUiTimer = setTimeout(flushProgressUi, Math.max(1, 250 - elapsed));
   }
 
   function setScanProgress(n, pct) {
@@ -6769,34 +9049,50 @@
 
   function render() {
     if (!shadow) return;
+    // Kết quả confirmed-unavailable có thể được ghi nhớ trong lúc gửi; sau khi checklist mở lại,
+    // hạ tick ngay nhưng không sửa snapshot đang khóa để tránh đổi người nhận giữa lượt.
+    if (!state.sendListFrozen) {
+      state.matches.forEach((m) => {
+        if (m && isRememberedUnavailable(m.id)) { m.knownUnavailable = true; m.checked = false; }
+      });
+    }
     const tgl = shadow.getElementById('ssb-toggle');
     if (tgl) {
       tgl.textContent = state.enabled ? 'BẬT' : 'TẮT';
       tgl.className = 'badge ' + (state.enabled ? 'on' : 'off');
     }
+    const deselectBtn = shadow.getElementById('ssb-deselect-one');
+    if (deselectBtn) {
+      deselectBtn.textContent = state.deselectMode ? '👆 Click chat cần bỏ chọn… (Esc hủy)' : '⊖ Bỏ chọn 1 chat';
+      deselectBtn.style.background = state.deselectMode ? '#b45309' : '';
+      deselectBtn.style.color = state.deselectMode ? '#fff' : '';
+    }
+    const checkedMatchCount = state.matches.filter((m) => m && m.checked && !m.knownUnavailable).length;
     const tgt = shadow.getElementById('ssb-target');
     if (tgt) {
       if (state.mode === 'range' && state.rangeStart && state.rangeEnd) {
         tgt.innerHTML = '🔗 Chuỗi: <b>' + esc(state.rangeStart.name || '?') + '</b> (' + esc(state.rangeStart.time || '') + ')'
           + ' → <b>' + esc(state.rangeEnd.name || '?') + '</b> (' + esc(state.rangeEnd.time || '') + ')'
-          + '<br>' + state.matches.length + ' chat trong chuỗi';
+          + '<br>' + state.matches.length + ' chat trong chuỗi · đang chọn ' + checkedMatchCount;
       } else if (state.mode === 'range' && state.rangeStart) {
-        tgt.innerHTML = '🅰 Đã đặt ĐẦU CHUỖI: <b>' + esc(state.rangeStart.name || '?') + '</b> · ' + esc(state.rangeStart.time || '')
-          + '<br>Giữ Alt và nhấp tiếp dòng <b>CUỐI chuỗi</b>…';
+        tgt.innerHTML = '🅰 Đã chọn & đặt ĐẦU CHUỖI: <b>' + esc(state.rangeStart.name || '?') + '</b> · ' + esc(state.rangeStart.time || '')
+          + '<br>Giữ Alt nhấp tiếp dòng <b>CUỐI chuỗi</b> (hoặc bấm Chạy nếu chỉ gửi 1 chat này)…<br>Đang chọn: ' + checkedMatchCount;
       } else if (state.mode === 'all' && state.matches.length) {
-        tgt.innerHTML = '☑ Đã chọn <b>tất cả</b> — ' + state.matches.length + ' chat';
+        tgt.innerHTML = '☑ Đã chọn <b>' + checkedMatchCount + '/' + state.matches.length + ' chat</b>';
+      } else if (state.mode === 'pick' && state.matches.length) {
+        tgt.innerHTML = '☑ Đã chọn lẻ <b>' + checkedMatchCount + ' chat</b>';
       } else {
-        tgt.innerHTML = 'Chưa chọn — bấm ⚡ Tải danh sách rồi <b>Chọn tất cả</b>';
+        tgt.innerHTML = 'Chưa chọn — Alt+Click chọn chat/chuỗi hoặc bấm ⚡ Tải danh sách';
       }
     }
     const cnt = shadow.getElementById('ssb-count');
-    if (cnt) cnt.textContent = String(state.matches.length);
+    if (cnt) cnt.textContent = String(checkedMatchCount);
 
-    const list = shadow.getElementById('ssb-list');
-    if (list) {
+    const list = getBotChecklistElement();
+    if (list && !state.sendListFrozen) {
       // Với chuỗi hàng nghìn chat: chỉ dựng lại HTML danh sách khi ĐỔI danh sách/tick —
       // không build lại mỗi lần render (tiến độ gửi cập nhật liên tục sẽ gây đơ).
-      const listKey = state.matches.map((m) => m.id + '~' + (m.checked ? 1 : 0)).join('|');
+      const listKey = state.matches.map((m) => m.id + '~' + (m.checked ? 1 : 0) + '~' + (m.knownUnavailable ? 1 : 0)).join('|');
       if (listKey !== state.listKey) {
         state.listKey = listKey;
         if (!state.matches.length) {
@@ -6804,7 +9100,7 @@
         } else {
           list.innerHTML = state.matches.map((m, i) => `
           <label class="item">
-            <input type="checkbox" data-i="${i}" ${m.checked ? 'checked' : ''}>
+            <input type="checkbox" data-i="${i}" ${m.checked && !m.knownUnavailable ? 'checked' : ''} ${m.knownUnavailable ? 'disabled title="Đã lưu lỗi Socket: FB từ chối nhận tin (khách hiện không có mặt / đã khóa nick)"' : ''}>
             <span style="flex:1">
               <span class="nm">${esc(m.name || m.id)}${
                 m.mark === 'start' ? ' <span style="color:#3b82f6">(đầu chuỗi)</span>'
@@ -6813,7 +9109,7 @@
               }${
                 m.type === 'comment' ? ' <span style="color:#f59e0b" title="Bình luận bài viết — gửi bằng TRẢ LỜI BÌNH LUẬN công khai; mặc định bỏ tick">[bình luận]</span>'
                 : (m.type === 'inbox' ? '' : ' <span style="color:#64748b" title="Không xác định loại">[?]</span>')
-              }</span><br>
+              }${m.knownUnavailable ? ' <span style="color:#f87171" title="Chỉ lưu do Socket xác nhận đúng lỗi khách vắng mặt/đã khóa nick">[tự bỏ qua: lỗi đã nhớ]</span>' : ''}</span><br>
               <span class="sn">${esc(clip(m.snippetRaw || m.snippet, 90))}</span>
             </span>
             <span class="tm">${esc(m.time || '')}</span>
@@ -6821,7 +9117,10 @@
           list.querySelectorAll('input[type=checkbox]').forEach((cb) => {
             cb.addEventListener('change', () => {
               const i = parseInt(cb.getAttribute('data-i'), 10);
-              if (state.matches[i]) state.matches[i].checked = cb.checked;
+              if (state.matches[i]) {
+                state.matches[i].checked = cb.checked;
+                schedulePreloadSelectedChats();
+              }
             });
           });
         }
@@ -6890,16 +9189,23 @@
 
   // Chặn ở các event "down/up" của chuột — app không được mở chat khi đang chọn chuỗi
   function onRowGesture(e) {
-    if (!rowGuardOn()) return;                  // người dùng đã bỏ tích "Chặn mở chat"
-    if (!altHeldNow(e) && !ctrlHeldNow(e) && !state.pickMode) return; // chuột thường → không can thiệp
+    if (state.sendListFrozen) return;
+    if (state.deselectMode) {
+      const info = convRowTarget(e);
+      if (info) swallowRowEvent(e, true); // giữ default để click tiếp theo vẫn tới onDocClick
+      return;
+    }
+    if (!rowGuardOn()) return;
+    if (!altHeldNow(e) && !ctrlHeldNow(e) && !state.pickMode) return;
     const info = convRowTarget(e);
     if (!info) return;
     swallowRowEvent(e, e.type === 'pointerdown' || e.type === 'pointerup');
   }
 
   function onDocClick(e) {
+    if (state.sendListFrozen) return;
     // Xử lý click trong panel BOTFAKE (#ssb-list): Ctrl+click chọn/bỏ chọn cùng snippet
-    const listEl = shadow && shadow.getElementById('ssb-list');
+    const listEl = getBotChecklistElement();
     if (listEl && listEl.contains(e.target)) {
       const row = e.target.closest && e.target.closest('.item');
       if (row) {
@@ -6927,6 +9233,28 @@
     }
 
     if (!state.enabled) return;
+    if (state.deselectMode) {
+      const item = e.target && e.target.closest && e.target.closest('.conversation-list-item');
+      if (!item) return;
+      const info = rowInfo(item);
+      if (!info) return;
+      swallowRowEvent(e, false);
+      state.deselectMode = false;
+      const match = state.matches.find((m) => m && String(m.id) === String(info.id));
+      if (!match) {
+        logLine('⚠ Chat "' + (info.name || info.id) + '" không có trong checklist hiện tại nên không có gì để bỏ chọn.');
+      } else if (!match.checked) {
+        logLine('ℹ Chat "' + (info.name || info.id) + '" đã bỏ chọn sẵn.');
+      } else {
+        match.checked = false;
+        preloadSelectedSeq++;
+        schedulePreloadSelectedChats();
+        logLine('⬜ Đã bỏ chọn chat: ' + (info.name || info.id));
+      }
+      highlightRows();
+      render();
+      return;
+    }
     const isCtrl = ctrlHeldNow(e);
     const isAlt = !isCtrl && altHeldNow(e);
     const pickAct = !!(state.pickMode && !isCtrl && !isAlt);
@@ -6957,16 +9285,34 @@
       return;
     }
 
-    // Ctrl/Cmd + click: chọn/bỏ chọn TẤT CẢ đoạn cùng snippet trong danh sách hiện tại (toggle)
+    // Ctrl/Cmd + click: chọn/bỏ chọn TẤT CẢ đoạn cùng snippet trong danh sách hiện tại (nếu đoạn vừa nhấp đang nằm trong danh sách và có nhiều đoạn trùng câu),
+    // hoặc chọn/bỏ chọn & tự nạp trực tiếp đoạn chat vừa nhấp!
     if (isCtrl) {
       const snippet = info.snippetRaw || info.snippet;
+      const idx = state.matches.findIndex((m) => m.id === info.id);
       const same = state.matches.filter((m) => (m.snippetRaw || m.snippet) === snippet);
-      if (!same.length) {
-        logLine('⚠ Không có đoạn nào cùng snippet trong danh sách hiện tại: “' + clip(snippet, 60) + '”');
-      } else {
+      if (idx >= 0 && same.length > 1) {
         const allChecked = same.every((m) => m.checked);
         same.forEach((m) => { m.checked = !allChecked; });
         logLine((allChecked ? '✅ Bỏ chọn' : '✅ Chọn') + ' ' + same.length + ' đoạn cùng snippet: “' + clip(snippet, 60) + '”');
+        schedulePreloadSelectedChats(true);
+      } else if (idx >= 0) {
+        state.matches[idx].checked = !state.matches[idx].checked;
+        logLine((state.matches[idx].checked ? '✅ Đã chọn lại & tự nạp: ' : '⬜ Đã bỏ chọn: ') + (info.name || info.id));
+        highlightRows();
+        if (state.matches[idx].checked) schedulePreloadSelectedChats(true);
+      } else {
+        const rich = enrichRowWithRedux(info);
+        state.mode = 'pick';
+        state.matches.push({
+          ...rich,
+          checked: rich.type !== 'comment',
+          isTarget: true,
+          mark: 'target',
+        });
+        logLine('✅ Đã chọn & tự nạp đoạn chat: ' + (rich.name || rich.id) + ' (đã chọn ' + state.matches.length + ' chat)');
+        highlightRows();
+        schedulePreloadSelectedChats(true);
       }
       render();
       return;
@@ -6977,23 +9323,29 @@
     if (isAlt && state.lastAltClickId === info.id && now - state.lastAltClickTime < 800) {
       state.lastAltClickId = null;
       state.lastAltClickTime = 0;
-      state.mode = 'range';
-      state.target = null;
-      state.rangeStart = info;
-      const rows = state.allRows ? Array.from(state.allRows.values()) : visibleRows();
-      const lastRow = rows[rows.length - 1];
-      if (lastRow) {
-        state.rangeEnd = {
-          id: lastRow.id, name: lastRow.name, snippet: lastRow.snippet,
-          snippetRaw: lastRow.snippetRaw, time: lastRow.time,
-        };
-        computeMatches();
-        logLine('🅰⬇ Chọn từ ' + (info.name || info.id) + ' xuống hết cuối danh sách — ' + state.matches.length + ' chat');
-      } else {
-        state.rangeEnd = null;
-        computeMatches();
-      }
-      render();
+      (async () => {
+        logLine('⚡ Đang tự tải danh sách qua API để lấy từ ' + (info.name || info.id) + ' xuống cuối…');
+        await scanFullList({ full: true, restartIfBusy: true });
+        state.mode = 'range';
+        state.target = null;
+        state.rangeStart = enrichRowWithRedux(info);
+        const rows = sourceRows();
+        const lastRow = rows[rows.length - 1];
+        if (lastRow) {
+          state.rangeEnd = {
+            ...lastRow,
+            id: lastRow.id, name: lastRow.name, snippet: lastRow.snippet,
+            snippetRaw: lastRow.snippetRaw, time: lastRow.time,
+          };
+          computeMatches();
+          logLine('🅰⬇ Chọn từ ' + (info.name || info.id) + ' xuống hết cuối danh sách — ' + state.matches.length + ' chat');
+          schedulePreloadSelectedChats(true);
+        } else {
+          state.rangeEnd = null;
+          computeMatches();
+        }
+        render();
+      })().catch((err) => logLine('⚠ Lỗi khi chọn xuống cuối: ' + err));
       return;
     }
 
@@ -7014,27 +9366,71 @@
   }
 
   function onKeydown(e) {
+    if (!e || e.__botfakeKeyHandled) return;
+    const isTabKey = (e.key === 'Tab' || e.code === 'Tab' || e.keyCode === 9 || e.which === 9);
+    // Phím Tab: kích hoạt nút ▶ Chạy (luôn hiện hộp xác nhận trước khi gửi)
+    if (isTabKey && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.isComposing) {
+      if (!state.enabled || !isPancakeHost()) return;
+      e.__botfakeKeyHandled = true;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      if (e.repeat) return;
+      if (!shadow || !document.getElementById(PANEL_ID)) {
+        try { showBotfakePanel(); } catch (e0) { /* ignore */ }
+      }
+      if (typeof window.__botfakeTriggerSend__ === 'function') {
+        window.__botfakeTriggerSend__();
+      } else {
+        try { markSendIdleIfSettled(); } catch (e1) { /* ignore */ }
+        if (!state.sending && !state.confirmingSend) {
+          sendToAll().catch(() => {
+            state.confirmingSend = false;
+            if (!state.sending) { unfreezeSendChecklist(); render(); }
+          });
+        }
+      }
+      return;
+    }
     if (e.key === 'Escape' && state.imgPick) {
+      e.__botfakeKeyHandled = true;
       if (typeof window.__botfakeImgPick__ === 'function') window.__botfakeImgPick__(false);
       logLine('🖼 Đã hủy chọn ảnh');
       return;
     }
     // Alt+Q: bật/tắt chế độ BẮT CÂU NHANH (chờ click vào popup "/" của app)
-    if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'q' || e.key === 'Q')) {
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && (e.key === 'q' || e.key === 'Q' || e.code === 'KeyQ' || e.keyCode === 81 || e.which === 81)) {
+      e.__botfakeKeyHandled = true;
       e.preventDefault();
+      e.stopPropagation();
+      if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+      if (e.repeat) return;
+      if (!shadow || !document.getElementById(PANEL_ID)) {
+        try { showBotfakePanel(); } catch (e0) { /* ignore */ }
+      }
       if (typeof window.__botfakeQrCapture__ === 'function') window.__botfakeQrCapture__();
       return;
     }
     if (e.key === 'Escape' && state.qrCapture) {
+      e.__botfakeKeyHandled = true;
       if (typeof window.__botfakeQrCapture__ === 'function') window.__botfakeQrCapture__(false);
       logLine('🎯 Đã hủy chế độ bắt câu');
       return;
     }
+    if (e.key === 'Escape' && state.deselectMode) {
+      e.__botfakeKeyHandled = true;
+      state.deselectMode = false;
+      logLine('Đã hủy chế độ bỏ chọn 1 chat; danh sách chọn không đổi.');
+      render();
+      return;
+    }
     if (e.key === 'Escape' && (state.pickMode || (state.rangeStart && !state.rangeEnd))) {
+      e.__botfakeKeyHandled = true;
       state.pickMode = false;
       if (state.rangeStart && !state.rangeEnd) {
         state.rangeStart = null;
         state.mode = null;
+        state.matches = [];
         highlightRows();
         logLine('Đã hủy chọn chuỗi');
       } else {
@@ -7043,7 +9439,9 @@
       render();
       return;
     }
-    if (e.altKey && e.shiftKey && (e.key === 'B' || e.key === 'b')) {
+    if (e.altKey && e.shiftKey && (e.key === 'B' || e.key === 'b' || e.code === 'KeyB')) {
+      e.__botfakeKeyHandled = true;
+      if (e.repeat) return;
       const host = document.getElementById(PANEL_ID);
       if (host) {
         const showing = host.style.display === 'none';
@@ -7056,7 +9454,9 @@
         }
       }
     }
-    if (e.altKey && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+    if (e.altKey && e.shiftKey && (e.key === 'D' || e.key === 'd' || e.code === 'KeyD')) {
+      e.__botfakeKeyHandled = true;
+      if (e.repeat) return;
       const info = selectedRowInfo();
       if (info) setTarget(info, 'Alt+Shift+D');
     }
@@ -7066,6 +9466,45 @@
 
   hookNetwork();
 
+  // Theo dõi sự kiện copy/cut trên trang và khi quay lại tab để cập nhật ngay bản xem trước Clipboard
+  const onCopyOrCut = (e) => {
+    try {
+      let copied = '';
+      if (e && e.clipboardData && typeof e.clipboardData.getData === 'function') {
+        copied = e.clipboardData.getData('text/plain') || '';
+      }
+      if (!copied && window.getSelection) {
+        copied = String(window.getSelection() || '');
+      }
+      if (!copied) {
+        const ae = document.activeElement;
+        if (ae && (ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT') && typeof ae.selectionStart === 'number') {
+          copied = String(ae.value || '').slice(ae.selectionStart, ae.selectionEnd);
+        }
+      }
+      if (copied && copied.trim()) {
+        state.lastCopiedText = copied;
+        const previewEl = shadow && shadow.getElementById('ssb-clip-preview-text');
+        if (previewEl) {
+          previewEl.textContent = 'Đang có trên Clipboard: “' + clip(copied.trim(), 120) + '” — bấm ▶ Chạy (hoặc phím Tab) để xác nhận & gửi.';
+        }
+      }
+    } catch (err) { /* ignore */ }
+  };
+  window.addEventListener('copy', onCopyOrCut, true);
+  window.addEventListener('cut', onCopyOrCut, true);
+  window.addEventListener('focus', () => {
+    if (state.msgSource === 'clipboard' && !state.confirmingSend) {
+      readClipboardText().then((txt) => {
+        const clean = String(txt || '').trim();
+        const previewEl = shadow && shadow.getElementById('ssb-clip-preview-text');
+        if (clean && previewEl) {
+          previewEl.textContent = 'Đang có trên Clipboard: “' + clip(clean, 120) + '” — bấm ▶ Chạy (hoặc phím Tab) để xác nhận & gửi.';
+        }
+      }).catch(() => {});
+    }
+  });
+
   // GẮN LISTENER CHUỘT NGAY TẠI ĐÂY (script chạy ở document-start → TRƯỚC khi JS của app
   // gắn listener của nó). Đây là lý do phải gắn sớm: nếu app đăng ký listener capture trên
   // window trước ta thì stopImmediatePropagation của ta vô hiệu (listener đăng ký trước chạy trước).
@@ -7074,6 +9513,7 @@
   window.addEventListener('click', onDocClick, true);
   ROW_GUARD_EVENTS.forEach((ev) => window.addEventListener(ev, onRowGesture, true));
   window.addEventListener('keydown', onKeydown, true);
+  document.addEventListener('keydown', onKeydown, true);
 
   // Theo dõi Alt / Ctrl THẬT SỰ đang được giữ (dùng khi event click không còn kèm altKey/ctrlKey
   // do người dùng nhả phím hơi sớm). Có keyup + blur + đáo hạn 900ms nên KHÔNG bao giờ "dính" lâu
