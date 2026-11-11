@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.78-w200.20
+// @version      1.91.79-w200.21
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.78-W200.20'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.79-W200.21'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6356,6 +6356,11 @@
   const sockVerifyFired = {}; // convId → runSeq đã bắn cứu sau kiểm chứng (mỗi lượt tối đa 1 lần/chat)
   const verifyStats = { found: 0, fired: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
   const extVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng sau khi Ext timeout
+  // [v1.91.79] Ca ĐỌC LẠI nhịp giãn: KHÔNG được tính vào "đang chờ" của bảng TỔNG HỢP.
+  // Log 19:01→19:04 (10672 tin): phát lệnh xong 19:01:29 nhưng mãi 19:04:25 mới chốt vì
+  // 16 ca đọc-lại giữ lượt suốt 176s, trong khi kết quả cuối vẫn là "thấy tin 0". Đọc lại
+  // là việc phụ trợ — để nó chạy nền, không bắt người dùng chờ.
+  const extRecheckPending = {}; // convId → runSeq đang đọc lại (không giữ lượt)
   const uncertainVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng ca "không rõ kết quả" (API timeout/5xx)
   const extTimeoutStats = { timeout: 0, skipped: 0, found: 0, notFound: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
   let bgWatchdogTimer = null;
@@ -6996,12 +7001,19 @@
     if (!conv || !conv.id || !sentAtMs) return;
     const want = normalizeMsgText(text);
     if (!want && !photo) return;
-    if (extVerifyPending[conv.id]) return;
     if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
     const myRun = runSeq;
-    extVerifyPending[conv.id] = myRun;
+    if (recheck) {
+      if (extRecheckPending[conv.id]) return;
+      extRecheckPending[conv.id] = myRun;
+    } else {
+      if (extVerifyPending[conv.id]) return;
+      extVerifyPending[conv.id] = myRun;
+    }
     const nm = conv.name || conv.id;
-    const left = (typeof roundsLeft === 'number') ? roundsLeft : 2; // còn 2 lần đọc lại
+    // [v1.91.79] Chỉ còn 1 lần đọc lại: 3 lượt liên tiếp cho 'thấy tin 0' ⇒ đọc nhiều là vô ích,
+    // chỉ tốn request trên máy yếu.
+    const left = (typeof roundsLeft === 'number') ? roundsLeft : 1;
     const isRecheck = !!recheck; // lần đọc lại: KHÔNG cộng vào thống kê chốt
     const delayMs = (delayOverride || EXT_VERIFY_DELAY_MS) + Math.floor(Math.random() * 5000); // rải nhịp khi timeout theo cụm
     setTimeout(async () => {
@@ -7046,7 +7058,7 @@
       } catch (e) {
         if (!isRecheck) extTimeoutStats.unknown++;
       } finally {
-        delete extVerifyPending[conv.id];
+        if (isRecheck) delete extRecheckPending[conv.id]; else delete extVerifyPending[conv.id];
         // [v1.91.78] Hẹn lần đọc lại kế tiếp (chỉ đọc, không bắn).
         try {
           if (left > 0 && !state.stopRequested && runSeq === myRun
