@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.79-w200.21
+// @version      1.91.80-w200.22
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.79-W200.21'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.80-W200.22'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2689,13 +2689,16 @@
         dimensions: items.map((x) => ({ width: Number(x.w) || 0, height: Number(x.h) || 0 })),
         send_by_platform: 'web',
       };
-      if (ctx7) jsonBody.is_record_ctx_7_days = true;
+      // [v1.91.80] LUÔN gửi cờ này, khớp app thật 52/52 request trong 13 HAR.
+      // Trước đây chỉ gửi khi dr() đánh giá được cửa sổ 7 ngày ⇒ ca không đánh giá được
+      // bị FB trả (#10) oan. Cờ này chỉ là "ghi nhận ctx 7 ngày", app thật không bao giờ bỏ.
+      jsonBody.is_record_ctx_7_days = true;
       return { url: url, isJson: true, jsonBody: jsonBody, ctx7: ctx7 };
     }
 
     const fd = new FormData();
     fd.append('action', 'reply_inbox');
-    if (ctx7) fd.append('is_record_ctx_7_days', 'true');
+    fd.append('is_record_ctx_7_days', 'true'); // [v1.91.80] luôn gửi — xem chú thích nhánh JSON ở trên
     fd.append('message', text);
     const p0 = items[0] || photo;
     const fbId0 = (p0 && p0.fbId) || (photo && photo.fbId) || (photo && Array.isArray(photo.fbIds) && photo.fbIds[0]) || '';
