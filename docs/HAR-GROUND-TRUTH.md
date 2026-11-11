@@ -1,9 +1,24 @@
-# Sự thật gốc rút từ HAR (13 file, 60 MB)
+# Sự thật gốc rút từ HAR (12 file, ~59 MB)
 
 Tài liệu này ghi lại **mọi kết luận đã kiểm chứng bằng dữ liệu HAR**, để không phải suy đoán lại.
 Cập nhật: 2026-11-11, script 1.91.80.
 
-## 0. Cách đọc — điều đầu tiên phải biết
+## 0. Phạm vi chính xác (đã đếm lại)
+
+**12 file** `.har`, tổng 60 868 KB:
+
+| File | entries | File | entries |
+|---|---|---|---|
+| batmesss | 348 | loadnhanh | 735 |
+| guianh1 | 37 | pancake.vn2 | 58 |
+| guicau | 284 | taidanhsach | 100 |
+| guikhachcu | 275 | tinnhan | 216 |
+| guisot | 170 | tinnhan1 | 31 |
+| loaddanhsach | 50 | tinnhanthread | 93 |
+
+> Trước đây tài liệu ghi "13 file" — **sai**, chỉ có 12. Đã sửa.
+
+## 0b. Cách đọc — điều đầu tiên phải biết
 
 Pancake trả phản hồi dạng **base64-encoded JSON**: chuỗi `eyJzdWNjZXNzIjp0cnVl…` giải mã ra `{"success":true…`.
 Mọi phân tích đọc text thô mà không giải mã đều **sai**. Đây là nguồn gốc của nhiều kết luận sai trước đây.
@@ -24,6 +39,26 @@ Mã phụ ở đường **đọc** (không phải gửi):
 - `Hội thoại này không tồn tại` — thread đã bị xoá/không còn.
 - `Too many requests` — 41 POST + 32 GET, **toàn bộ ở endpoint danh sách**.
 - `success:false` với `message: null` — một số GET chi tiết.
+
+## 1b. Chỉ có ĐÚNG MỘT đường gửi (đã kiểm bằng cách liệt kê toàn bộ endpoint)
+
+Toàn bộ đường dẫn con dưới `/messages/` — **không có đường gửi nào khác**:
+
+| Endpoint | Số | Loại |
+|---|---|---|
+| POST `/messages/fill_admin_name` | 153 | metadata (body `{timestamp}`) |
+| GET `/messages/recent_orders` | 92 | metadata |
+| POST `/messages/load_shop_page_customers` | 92 | metadata |
+| GET `/messages/customer_info` | 89 | metadata |
+
+Đường gửi duy nhất: `POST /pages/{pageId}/conversations/{convId}/messages`.
+
+Mã lỗi trên **toàn bộ hệ thống** (không chỉ đường gửi): `e_code` **10** (24 lần), **551** (11 lần),
+`error_code` **429** (73 lần). **Không có mã nào khác** trong 59 MB.
+`graph.facebook.com/{psid}/picture` trả **400** ở 8 lần — app lấy avatar trực tiếp từ FB và bị chặn; vô hại.
+
+Dấu hiệu dứt điểm cho hội thoại đã xoá: `{"existed":false,"message":"Hội thoại này không tồn tại","success":false}`
+— dùng cờ `existed:false`, đáng tin hơn so khớp chuỗi.
 
 ## 2. Hợp đồng gửi tin (POST …/conversations/{convId}/messages)
 
