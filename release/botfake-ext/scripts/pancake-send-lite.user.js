@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.84-w200.26
+// @version      1.91.85-w200.27
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.84-W200.26'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.85-W200.27'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5035,6 +5035,14 @@
   const SOCKET_LANE_MAX = 192;
   const SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD = 4; // thử nghiệm: tránh hạ lane vì chỉ 2 ACK đuôi chậm lẻ tẻ
   const SOCKET_LANE_NOACK_BACKOFF_THRESHOLD = 2; // no-ACK giữ ngưỡng chặt hơn vì thường báo hiệu Socket/page có vấn đề
+  // [v1.91.85] CẦU DAO ACK TOÀN CỤC.
+  // Lô thật 19:03 (11/11): từ tin ~1082 trở đi MỌI tin qua Socket đều "không có ACK" liên tục,
+  // rồi dồn hết sang Extension bù ⇒ gửi rất chậm. Đó là Pancake bóp ACK khi có quá nhiều
+  // kết nối socket cùng lúc, không phải lỗi từng chat. Bộ điều tiết cũ chỉ co được xuống
+  // sàn mặc định 64/page nên vẫn quá cao ⇒ ACK càng mất. Nay: mất ACK LIÊN TỤC 25 tin thì
+  // hạ hẳn sàn (64→32→16) để lane co xuống thật sâu và ACK có cơ hội hồi lại.
+  let sockNoAckRun = 0;
+  const SOCK_ACK_STORM_RUN = 25;
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
@@ -5217,6 +5225,7 @@
         ctl.fastOk++;
         ctl.slowAck = 0;
         ctl.noAckStreak = 0;
+        sockNoAckRun = 0; // ACK hồi ⇒ reset cầu dao
         if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX) {
           ctl.fastOk = 0;
           const next = lane.setLimit(lane.getLimit() + 8);
@@ -5226,6 +5235,15 @@
         ctl.fastOk = 0;
         ctl.slowAck = 0;
         ctl.noAckStreak++;
+        // [v1.91.85] Cầu dao toàn cục: mất ACK liên tục ⇒ hạ SÀN socket (không chỉ hạ limit).
+        sockNoAckRun++;
+        if (sockNoAckRun >= SOCK_ACK_STORM_RUN && socketLaneFloor > 16) {
+          sockNoAckRun = 0;
+          socketLaneFloor = Math.max(16, Math.floor(socketLaneFloor / 2));
+          try { lane.setLimit(Math.max(socketLaneFloor, Math.floor(lane.getLimit() * 0.8))); } catch (e0) { /* ignore */ }
+          logLine('🧯 Mất ACK liên tục ' + SOCK_ACK_STORM_RUN + ' tin — hạ SÀN socket xuống '
+            + socketLaneFloor + '/page (cầu dao giữ tới hết phiên; ACK hồi thì lane tự tăng lại tới 192)');
+        }
         if (ctl.noAckStreak >= SOCKET_LANE_NOACK_BACKOFF_THRESHOLD && lane.getLimit() > socketLaneFloor) {
           ctl.noAckStreak = 0;
           const next = lane.setLimit(Math.max(socketLaneFloor, Math.floor(lane.getLimit() * 0.8)));
@@ -6403,6 +6421,29 @@
   // nhả cho tới khi kiểm chứng chốt, tránh người dùng bấm lượt mới làm hủy đường bắn cứu).
   const sockVerifyPending = {}; // convId → runSeq đang có kiểm chứng chờ (chống đăng ký trùng)
   const sockVerifyFired = {}; // convId → runSeq đã bắn cứu sau kiểm chứng (mỗi lượt tối đa 1 lần/chat)
+  // [v1.91.85] HÀNG ĐỢI KIỂM CHỨNG SOCKET — chống bão đọc lịch sử.
+  // Khi ACK mất hàng loạt, mỗi lần mất là 1 vòng kiểm chứng tới 4 lần đọc, giãn cách 2/4/6s.
+  // Với 192 kênh song song thì có thể có hàng trăm vòng đọc cùng lúc ⇒ 429 tràn sang cả
+  // đường Extension bù ⇒ mọi thứ chậm. Nay chỉ chạy tối đa 12 vòng kiểm chứng cùng lúc;
+  // phần còn lại xếp hàng FIFO. KHÔNG đổi logic phán xử (vẫn cần 2 lần đọc rỗng liên tiếp
+  // mới dám kết luận "chưa tới"), chỉ giới hạn số vòng đọc đồng thời.
+  const SOCK_VERIFY_PARALLEL = 12;
+  let sockVerifyRunning = 0;
+  const sockVerifyQueue = [];
+  function pumpSockVerify() {
+    while (sockVerifyRunning < SOCK_VERIFY_PARALLEL && sockVerifyQueue.length) {
+      const fn = sockVerifyQueue.shift();
+      sockVerifyRunning++;
+      Promise.resolve()
+        .then(fn)
+        .catch(() => { /* lỗi từng vòng đã được xử lý bên trong */ })
+        .then(() => { sockVerifyRunning--; pumpSockVerify(); });
+    }
+  }
+  function enqueueSockVerify(fn) {
+    sockVerifyQueue.push(fn);
+    pumpSockVerify();
+  }
   const verifyStats = { found: 0, fired: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
   const extVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng sau khi Ext timeout
   // [v1.91.79] Ca ĐỌC LẠI nhịp giãn: KHÔNG được tính vào "đang chờ" của bảng TỔNG HỢP.
@@ -6938,7 +6979,7 @@
     const nm = conv.name || conv.id;
     const sentAt = publishedAtMs || Date.now();
     const verifyDelay = (batchStats && batchStats.total > 50) ? 3000 : SOCK_VERIFY_DELAY_MS;
-    setTimeout(async () => {
+    const __sockVerifyBody = async () => {
       try {
         if (myRun !== runSeq) return; // đã sang lượt mới — giữ nguyên ⚠ lượt cũ, không bắn lẫn
         if (state.stopRequested) return; // đang dừng — không bắn cứu
@@ -7031,7 +7072,8 @@
         try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
         try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
       }
-    }, verifyDelay);
+    };
+    setTimeout(() => { enqueueSockVerify(__sockVerifyBody); }, verifyDelay);
   }
 
   // KIỂM CHỨNG SAU KHI EXTENSION TIMEOUT: lệnh Ext đã phát đi nhưng adapter
