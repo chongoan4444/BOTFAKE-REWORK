@@ -340,3 +340,29 @@ Dòng `🌊` trong log sẽ hiện `Socket/page cap <sàn>–192 (sàn tự đ�
 
 Muốn vượt trần 56 tin/s một cách chắc chắn thì phải **tăng số page chạy song song** —
 giới hạn nằm ở từng page của Facebook, không phải ở máy.
+
+## §12 — Bão mất ACK giữa lô (log thật 19:03, 11/11) và hai van an toàn 1.91.85
+
+**Hiện tượng.** Tới tin ~[1082/9963] thì *mọi* tin qua Socket đều `không có ACK`
+liên tục (không rải rác), kéo theo mỗi chat một vòng `kiểm chứng 4 lần đọc`
+(rỗng cả 4) → `bắn cứu 1 vòng qua Extension` → `bù THÀNH CÔNG`. Kết quả: 6
+round-trip/chat thay vì 1, toàn bộ tải dồn sang đường Extension ⇒ gửi rất chậm.
+
+**Chẩn đoán.** Không phải lỗi một chat: no-ACK *đồng loạt và đột ngột* sau ~1 100
+tin là dấu hiệu Pancake bóp ACK khi có quá nhiều kết nối socket cùng lúc. Bộ điều
+tiết cũ chỉ co lane xuống **sàn 64/page**, vẫn quá cao ⇒ mất ACK tiếp.
+
+**Van 1 — cầu dao ACK toàn cục.** `sockNoAckRun` đếm no-ACK liên tiếp; đạt 25 thì
+hạ **sàn** lane 64→32→16 (giữ tới hết phiên) và hạ luôn limit trang đang chạy.
+ACK hồi ⇒ `sockNoAckRun` reset, upshift vẫn đưa lane về tới 192 như cũ.
+Log: `🧯 Mất ACK liên tục 25 tin — hạ SÀN socket xuống 32/page`.
+
+**Van 2 — hàng đợi kiểm chứng.** Tối đa **12 vòng kiểm chứng chạy song song**,
+số còn lại xếp FIFO. **Không đổi logic phán xử**: vẫn cần 2 lần đọc rỗng liên
+tiếp mới kết luận "chưa tới" ⇒ không tăng nguy cơ gửi trùng. Mục tiêu là chặn
+hàng trăm vòng đọc đồng thời (nguồn 429 tràn sang cả đường Extension bù).
+
+**Cách A/B.** Chạy một lô lớn và đọc dòng tổng kết: nếu thấy `🧯` xuất hiện thì
+cầu dao có tác dụng; so `ACK TB` và số ca `bù qua Extension` với lô 19:03.
+Nếu `🧯` không xuất hiện mà vẫn no-ACK hàng loạt ⇒ hạ `SOCK_ACK_STORM_RUN`
+hoặc đặt sàn tay `__botfakeSetSockPageFloor__(32)` trước khi chạy.
