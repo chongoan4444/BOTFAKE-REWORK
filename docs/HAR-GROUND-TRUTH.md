@@ -366,3 +366,31 @@ hàng trăm vòng đọc đồng thời (nguồn 429 tràn sang cả đường E
 cầu dao có tác dụng; so `ACK TB` và số ca `bù qua Extension` với lô 19:03.
 Nếu `🧯` không xuất hiện mà vẫn no-ACK hàng loạt ⇒ hạ `SOCK_ACK_STORM_RUN`
 hoặc đặt sàn tay `__botfakeSetSockPageFloor__(32)` trước khi chạy.
+
+## §13 — Lô xác nhận sau 1.91.85 (19:54, 11/11): kỷ lục 71,96 tin/giây
+
+**Cấu hình:** 1.91.85-W200.27 · 12 wave · size 500 · gap 250 ms · Gửi nhanh BẬT · 1 page
+(`Socket/page limits cuối [192×1]`).
+
+| Chỉ số | Lô B (21:10) | Lô C (21:52) | **Lô này (19:54)** |
+|---|---|---|---|
+| Tin đã gửi | 10 602 | 9 337 | **5 897** |
+| Tốc độ | 47,41/s | 27,97/s | **71,96/s (4 318/phút)** |
+| Thời gian | 224 s | 334 s | **82 s** |
+| ACK TB / max | 1 359 / 3 854 ms | 1 360 / 12 680 ms | **1 507 / 3 900 ms** |
+| no-ACK | có | có | **0** |
+| `🧯` cầu dao | — | — | **không xuất hiện** |
+
+**Đọc kết quả:** `📡 ACK OK/rejected/no-ACK 5738/55/0` ⇒ **không mất một ACK nào**,
+nên cầu dao `🧯` và hàng đợi kiểm chứng **không phải kích hoạt** — đúng thiết kế.
+Tỉ lệ tới đích `5841/5882 = 99,3%`; `❌16` lỗi; `⚠40` đều là `Ext quá hạn`
+(kiểm chứng thấy tin **0**, chưa thấy **40**) ⇒ giữ ⚠, không gửi lại, không trùng.
+
+**Kết luận về nhịp gửi.** Bão mất ACK ở §12 xuất hiện khi nhịp quá dày; giảm xuống
+`500/250 ms` đưa no-ACK về **0** và tốc độ lên gấp **1,5× lô B** và **2,6× lô C**.
+Bài học: *một round-trip nhanh luôn thắng sáu round-trip chậm*. Cấu hình này chưa
+đặt làm mặc định — cần thêm 1–2 lô nữa trước khi đổi.
+
+**Đuôi còn lại:** 40 ca `Ext quá hạn` (0,7%). Đây là chỗ duy nhất còn đáng tối ưu;
+mọi thứ khác trong lô đã chạm trần lý thuyết (192 in-flight × ACK 1,5 s ≈ 128/s,
+thực đạt 72/s).
