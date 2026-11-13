@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.85-w200.27
+// @version      1.91.86-w200.28
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.85-W200.27'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.86-W200.28'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5043,6 +5043,22 @@
   // hạ hẳn sàn (64→32→16) để lane co xuống thật sâu và ACK có cơ hội hồi lại.
   let sockNoAckRun = 0;
   const SOCK_ACK_STORM_RUN = 25;
+  // [v1.91.86] KÊNH ACK CHẾT THEO PAGE.
+  // Bằng chứng lô 20:36–20:38 (11/11): các lô 5–10 chat, mỗi lô chỉ 1 tin đi Socket và
+  // tin đó LUÔN mất ACK với độ trễ đúng bằng hạn chờ (8000/8002/8003 ms; lô 68 tin: 20016 ms).
+  // Trễ đúng bằng timeout = KHÔNG có phản hồi nào, tức kênh ACK của page đã chết — không phải
+  // server chậm. Hậu quả: mỗi tin như vậy tốn 8–20s chờ + 4 lần đọc kiểm chứng + Ext ⇒ lô 5 tin
+  // mất 13s. Nay: 2 lần no-ACK đủ hạn chờ ⇒ đánh dấu kênh ACK chết, bỏ Socket khỏi thứ tự làn
+  // (đi thẳng Extension ~1s). Chỉ đổi THỨ TỰ kênh, không gửi thêm, không gửi lặp.
+  const pageAckTimeoutRun = {}; // pageId → số lần no-ACK đủ hạn chờ liên tiếp
+  const pageAckDeadAt = {};     // pageId → thời điểm đánh dấu kênh ACK chết
+  const PAGE_ACK_DEAD_TTL_MS = 120000; // 2 phút không phục hồi thì thử lại Socket
+  function isPageAckDead(pid) {
+    const at = pageAckDeadAt[pid];
+    if (!at) return false;
+    if (Date.now() - at > PAGE_ACK_DEAD_TTL_MS) { delete pageAckDeadAt[pid]; return false; }
+    return true;
+  }
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
@@ -5226,6 +5242,7 @@
         ctl.slowAck = 0;
         ctl.noAckStreak = 0;
         sockNoAckRun = 0; // ACK hồi ⇒ reset cầu dao
+        if (pid) { delete pageAckTimeoutRun[pid]; delete pageAckDeadAt[pid]; }
         if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX) {
           ctl.fastOk = 0;
           const next = lane.setLimit(lane.getLimit() + 8);
@@ -5235,6 +5252,16 @@
         ctl.fastOk = 0;
         ctl.slowAck = 0;
         ctl.noAckStreak++;
+        // [v1.91.86] no-ACK mà trễ >= 6s ⇒ đã chờ hết hạn, không có phản hồi nào ⇒ kênh ACK chết.
+        if (ms >= 6000 && pid) {
+          pageAckTimeoutRun[pid] = (pageAckTimeoutRun[pid] || 0) + 1;
+          if (pageAckTimeoutRun[pid] >= 2 && !isPageAckDead(pid)) {
+            pageAckDeadAt[pid] = Date.now();
+            try { if (lane.getLimit() > socketLaneFloor) lane.setLimit(socketLaneFloor); } catch (e0) { /* ignore */ }
+            logLine('🧯 Socket ACK của page ' + pid + ' coi như CHẾT (2 lần no-ACK đủ hạn chờ ~'
+              + Math.round(ms / 1000) + 's) — bỏ Socket khỏi thứ tự làn, đi Extension/API cho tới khi hồi (thử lại sau 2 phút)');
+          }
+        }
         // [v1.91.85] Cầu dao toàn cục: mất ACK liên tục ⇒ hạ SÀN socket (không chỉ hạ limit).
         sockNoAckRun++;
         if (sockNoAckRun >= SOCK_ACK_STORM_RUN && socketLaneFloor > 16) {
@@ -5572,6 +5599,12 @@
   function pickBestDirectOrder(conv, pageId, ctx, baseSeq) {
     const seq = (baseSeq || ['ext', 'socket', 'api']).slice();
     if (!conv || conv.type === 'comment') return seq;
+    // [v1.91.86] Kênh ACK của page đã chết ⇒ đừng bắn Socket để rồi chờ hết hạn 8–20s.
+    // Chỉ đổi thứ tự làn (bỏ 'socket'), Extension/API vẫn là đường gửi thật như cũ.
+    if (pageId && isPageAckDead(pageId)) {
+      const noSock = seq.filter((x) => x !== 'socket');
+      if (noSock.length) return noSock;
+    }
     const hasSock = seq.indexOf('socket') > -1;
     const hasExt = seq.indexOf('ext') > -1;
     if (!hasSock || !hasExt) return seq;

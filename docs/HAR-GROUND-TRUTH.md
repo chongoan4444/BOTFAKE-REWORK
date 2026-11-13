@@ -394,3 +394,35 @@ Bài học: *một round-trip nhanh luôn thắng sáu round-trip chậm*. Cấu
 **Đuôi còn lại:** 40 ca `Ext quá hạn` (0,7%). Đây là chỗ duy nhất còn đáng tối ưu;
 mọi thứ khác trong lô đã chạm trần lý thuyết (192 in-flight × ACK 1,5 s ≈ 128/s,
 thực đạt 72/s).
+
+## §14 — "Dính" ở lô nhỏ KHÔNG phải do tải: là kênh ACK đã chết (1.91.86)
+
+**Bằng chứng (log 20:03–20:38, 11/11 — các lô 5, 6, 7, 10, 20, 68 chat).**
+
+| Lô | Tin đi Socket | ACK no-ACK | Độ trễ ACK đo được |
+|---|---|---|---|
+| 68 chat | 5 | **5** | **20 016 / 20 042 ms** |
+| 7 chat | 1 | 1 | 8 002 ms |
+| 5 chat | 1 | 1 | 8 000 ms |
+| 10 chat | 1 | 1 | 8 003 ms |
+| 20 chat (20:03) | 1 | 0 | 1 554 ms (kênh còn sống) |
+
+**Đọc con số.** Độ trễ **đúng bằng hạn chờ** (8 000 ms và 20 000 ms, sai số 2–42 ms)
+nghĩa là **không có phản hồi nào** — không phải server trả chậm. Kênh ACK của page
+đã chết; Socket vẫn gửi được nhưng không bao giờ biết kết quả ⇒ mỗi tin như vậy tốn
+`hạn chờ + 4 lần đọc kiểm chứng + Ext bù` ⇒ lô 5 tin mất **13 s**, lô 68 tin mất **28 s**.
+
+Vì sao chỉ 1 tin đi Socket mỗi lô nhỏ: `pickBestDirectOrder` chỉ ưu tiên Socket khi
+`isPageSocketReady()` VÀ có `global_id` thật; phần lớn chat đi làn API. Tin cuối lô
+rơi vào Socket ⇒ trúng đúng kênh chết ⇒ đuôi dài.
+
+**Sửa (1.91.86).** `pageAckTimeoutRun[pageId]`: đếm no-ACK có độ trễ ≥ 6 s (tức đã
+chờ hết hạn). Đạt **2** ⇒ `pageAckDeadAt[pageId] = now` và `pickBestDirectOrder`
+**bỏ 'socket' khỏi thứ tự làn** ⇒ đi Extension (~1 s) thay vì Socket-rồi-chờ-20 s.
+ACK thành công (`kind==='ok'`) ⇒ xoá dấu. Hết hạn 120 s ⇒ tự thử lại Socket.
+
+**An toàn:** chỉ đổi **thứ tự kênh**, không thêm lệnh gửi, không gửi lặp, không mở
+khoá outbound. Log: `🧯 Socket ACK của page … coi như CHẾT (2 lần no-ACK đủ hạn chờ ~20s)`.
+
+**Kỳ vọng:** đuôi 13–28 s của lô nhỏ rút còn ~2–3 s; lô lớn không đổi (kênh còn sống
+thì cờ không bao giờ bật).
