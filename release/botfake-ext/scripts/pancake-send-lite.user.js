@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.86-w200.28
+// @version      1.91.87-w200.29
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.86-W200.28'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.87-W200.29'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3900,7 +3900,12 @@
     // [v1.91.76] Log lượt 10k: ACK TB 2317ms · MAX 15544ms, bucket ≥5s có 420 ca ⇒ ngưỡng
     // 15000ms cắt oan đúng những ACK chậm nhất (mỗi ca bị cắt thành "no-ACK" rồi phải kiểm
     // chứng lịch sử). Nới lên 20000ms cho lô lớn; lô ≤30 chat vẫn 8000ms cho nhanh.
-    const ackWaitMs = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 8000 : 20000;
+    // [v1.91.87] HẠN CHỜ THÍCH ỨNG thay cho chờ cứng 8s/20s.
+    // Lô 5 897 tin: ACK TB 1 507ms · max 3 900ms ⇒ chờ 8–20s là dư gấp nhiều lần.
+    // Kênh ACK chết thì trễ đúng bằng hạn chờ rồi vẫn no-ACK ⇒ chờ dài chỉ làm chậm.
+    const ackCeiling = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 8000 : 20000;
+    const ackWaitMs = Math.min(ackCeiling, Math.max(2500, Math.round(sockAckP90() * 3)));
+    try { if (pageId) pageLastAckWait[pageId] = ackWaitMs; } catch (e0) { /* ignore */ }
     /* ===== SỬA GỐC "MẤT ACK" Ở LÔ LỚN =====
      * Trong _app (@818834) hàm publish() làm đúng thế này:
      *     i = { app_id, payload, request_id: ++sock.requestId, type }
@@ -5050,6 +5055,22 @@
   // server chậm. Hậu quả: mỗi tin như vậy tốn 8–20s chờ + 4 lần đọc kiểm chứng + Ext ⇒ lô 5 tin
   // mất 13s. Nay: 2 lần no-ACK đủ hạn chờ ⇒ đánh dấu kênh ACK chết, bỏ Socket khỏi thứ tự làn
   // (đi thẳng Extension ~1s). Chỉ đổi THỨ TỰ kênh, không gửi thêm, không gửi lặp.
+  // [v1.91.87] ĐO ĐỘ TRỄ ACK THẬT ĐỂ BỎ "CHỜ CỨNG".
+  // Hạn chờ cũ là hằng số 8000/20000ms do script tự đặt, không phải Pancake bắt chờ.
+  // Nay hạn chờ bám theo p90 độ trễ ACK quan sát được: wait = clamp(3 × p90, 2500, mức cũ).
+  const ackLatRing = [];   // 200 mẫu ACK OK gần nhất (ms)
+  function noteAckLatency(ms) {
+    const v = Math.round(Number(ms) || 0);
+    if (v <= 0) return;
+    ackLatRing.push(v);
+    if (ackLatRing.length > 200) ackLatRing.shift();
+  }
+  function sockAckP90() {
+    if (ackLatRing.length < 20) return 3000; // chưa đủ mẫu ⇒ 3s (≈2× ACK TB đã đo)
+    const a = ackLatRing.slice().sort((x, y) => x - y);
+    return a[Math.min(a.length - 1, Math.floor(a.length * 0.9))];
+  }
+  const pageLastAckWait = {};   // pageId → hạn chờ vừa dùng cho lần publish gần nhất
   const pageAckTimeoutRun = {}; // pageId → số lần no-ACK đủ hạn chờ liên tiếp
   const pageAckDeadAt = {};     // pageId → thời điểm đánh dấu kênh ACK chết
   const PAGE_ACK_DEAD_TTL_MS = 120000; // 2 phút không phục hồi thì thử lại Socket
@@ -5242,6 +5263,7 @@
         ctl.slowAck = 0;
         ctl.noAckStreak = 0;
         sockNoAckRun = 0; // ACK hồi ⇒ reset cầu dao
+        noteAckLatency(ms); // [v1.91.87] học độ trễ thật để tính hạn chờ
         if (pid) { delete pageAckTimeoutRun[pid]; delete pageAckDeadAt[pid]; }
         if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX) {
           ctl.fastOk = 0;
@@ -5252,10 +5274,14 @@
         ctl.fastOk = 0;
         ctl.slowAck = 0;
         ctl.noAckStreak++;
-        // [v1.91.86] no-ACK mà trễ >= 6s ⇒ đã chờ hết hạn, không có phản hồi nào ⇒ kênh ACK chết.
-        if (ms >= 6000 && pid) {
+        // [v1.91.87] Trễ ĐÚNG BẰNG hạn chờ vừa áp dụng ⇒ bộ đếm giờ đã nổ, tức KHÔNG có
+        // phản hồi nào ⇒ một lần là đủ kết luận kênh ACK chết (thay vì 2 lần như 1.91.86).
+        const lastWait = (pid && pageLastAckWait[pid]) || 0;
+        const hitCeiling = lastWait > 0 && ms >= lastWait * 0.95;
+        if ((ms >= 6000 || hitCeiling) && pid) {
           pageAckTimeoutRun[pid] = (pageAckTimeoutRun[pid] || 0) + 1;
-          if (pageAckTimeoutRun[pid] >= 2 && !isPageAckDead(pid)) {
+          const need = hitCeiling ? 1 : 2;
+          if (pageAckTimeoutRun[pid] >= need && !isPageAckDead(pid)) {
             pageAckDeadAt[pid] = Date.now();
             try { if (lane.getLimit() > socketLaneFloor) lane.setLimit(socketLaneFloor); } catch (e0) { /* ignore */ }
             logLine('🧯 Socket ACK của page ' + pid + ' coi như CHẾT (2 lần no-ACK đủ hạn chờ ~'

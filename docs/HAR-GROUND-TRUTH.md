@@ -426,3 +426,31 @@ khoá outbound. Log: `🧯 Socket ACK của page … coi như CHẾT (2 lần no
 
 **Kỳ vọng:** đuôi 13–28 s của lô nhỏ rút còn ~2–3 s; lô lớn không đổi (kênh còn sống
 thì cờ không bao giờ bật).
+
+## §15 — Bỏ "chờ cứng" ACK: hạn chờ thích ứng (1.91.87)
+
+**Phát hiện khi đọc lại code + HAR.** Hai mốc 8 000 ms và 20 000 ms **không phải do
+Pancake** — chúng là hằng số script tự đặt tại một dòng duy nhất:
+
+```js
+const ackWaitMs = (batchStats.total > 0 && batchStats.total <= 30) ? 8000 : 20000;
+```
+
+Vì vậy "chờ 20 s rồi vẫn no-ACK" ở §14 chỉ là **hệ quả của chính hạn chờ đó**.
+HAR xác nhận ACK là frame `/ls_resp` echo `request_id` trên `wss://edge-chat.facebook.com/chat`
+(không có endpoint HTTP nào trả kết quả gửi) ⇒ muốn biết kết quả sớm hơn thì phải
+**rút hạn chờ**, không có đường khác.
+
+**Sửa.** (a) Đo độ trễ ACK thật, giữ vòng 200 mẫu, tính p90. (b) Hạn chờ =
+`clamp(3 × p90, 2500, mức cũ)` — lô 5 897 tin có p90 ≈ 2–3 s ⇒ chờ ~6–8 s thay vì 20 s;
+kênh chết thì ~2,5–4,5 s. (c) No-ACK có độ trễ **≥95 % hạn chờ vừa áp dụng** ⇒ bộ đếm
+giờ đã nổ, không có phản hồi nào ⇒ **1 lần** là đủ đánh dấu kênh chết (trước là 2 lần,
+tốn thêm trọn một hạn chờ).
+
+**Vì sao không bỏ chờ hoàn toàn.** Không có ACK thì *không biết tin đã đi hay chưa*;
+bỏ chờ ⇒ kết luận sớm ⇒ bù Ext ⇒ **gửi trùng**. Đây là ranh giới không được vượt.
+Mức tối ưu hợp lệ là: chờ *vừa đủ* theo dữ liệu đo được, rồi hoặc chốt ✅, hoặc đánh
+dấu kênh chết để **những tin sau không phải chờ nữa** (đã làm ở §14).
+
+**Ước tính:** lô nhỏ 5–10 chat: đuôi 13 s → ~3–5 s; lô lớn: hạn chờ 20 s → 6–8 s,
+số ca `⚠ không rõ` giảm vì ít lần cắt oan ACK chậm hơn.
