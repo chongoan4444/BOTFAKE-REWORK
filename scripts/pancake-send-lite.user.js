@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.10-w200.52
+// @version      1.92.11-w200.53
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.10-W200.52'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.11-W200.53'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -8409,6 +8409,8 @@
     // 🔥 [FIX-TỐC-ĐỘ] Nâng từ 96 → 192 main slots. Với sockFired: true, mỗi slot quay vòng ~10ms
     // → 192 × 100/s = 19.200/s theoretical, chỉ bị paceSocketPublish (4ms) chặn.
     // Ext tăng 32→128, Socket retry tăng 44→96 để bù khi có rejected hàng loạt.
+    // [v1.92.11] Hai hằng này KHÔNG còn dùng để chia việc — wave nay một hàng đợi chung.
+    // Giữ lại để đọc log cũ và để đối chiếu lịch sử (xem docs §43).
     const WAVE_MAIN_LANES = 4;
     const WAVE_PER_LANE = 48;
     const WAVE_MAIN_TOTAL_CAP = 192;
@@ -8652,12 +8654,12 @@
           const waveNo = Math.floor(waveStart / WAVE_SIZE) + 1;
           const waveStartedAt = Date.now();
           waveDiag.wavesStarted++;
-          const laneSize = Math.max(1, Math.ceil(waveSlice.length / WAVE_MAIN_LANES));
-          const laneChunks = [];
-          for (let lane = 0; lane < WAVE_MAIN_LANES; lane++) {
-            const chunk = waveSlice.slice(lane * laneSize, (lane + 1) * laneSize);
-            if (chunk.length) laneChunks.push(chunk);
-          }
+          // [v1.92.11] BỎ CHIA KHÚC TĨNH. Bản cũ chia wave thành WAVE_MAIN_LANES khúc cố định, mỗi
+          // khúc một pool riêng ⇒ khúc nào nhiều ca chậm (FB từ chối → chờ ACK lâu) thì 48 làn của
+          // khúc đó ùn, còn 144 làn của 3 khúc kia HẾT VIỆC rồi ngồi không, wave chỉ kết thúc khi
+          // khúc chậm nhất xong. Log 14:27 (2 393 chat): wave→cổng TB 2 510 ms nhưng MAX 6 270 ms
+          // — chênh 2,5 lần, đúng dấu của mất cân bằng tĩnh. Nay cả wave dùng CHUNG một hàng đợi,
+          // 192 làn rút việc chung ⇒ làn rảnh nhận việc ngay, không chờ khúc khác.
           let waveDoneCount = 0;
           // 🔥 [FIX-TỐC-ĐỘ] Mở wave N+1 khi wave N đạt 40% (thay vì 78%) → gối wave sớm, tổng thời gian wave không bị "rỗng".
           const fastGateTarget = Math.max(1, Math.ceil(waveSlice.length * 0.4));
@@ -8720,8 +8722,8 @@
             }
           };
 
-          const lanePromises = laneChunks.map((chunk) => runPool(chunk, runMainItem, Math.min(WAVE_PER_LANE, chunk.length)));
-          const wavePromise = Promise.all(lanePromises);
+          // Một pool duy nhất: runPool đã rút việc động bằng biến next chung (không chia khúc).
+          const wavePromise = runPool(waveSlice, runMainItem, WAVE_MAIN_TOTAL_CAP);
           allMainPromises.push(wavePromise);
           if (waveStart + WAVE_SIZE < fullList.length) {
             prefetchNextWaveGids(fullList.slice(waveStart + WAVE_SIZE, waveStart + 2 * WAVE_SIZE));
