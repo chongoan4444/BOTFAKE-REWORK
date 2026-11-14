@@ -1546,3 +1546,61 @@ Mỗi lệnh giữ một `pendingMessages` + một timer 60 s phía app (không 
 
 `node --check` ✓ · `npm run check` ✓ · `npm test` ✓ (12/12) · `npm run build` ✓.
 Không đổi nhịp phát, không đổi timeout mạng, không đổi luật chống trùng ⇒ không mở thêm đường gửi lặp.
+
+---
+
+## §41 — HỒI QUY 1.92.7: mọi tin API bị chấm "không rõ" (vá ở 1.92.10)
+
+### 41.1 Triệu chứng người dùng báo
+
+Lô 14:09 (4 chat, script 1.92.9): phát xong trong **53 ms**, cả 4 tin ✅, `HTTP 200×4`,
+nhưng TỔNG HỢP ghi **"10s · 0,39 tin/giây"** và 4 tin phải chờ **kiểm chứng 9 s** mới chốt.
+
+### 41.2 Nguyên nhân — ba bộ đếm tự tố cáo nhau
+
+| bộ đếm | log | nghĩa |
+|---|---|---|
+| `HTTP status [200×4]` | ghi trong `try` của `timedFetch` | request **đã** đi và trả 200 |
+| `OK/rejected/không rõ 0/0/4` | ghi **sau** khi `timedFetch` trả về | `timedFetch` **không** trả về bình thường |
+| `fetch p50 0ms` | mảng mẫu rỗng | `push` vào mẫu **thất bại** |
+
+Ba dòng đó chỉ thẳng vào `finally` của `timedFetch`. Và đúng thế:
+
+```js
+// 8028 (từ 1.92.7):
+Object.keys(sendDiag).forEach((k) => { sendDiag[k] = k === 'apiStatusCounts' ? Object.create(null) : 0; });
+//                                       ↑ apiFetchSamples: []  →  bị đổi thành SỐ 0
+// 2994:
+const ar = sendDiag.apiFetchSamples;  ar.push(fetchMs);   // 0.push → TypeError
+```
+
+`push` nằm trong `finally` ⇒ văng ⇒ `timedFetch` ném ⇒ làn `makeLane` bọc thành `'Lỗi kênh:…'`
+⇒ `.then(laneRes)` chấm **"⚠ không rõ kết quả (lỗi mạng/quá hạn)"** ⇒ `scheduleUncertainVerify`
+⇒ đuôi kiểm chứng ~10 s ⇒ tốc độ hiển thị sụp.
+
+**Lỗi vào từ 1.92.7** (lúc thêm vòng p50), không phải 1.92.8/1.92.9. Người dùng nhảy
+1.92.6 → 1.92.9 nên chỉ thấy ở lô 14:09 — ba lô trước (13:47, 13:58, 13:59) đều chạy 1.92.6.
+
+### 41.3 Vá
+
+1. Reset theo **KIỂU**: mảng → `length = 0`, map → mới, số → `0`.
+2. Chốt chặn thứ hai: `if (Array.isArray(ar)) { ar.push(...) }` — một khoá đổi kiểu không bao giờ
+   được phép làm chết cả làn gửi.
+
+### 41.4 Báo cáo: tách "phát lệnh" khỏi "chờ xác nhận"
+
+Thêm `batchStats.dispatchEndedAt` (đặt khi `loopFinished = true`) và in **hai chặng**:
+
+```
+📊 … | ⏱ Phát lệnh 0.1s · chờ xác nhận 9.4s · tổng 10s
+⚡ TỐC ĐỘ: PHÁT 4 lệnh trong 0.1s = 40.00/giây (2400/phút) · đuôi xác nhận 9.4s · đã chốt 4/4 (0.39/giây …)
+```
+
+Trước đây chỉ có "tổng", nên lô phát xong tức thì vẫn hiện 0,39 tin/giây — đọc thành script chậm.
+Đuôi xác nhận là **cố ý** (kiểm chứng chỉ nâng ⚠→✅, không gửi lại), không phải tốc độ gửi.
+
+### 41.5 Bài học
+
+Một khoá chẩn đoán (`apiFetchSamples`) làm chết **đường gửi**. Mọi thao tác trong `finally`
+phải coi mình là code không được phép ném. `npm test` không bắt được vì nó không chạy đường
+mạng thật — chỉ log vận hành mới lộ.
