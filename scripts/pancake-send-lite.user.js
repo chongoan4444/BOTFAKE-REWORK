@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.13-w200.55
+// @version      1.92.14-w200.56
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.13-W200.55'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.14-W200.56'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5287,15 +5287,17 @@
   //     __botfakeSetSockPageFloor__(128)      // trong Console của trang Pancake
   // hoặc đặt localStorage 'botfake_sock_page_floor' = 128. Đặt lại 64 để về mặc định.
   let socketLaneFloor = SOCKET_LANE_MIN;
+  let socketFloorUserSet = false; // sàn do NGƯỜI DÙNG đặt thì không tự nâng lại
   try {
     const _f = parseInt(localStorage.getItem('botfake_sock_page_floor') || '', 10);
-    if (_f >= 16 && _f <= SOCKET_LANE_MAX) socketLaneFloor = _f;
+    if (_f >= 16 && _f <= SOCKET_LANE_MAX) { socketLaneFloor = _f; socketFloorUserSet = true; }
   } catch (e0) { /* ignore */ }
   try {
     window.__botfakeSetSockPageFloor__ = function (v) {
       const n = parseInt(v, 10);
       if (!(n >= 16 && n <= SOCKET_LANE_MAX)) return 'giá trị phải trong khoảng 16–' + SOCKET_LANE_MAX;
       socketLaneFloor = n;
+      socketFloorUserSet = true;
       try { localStorage.setItem('botfake_sock_page_floor', String(n)); } catch (e1) { /* ignore */ }
       return 'đã đặt sàn Socket/page = ' + n + ' — áp dụng cho lượt gửi kế tiếp (tải lại trang nếu đang chạy)';
     };
@@ -5611,6 +5613,15 @@
         if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX) {
           ctl.fastOk = 0;
           const next = lane.setLimit(lane.getLimit() + 8);
+          // [v1.92.14] SÀN BỊ CẦU DAO HẠ THÌ KHÔNG BAO GIỜ HỒI — hạ là vĩnh viễn tới khi F5.
+          // Log lô 15:54 cho thấy Socket/page cap in ra "64–384" nhưng limit cuối [64×1]; còn
+          // mỗi lần cầu dao nổ (25 no-ACK liên tiếp) lại hạ sàn 64→32→16 và GIỮ tới hết phiên.
+          // ACK đã nhanh ổn định 20 nhịp liên tiếp thì nâng sàn trở lại dần (không đụng sàn do
+          // người dùng tự đặt bằng __botfakeSetSockPageFloor__).
+          if (!socketFloorUserSet && socketLaneFloor < SOCKET_LANE_MIN) {
+            socketLaneFloor = Math.min(SOCKET_LANE_MIN, socketLaneFloor + 8);
+            logLine('🔧 ACK hồi ổn định — nâng lại sàn Socket/page ' + socketLaneFloor + '/' + SOCKET_LANE_MIN + '.');
+          }
           logLine('⚡ Socket ACK nhanh ổn định — tăng lane page ' + pid + ' lên ' + next + '.');
         }
       } else if (kind === 'noack') {
@@ -5623,7 +5634,13 @@
         const hitCeiling = lastWait > 0 && ms >= lastWait * 0.95;
         if ((ms >= 6000 || hitCeiling) && pid) {
           pageAckTimeoutRun[pid] = (pageAckTimeoutRun[pid] || 0) + 1;
-          const need = hitCeiling ? 1 : 2;
+          // [v1.92.14] need 1 → 2. `hitCeiling` gần như LUÔN đúng (bộ đếm giờ nổ đúng hạn chờ
+          // nên ms ≈ lastWait), nghĩa là chỉ MỘT ACK trượt là page bị tuyên bố chết 10 phút.
+          // Lô 14:34 có 117 no-ACK nằm rải giữa 1 173 ACK OK — một ca trượt đơn lẻ không chứng
+          // minh được kênh ACK chết (mọi ACK OK đều xoá bộ đếm này). Đòi 2 ca LIÊN TIẾP: đổi lại
+          // chỉ tốn thêm ~3s trước khi kết luận, nhưng không còn cảnh "trượt một ca ⇒ cả lô 9 455
+          // chat rơi vào Extension".
+          const need = 2;
           if (pageAckTimeoutRun[pid] >= need && !isPageAckDead(pid)) {
             pageAckDeadAt[pid] = Date.now();
             try { if (lane.getLimit() > socketLaneFloor) lane.setLimit(socketLaneFloor); } catch (e0) { /* ignore */ }
@@ -6909,6 +6926,46 @@
   }
 
   // Đồng bộ tức thì (0ms) global_id từ WebSocket RAM cache trước khi bắn — tuyệt đối không chặn đầu lượt!
+  /* [v1.92.14] QUYẾT ĐỊNH KÊNH CỦA CẢ LÔ NẰM Ở ~2 GIÂY ĐẦU — nên phải chờ ĐÚNG điều kiện.
+   * Vì sao cùng một lô mà lúc thì chạy Socket (125 tin/s), lúc thì dồn hết vào Ext (29,7 tin/s):
+   *   `pickBestDirectOrder` chọn Socket TRƯỚC chỉ khi `sockReady = isPageSocketReady(pid)`
+   *   (MqttHelper.SOCKETS[pid] đã sync — cần ~1s sau connect + requestId ≥ 1) VÀ có global_id thật.
+   *   Nếu wave đầu tiên bắt đầu TRƯỚC khi socket sync xong ⇒ kế hoạch là ['ext','socket'], Ext
+   *   trả lời trước (bắn nhả ~0,8–3s) và THẮNG ⇒ Socket không bao giờ được thử, cả lô đi Ext.
+   *   Cùng một danh sách, cùng máy: chỉ khác nhau ở chỗ socket kịp sync trong ~2s hay không
+   *   (mạng/CPU/tab vừa F5) ⇒ kết quả lệch 4 lần. Không phải "lúc được lúc không" ngẫu nhiên.
+   * Nay: đầu lô lớn, chờ socket sync với hạn 4s (thức bằng softNotify('sock-sync'), không sleep
+   * mù). Không sync kịp thì vẫn chạy như cũ và GHI RÕ lý do vào log. */
+  async function waitSocketsReadyForSend(targets, capMs) {
+    const h = window.__MqttHelper__;
+    if (!h || typeof h.initSocket !== 'function') return { waited: 0, ready: 0, pages: 0 };
+    const seen = {};
+    const pages = [];
+    (targets || []).forEach((c) => {
+      const pid = (c && (c.pageId || String(c.id || '').split('_')[0])) || '';
+      if (pid && !seen[pid]) { seen[pid] = true; pages.push(pid); }
+    });
+    if (!pages.length) return { waited: 0, ready: 0, pages: 0 };
+    const allReady = () => pages.every((pid) => isPageSocketReady(pid));
+    if (allReady()) return { waited: 0, ready: pages.length, pages: pages.length };
+    const t0 = Date.now();
+    const cap = Math.max(0, Number(capMs) || 4000);
+    try { logLine('🔌 Chờ Socket sẵn sàng (tối đa ' + (cap / 1000).toFixed(0) + 's) để cả lô đi làn Socket…'); } catch (e0) { /* ignore */ }
+    // Chờ đúng sự kiện: waitForSocketSynced tự softNotify('sock-sync'); waitCond chỉ là lưới 250ms.
+    await waitCond(allReady, 'sock-sync', cap);
+    const ready = pages.filter((pid) => isPageSocketReady(pid)).length;
+    const waited = Date.now() - t0;
+    if (ready === pages.length) {
+      try { logLine('✅ Socket đã sync ' + ready + '/' + pages.length + ' page sau ' + waited + 'ms — lô này đi làn Socket trước.'); } catch (e1) { /* ignore */ }
+    } else {
+      try {
+        logLine('⏳ Socket CHƯA sync (' + ready + '/' + pages.length + ' page) sau ' + waited + 'ms — lô này sẽ đi Extension trước, '
+          + 'chậm hơn ~4 lần so với Socket. Bấm ⏹ Dừng + F5 rồi chạy lại NGAY sẽ lấy lại được làn Socket.');
+      } catch (e2) { /* ignore */ }
+    }
+    return { waited, ready, pages: pages.length };
+  }
+
   async function waitInitialGidWarmup(targets) {
     try {
       const h = window.__MqttHelper__;
@@ -8862,6 +8919,12 @@
       try {
         await waitInitialGidWarmup(targets, 1500);
       } catch (e) { /* làm nóng lỗi không được làm hỏng lô */ }
+      // [v1.92.14] Lô lớn: chờ socket sync TRƯỚC wave đầu (lô nhỏ ≤50 chat giữ nguyên chiến lược
+      // "Ext ngay cho nhanh" — 3–4s chờ làm nho; đổi lại cả lô 9 455 chat đi làn chậm là lỗ lớn).
+      try {
+        const nTargets = (targets || []).length;
+        if (nTargets > 50) await waitSocketsReadyForSend(targets, 4000);
+      } catch (e) { /* chờ socket lỗi không được làm hỏng lô */ }
       // SW gửi inbox thất bại: jwt → #551; cookie jar → Invalid access_token. Chỉ tab pancake.vn.
       for (let gi = 0; gi < sendGroups.length && !state.stopRequested; gi++) {
         const g = sendGroups[gi];

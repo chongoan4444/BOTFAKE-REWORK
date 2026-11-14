@@ -1797,3 +1797,58 @@ loại khỏi kế hoạch.
 Ca bị bộ ngắt Ext chặn vẫn đang bị tính ❌ chứ chưa được xếp lại. Muốn xếp lại phải đi qua
 `sendOneAndLog` (nó đã `done++/fail++` trước khi trả về) nên không thể nhét thêm ở `runMainItem`
 mà không lệch sổ — cần một đường "chưa bắn ⇒ trả về hàng đợi" đúng chỗ, làm riêng khi có log mới.
+
+## §46 — Vì sao CÙNG MỘT LÔ lúc chạy Socket (125 tin/s) lúc dồn hết vào Ext (29,7 tin/s)
+
+### 46.1 Chỗ rẽ nhánh chỉ có MỘT, và nó nằm ở 2 giây đầu
+
+```js
+// pickBestDirectOrder()
+const sockReady = isPageSocketReady(pageId) || (!isSmallBatch && !!socketWarmPromises[pageId]);
+const hasRealGid = !!(ctx && ctx.gid && !ctx.gidFromPsid);
+const preferSocket = sockReady && hasRealGid && (hint === 'socket' || hasRealGid);
+const first = preferSocket ? 'socket' : 'ext';   // ← đây là toàn bộ "lúc được lúc không"
+```
+
+`isPageSocketReady()` = `MqttHelper.SOCKETS[pageId]` đã **sync** — mà sync cần
+`connectAt + 1000 ms` **và** `requestId ≥ 1` (xem `waitForSocketSynced`). Tức socket cần ~1–2 s
+sau khi `initSocket()` mới "sẵn sàng".
+
+Luồng đầu lô hiện tại: `warmUpSockets()` (bắn `initSocket`, KHÔNG ai chờ) →
+`waitInitialGidWarmup()` (chỉ đồng bộ mapping, không chờ sync) → **wave 1 chạy ngay**.
+
+⇒ Nếu wave 1 bắt đầu **trước** lúc socket sync xong: mỗi chat có kế hoạch `['ext','socket']`;
+Ext trả lời trước (bắn nhả 0,8–3 s) và **thắng** ⇒ **Socket không bao giờ được thử**. Cả lô đi Ext.
+⇒ Nếu socket kịp sync: `['socket','ext']` ⇒ Socket thắng ⇒ ACK về ⇒ cờ chết bị xoá + làn +8 ⇒
+càng ngày càng nhanh (vòng tự củng cố).
+
+Đây là **hai trạng thái bền** của cùng một danh sách. Khác biệt duy nhất: mạng/CPU/tab vừa F5
+làm socket sync kịp hay không kịp trong ~2 s. Không phải ngẫu nhiên vô cớ.
+
+### 46.2 Hai cái "chốt" làm trạng thái xấu KHÔNG tự hồi
+
+| chốt | đặt khi | tự hồi? |
+|---|---|---|
+| `pageAckDeadAt` (né Socket) | **1** lần no-ACK đủ hạn chờ (`hitCeiling` gần như luôn đúng) | ❌ chỉ hồi khi có **ACK Socket** — mà né Socket thì không có ACK. Vòng tròn. TTL 10 phút |
+| `socketLaneFloor` (sàn làn) | 25 no-ACK liên tiếp ⇒ 64→32→16 | ❌ code cũ ghi rõ "cầu dao giữ tới HẾT PHIÊN"; không có đường nâng lại |
+| `apiBlockedPages` | 3 lỗi thread-control liên tiếp | TTL 4 giờ |
+
+Cộng lại: một phút xui ở đầu phiên ⇒ né Socket 10 phút ⇒ sàn làn 16–32 tới khi F5 ⇒ API bị chặn
+4 giờ. Ba hình phạt dồn lên đúng lúc hệ đang bận nhất.
+
+Lưu ý: lô 15:54 **không chứng minh** được là cờ chết bật (Ext thắng 7 124 lần nên Socket đứng
+thứ hai cũng không bao giờ được thử). Hai nguyên nhân cho cùng một triệu chứng ⇒ phải ĐO, không
+đoán — đó là lý do thêm bộ đếm `chọn kênh:` ở §45.3.
+
+### 46.3 Sửa ở 1.92.14-W200.56
+
+1. **`waitSocketsReadyForSend(targets, 4000)`** — đầu lô > 50 chat, chờ đúng điều kiện
+   `isPageSocketReady()` (thức bằng `softNotify('sock-sync')`, lưới an toàn 250 ms, hạn 4 s).
+   Log rõ `✅ Socket đã sync N/N page sau Xms — lô này đi làn Socket trước.` hoặc
+   `⏳ Socket CHƯA sync N/N sau Xms — lô này đi Extension trước…`. Lô ≤ 50 chat giữ nguyên
+   chiến lược cũ (Ext ngay, không chờ).
+2. **`need` 1 → 2** cho cờ "ACK chết": phải **2 lần no-ACK liên tiếp** mới kết luận. Lô 14:34 có
+   117 no-ACK rải giữa 1 173 ACK OK ⇒ một ca trượt đơn lẻ không chứng minh được kênh chết.
+3. **Sàn làn Socket tự hồi**: cứ 20 ACK nhanh liên tiếp thì `socketLaneFloor` +8 (trần
+   `SOCKET_LANE_MIN = 64`), trừ khi người dùng tự đặt bằng `__botfakeSetSockPageFloor__`
+   (cờ `socketFloorUserSet`).
