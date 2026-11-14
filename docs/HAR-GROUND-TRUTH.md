@@ -1378,3 +1378,51 @@ việc phải đi tìm bằng mắt. Vòng luẩn quẩn.
    cần tải nhỏ hơn nhiều so với "toàn bộ page".
 3. **`New global_user_id added: <page>,<global_id>`** — hàng trăm cặp trong vài giây: đây chính là
    nguồn nuôi cache globalId (WS `threadMappingStoreV2`). Không cần dò từng chat.
+
+---
+
+## §38 — ĐÍNH CHÍNH bảng "tiềm năng" ở §35/§36 (đo lại, 2026-11-14)
+
+### 38.1 Câu tôi nói SAI: "danh sách có sẵn global_id, không cần request từng chat"
+
+Đo lại trên `taidanhsach.har` (1 840 dòng hội thoại, chưa khử trùng):
+
+```
+có global_id (ở conv hoặc customers[]): 0 / 1840
+có customers[].fb_id                 : 1840 / 1840
+các trường của customers[]           : fb_id, id, name      ← KHÔNG có global_id
+```
+
+⇒ Danh sách **không** chứa `global_id`. Nó chỉ có `fb_id` = **PSID**, đúng loại gid mà chính
+script đã đánh dấu là yếu (`gidFromPsid`) và loại khỏi các nhánh retry (§31.1).
+
+Và script **đã** khai thác phần có thể từ lâu: `cacheGidFromConvObj()` chạy cho **mọi dòng** khi
+enrich và **mọi hội thoại** khi tải danh sách, nhưng nó chỉ nhận `global_id`/`globalId`
+(không nhận `fb_id`). Vì vậy 3 949 lần dò `GET /messages` mỗi lượt là **những chat mà dữ liệu
+không có global_id thật** — không phải chỗ script bỏ sót.
+
+**Kết luận: không có việc gì để làm ở đây. Bỏ dòng đó khỏi danh sách tiềm năng.**
+
+### 38.2 `last_sent_by` cũng không phải "chưa nhắn" như tôi nói
+
+`last_sent_by.id === from_psid` chỉ nghĩa là **khách nói câu cuối** — tức *chưa được trả lời*,
+KHÔNG phải *page chưa từng nhắn*. Một chat page đã nhắn 5 lần mà khách trả lời sau cùng vẫn thoả
+điều kiện này. Muốn biết "page chưa từng nhắn" phải đọc lịch sử từng chat ⇒ trái với ràng buộc
+"không request từng chat". **Hạ mức: không dùng được.**
+
+### 38.3 Chấm lại 5 dòng "tiềm năng"
+
+| dòng | kết luận thật |
+|---|---|
+| `customers[].fb_id` ⇒ global_id | **SAI** — chỉ có PSID, script đã khai thác hết phần có thể (38.1) |
+| `contents/facebook` đường ảnh rẻ | Đúng số đo, nhưng **vô dụng hiện tại**: các lô đang gửi chữ; nhánh ảnh đã chạy đúng |
+| bulk `update_global_id` | **Giá trị thấp**: đây là GHI vào DB Pancake, mà chính app đã làm qua WS (`New global_user_id added` hàng trăm dòng/giây) |
+| `isRangeSatisfied` | **Đã chạy sẵn**, không phải cơ hội — chỉ là giải thích tại sao chọn 2 đầu sớm thì tải nhanh |
+| Keep-alive 16 Hz | **Giải thích**, không phải cơ hội |
+
+### 38.4 Rút ra
+
+Loạt đọc này **đóng cửa nhiều hơn mở cửa**. Thứ duy nhất tạo ra tốc độ thật trong cả loạt là
+**timeout Ext động** (Ext 0 → 245 thắng, 37,32 → 39,86 tin/giây). Các "phát hiện" còn lại phần lớn
+là giải thích cơ chế hoặc chặn đường cụt. Việc còn lại có giá trị thật chỉ là: xoay JWT, dọn file
+rác, và (tuỳ bạn) xoá cache unavailable.
