@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.12-w200.54
+// @version      1.92.13-w200.55
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.12-W200.54'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.13-W200.55'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5377,6 +5377,18 @@
   // một wave KHÔNG thể biết trước để né Socket. Giá trị thật của cờ là GIỮ QUA CÁC LÔ: lô sau
   // biết page đã chết ⇒ đi Ext ngay từ tin đầu. Vì vậy nới TTL 2 phút → 10 phút.
   const PAGE_ACK_DEAD_TTL_MS = 600000;
+  /* [v1.92.13] CỜ "ACK CHẾT" BỊ BÓP QUÁ LÂU — đo được từ lô 15:54 (9 455 chat, 1.92.12):
+   *   📡 SOCKET: ACK OK/rejected/no-ACK 0/0/0 · peak Socket/page active 0/0 · limits [64×1]
+   * ⇒ Socket KHÔNG ĐƯỢC THỬ MỘT LẦN NÀO trong cả 342s. Toàn bộ 9 455 chat dồn vào làn Ext
+   *   (48 luồng, Ext p90 3 203ms) ⇒ 29,74 tin/s, Ext ngộp: peak queue 468, 633 quá hạn,
+   *   1 526 ca bị bỏ qua vì bộ ngắt quá tải.
+   * Đường duy nhất xoá 'socket' khỏi MỌI kế hoạch là nhánh isPageAckDead() dưới đây, mà TTL
+   * của nó (10 phút) DÀI HƠN cả lượt chạy ⇒ một lần no-ACK ở lượt trước đủ bóp cả lô 9 455
+   * chat vào làn chậm nhất. Nay: vẫn né Socket, nhưng cứ SOCK_DEAD_PROBE_MS cho đúng MỘT ca
+   * đi Socket để dò; ACK về là cờ được xoá ngay (noteSocketPageLaneOutcome 'ok') ⇒ tự hồi. */
+  const pageAckDeadProbeAt = {};
+  const SOCK_DEAD_PROBE_MS = 20000;
+  const socketPickDiag = { deadSkip: 0, probe: 0, probeOk: 0, notReady: 0, noGid: 0 };
   function isPageAckDead(pid) {
     const at = pageAckDeadAt[pid];
     if (!at) return false;
@@ -5595,7 +5607,7 @@
         ctl.noAckStreak = 0;
         sockNoAckRun = 0; // ACK hồi ⇒ reset cầu dao
         noteAckLatency(ms); // [v1.91.87] học độ trễ thật để tính hạn chờ
-        if (pid) { delete pageAckTimeoutRun[pid]; delete pageAckDeadAt[pid]; }
+        if (pid) { delete pageAckTimeoutRun[pid]; if (pageAckDeadAt[pid]) { socketPickDiag.probeOk++; delete pageAckDeadProbeAt[pid]; } delete pageAckDeadAt[pid]; }
         if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX) {
           ctl.fastOk = 0;
           const next = lane.setLimit(lane.getLimit() + 8);
@@ -6093,6 +6105,15 @@
     // [v1.91.86] Kênh ACK của page đã chết ⇒ đừng bắn Socket để rồi chờ hết hạn 8–20s.
     // Chỉ đổi thứ tự làn (bỏ 'socket'), Extension/API vẫn là đường gửi thật như cũ.
     if (pageId && isPageAckDead(pageId)) {
+      // [v1.92.13] Dò lại định kỳ thay vì né Socket mù 10 phút (xem chú thích ở PAGE_ACK_DEAD_TTL_MS).
+      if (Date.now() - (pageAckDeadProbeAt[pageId] || 0) >= SOCK_DEAD_PROBE_MS) {
+        pageAckDeadProbeAt[pageId] = Date.now();
+        if (seq.indexOf('socket') > -1) {
+          socketPickDiag.probe++;
+          return ['socket'].concat(seq.filter((x) => x !== 'socket'));
+        }
+      }
+      socketPickDiag.deadSkip++;
       const noSock = seq.filter((x) => x !== 'socket');
       if (noSock.length) return noSock;
     }
@@ -6106,6 +6127,8 @@
     // để không phải đứng đợi getBusinessWSContext + sendInitMessages (~3s).
     const sockReady = isPageSocketReady(pageId) || (!isSmallBatch && !!(pageId && socketWarmPromises[pageId]));
     const hasRealGid = !!(ctx && ctx.gid && !ctx.gidFromPsid);
+    if (!sockReady) socketPickDiag.notReady++;
+    else if (!hasRealGid) socketPickDiag.noGid++;
     // Khớp 100% với __sendBySocketCacheFB__ trong _app (@927067 & @937200):
     // Ưu tiên bắn qua Socket trước khi WebSocket đang kết nối (hoặc đang khởi động ở đầu lượt lô lớn) VÀ ĐÃ CÓ global_id THẬT (hasRealGid)!
     // Tuyệt đối không ưu tiên Socket khi chưa có global_id thật (vì Socket không nhận from_psid).
@@ -6393,6 +6416,9 @@
     // Chỉ đánh dấu "gid chưa rõ" khi một kênh thật sự cho biết đang thiếu gid.
     // Lỗi API độc lập (chưa hề cần gid) không được kéo cả chat sang Pass 2 oan.
     let sawGidUnknown = !!(ctx.gidUnknown && !ctx.gid && conv.type !== 'comment');
+    // [v1.92.13] Chat bị CHÍNH BỘ NGẮT QUÁ TẢI của Ext chặn (chưa hề bắn lệnh nào ⇒ chắc chắn
+    // chưa đi) — phải phân biệt với "khách chết" để còn xếp lại, xem runMainItem.
+    let sawExtOverload = false;
     if (triedCh.length) {
       seq = seq.filter((x) => triedCh.indexOf(x) < 0);
     }
@@ -6426,6 +6452,7 @@
       triedCh.push(ch);
       tried.push((ch === 'ext' ? 'Ext' : ch) + ': ' + (r.error || 'fail'));
       if (r.gidUnknown) sawGidUnknown = true;
+      if (r.extBreakerOpen) { sawExtOverload = true; sendDiag.extOverloadSkips++; }
       // "không rõ" = tin CÓ THỂ đã đi — thử tiếp kênh khác sẽ gửi TRÙNG → dừng ngay
       if (r.sent === 'maybe') {
         recycleUnusedFbId(pid0, ctx);
@@ -6459,6 +6486,7 @@
     recycleUnusedFbId(pid0, ctx);
     return {
       ok: false, sent: false, tried: triedCh.slice(),
+      extOverloaded: sawExtOverload && !deliveredIds[conv.id],
       gidUnknown: !!(sawGidUnknown && !(ctx.gid && !ctx.gidFromPsid)),
       discoveryState: (ctx && ctx.gidDiscoveryState) || '',
       error: tried.join(' | '),
@@ -6905,6 +6933,9 @@
   const sendDiag = {
     sockRetry: 0, sockRetryRecovered: 0, sockRetryRejected: 0, sockRetryOther: 0, photoRetry: 0,
     recipientUnavailable: 0,
+    // [v1.92.13] Số ca bị CHÍNH bộ ngắt quá tải của Ext chặn trước khi bắn (chưa hề gửi lệnh nào)
+    // mà kế hoạch không còn kênh nào khác ⇒ bị tính ❌ oan. Lô 15:54: 1 526 ca.
+    extOverloadSkips: 0,
     socketAckOk: 0, socketAckRejected: 0, socketNoAck: 0,
     socketAckMsTotal: 0, socketAckMsMax: 0,
     socketAckLt250: 0, socketAck250To999: 0, socketAck1To2s: 0, socketAck2To5s: 0, socketAckGte5s: 0,
@@ -7195,7 +7226,10 @@
           + '/giây; ' + (successPerSec * 60).toFixed(0) + '/phút) · loại chat FB xác nhận unavailable '
           + sendDiag.recipientUnavailable + ' → mục tiêu còn ' + eligibleAfterUnavailable + ', thành công '
           + c.okTotal + '/' + eligibleAfterUnavailable + ' (' + eligibleSuccessPct.toFixed(1) + '%) · đang chờ ' + c.pending
-          + ' · lỗi ' + c.failTotal + ' · không rõ ' + c.unsureTotal + ' · bỏ qua ' + c.skipTotal);
+          + ' · lỗi ' + c.failTotal + ' · không rõ ' + c.unsureTotal + ' · bỏ qua ' + c.skipTotal
+          + (sendDiag.extOverloadSkips
+            ? ' · ⏸ Ext tự nghẽn chặn trước khi bắn (tính lỗi oan): ' + sendDiag.extOverloadSkips
+            : ''));
         logLine('🌊 WAVE: script ' + APP_VERSION + ' · ' + waveDiag.wavesStarted + '/' + waveDiag.plannedWaves + ' wave · size ' + waveDiag.waveSize
           + ' · gap cấu hình ' + waveDiag.configuredGapMs + 'ms · Gửi nhanh ' + (waveDiag.quickEnabled ? 'BẬT' : 'TẮT')
           + ' · main cap ' + waveDiag.mainCapMinObserved + '–96 (cuối ' + waveDiag.mainCapFinal + ', hạ/tăng ' + waveDiag.mainCapDownshifts + '/' + waveDiag.mainCapUpshifts + ') / active max ' + waveDiag.maxMainInFlight
@@ -7236,7 +7270,11 @@
           + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
           + ' · Ext p90 ' + (extLatP90() || 0) + 'ms → timeout ' + extTimeoutMs() + 'ms'
           + ' · can_inbox=false ' + ((sendDiag && sendDiag.canInboxFalse) || 0) + '/' + ((sendDiag && sendDiag.canInboxSeen) || 0)
-          + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
+           + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
+           + ' · chọn kênh: Ext-trước(socket chưa sync) ' + socketPickDiag.notReady
+           + ' / thiếu gid ' + socketPickDiag.noGid
+           + ' / Socket bị né (ACK chết) ' + socketPickDiag.deadSkip
+           + ' · dò lại ACK chết ' + socketPickDiag.probe + ' (hồi ' + socketPickDiag.probeOk + ')'
           + ' · lane HTTP ' + ctxFetchLane.getLimit()
           + ' / Ext dò ' + gidExtLane.getLimit()
           + ' / Ext gửi ' + extSendLane.getLimit()
@@ -8078,6 +8116,7 @@
       else sendDiag[k] = 0;
     });
     Object.keys(waveDiag).forEach((k) => { waveDiag[k] = 0; });
+    Object.keys(socketPickDiag).forEach((k) => { socketPickDiag[k] = 0; });
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
@@ -8735,6 +8774,7 @@
               catch (e) { settleInternalError(c, e); return null; }
               if (r && r.deferredToSocketRetry) pushToSocketRetry({ c, deferredCtx: r.deferredCtx || {} });
               else if (r && r.deferredToExt) pushToExtBacklog({ c, deferredCtx: r.deferredCtx || {} });
+
               else if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
                 logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
                 state.stopRequested = true;

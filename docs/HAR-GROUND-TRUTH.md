@@ -1741,3 +1741,59 @@ Hai lỗi, cùng một gốc:
   (scan `finally` đã `softNotify('scan-done')` — không sleep mù), hết hạn vẫn đang quét thì **không gửi**.
   Chờ xong mới đọc lại `state.listIncomplete` và chụp `state.matches`.
 - `completeRange`: chỉ in dòng `CHUỖI CHỌN`/`⚠` khi chuỗi chọn **còn nguyên** (`chainAlive`); bị lượt gửi cắt ngang thì im lặng.
+
+## §45 — Lô 9 455 chat (15:54, 1.92.12): KHÔNG phải script chậm — Socket không được thử MỘT lần nào
+
+### 45.1 Sổ sách
+
+| chỉ số | số |
+|---|---|
+| ✅ | **7 185 (76,0 %)** — API 61 · **Ext 7 124** · Socket **0** |
+| ❌ | 2 054 |
+| ⚠ | 216 |
+| FB unavailable | 524 → mục tiêu 8 931 → **80,5 %** |
+| ⏱ | phát 318 s · chờ 23,9 s · tổng 342 s |
+| PHÁT / chốt / thành công | 29,74/s · 27,65/s · **21,01/s** |
+| WAVE | 19 wave × 500 · `wave→cổng TB 16 417 / max 37 041 ms` · main active max 192 |
+| Ext | peak queue/active **468/128** · p90 3 203 ms → timeout 9 000 ms · quá hạn **633** · chưa thấy 226 · MUỘN-mà-OK 417 · muộn-mà-lỗi 181 · **bỏ qua vì bộ ngắt 1 526** |
+| Socket | `ACK OK/rejected/no-ACK 0/0/0` · `peak active 0/0` · `limits cuối [64×1]` |
+| API | 64 ca (61 OK · 3 rejected) · fetch p50 1 431 ms · `429/retry 0/0` |
+| gid | cache **9 389** · Ext 1 · HTTP không gid 5 |
+
+`7 185 + 2 054 + 216 = 9 455` ✔
+
+### 45.2 Chuỗi nhân quả (đọc từ log + code, không suy đoán)
+
+1. **Socket KHÔNG được thử lần nào.** Không phải "thử rồi thất bại": `active 0/0`, `ACK 0/0/0`,
+   và `limits cuối [64×1]` = sàn 64 chưa từng được nâng (mỗi ACK OK sẽ nâng +8 và xoá cờ chết).
+2. Đường DUY NHẤT xoá `'socket'` khỏi mọi kế hoạch là `pickBestDirectOrder` → `isPageAckDead(pageId)`.
+   `PAGE_ACK_DEAD_TTL_MS = 600 000` (10 phút) **dài hơn cả lượt chạy 342 s** ⇒ một lần no-ACK ở
+   lượt TRƯỚC đủ bóp toàn bộ lô này vào làn chậm nhất.
+3. Còn lại `'ext'`: `skipFutileApi` (lô > 50 chat + chat ngoài 24 h) đã cắt `'api'` khỏi kế hoạch
+   ⇒ kế hoạch co về đúng `['ext']`. Vì thế API chỉ có 64 ca.
+4. Ext 48 luồng × p90 3,2 s ⇒ trần ~15–21 tin/s; hàng đợi Ext dâng tới **468**; bộ ngắt quá tải
+   (3 timeout liên tiếp) mở ⇒ **1 526 chat bị chặn TRƯỚC KHI BẮN** (chưa hề gửi lệnh nào) nhưng
+   không còn kênh nào để rơi xuống ⇒ bị tính ❌.
+5. `wave→cổng 16,4 s` là **triệu chứng, không phải nguyên nhân**: cổng chỉ mở khi wave trước đã
+   thoát gần hết, mà Ext rút 500 chat mất ~17 s.
+
+Đối chiếu: cùng script, cùng tab, 70 phút trước — lô 1 958 chat có Socket ⇒ **PHÁT 125,30/s**,
+`wave→cổng 1 844 ms`. Chênh lệch 4 lần này **không đến từ code đường gửi**, đến từ việc Socket bị
+loại khỏi kế hoạch.
+
+### 45.3 Sửa ở 1.92.13-W200.55
+
+- **Dò lại cờ "ACK chết" thay vì né mù 10 phút**: cứ `SOCK_DEAD_PROBE_MS = 20 000` cho đúng MỘT
+  chat đi Socket; ACK về ⇒ `noteSocketPageLaneOutcome('ok')` xoá cờ + nâng làn (+8) như cũ ⇒ tự hồi.
+  Suốt 342 s chỉ tốn ~17 ca dò, đổi lại có thể lấy lại làn 384.
+- **Đo được lý do chọn kênh** (thêm vào dòng 🧭): `Ext-trước(socket chưa sync) N / thiếu gid N /
+  Socket bị né (ACK chết) N · dò lại ACK chết N (hồi N)`. Lô 15:54 mà có dòng này thì đã biết
+  ngay, không phải suy luận.
+- **Không để 1 526 ca biến mất trong cột ❌**: đếm riêng `⏸ Ext tự nghẽn chặn trước khi bắn (tính
+  lỗi oan)`. Đây là lỗi DUNG LƯỢNG NỘI BỘ, khác hẳn "khách chết" — phải nhìn thấy nó.
+
+### 45.4 Việc còn để ngỏ
+
+Ca bị bộ ngắt Ext chặn vẫn đang bị tính ❌ chứ chưa được xếp lại. Muốn xếp lại phải đi qua
+`sendOneAndLog` (nó đã `done++/fail++` trước khi trả về) nên không thể nhét thêm ở `runMainItem`
+mà không lệch sổ — cần một đường "chưa bắn ⇒ trả về hàng đợi" đúng chỗ, làm riêng khi có log mới.
