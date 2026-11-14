@@ -1077,3 +1077,87 @@ danh sách đó, **không** phải tỉ lệ cố hữu — càng ít lý do đ�
 - `🌐 API NỀN queue wait TB/max 3/33ms` nhưng `fetch TB/max 1826/5875ms` ⇒ §30.4 **không phải**
   thời gian xếp hàng của làn mình; phần chậm nằm **bên trong `fetch()`**. Chưa cần biết thêm vì
   API chỉ chiếm 50/8 419 ca.
+
+---
+
+## §34 — Quét 50 lượt phần chưa từng đọc (v1.92.7)
+
+### 34.1 Các file trước đây chưa ai đọc — kết luận
+
+| file | dung lượng | thực chất là gì | giá trị |
+|---|---|---|---|
+| `html.txt` / `html2.txt` / `html3.txt` / `html comment list` | 5,3 MB | DOM đã render của Pancake, chỉ có 1 `__NEXT_DATA__` rỗng | **0** — không có `ls_req`, `can_inbox`, `send_by_platform`, `global_id`, `conv_id` |
+| `dashboard-fa168c408c705d9e.v6.js` | 60 KB | webpack chunk CSS/trang cài đặt | **0** |
+| `taodon` | 70 KB | DOM bảng đơn hàng | **0** |
+| `BOTFAKE FULL` + `BOTFAKE.TXT` | 708 KB | **bản trùng nhau** của userscript 1.90.4 (`diff` = **0 dòng**, chỉ khác CRLF) | chỉ để đối chiếu lịch sử; **giữ 1 là đủ** |
+| `download` | 105 B | ghi chú đường dẫn khoá ký | — |
+| `MESSAGE POST`, `post`, `lại là POST` | 22 KB | 3 lệnh `curl` chụp tay | **có** (34.2–34.3) + **có JWT** (34.6) |
+
+### 34.2 Hợp đồng body gửi tin — nay có nguồn thứ 3 xác nhận
+
+Chụp `curl` một lần gửi thật của app, phần `multipart/form-data`:
+
+```
+action           = reply_inbox
+message          = <nội dung>
+send_by_platform = web
+```
+
+**Chỉ 3 trường**, không `is_record_ctx_7_days`, không `global_id`, không `send_type`.
+Khớp 1:1 với `buildInboxSend` của mình (nhánh văn bản) và với suy luận §31.3.
+
+### 34.3 Endpoint có trong bản chụp mà docs chưa ghi
+
+| endpoint | body | khi nào |
+|---|---|---|
+| `POST /api/v1/pages/{p}/contents/touch` | `{"content_ids":[]}` | app đánh dấu nội dung đã dùng |
+| `GET /api/v1/pages/unread_conv_pages_count` | — | đếm hội thoại chưa đọc |
+| `POST /api/v1/logs/pancake_exception_log` | `{"payload":"TypeError: …"}` | app tự ghi lỗi của chính nó |
+| `POST /api/v1/pages/{p}/customers/update_global_id` | **`{"global_ids":[…]}`** | **dạng BULK** — §29 trước đây chỉ ghi dạng từng khách |
+
+`check_inbox` trong code app: chỉ gọi **SAU khi gửi thành công** (`if(i.success && !form && !repliedMessage)`)
+như một side-effect, không dùng để quyết định gì ⇒ quyết định **không dùng `check_inbox` làm tín hiệu
+bỏ qua** là đúng.
+
+### 34.4 Sự thật về "Extension" — không phải extension của mình
+
+```js
+if(!window.__ExtensionAdapter__){ … window.__ExtensionAdapter__=h, t.Z=h }
+```
+
+`__ExtensionAdapter__` do **chính bundle của Pancake** gán. Trong repo mình **không file nào** định
+nghĩa nó (`extension/*.js` chỉ làm overlay + jobs + fetch nền). Nghĩa là nhánh "Ext" = adapter của
+**extension Pancake chính chủ** — một đường ống phía trình duyệt, một phiên FB duy nhứt ⇒ **không bao
+giờ** mở rộng được như làn socket của mình. Đừng kỳ vọng Ext thành đường chính.
+
+**Timeout chờ ACK của app:** `let b=3e4` (30 000 ms) cạnh `class k{async initSocket}`; `publish()` dùng
+`PENDING_MESSAGES[pageId+"_"+requestId]` + `setTimeout(…, b)`. Của mình clamp 1,2–3 s — cố ý, và lô
+10:17 chỉ có **139/7 686** ca no-ACK (1,8 %). Tham số thứ 4 của `publish` là **`type`** (2/3), không
+phải timeout.
+
+Bundle **không** chứa `#551`, `2018300` hay `HUMAN_AGENT` ⇒ client không có đường đặc biệt nào; mọi
+phán quyết nằm ở server Pancake/FB.
+
+### 34.5 localStorage — đủ 17 khoá, không còn khoá mồ côi
+
+Toàn bộ khoá đều đi qua hằng số (không phải chuỗi literal) nên lần quét trước tưởng "chỉ ghi".
+Kiểm lại: **mọi khoá đều có chỗ đọc**; `ssb_force_ext` đã biến mất hẳn từ v1.92.5.
+Rủi ro còn lại: `ssb_last_sent_v1` (ảnh chụp lô vừa gửi) **không cắt bớt** — lô 8 419 chat là ~1,5 MB.
+Khi đầy, `persistUnavailableConversationId` rơi vào `pruneUnavailableKeys` (xoá 40 %, tối thiểu 50 khoá,
+≤1 lần/60 s) nên không mất dữ liệu im lặng.
+
+### 34.6 🔴 BẢO MẬT — JWT còn hạn nằm trong repo CÔNG KHAI
+
+`gh api repos/chongoan4444/BOTFAKE-REWORK` → `"private": false, "visibility": "public"`.
+
+Ba file được git theo dõi chứa cookie `jwt=eyJ…` (không in giá trị ở đây):
+
+| file | payload đọc được (không có chữ ký) |
+|---|---|
+| `MESSAGE POST` | `exp` **2027-01-07T02:57:17Z**, `uid` `299666bd…` |
+| `post` | y hệt |
+| `lại là POST` | y hệt |
+
+⇒ Bất kỳ ai đọc repo đều lấy được phiên Pancake của tài khoản đó tới tháng 1/2027.
+**Đã xoá 3 file khỏi nhánh này**, nhưng **lịch sử git vẫn còn** ⇒
+**BẮT BUỘC** đăng xuất/đổi mật khẩu tài khoản đó để vô hiệu token cũ; xoá file không đủ.
