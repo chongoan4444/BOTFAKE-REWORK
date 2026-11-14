@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.8-w200.50
+// @version      1.92.9-w200.51
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.8-W200.50'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.9-W200.51'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -240,6 +240,87 @@
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   const norm = (s) => (s || '').normalize('NFC').replace(/\s+/g, ' ').trim();
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // ═══ [v1.92.9] CHỜ MỀM — thức ngay khi điều kiện đạt, không quét theo nhịp cố định ═══
+  // Bối cảnh: bản cũ có 30 chỗ sleep() cố định. Phần lớn là "quét cho tới khi điều kiện đúng"
+  // (chờ lệnh thăm dò Ext xong, chờ lane rảnh, chờ quét danh sách dừng, chờ hết cơn 429…).
+  // Những chỗ đó thức sớm hơn mức cần thiết hoặc trễ hơn mức cần thiết tuỳ nhịp quét.
+  // Nay: sự kiện phát bằng softNotify(key) — người chờ được đánh thức NGAY trong cùng tick.
+  // Đồng hồ chỉ còn là LƯỚI AN TOÀN, không còn là cơ chế chính.
+  const softWaiters = new Map();
+  function softNotify(key) {
+    const set = softWaiters.get(key);
+    if (!set || !set.size) return;
+    const arr = Array.from(set);
+    for (let i = 0; i < arr.length; i++) { try { arr[i](); } catch (e) { /* ignore */ } }
+  }
+  function softWait(key) {
+    let drop = null;
+    const p = new Promise((resolve) => {
+      let set = softWaiters.get(key);
+      if (!set) { set = new Set(); softWaiters.set(key, set); }
+      const fn = () => { try { set.delete(fn); } catch (e) { /* ignore */ } resolve(); };
+      drop = () => { try { set.delete(fn); } catch (e) { /* ignore */ } };
+      set.add(fn);
+    });
+    p.cancel = () => { try { if (drop) drop(); } catch (e) { /* ignore */ } };
+    return p;
+  }
+  // Tín hiệu Dừng dùng chung: MỘT promise duy nhất (không tích rác trong Set khi sleep liên tục).
+  let stopSig = null;
+  function stopSignal() {
+    if (!stopSig) {
+      const box = {};
+      box.promise = new Promise((res) => { box.resolve = res; });
+      stopSig = box;
+    }
+    return stopSig.promise;
+  }
+  function fireStopSignal() { try { if (!stopSig) stopSignal(); if (stopSig && stopSig.resolve) stopSig.resolve(); } catch (e) { /* ignore */ } }
+  function resetStopSignal() { stopSig = null; }
+  /** Ngủ CHÍNH XÁC tới mốc ts; thức ngay nếu softNotify(key) hoặc bấm Dừng. */
+  async function sleepUntil(ts, key) {
+    const ms = Math.max(0, ts - Date.now());
+    if (!ms) return;
+    const waits = [new Promise((r) => setTimeout(r, ms)), stopSignal()];
+    const w = key ? softWait(key) : null;
+    if (w) waits.push(w);
+    await Promise.race(waits);
+    if (w) w.cancel();
+  }
+  /** Chờ tới khi cond() đúng. Thức bằng SỰ KIỆN key; 250 ms chỉ là lưới an toàn cuối. */
+  async function waitCond(cond, key, capMs) {
+    const until = Date.now() + (capMs || 30000);
+    while (!state.stopRequested) {
+      if (cond()) return true;
+      const now = Date.now();
+      if (now >= until) return !!cond();
+      await sleepUntil(Math.min(until, now + 250), key);
+    }
+    return !!cond();
+  }
+  /** [v1.92.9] Tôn trọng Retry-After của server khi có; không có thì dùng mức cũ. */
+  function retryAfterMs(res, fallbackMs) {
+    try {
+      const v = res && res.headers && typeof res.headers.get === 'function' ? res.headers.get('retry-after') : null;
+      if (v) {
+        const sec = Number(v);
+        if (isFinite(sec) && sec >= 0) return Math.min(15000, Math.max(100, Math.round(sec * 1000)));
+        const at = Date.parse(v);
+        if (!isNaN(at)) return Math.min(15000, Math.max(100, at - Date.now()));
+      }
+    } catch (e) { /* ignore */ }
+    return Math.max(0, Number(fallbackMs) || 0);
+  }
+  /** [v1.92.9] Nhường ĐÚNG một khung hình (thay vì ngủ mù 20 ms). Tab ẩn thì lưới an toàn 34 ms. */
+  function nextFrame() {
+    return new Promise((resolve) => {
+      let done = false;
+      const fin = () => { if (done) return; done = true; resolve(); };
+      try { if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fin); } catch (e) { setTimeout(fin, 34); return; }
+      setTimeout(fin, 34);
+    });
+  }
 
   let sentIdsSaveTimer = null;
   function saveSentIds() {
@@ -491,7 +572,7 @@
         unsubBg();
         summaryCounters.okApi = doneMsg.okN || 0;
         summaryCounters.fail = doneMsg.fail || 0;
-        if (doneMsg.stopped) state.stopRequested = true;
+        if (doneMsg.stopped) { state.stopRequested = true; fireStopSignal(); }
         resolve(doneMsg);
       };
       const onMsg = (msg) => {
@@ -1209,7 +1290,7 @@
         if (abortTimer) { clearTimeout(abortTimer); abortTimer = null; }
         if (r.status === 429 || r.status >= 500) {
           lastErr = 'HTTP ' + r.status;
-          if (t < max) { await sleep(400 * t); continue; }
+          if (t < max) { await sleepUntil(Date.now() + 400 * t); continue; }
           return { ok: false, error: lastErr };
         }
         if (!r.ok) {
@@ -1230,7 +1311,7 @@
       } catch (e) {
         if (abortTimer) clearTimeout(abortTimer);
         lastErr = (e && e.name === 'AbortError') ? 'quá ' + Math.round(((reqOpts && reqOpts.timeoutMs) || 15000) / 1000) + 's chưa phản hồi' : 'Lỗi mạng: ' + (e && e.message || e);
-        if (t < max) { await sleep(400 * t); continue; }
+        if (t < max) { await sleepUntil(Date.now() + 400 * t); continue; }
         return { ok: false, error: lastErr };
       }
     }
@@ -1526,7 +1607,7 @@
       const req = buildListRequest(pageCount, cursor, currentCount, token, eo.forceMulti || eo.singlePageId ? eo : opts);
       if (!req.ids.length) return { ok: false, error: 'Không xác định được page đang xem' };
       // đang trong cơn 429 → mọi luồng cùng chờ hết giờ nghỉ chung thay vì đâm đầu vào server
-      while (!stopped() && Date.now() < rl.pauseUntil) await sleep(150);
+      if (!stopped() && Date.now() < rl.pauseUntil) await sleepUntil(rl.pauseUntil, 'rl-pause'); // [v1.92.9] thức ĐÚNG mốc
       if (stopped()) return { ok: false, error: 'stopped' };
       const res = await fetchJson(req.url, eo.tries || 3, { method: req.method, bodyObj: req.bodyObj, timeoutMs: eo.timeoutMs || 12000 });
       if (!res.ok) { if (/429/.test(res.error || '')) rlNote429(); return { ok: false, error: res.error }; }
@@ -1794,7 +1875,7 @@
             const res = await fetchPage(seg.pageCount, seg.cursor, seg.estCount + seg.items.length, { forceMulti: forceMultiEndpoint, tries: 2, timeoutMs: 10000 });
             if (!res.ok) {
               // v1.84.0: lỗi lẻ không giết luồng phụ nữa (chết sớm = mất hẳn 1 đường tải song song)
-              if ((seg.errRetry = (seg.errRetry || 0) + 1) <= 6) { await sleep(1200 + Math.random() * 800); continue; }
+              if ((seg.errRetry = (seg.errRetry || 0) + 1) <= 6) { await sleepUntil(Date.now() + 1200 + Math.random() * 800); continue; }
               return;
             }
             seg.errRetry = 0;
@@ -1828,7 +1909,7 @@
           // cursor, tối đa 8 lần — danh sách chỉ thật sự hết khi server báo hết dữ liệu.
           seg0.errRetry = (seg0.errRetry || 0) + 1;
           if (seg0.errRetry === 1) logLine('⏸ Tải bị gián đoạn (' + (res.error || 'lỗi') + ') ở ' + seg0.items.length + ' chat — đang tự thử lại…');
-          if (seg0.errRetry <= 8) { await sleep(2000); continue; }
+          if (seg0.errRetry <= 8) { await sleepUntil(Date.now() + 2000); continue; }
           logLine('⚠ Không tải tiếp được sau 8 lần thử — danh sách CHƯA đầy đủ (' + seg0.items.length + ' chat), bấm tải lại để tiếp tục.');
           seg0.truncated = true;
           break;
@@ -1930,8 +2011,7 @@
     if (state.scanning) {
       if (scanOpts.restartIfBusy) {
         state.scanStopRequested = true;
-        let wg = 0;
-        while (state.scanning && wg++ < 80) await sleep(50);
+        await waitCond(() => !state.scanning, 'scan-done', 4000); // [v1.92.9] thức NGAY khi lượt quét cũ kết thúc
       } else {
         state.scanStopRequested = true;
         logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
@@ -2062,6 +2142,7 @@
       render();
     } finally {
       state.scanning = false;
+      softNotify('scan-done'); // [v1.92.9]
       state.scanStopRequested = false;
       applyScanButtons();
       stopKeepAliveAudio();
@@ -2919,7 +3000,7 @@
       let res = await timedFetch(req);
       if (res && res.status === 429 && myRun === runSeq && !state.stopRequested) {
         sendDiag.api429Retries++;
-        await sleep(600);
+        await sleepUntil(Date.now() + retryAfterMs(res, 600)); // [v1.92.9] theo Retry-After, không phải 600 ms cứng
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
           res = await timedFetch(req2);
@@ -3040,7 +3121,7 @@
         : { method: 'POST', body: rObj.fd, headers: { Accept: 'application/json' }, credentials: 'include' });
       let res = await fetchT(req.url, makeFetchOpts(req), 30000);
       if (res && res.status === 429 && !state.stopRequested) {
-        await sleep(600);
+        await sleepUntil(Date.now() + retryAfterMs(res, 600)); // [v1.92.9] theo Retry-After
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
           res = await fetchT(req2.url, makeFetchOpts(req2), 30000);
@@ -3586,7 +3667,7 @@
     // một nhịp ngắn trước; nếu WS đã tìm thấy thì nhánh này tự hủy, không tốn lệnh Extension.
     if (hasExtFinder && threadId) {
       raceTasks.push((async () => {
-        if (extStartDelayMs) await sleep(extStartDelayMs);
+        if (extStartDelayMs) await sleepUntil(Date.now() + extStartDelayMs, 'gid'); // [v1.92.9] WS có gid trước thì khỏi chờ đủ 80 ms
         if (settled || state.stopRequested) {
           return peekFastGlobalId(full, full, badGid) || null;
         }
@@ -3732,7 +3813,7 @@
             const errStr0 = (d0 && typeof d0 === 'object') ? String(d0.errorMessage || d0.error || d0.reason || '') : '';
             const isConnErr0 = /REOPEN_BROWSER|unableToConnect|extensionDisconnected/i.test(errStr0);
             if (!settled && !extSettled && !state.stopRequested && !isConnErr0 && res && (res.success || (d0 && typeof d0 === 'object'))) {
-              await sleep(250);
+              await sleepUntil(Date.now() + 250, 'gid'); // [v1.92.9] thức ngay khi cache/WS có gid mới
               if (settled || extSettled || state.stopRequested) { onFinderNull(); return; }
               const hitMid1 = peekFastGlobalId(full, full, badGid);
               if (hitMid1) { finishExt(hitMid1, 'cache'); return; }
@@ -3881,7 +3962,7 @@
     const nextAt = Math.max(now, (socketLastPublishAt[pid] || 0) + SOCKET_MIN_PACE_MS);
     socketLastPublishAt[pid] = nextAt;
     const waitMs = nextAt - now;
-    if (waitMs > 0) await sleep(waitMs);
+    if (waitMs > 0) await sleepUntil(Date.now() + waitMs); // [v1.92.9] nhịp phát Socket giữ nguyên, chỉ ngắt được khi Dừng
   }
 
   function isSocketAlive(sock) {
@@ -3915,11 +3996,18 @@
       const s = helper && helper.SOCKETS && helper.SOCKETS[pageId];
       if (!isSocketAlive(s)) return s;
       if (isSocketSynced(s)) {
-        if (sawJustSynced) await sleep(180);
+        if (sawJustSynced) await sleepUntil(Date.now() + 180, 'sock-sync'); // [v1.92.9]
         return helper && helper.SOCKETS && helper.SOCKETS[pageId];
       }
       sawJustSynced = true;
-      await sleep(60);
+      // Điều kiện sync = (connectAt + 1000 ms) VÀ (requestId ≥ 1). Mốc thời gian ngủ ĐÚNG hạn,
+      // phần requestId chỉ cần nhịp 25 ms vì frame WS không móc được sự kiện.
+      {
+        const mark = (s && typeof s.connectAt === 'number') ? (s.connectAt + 1000) : 0;
+        const now = Date.now();
+        const wakeAt = mark > now ? Math.min(deadline, mark) : Math.min(deadline, now + 25);
+        await sleepUntil(wakeAt, 'sock-sync');
+      }
     }
     return helper && helper.SOCKETS && helper.SOCKETS[pageId];
   }
@@ -4384,7 +4472,7 @@
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
         sendDiag.sockRetry++;
-        await sleep(220 + Math.floor(Math.random() * 130));
+        await sleepUntil(Date.now() + 220 + Math.floor(Math.random() * 130), 'delivered'); // [v1.92.9] đã giao thì thức ngay
         if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         // Kiểm tra xem trong nhịp nghỉ đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
@@ -4951,13 +5039,13 @@
         }
         lastErr = (j && (j.message || j.error)) || ('HTTP ' + res.status);
         if ((res.status === 429 || res.status >= 500) && attempt < 3) {
-          await sleep(350 * attempt);
+          await sleepUntil(Date.now() + retryAfterMs(res, 350 * attempt)); // [v1.92.9]
           continue;
         }
         break;
       } catch (e) {
         lastErr = 'Lỗi mạng: ' + (e && e.message || e);
-        if (attempt < 3) { await sleep(350 * attempt); continue; }
+        if (attempt < 3) { await sleepUntil(Date.now() + 350 * attempt); continue; } // [v1.92.9] ngắt được khi Dừng
       }
     }
     // Fallback sang UPLOAD_INBOX_PHOTO qua Extension Pancake (đúng hàm E tại @883200 trong _app)
@@ -5295,17 +5383,26 @@
     let normalSincePriority = 0;
     const waiters = [];
     const pWaiters = [];
+    // [v1.92.9] phát sự kiện mỗi khi active/hàng đợi đổi → chỗ chờ thức ngay, không quét nhịp
+    const changeSubs = new Set();
+    const laneNotify = () => {
+      if (!changeSubs.size) return;
+      const arr = Array.from(changeSubs);
+      for (let k = 0; k < arr.length; k++) { try { arr[k](); } catch (e) { /* ignore */ } }
+    };
     const enqueue = function (fn, opts) {
       const isPriority = !!(opts && opts.priority);
       return new Promise((resolve) => {
         const start = () => {
           if (state.stopRequested) { resolve({ ok: false, sent: false, error: 'Đã dừng' }); return; }
           active++;
+          laneNotify();
           Promise.resolve()
             .then(fn)
             .catch((e) => ({ ok: false, sent: false, error: 'Lỗi kênh: ' + (e && e.message || e) }))
             .then((r) => {
               active--;
+              laneNotify();
               if (state.stopRequested) {
                 // Đang Dừng: xả HẾT hàng đợi — mỗi start() tự resolve 'Đã dừng' ngay.
                 // Chỉ xả 1 waiter như cũ thì số waiter còn lại kẹt vĩnh viễn (không còn
@@ -5342,6 +5439,11 @@
     enqueue.busy = () => active >= parallel || waiters.length > 0 || pWaiters.length > 0;
     enqueue.activeCount = () => active;
     enqueue.waitingCount = () => waiters.length + pWaiters.length;
+    enqueue.onChange = (fn) => {
+      if (typeof fn !== 'function') return () => {};
+      changeSubs.add(fn);
+      return () => { try { changeSubs.delete(fn); } catch (e) { /* ignore */ } };
+    };
     return enqueue;
   }
 
@@ -5352,6 +5454,13 @@
     let active = 0;
     let limit = Math.max(min, Math.min(max, initial || min));
     const waiters = [];
+    // [v1.92.9] phát sự kiện mỗi khi active/hàng đợi đổi → chỗ chờ thức ngay, không quét nhịp
+    const changeSubs = new Set();
+    const laneNotify = () => {
+      if (!changeSubs.size) return;
+      const arr = Array.from(changeSubs);
+      for (let k = 0; k < arr.length; k++) { try { arr[k](); } catch (e) { /* ignore */ } }
+    };
     const pump = () => {
       if (state.stopRequested) {
         while (waiters.length) { const w = waiters.shift(); w(); }
@@ -5367,11 +5476,13 @@
         const start = () => {
           if (state.stopRequested) { resolve({ ok: false, sent: false, error: 'Đã dừng' }); return; }
           active++;
+          laneNotify();
           Promise.resolve()
             .then(fn)
             .catch((e) => ({ ok: false, sent: false, error: 'Lỗi kênh: ' + (e && e.message || e) }))
             .then((r) => {
               active--;
+              laneNotify();
               pump();
               resolve(r);
             });
@@ -5388,6 +5499,11 @@
       limit = Math.max(min, Math.min(max, Math.round(next) || min));
       pump();
       return limit;
+    };
+    enqueue.onChange = (fn) => {
+      if (typeof fn !== 'function') return () => {};
+      changeSubs.add(fn);
+      return () => { try { changeSubs.delete(fn); } catch (e) { /* ignore */ } };
     };
     return enqueue;
   }
@@ -5588,12 +5704,12 @@
   const gidExtCtl = { good: 0, bad: 0 };
   async function waitGidHttpCooldown() {
     let waited = false;
-    while (!state.stopRequested && Date.now() < gidHttpCtl.coolUntil) {
+    if (!state.stopRequested && Date.now() < gidHttpCtl.coolUntil) {
       waited = true;
-      await sleep(Math.min(250, Math.max(25, gidHttpCtl.coolUntil - Date.now())));
+      await sleepUntil(gidHttpCtl.coolUntil, 'gid-cool'); // [v1.92.9] thức ĐÚNG mốc, không quét 25–250 ms
     }
     // Rải nhịp ngẫu nhiên sau cơn 429: tránh cả lane cùng lao lại đúng 1 ms.
-    if (waited && !state.stopRequested) await sleep(Math.floor(Math.random() * 180));
+    if (waited && !state.stopRequested) await sleepUntil(Date.now() + Math.floor(Math.random() * 180));
   }
   function noteGidHttpResult(ok, status, latencyMs) {
     try {
@@ -5660,14 +5776,22 @@
     } catch (e) { /* ignore */ }
   }
   async function waitForGidDiscoveryIdle(maxMs) {
-    const startedAt = Date.now();
-    while (!state.stopRequested && (Date.now() - startedAt) < (maxMs || 8000)) {
-      const busy = (ctxFetchLane.activeCount() + ctxFetchLane.waitingCount())
-        + (gidExtLane.activeCount() + gidExtLane.waitingCount());
-      if (!busy) return true;
-      await sleep(200);
+    // [v1.92.9] thức ngay khi 2 lane dò đổi trạng thái; 200 ms chỉ còn là lưới an toàn.
+    const busy = () => (ctxFetchLane.activeCount() + ctxFetchLane.waitingCount())
+      + (gidExtLane.activeCount() + gidExtLane.waitingCount());
+    const deadline = Date.now() + (maxMs || 8000);
+    const watch = [ctxFetchLane, gidExtLane];
+    while (!state.stopRequested && Date.now() < deadline) {
+      if (!busy()) return true;
+      const subs = [];
+      const changed = new Promise((resolve) => {
+        watch.forEach((lane) => { if (lane && lane.onChange) { try { subs.push(lane.onChange(resolve)); } catch (e) { /* ignore */ } } });
+        setTimeout(resolve, 200); // lưới an toàn
+      });
+      await changed; // đã có lưới an toàn 200 ms bên trong
+      subs.forEach((off) => { try { off(); } catch (e) { /* ignore */ } });
     }
-    return false;
+    return !busy();
   }
   const extPrepLane = makeLane(PREP_PARALLEL_EXT);
   const extSendLane = makeAdaptiveLane(BUS_PARALLEL_EXT, EXT_SEND_MIN, EXT_SEND_MAX);
@@ -5788,7 +5912,7 @@
     while (!state.stopRequested) {
       const now = Date.now();
       if (now < extSendCtl.openUntil) return null; // đang nghỉ hồi sức — bỏ qua Ext ngay
-      if (extSendCtl.probeInFlight) { await sleep(250); continue; } // chờ kết quả lệnh thăm dò
+      if (extSendCtl.probeInFlight) { await sleepUntil(Date.now() + 10000, 'ext-probe'); continue; } // [v1.92.9] thức NGAY khi lệnh thăm dò có kết quả
       if (extSendCtl.openUntil) {
         extSendCtl.probeInFlight = true;
         extSendCtl.probeToken++;
@@ -5801,6 +5925,7 @@
   function releaseExtSendPermit(permit) {
     if (permit && permit.probe && extSendCtl.probeToken === permit.token) {
       extSendCtl.probeInFlight = false;
+      softNotify('ext-probe'); // [v1.92.9] đánh thức mọi làn đang chờ kết quả thăm dò
     }
   }
   function noteExtSendOutcome(kind, permit, latencyMs) {
@@ -6393,6 +6518,7 @@
     const s = String(gid);
     if (convId) putGidToMemCaches(String(convId), s);
     if (pageId && threadId) putGidToMemCaches(String(pageId) + '_' + String(threadId), s);
+    softNotify('gid'); // [v1.92.9] mọi chỗ đang chờ gid thức ngay
     if (!gidSaveTimer) gidSaveTimer = setTimeout(flushPersistentGids, 400);
     try {
       const fbStore = window.__FBMetaDataStore__;
@@ -7129,6 +7255,7 @@
     if (finalFailedIds[convId]) { delete finalFailedIds[convId]; summaryCounters.fail = Math.max(0, summaryCounters.fail - 1); }
     if (uncertainIds[convId]) { delete uncertainIds[convId]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
     deliveredIds[convId] = ch;
+    softNotify('delivered'); // [v1.92.9] chỗ chờ "đã giao" thức ngay, khỏi chờ mù 220 ms
     // Lượt đã kết thúc bình thường (không bấm Dừng) thì sentIds đã được dọn ở cuối sendToAll —
     // ACK trễ KHÔNG được nạp lại, nếu không lượt sau bỏ qua oan gần hết chat (mất tin im lặng)
     if (convId && !(batchStats.loopFinished && !state.stopRequested)) {
@@ -7450,7 +7577,7 @@
         } catch (e0) { /* ignore */ }
         for (let attempt = 0; attempt < maxReads; attempt++) {
           if (attempt > 0) {
-            await sleep(attempt === 1 ? 2000 : (attempt === 2 ? 4000 : 6000));
+            await sleepUntil(Date.now() + (attempt === 1 ? 2000 : (attempt === 2 ? 4000 : 6000))); // [v1.92.9]
             if (myRun !== runSeq || state.stopRequested) return;
             if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
           }
@@ -7654,7 +7781,7 @@
         let noStreak = 0;
         for (let attempt = 0; attempt < 2; attempt++) {
           if (attempt) {
-            await sleep(UNCERTAIN_VERIFY_GAP_MS);
+            await sleepUntil(Date.now() + UNCERTAIN_VERIFY_GAP_MS); // [v1.92.9] ngắt được khi Dừng
             if (myRun !== runSeq || state.stopRequested) return;
             if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
           }
@@ -7766,8 +7893,9 @@
         const msgEl = shadow && shadow.getElementById('ssb-msg');
         typedText = (msgEl && msgEl.value || '').trim() || ((state.quickReply && state.quickReply.text) || '');
       }
-      // Nhường 20ms để chu kỳ keydown/keyup của phím Tab hoàn tất trước khi mở hộp thoại modal alert/confirm
-      await sleep(20);
+      // [v1.92.9] Nhường ĐÚNG một khung hình (rAF) thay vì 20 ms mù — chu kỳ keydown/keyup của Tab
+      // xong ở nhịp vẽ kế tiếp, không cần chờ đồng hồ.
+      await nextFrame();
       const imgState = state.image || null;
       let targets = selectedSnapshot.slice();
       {
@@ -7894,6 +8022,8 @@
     extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
     extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
     extSendCtl.probeInFlight = false; // lượt mới không được kẹt bởi thăm dò của lượt cũ đã dừng
+    resetStopSignal(); // [v1.92.9] lượt mới: tín hiệu Dừng phải sống lại
+    softNotify('ext-probe');
     resetGidStats();
     Object.keys(sendDiag).forEach((k) => { sendDiag[k] = k === 'apiStatusCounts' ? Object.create(null) : 0; });
     Object.keys(waveDiag).forEach((k) => { waveDiag[k] = 0; });
@@ -8555,6 +8685,7 @@
               else if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
                 logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
                 state.stopRequested = true;
+                fireStopSignal();
               }
               return r;
             } finally {
@@ -8586,7 +8717,7 @@
               + ' · Socket/page active/wait ' + socketLaneNow.activeTotal + '/' + socketLaneNow.waitingTotal
               + ' (max/page ' + socketLaneNow.activeMaxPerPage + '/' + socketLaneNow.waitingMaxPerPage + '; lane ' + socketLaneNow.limits + ')'
               + ' · API đang chờ ' + apiSendLane.waitingCount() + ' — gap kế tiếp ' + smartGap + 'ms.');
-            if (smartGap > 0) await sleep(smartGap);
+            if (smartGap > 0) await sleepUntil(Date.now() + smartGap);
           } else if (!state.stopRequested) {
             const socketLaneNow = getPageSocketLaneStats();
             logLine('🌊 Wave ' + waveNo + '/' + totalWaves + ' — cổng cuối ' + waveDoneCount + '/' + waveSlice.length
@@ -9678,6 +9809,7 @@
         // Đường chốt cuối: exception nào thoát khỏi sendToAll cũng phải nhả nút + tắt overlay
         logLine('⛔ Lỗi ngoài dự kiến khi gửi: ' + (err && err.message || err) + ' — dừng lượt.');
         state.stopRequested = true;
+        fireStopSignal();
         batchStats.loopFinished = true;
         markSendIdleIfSettled();
         if (!state.sending) {
@@ -9692,6 +9824,7 @@
     const requestStop = () => {
       if (!state.sending) return;
       state.stopRequested = true;
+      fireStopSignal(); // [v1.92.9] cắt ngay mọi chỗ đang chờ mềm
       try {
         if (extBgAvailable()) extCall({ type: 'BOTFAKE_BG_STOP' });
       } catch (e0) { /* ignore */ }
