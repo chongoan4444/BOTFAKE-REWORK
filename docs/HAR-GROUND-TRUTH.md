@@ -1254,3 +1254,82 @@ từng chat**.
 `last_sent_by.id === from_psid` = tin cuối do khách gửi = page **chưa trả lời**. Trong mẫu này chỉ
 **10/1 680** (vì đây là danh sách đã trả lời gần hết) — đây là tín hiệu **dựa trên dữ liệu**, đúng
 tiêu chí "không đoán theo vị trí", nhưng **chưa dùng** vì việc lấy danh sách đã chốt theo hướng khác.
+
+---
+
+## §36 — Đọc phần UI/panel + các cơ chế nền (v1.92.7)
+
+### 36.1 Bản đồ panel (40 phần tử, 28 listener)
+
+Mọi nút gắn qua helper `on(id, 'click', fn)`. Nhóm chức năng:
+
+| nút | việc |
+|---|---|
+| `ssb-scan` | ⚡ tải danh sách qua API (`next_cursor`, không cuộn) |
+| Alt+Click dòng | đặt ĐẦU / CUỐI chuỗi (`setRangeStart` / `completeRange`) |
+| `ssb-to-end` | **từ chat đang chọn tới cuối danh sách** |
+| `ssb-selall` / `ssb-deselect-one` / `ssb-clear` | chọn tất cả / bỏ 1 / xoá chọn |
+| `ssb-clear-unavailable` | **🧹 Xóa nhớ lỗi (N)** — đúng nút để xoá 6 753 ID đã nhớ |
+| `ssb-send` → `triggerSendRun` · `ssb-stop` → `requestStop` | chạy / dừng |
+| `ssb-wave`, `ssb-gap`, `ssb-quick`, `ssb-ms`, `ssb-rs`, `ssb-msg-mode`, `ssb-img-*`, `ssb-qr-*` | cấu hình lô, câu, ảnh, QR |
+
+### 36.2 Bộ máy chọn `computeMatches` — đúng nguyên tắc "theo dữ liệu"
+
+4 chế độ: `all` · `snippet` (so khớp nội dung) · `pick` (chọn lẻ) · `range` (chuỗi).
+
+Chế độ `range` tìm vị trí 2 đầu trong **mảng dữ liệu**, theo thứ tự ưu tiên:
+`state.allRows` (danh sách API, có trường `order`) → `getReduxConversationListRows()` → cuối cùng mới
+`visibleRows()` (DOM). Nghĩa là **không dùng chỉ số DOM** trừ khi cả hai đầu không có trong dữ liệu.
+
+Mặc định khi nạp danh sách: **tick tất cả** trừ `type === 'comment'` và các ID đã nhớ
+"Socket confirmed-unavailable". Chat đã gửi ở lượt trước bị bỏ qua nhờ `state.sentIds`
+(`⏩ Có N chat đã gửi ở lượt trước — sẽ bỏ qua`) ⇒ chạy lại không sinh tin trùng trong cùng phiên.
+
+### 36.3 `next_cursor` là Erlang `term_to_binary` — và nó chứa MỐC THỜI GIAN
+
+`parseErlangCursor` / `encodeErlangCursor` giải mã **từng byte**, đã đối chiếu `pancake.vn2.har #10`:
+
+```
+0x83 0x6c 00 00 00 03   LIST_EXT, 3 phần tử
+0x61 <seen>             SMALL_INTEGER  (0/1)
+0x6e 06 <6 byte LE>     SMALL_BIG      updated_at_ms
+0x6d <4 byte len> <str> STRING         "{page_id}:{conv_id}"
+0x6a                    NIL (đuôi)
+```
+
+⇒ Cursor **mang sẵn `updated_at_ms`**. Đây là cơ sở để (nếu sau này muốn) **nhảy thẳng tới mốc ngày**
+thay vì lật từng trang đến vùng chat 10–20 ngày — đúng bài toán "tìm ranh giới bằng dữ liệu" ban đầu.
+**Chưa làm**: việc lấy danh sách đã chốt theo hướng hiện tại, và cursor tự dựng cần kiểm chứng server
+có chấp nhận `key` không khớp hay không.
+
+### 36.4 Token: không lưu, và `'cookie_session'` là giá trị thật
+
+```js
+if (/(^|\.)pancake\.vn$/i.test(location.hostname)) return 'cookie_session';
+```
+
+Trên pancake.vn, `access_token` gửi lên **chính là chuỗi `cookie_session`** — server xác thực bằng
+cookie phiên. Không có JWT nào bị lưu. Ngoài pancake.vn, token học được qua `hookNetwork`
+(bọc `window.fetch` + `XMLHttpRequest.prototype.open`) và `performance.getEntriesByType('resource')`,
+chỉ giữ trong biến bộ nhớ.
+
+### 36.5 Keep-alive: 16 Hz siêu âm để tab không bị Chrome bóp
+
+`startKeepAliveAudio()` tạo `OscillatorNode` 16 Hz, gain 0,01 trong lúc tải/gửi. Mục đích: Chrome
+giảm nhịp `setTimeout`/timer của tab nền, làm chậm cả lượt gửi. Tần số 16 Hz **dưới ngưỡng nghe**,
+gain 0,01 gần như không phát ra loa. Đây là lý do các lượt 200 s vẫn giữ được tốc độ.
+
+### 36.6 Ảnh: `is_reusable:false` + bể fbId dự phòng
+
+`uploadOneTimePhoto(pageId, photo, convId, ctx, forceFresh)`:
+- fbId gắn **riêng từng hội thoại** (`is_reusable:false`), tuyệt đối không dùng chéo A→B;
+- `spareFbIdPool[pageId]` giữ fbId dự phòng để retry không phải chờ upload lại;
+- retry luôn `forceFresh = true` (xin fbId mới) vì fbId cũ đã bị FB đốt trong khung `/ls_req` lần 1;
+- nhiều ảnh: bind cả mảng trong **1 lượt** `contents/facebook` — khớp §35.4.
+
+### 36.7 Còn lại chưa đọc (nói thẳng)
+
+- CSS + markup chi tiết của panel (~700 dòng trong `buildPanel`) — chỉ đọc phần tử và handler.
+- Phần giữa `tools/build.mjs` (đồng bộ version / đóng gói) — đã đọc phần crx và `--check`.
+- `_app-*.v6.js` còn nhiều module chưa mở, nhưng các câu hỏi cốt lõi (payload, cờ ctx7, 24h, ACK,
+  adapter Ext) đã có đáp án.
