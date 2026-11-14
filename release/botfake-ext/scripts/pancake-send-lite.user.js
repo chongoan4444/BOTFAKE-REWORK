@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.5-w200.47
+// @version      1.92.6-w200.48
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.5-W200.47'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.6-W200.48'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4770,7 +4770,7 @@
         // p50 908ms / p90 1 197ms — 2,5s đã phủ trên p99. Ca quá hạn vẫn đi đúng đường cũ:
         // đánh ⚠ "không rõ", đăng ký kiểm chứng lịch sử nền, KHÔNG BAO GIỜ gửi lại (chỉ nâng
         // ⚠→✅). Rút ngắn thời gian chờ không mở thêm bất kỳ đường gửi trùng nào.
-        return adapter.send(payload, { timeout: 2500 });
+        return adapter.send(payload, { timeout: extTimeoutMs() }); // [v1.92.6] suy từ p90 đo được
       });
       if (res && res.extBreakerSkipped) {
         releaseExtSendPermit(extSendPermit);
@@ -5694,7 +5694,35 @@
   const EXT_SEND_BREAKER_THRESHOLD = 150;
   const EXT_SEND_BREAKER_BASE_MS = 8000;
   const EXT_SEND_BREAKER_MAX_MS = 15000;
-  const extSendCtl = { timeoutStreak: 0, openUntil: 0, openStreak: 0, probeInFlight: false, probeToken: 0, fastStreak: 0 };
+  const extSendCtl = { timeoutStreak: 0, openUntil: 0, openStreak: 0, probeInFlight: false, probeToken: 0, fastStreak: 0,
+    // [v1.92.6] Vòng mẫu độ trễ THẬT của Extension (chỉ ca CÓ phản hồi — ca quá hạn là số
+    // liệu bị cắt cụt, đưa vào p90 sẽ tự ru ngủ chính nó). Dùng để suy timeout, xem extTimeoutMs().
+    latSamples: [] };
+  const EXT_LAT_RING = 24;
+  /** p90 độ trễ phản hồi Ext gần nhất; 0 = chưa có số đo. */
+  function extLatP90() {
+    const a = extSendCtl.latSamples;
+    if (!a.length) return 0;
+    const b = a.slice().sort((x, y) => x - y);
+    return b[Math.min(b.length - 1, Math.floor(b.length * 0.9))] || 0;
+  }
+  /**
+   * [v1.92.6] Timeout Extension SUY TỪ SỐ ĐO, không còn là hằng số 2,5 s.
+   *
+   * Bằng chứng (hai lần chạy cùng cơ chế, chỉ khác timeout):
+   *   09:24 · 1 457 chat · timeout 7 s   → Ext quá hạn 114 · kiểm chứng THẤY TIN 69 (60 %)
+   *   09:44 · 3 653 chat · timeout 2,5 s → Ext quá hạn 225 · kiểm chứng THẤY TIN   0 ( 0 %)
+   * Cắt 7 s → 2,5 s không cứu thêm ca nào mà biến 60 % ca "quá hạn" thành mất trắng: lệnh gửi
+   * nằm trong hàng đợi cầu nối, timeout bắn trước khi lệnh kịp chạy ⇒ KHÔNG có gì để kiểm chứng.
+   * Nay: timeout = 3 × p90 đo được (sàn 2,5 s, trần 9 s); chưa có mẫu ⇒ 7 s (mức đã đo là có
+   * 60 % ca đến nơi). Ext trả nhanh thì tự siết về 2,5 s; Ext ì thì tự nới, tối đa 9 s.
+   * Không thể sinh tin trùng: ca quá hạn vẫn chỉ đánh ⚠ + kiểm chứng nền, KHÔNG BAO GIỜ gửi lại.
+   */
+  function extTimeoutMs() {
+    const p90 = extLatP90();
+    const want = p90 > 0 ? p90 * 3 : 7000;
+    return Math.min(9000, Math.max(2500, Math.round(want)));
+  }
   function isExtBreakerOpen() {
     return Date.now() < extSendCtl.openUntil;
   }
@@ -5723,6 +5751,10 @@
       if (kind === 'responded') {
         // Extension CÓ trả lời (dù thành công hay báo lỗi rõ ràng) = còn sống.
         extSendCtl.timeoutStreak = 0;
+        if (latencyMs != null && latencyMs > 0) {
+          extSendCtl.latSamples.push(latencyMs);
+          if (extSendCtl.latSamples.length > EXT_LAT_RING) extSendCtl.latSamples.shift();
+        }
         // AIMD làn Ext gửi: trả nhanh (<5s) tích lũy 10 lần → tăng +2 slot (tối đa 24).
         // Có 1 lệnh hơi chậm (>5s nhưng không timeout) chỉ trừ nhẹ bộ đếm chứ không xóa về 0.
         if (latencyMs != null) {
@@ -6990,6 +7022,7 @@
           + ' · lần dò chưa ra ' + gidStats.unknown
           + ' · batch nạp ' + gidStats.batchMappings + '/' + gidStats.batchReturned + ' mapping (lỗi ' + gidStats.batchFail + ')'
           + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
+          + ' · Ext p90 ' + (extLatP90() || 0) + 'ms → timeout ' + extTimeoutMs() + 'ms'
           + ' · can_inbox=false ' + ((sendDiag && sendDiag.canInboxFalse) || 0) + '/' + ((sendDiag && sendDiag.canInboxSeen) || 0)
           + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
           + ' · lane HTTP ' + ctxFetchLane.getLimit()
@@ -7425,7 +7458,7 @@
   // hàng đợi của Extension và đi sau đó — vì vậy kiểm chứng này CHỈ được phép
   // lật ⚠ thành ✅ khi thấy đúng tin trong lịch sử. Không thấy tin thì vẫn giữ
   // ⚠, không bắn cứu, không mở khóa outbound (tránh trùng tuyệt đối).
-  const EXT_VERIFY_DELAY_MS = 20000; // sau mốc adapter timeout 35s → tổng phân xử khoảng 55–60s
+  const EXT_VERIFY_DELAY_MS = 20000; // [v1.92.6] adapter timeout nay 2,5–9 s (suy từ p90) → 20 s vẫn dư ~11 s trước khi phân xử
   // [v1.91.78] ĐỌC LẠI THEO NHỊP GIÃN cho ca Extension quá hạn.
   // Log lô 4296 tin: 27 ca kết thúc ở "⚠ bù không rõ kết quả" vì lần đọc DUY NHẤT
   // (sau ~20s) chưa thấy tin — nhưng "chưa thấy" ở 20s KHÔNG phải bằng chứng "chưa đi":

@@ -875,3 +875,85 @@ cứu được ca nào. Chưa đủ để kết luận "Ext vô dụng" (mẫu 2
 
 Cùng endpoint, cùng cookie, cùng máy. Chưa có lời giải thích có bằng chứng ⇒ **không sửa gì**
 dựa trên nghi ngờ này; chỉ ghi nhận để đo tiếp.
+
+---
+
+## §31 — Đọc sâu 20 lượt (v1.92.5 → v1.92.6)
+
+### 31.1 Vì sao `retry lần 0` KHÔNG phải làn bù chết
+
+Đọc hết chuỗi: `pushToSocketRetry` → `pendingSocketCoolCount` → `runSocketRetryWorker` (96 worker,
+`WAVE_SOCKET_RETRY_WORKERS = 96`). Worker có tăng `sendDiag.sockRetry++` (dòng ~8325). Chuỗi defer
+`deferredToSocketRetry` được truyền đủ 3 tầng (sendViaSocket:4376 → sendOne:6193 → sendOneAndLog:8095
+→ runMainItem:8455). **Không có chỗ nào nuốt kết quả.**
+
+Nhưng điều kiện vào làn bù là:
+
+```js
+if (raw.kind === 'rejected' && ctx.wave200Mode && !ctx.isSocketRetryPass
+    && !ctx.gidFromPsid && !ctx.socketRetriedOnce && !ctx.apiRejected551)
+```
+
+Chat có `ctx.gidFromPsid === true` bị **loại khỏi cả hai** nhánh retry (làn bù và bắn-lại-tại-chỗ).
+Lý do lịch sử là đúng: gid lấy từ psid có thể sai, bắn lại cùng gid là vô ích. Nhưng hệ quả là
+những ca đó rơi thẳng xuống `raw.kind === 'rejected'` cuối hàm (dòng ~4466) → trả lỗi thường →
+`sendOne` thử kênh kế tiếp = **Extension**. Run 09:44 có **442 ca "HTTP không có gid"** đi đúng
+đường này. Đó là nguồn của đuôi Ext 225 ca, và cũng là lý do `retry lần 0`.
+
+### 31.2 Nguyên nhân thật của "Ext 0 thắng": timeout bị cắt quá tay
+
+Hai lần chạy cùng cơ chế, chỉ khác hằng số timeout:
+
+| lần chạy | timeout | Ext quá hạn | kiểm chứng **thấy tin** |
+|---|---|---|---|
+| 09:24 · 1 457 chat | 7 s | 114 | **69 (60 %)** |
+| 09:44 · 3 653 chat | **2,5 s** | 225 | **0 (0 %)** |
+
+Cơ chế: lệnh Ext nằm trong hàng đợi cầu nối (peak 360). Timeout 2,5 s bắn **trước khi lệnh kịp
+chạy** ⇒ không có gì để kiểm chứng ⇒ "thấy tin 0". Ở lần 09:24, lệnh kịp chạy, tin đến nơi, chỉ
+phản hồi về muộn ⇒ 60 % cứu được.
+
+**Kết luận: 2,5 s là false economy.** Nó không cứu thêm ca nào mà biến 60 % ca "quá hạn" thành
+mất trắng, đồng thời kích `extSendLane.setLimit(×0,6)` liên tục → làn Ext sụp về sàn.
+
+### 31.3 Sửa: timeout Ext suy từ số đo (v1.92.6)
+
+```js
+function extTimeoutMs() {
+  const p90 = extLatP90();                       // vòng 24 mẫu ca CÓ phản hồi
+  const want = p90 > 0 ? p90 * 3 : 7000;         // chưa có mẫu ⇒ 7 s (mức đã đo có 60 % đến nơi)
+  return Math.min(9000, Math.max(2500, Math.round(want)));
+}
+```
+
+- Ca **quá hạn không được** đưa vào mẫu (số liệu bị cắt cụt, đưa vào sẽ tự ru ngủ chính nó).
+- Ext trả nhanh ⇒ tự siết về 2,5 s; Ext ì ⇒ tự nới, trần 9 s.
+- Dòng chẩn đoán mới: `· Ext p90 <x>ms → timeout <y>ms` — lần chạy sau đọc được ngay.
+- `EXT_VERIFY_DELAY_MS` giữ 20 000 (dư >11 s so với trần 9 s ⇒ kiểm chứng không bao giờ chạy
+  trước khi lệnh Ext kết thúc).
+
+**Không thể sinh tin trùng:** timeout chỉ đánh ⚠ + `scheduleExtTimeoutVerify`; đọc lại toàn bộ
+khối đó chỉ có `markDelivered`, **không có một lời gọi gửi nào** (đã kiểm từng dòng, lượt 18).
+
+### 31.4 Xác nhận từ bundle app thật
+
+`_app-9331d46f21a84eb1.v6.js`:
+
+```js
+let y = findAllBlockActions(step,"replaceOptimsiticMessage"),
+    b = findAllBlockActions(step,"markOptimisticMessageFailed");
+if (b.length > 0 && y.length === 0) return { success:false, sendBy:"socket", response:_ };
+```
+
+⇒ App cũng **thất bại ngay**, không có retry ẩn, không có phép thuật gid. Hành vi của mình là
+đúng app. Đừng đi tìm "đường tắt" nữa — không có trong code của chính Pancake.
+
+### 31.5 Đã kiểm và KHÔNG có lỗi (ghi lại để khỏi kiểm lại)
+
+| nghi vấn | kết luận |
+|---|---|
+| rò `extSendPermit` khi timeout | Không. `releaseExtSendPermit` chỉ nhả cờ thăm dò; slot do làn tự quản |
+| TDZ vì `extLatP90` khai báo sau chỗ dùng | Không. Cùng pattern `extSendLane`: chỉ gọi lúc chạy, không lúc init |
+| `sleep(12000)` chặn đường gửi | Không. Toàn bộ là trần `Promise.race` cho init Socket |
+| `innerHTML` chèn dữ liệu server | Không. 4 chỗ có nội suy đều từ dữ liệu nội bộ đã xử lý |
+| prune cache unavailable | Đúng thiết kế: 40 % khoá, ≤1 lần/60 s |
