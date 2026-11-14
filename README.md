@@ -26,7 +26,6 @@ scripts/
   pancake-send-lite.user.js       # TOÀN BỘ logic gửi trong tab Pancake (panel, quét list, Wave 200)
                                   #   ↳ BẢN GỐC: dùng để tinh chỉnh, log đầy đủ (SOCKET/API/WAVE/globalId)
   pancake-send-stable.user.js     # BẢN ỔN ĐỊNH cho người dùng cuối — sinh từ bản gốc:
-                                  #   • KHÔNG nhớ/lọc chat gửi lỗi (không có "danh sách đen")
                                   #   • có công tắc "TAB:" trên tiêu đề panel (mặc định TẮT gửi bằng Tab)
                                   #   • log cuối gọn: chỉ còn dòng tổng kết (✅/❌/⚠/thời gian)
 
@@ -69,7 +68,7 @@ Cả hai folder **sinh tự động** từ mã nguồn: đừng sửa trực ti�
 | | `pancake-send-lite.user.js` | `pancake-send-stable.user.js` |
 |---|---|---|
 | dành cho | người tinh chỉnh theo log | người dùng cuối |
-| nhớ chat lỗi | ✅ có (tự bỏ chọn lần sau) | ❌ **bỏ hẳn** — không lọc gì |
+| nhớ chat lỗi | ❌ **không còn** (đã xoá hẳn 1.92.21) | ❌ không có |
 | phím Tab | **công tắc `TAB:`** trên panel, mặc định **BẬT** (bấm Tab = Chạy) | cùng công tắc đó, mặc định **TẮT** |
 | log cuối | 📊 + ⚡TỐC ĐỘ + 🌊WAVE + 📡SOCKET + 🌐API + 🧭globalId | **chỉ 📊 tổng kết** |
 | version hiển thị | `1.92.20-W200.62` | `1.92.20-STABLE` |

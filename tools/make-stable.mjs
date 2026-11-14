@@ -93,25 +93,11 @@ rep('  function logLine(s) {',
   function logDiag(s) { if (!DIAG_LOGS) return; try { logLine(s); } catch (e) { /* ignore */ } }
   function logLine(s) {`, 'logdiag-def');
 
-/* 4. Bỏ nhớ/lọc chat lỗi --------------------------------------------------- */
-rep(`  function isRememberedUnavailable(convId) {
-    return !!convId && unavailableConversationIds.has(String(convId));
-  }`,
-`  function isRememberedUnavailable(convId) {
-    // [STABLE] YÊU CẦU: bỏ hẳn cơ chế nhớ/lọc chat gửi lỗi. Luôn trả false ⇒ không chat nào
-    // bị loại khỏi danh sách, không tự bỏ tick, không có "danh sách đen" tích qua các lần gửi.
-    return false;
-  }`, 'no-filter');
+/* 4. Nhớ/lọc chat lỗi ------------------------------------------------------ */
+// [v1.92.21] BẢN GỐC ĐÃ XOÁ HẲN cơ chế này (không lưu localStorage, không lọc, không còn nút
+// "🧹 Xóa nhớ lỗi"). Bản ổn định vì thế không cần sửa gì nữa — hai bản dùng chung đúng một hành vi.
+// (Giữ khối ghi chú này để lần sau không ai đi tìm mấy phép thay thế đã bị xoá.)
 
-rep(`  function rememberConfirmedSocketUnavailable(conv, result) {
-    if (!conv || !conv.id || !result || !result.recipientUnavailable) return false;`,
-`  function rememberConfirmedSocketUnavailable(conv, result) {
-    // [STABLE] Không ghi nhớ ID lỗi nữa (không lưu localStorage, không lọc lần sau).
-    return false;
-    if (!conv || !conv.id || !result || !result.recipientUnavailable) return false;`, 'no-remember');
-
-rep('<button class="b b-gray" id="ssb-clear-unavailable" title="Xóa các ID lỗi đã nhớ; thao tác cần xác nhận hai lần">🧹 Xóa nhớ lỗi (0)</button>',
-  '<button class="b b-gray" id="ssb-clear-unavailable" style="display:none" title="Không dùng ở bản ổn định">🧹 Xóa nhớ lỗi</button>', 'hide-clear-btn');
 
 /* 5. Công tắc phím Tab: ĐỔI MẶC ĐỊNH (nút đã có sẵn ở bản gốc) ----------------- */
 // Bản gốc: công tắc "TAB:" mặc định BẬT (giữ đúng hành vi cũ: bấm Tab = Chạy).
@@ -143,7 +129,6 @@ rep('  function extCall(payload, waitMs) {',
 
 /* 7. Log cuối gọn ---------------------------------------------------------- */
 for (const [a, b, label] of [
-  ["logLine('🧾 GHI NHỚ LỖI: thêm mới '", "logDiag('🧾 GHI NHỚ LỖI: thêm mới '", 'diag-ghinho'],
   ["logLine('⚡ TỐC ĐỘ: '", "logDiag('⚡ TỐC ĐỘ: '", 'diag-tocdo'],
   ["logLine('🌊 WAVE: script '", "logDiag('🌊 WAVE: script '", 'diag-wave'],
   ["logLine('📡 SOCKET: ACK OK/rejected/no-ACK '", "logDiag('📡 SOCKET: ACK OK/rejected/no-ACK '", 'diag-socket'],

@@ -2198,3 +2198,39 @@ Chi tiết kỹ thuật (quan trọng để không tự phá hành vi cũ):
 - Bấm nút ghi 1 dòng log (`⌨️ ĐÃ BẬT/TẮT…`) để người dùng biết mình vừa đổi gì.
 - `tools/make-stable.mjs` không còn "thêm" nút nữa (nút đã có ở bản gốc) — chỉ còn **1 phép đổi
   mặc định**. Số thay đổi `[STABLE]` giảm 28 → 24, `npm run check` vẫn đối chiếu hai bản.
+
+## §55 — XOÁ HẲN cơ chế "nhớ chat lỗi" (1.92.21)
+
+### 55.1 Đã xoá những gì
+
+| thứ bị xoá | chi tiết |
+|---|---|
+| bộ nhớ localStorage | mỗi ID lỗi từng được ghi thành **một khoá riêng** `SSB_CONFIRMED_UNAVAILABLE_CONV_ID_V1:<id>` + khoá JSON legacy |
+| dọn quota | `pruneUnavailableKeys()` (dọn 2 800 khoá/lần khi localStorage đầy) — không còn gì để dọn |
+| ghi nhớ / lọc | `rememberConfirmedSocketUnavailable()` và `isRememberedUnavailable()` giữ nguyên **tên hàm** để mọi chỗ gọi cũ không phải sửa, nhưng **luôn trả `false`** |
+| UI | nút `🧹 Xóa nhớ lỗi (N)` + dòng hint "chỉ nhớ lỗi Socket xác nhận…" + handler xác nhận 2 lần + phần vẽ trạng thái nút |
+| log | dòng `🧾 GHI NHỚ LỖI: thêm mới N ID …` ở cuối lượt |
+| hành vi | lúc chốt danh sách gửi không còn vòng "tự bỏ tick ID đã nhớ" ⇒ **đúng những chat bạn tick là đúng những chat sẽ gửi** |
+
+Khối bị xoá dài **105 dòng**, file gốc 10 840 → 10 735 dòng. `grep` toàn file: **0** lần còn
+`unavailableConversationIds` / `unavailableAddedThisRun` / `clearRememberedUnavailableIds` /
+`ssb-clear-unavailable`.
+
+### 55.2 Vì sao bỏ là đúng (không chỉ vì người dùng muốn)
+
+- Bộ nhớ này ghi **2 047 ID chỉ trong một lô** (§53) ⇒ localStorage phình, phải có cơ chế dọn quota
+  riêng, mỗi lần dọn là một nhánh code có thể hỏng.
+- **Không cải thiện tốc độ đo được**: chat vắng mặt vẫn bị loại ở lần gửi kế tiếp bằng phản hồi
+  thật (Socket/Ext trả `1545041` trong ~0,9–1,4 s), trong khi bộ nhớ chỉ tiết kiệm đúng khoảng đó
+  nhưng đổi lại là "danh sách tự co" mà người dùng không nhìn thấy.
+- Nó tạo **trạng thái ẩn giữa các phiên**: cùng một danh sách tick, hôm nay gửi 500, mai gửi 450 mà
+  không có dòng giải thích rõ ràng. Bỏ đi thì mọi thứ hiện trên màn hình.
+
+### 55.3 Hệ quả cần biết
+
+- Bản gốc **và** bản ổn định giờ hành xử giống nhau ở điểm này ⇒ `tools/make-stable.mjs` bỏ 3 phép
+  thay thế (`no-filter`, `no-remember`, `hide-clear-btn`) và 1 phép log; số thay đổi `[STABLE]`
+  giảm 24 → 20.
+- Khoá cũ trong localStorage của người đã dùng bản trước **vẫn nằm đó** (script không đọc nữa).
+  Muốn dọn sạch: DevTools → Application → Local Storage → xoá các khoá bắt đầu bằng
+  `SSB_CONFIRMED_UNAVAILABLE_CONV_ID_V1:`.

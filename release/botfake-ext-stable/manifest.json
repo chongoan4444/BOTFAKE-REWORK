@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BOTFAKE STABLE",
-  "version": "1.92.20",
+  "version": "1.92.21",
   "description": "Bản ổn định: gửi hàng loạt trong tab Pancake. Không nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.",
   "permissions": [
     "tabs",

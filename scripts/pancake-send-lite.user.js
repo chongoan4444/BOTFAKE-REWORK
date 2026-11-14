@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.20-w200.62
+// @version      1.92.21-w200.63
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.20-W200.62'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.21-W200.63'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -131,110 +131,15 @@
                             // để nút "↺ Chọn lại list vừa gửi" chọn lại y nguyên mà KHÔNG phải tải danh sách
   };
 
-  // Chỉ nhớ conversation ID có Socket xác nhận rejected qua lần retry; không nhớ no-ACK,
-  // lỗi mạng, API ngoài 24h hay lỗi tạm thời. Lần tải/chọn list sau các ID này tự bỏ tick.
-  const UNAVAILABLE_CONV_ID_PREFIX = 'SSB_CONFIRMED_UNAVAILABLE_CONV_ID_V1:';
-  const UNAVAILABLE_CONV_IDS_LEGACY_KEY = 'SSB_CONFIRMED_UNAVAILABLE_CONV_IDS_V1';
-  const unavailableConversationIds = new Set();
-  const unavailableAddedThisRun = new Set();
-  try {
-    // Mỗi ID có khóa riêng: setItem đồng bộ ngay lúc xác nhận lỗi, không phụ thuộc debounce/pagehide,
-    // nên F5 ngay sau lỗi cũng không làm mất phần lớn một danh sách JSON chưa kịp flush.
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i) || '';
-      if (key.indexOf(UNAVAILABLE_CONV_ID_PREFIX) !== 0) continue;
-      try {
-        const id = decodeURIComponent(key.slice(UNAVAILABLE_CONV_ID_PREFIX.length));
-        if (id) unavailableConversationIds.add(id);
-      } catch (e) { /* khóa lỗi riêng lẻ không được chặn khởi động */ }
-    }
-    // Nạp định dạng JSON của các phiên bản trước để không mất IDs đã được lưu.
-    const legacyUnavailable = JSON.parse(localStorage.getItem(UNAVAILABLE_CONV_IDS_LEGACY_KEY) || '[]');
-    if (Array.isArray(legacyUnavailable)) legacyUnavailable.forEach((id) => {
-      if (id != null && String(id)) unavailableConversationIds.add(String(id));
-    });
-  } catch (e) { /* bộ nhớ lỗi hỏng/bị chặn không được chặn khởi động script */ }
-  function isRememberedUnavailable(convId) {
-    return !!convId && unavailableConversationIds.has(String(convId));
-  }
-  let unavailablePruneNotified = false;
-  let unavailablePruneAt = 0; // [v1.91.91] chống dọn liên tục: mỗi lần dọn 2 800 khóa rồi vẫn đầy
-  function pruneUnavailableKeys(ratio) {
-    // [v1.91.90] localStorage đầy ⇒ xoá bớt khóa unavailable CŨ để nhường chỗ.
-    // Trước đây ghi hỏng là BỎ LUÔN id ⇒ lô sau lại thử khách vắng (HAR: mỗi ca ~908ms,
-    // 40% danh sách là khách vắng ⇒ mỗi lô mất hàng phút chỉ để nhận lại đúng lỗi đó).
-    try {
-      const keys = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i) || '';
-        if (k.indexOf(UNAVAILABLE_CONV_ID_PREFIX) === 0) keys.push(k);
-      }
-      const drop = Math.max(50, Math.floor(keys.length * (ratio || 0.4)));
-      for (let i = 0; i < drop && i < keys.length; i++) {
-        try { localStorage.removeItem(keys[i]); } catch (e0) { /* ignore */ }
-      }
-      return drop;
-    } catch (e) { return 0; }
-  }
-  function persistUnavailableConversationId(id) {
-    const key = UNAVAILABLE_CONV_ID_PREFIX + encodeURIComponent(String(id));
-    try {
-      // localStorage.setItem là đồng bộ; mỗi kết quả được ghi bền riêng trước khi lượt tiếp tục.
-      localStorage.setItem(key, '1');
-      return true;
-    } catch (e) {
-      // [v1.91.91] Lô 08:34: dọn lặp từng ca ⇒ vừa chậm vừa spam log. Chỉ dọn tối đa 1 lần/60s.
-      const canPrune = (Date.now() - unavailablePruneAt) > 60000;
-      const dropped = canPrune ? pruneUnavailableKeys(0.4) : 0;
-      if (dropped > 0) unavailablePruneAt = Date.now();
-      if (dropped > 0) {
-        try {
-          localStorage.setItem(key, '1');
-          if (!unavailablePruneNotified) {
-            unavailablePruneNotified = true;
-            logLine('🧹 localStorage đầy — đã dọn ' + dropped + ' ID unavailable cũ để ghi tiếp (ID vẫn nhớ trong phiên này).');
-          }
-          return true;
-        } catch (e2) { /* vẫn đầy */ }
-      }
-      if (!unavailablePruneNotified) {
-        unavailablePruneNotified = true;
-        logLine('⚠ Không lưu được ID unavailable ' + String(id) + ' (localStorage đầy/bị chặn) — chỉ nhớ trong phiên này.');
-      }
-      return false;
-    }
-  }
-  function rememberConfirmedSocketUnavailable(conv, result) {
-    if (!conv || !conv.id || !result || !result.recipientUnavailable) return false;
-    // [v1.91.76] Trước đây còn đòi khớp NGUYÊN VĂN 'Socket: FB từ chối nhận tin (khách hiện
-    // không có mặt / đã khóa nick)' trong result.error, nên mọi ca lỗi được bọc lại
-    // ("socket: …"), hoặc đến từ nhánh không dựng chuỗi đó, đều bị BỎ QUA ⇒ không nhớ được gì.
-    // Cờ recipientUnavailable đã là kết luận đã qua 2 lần rejected (xem settleSocketResult),
-    // nên chỉ cần cờ là đủ; chuỗi chỉ dùng để ghi log.
-    const id = String(conv.id);
-    if (unavailableConversationIds.has(id)) return false;
-    unavailableConversationIds.add(id);
-    unavailableAddedThisRun.add(id);
-    persistUnavailableConversationId(id);
-    return true;
-  }
-  function clearRememberedUnavailableIds() {
-    const removed = unavailableConversationIds.size;
-    unavailableConversationIds.clear();
-    unavailableAddedThisRun.clear();
-    try {
-      for (let i = localStorage.length - 1; i >= 0; i--) {
-        const key = localStorage.key(i) || '';
-        if (key.indexOf(UNAVAILABLE_CONV_ID_PREFIX) === 0) localStorage.removeItem(key);
-      }
-      localStorage.removeItem(UNAVAILABLE_CONV_IDS_LEGACY_KEY);
-    } catch (e) { logLine('⚠ Không xóa hết được bộ nhớ ID unavailable trong localStorage.'); }
-    state.listKey = '';
-    state.matches.forEach((m) => {
-      if (m) { m.checked = false; m.knownUnavailable = false; }
-    });
-    return removed;
-  }
+  /* [v1.92.21] ĐÃ XOÁ HẲN CƠ CHẾ "NHỚ CHAT LỖI".
+   * Trước đây mỗi ID bị Socket xác nhận rejected được ghi thành một khoá localStorage, lượt
+   * sau tự bỏ tick những ID đó (lô 20:28 ghi thêm 2 047 ID, phải có nút dọn tay). Nay:
+   *   • KHÔNG lưu gì vào localStorage, KHÔNG lọc gì khi tải/chọn danh sách;
+   *   • danh sách bạn tick là ĐÚNG những chat sẽ được gửi — không có "danh sách đen" ngầm;
+   *   • khoá cũ của bản trước (nếu còn) chỉ là rác, script không đọc nữa.
+   * Hai hàm dưới giữ nguyên tên để mọi chỗ gọi cũ không phải sửa, nhưng vô hiệu hoàn toàn. */
+  function isRememberedUnavailable() { return false; }
+  function rememberConfirmedSocketUnavailable() { return false; }
 
   try {
     const savedMode = localStorage.getItem(MSG_MODE_KEY);
@@ -7349,8 +7254,6 @@
       if (isDoneAll && !batchStats.finalLogged && c.total > 0) {
         batchStats.finalLogged = true;
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
-        logLine('🧾 GHI NHỚ LỖI: thêm mới ' + unavailableAddedThisRun.size + ' ID Socket confirmed-unavailable · tổng đang nhớ '
-          + unavailableConversationIds.size + ' (chỉ tự bỏ chọn khi tải/chọn danh sách sau).');
         logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total
           + ' tin (' + pct + '%)' + chStr
           + ' | ❌ Lỗi: ' + c.failTotal
@@ -8091,20 +7994,7 @@
     }
     state.confirmingSend = true;
     // Chốt lần cuối ngay trước hộp xác nhận: kể cả checklist cũ/stale vẫn không đưa ID đã nhớ vào snapshot gửi.
-    let suppressedRemembered = 0;
-    state.matches.forEach((m) => {
-      if (m && isRememberedUnavailable(m.id)) {
-        if (m.checked) suppressedRemembered++;
-        m.checked = false;
-        m.knownUnavailable = true;
-      }
-    });
-    if (suppressedRemembered) {
-      state.listKey = '';
-      logLine('🧹 Đã tự bỏ chọn ' + suppressedRemembered + ' ID Socket unavailable đã nhớ trước khi tạo snapshot gửi.');
-      render();
-    }
-    const selectedSnapshot = state.matches.filter((m) => m && m.checked && !isRememberedUnavailable(m.id)).map((m) => ({ ...m }));
+    const selectedSnapshot = state.matches.filter((m) => m && m.checked).map((m) => ({ ...m }));
     if (!selectedSnapshot.length) {
       state.confirmingSend = false;
       applyRunStopButtons();
@@ -8221,7 +8111,6 @@
     // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
     // bù của lượt trước đang chờ sẽ tự hủy (runSeq) — không gửi lẫn vào lượt mới
     runSeq++;
-    unavailableAddedThisRun.clear();
     buRetrySeq = 0;
     Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
     Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
@@ -9406,10 +9295,6 @@
           </div>
           <div class="summary-box" id="ssb-summary"></div>
           <div class="log" id="ssb-log"></div>
-          <div class="row" style="margin-top:6px;align-items:center;gap:6px;justify-content:flex-end">
-            <span class="hint">chỉ nhớ lỗi Socket xác nhận khách vắng mặt/đã khóa nick</span>
-            <button class="b b-gray" id="ssb-clear-unavailable" title="Xóa các ID lỗi đã nhớ; thao tác cần xác nhận hai lần">🧹 Xóa nhớ lỗi (0)</button>
-          </div>
         </div>
         <div class="rs" id="ssb-rs" title="Kéo góc này để đổi cỡ panel — đúp chuột để về mặc định"></div>
       </div>
@@ -9826,16 +9711,6 @@
         logLine('📷 Đã dán ảnh từ clipboard: ' + (file.name || 'ảnh'));
       } catch (err) { /* ignore */ }
     });
-    on('ssb-clear-unavailable', 'click', () => {
-      if (state.sendListFrozen || state.confirmingSend) return;
-      const count = unavailableConversationIds.size;
-      if (!count) return;
-      if (!confirm('Xác nhận lần 1: xóa toàn bộ ' + count + ' ID đã nhớ là Socket xác nhận bị Facebook từ chối? Các chat đó sẽ có thể được chọn lại.')) return;
-      if (!confirm('Xác nhận lần cuối: bấm OK để xóa vĩnh viễn bộ nhớ lỗi này, hoặc Cancel để giữ nguyên.')) return;
-      const removed = clearRememberedUnavailableIds();
-      logLine('🧹 Đã xóa bộ nhớ ' + removed + ' ID unavailable; các chat vẫn để bỏ chọn, có thể tự tick lại.');
-      render();
-    });
     on('ssb-deselect-one', 'click', () => {
       if (!state.enabled || state.sendListFrozen || state.confirmingSend) return;
       state.deselectMode = !state.deselectMode;
@@ -10218,11 +10093,6 @@
       const btn = shadow.getElementById(id);
       if (btn) btn.disabled = locked || (id === 'ssb-deselect-one' && !state.enabled);
     });
-    const clearUnavailable = shadow.getElementById('ssb-clear-unavailable');
-    if (clearUnavailable) {
-      clearUnavailable.textContent = '🧹 Xóa nhớ lỗi (' + unavailableConversationIds.size + ')';
-      clearUnavailable.disabled = locked || unavailableConversationIds.size === 0;
-    }
     if (send) {
       send.disabled = busy || locked;
       send.textContent = busy
@@ -10319,11 +10189,6 @@
     if (!shadow) return;
     // Kết quả confirmed-unavailable có thể được ghi nhớ trong lúc gửi; sau khi checklist mở lại,
     // hạ tick ngay nhưng không sửa snapshot đang khóa để tránh đổi người nhận giữa lượt.
-    if (!state.sendListFrozen) {
-      state.matches.forEach((m) => {
-        if (m && isRememberedUnavailable(m.id)) { m.knownUnavailable = true; m.checked = false; }
-      });
-    }
     const tgl = shadow.getElementById('ssb-toggle');
     if (tgl) {
       tgl.textContent = state.enabled ? 'BẬT' : 'TẮT';
