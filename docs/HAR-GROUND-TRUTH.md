@@ -1637,3 +1637,58 @@ khoảng chờ đồng hồ nào chen vào: `queue wait` chỉ **57–153 ms**, 
 
 Lô 4 chat: 3,87 tin/giây vì trần thời gian là **một lượt fetch ~0,9 s**, chia cho 4 lệnh. Từ ~20
 lệnh trở lên, chi phí cố định đó bị chia nhỏ và tốc độ phát tiến tới mức ~67–72 tin/giây.
+
+---
+
+## §43 — Lô lớn đầu tiên của dòng 1.92.x (2 393 chat, 14:27)
+
+### 43.1 Sổ sách khớp tuyệt đối — mọi chat đều có chỗ
+
+```
+1 500 ✅ + 813 chết-hẳn + 40 lỗi Ext + 40 không rõ = 2 393
+thành công / mục tiêu còn lại = 1 500 / 1 580 = 94,9 %
+```
+
+- **813** = `Socket confirmed-unavailable` (khách xoá nick/khoá) → đúng là không gửi được.
+- **40 lỗi Ext** = các ca Socket từ chối rồi Ext cũng trả `Người này hiện không có mặt`.
+- **40 không rõ** = Ext không phản hồi; `kiểm chứng thấy tin 0 / chưa thấy 40` ⇒ thật sự chưa đi.
+
+⇒ Sai sót **thật** của lượt = 40/2 393 = 1,7 %, và toàn bộ nằm ở làn Ext.
+
+### 43.2 Tốc độ
+
+| chỉ số | số đo |
+|---|---|
+| phát lệnh | **49,12 tin/giây (2 947/phút)** trong 48,7 s cho 2 393 chat |
+| chốt (gồm đuôi) | 33,83/giây · thành công **21,21/giây** |
+| đuôi xác nhận | 22 s (chủ yếu là 40 ca Ext chờ timeout 6,6 s + đọc lịch sử 20 s không thấy gì) |
+
+### 43.3 Nút thắt tìm được: chia khúc TĨNH trong wave
+
+`runPool` rút việc động **trong từng khúc**, nhưng cả wave bị chia thành **4 khúc cố định × 48 làn**
+(`laneSize = ceil(len/4)`). Khúc nào nhiều ca chậm (FB từ chối → chờ ACK) thì 48 làn của khúc đó ùn,
+**144 làn còn lại hết việc rồi ngồi không**; wave chỉ kết thúc khi khúc chậm nhất xong.
+
+Dấu hiệu trong log: `wave→cổng TB 2 510 ms` nhưng `MAX 6 270 ms` — chênh **2,5 lần**.
+
+**Vá 1.92.11**: bỏ chia khúc, cả wave dùng **một** `runPool(waveSlice, runMainItem, 192)`.
+Tổng song song không đổi (192), mỗi chat vẫn chỉ được rút đúng một lần ⇒ không có đường gửi lặp.
+`WAVE_PER_LANE`/`WAVE_MAIN_LANES` giữ lại chỉ để đọc log cũ.
+
+### 43.4 Hai thứ KHÔNG phải nút thắt (đã kiểm, đừng sửa mù)
+
+- `SOCKET_MIN_PACE_MS = 4` ⇒ trần 250 tin/giây/trang, không liên quan 49/s.
+- Cổng wave **đã gối sẵn**: mở ở 40 % khối lượng hoặc sau 1 600 ms ở 25 %. `gateWaitMs` là *thời gian
+  tới lúc mở cổng*, **không phải** thời gian làn rảnh — đừng đọc nhầm thành lãng phí.
+
+### 43.5 Làn Ext trong lượt này: 0 tin thắng
+
+`✅ [API: 6 · Socket: 1 494]` — Ext không đóng góp tin nào, chỉ tạo 40 ca "không rõ" và 22 s đuôi.
+Nguyên nhân: mọi ca chuyển sang Ext đều là ca Socket **đã bị FB từ chối** (khách chết), nên Ext cũng
+bị từ chối. Hành vi đúng thiết kế, nhưng cho thấy **thời gian đuôi của lượt chủ yếu là tiễn khách chết**.
+
+### 43.6 Bộ đếm phản hồi muộn (mới ở 1.92.8) lần đầu có số
+
+`phản hồi MUỘN (đã tính ✅) 0 · muộn-mà-lỗi 9 · im lặng hẳn 0` trên 40 ca quá hạn.
+⇒ 9 ca Extension trả lời muộn và trả lời **lỗi thật** (không phải tin đã đi). Còn 31 ca chưa có kết quả
+lúc in tổng hợp (mốc giữ chỗ 60 s chưa hết) — `im lặng hẳn` vì vậy đọc là "chưa tới hạn", không phải 0 ca.
