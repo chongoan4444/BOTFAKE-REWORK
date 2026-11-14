@@ -676,3 +676,11 @@ trên chat khoẻ**. Mọi dòng `📡 SOCKET: ACK 0/386` trong 6 lô là chat �
 khi Ext trượt) — thiên lệch chọn mẫu. v1.91.99 trả `ssb_force_ext` về **TẮT mặc định** để đo lại
 Socket trên chat khoẻ. Socket là kênh của chính Facebook, không qua bridge ⇒ đây là đường duy
 nhất có thể đạt mức hàng nghìn tin/phút.
+
+## §26 — Bỏ hẳn ô "Toàn bộ qua HTTP" (v1.92.0)
+
+Theo yêu cầu: ô `#ssb-forceext` **bị xoá khỏi panel** (không chỉ mặc định tắt) và `forceExtMode`
+**luôn = false**. Lý do kỹ thuật khớp với §25: bật chế độ đó đẩy cả lô vào trần ~12–21 tin/s
+của bridge Extension, và từ 1.91.92 nó còn bỏ hẳn làn Socket. Không còn đường UI nào bật lại
+⇒ một lần bấm nhầm không thể làm chậm cả lô. `__botfakeForceExt__(true)` vẫn còn trong console
+để đo đối chứng khi cần.
