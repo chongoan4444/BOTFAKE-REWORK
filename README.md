@@ -70,9 +70,9 @@ Cả hai folder **sinh tự động** từ mã nguồn: đừng sửa trực ti�
 |---|---|---|
 | dành cho | người tinh chỉnh theo log | người dùng cuối |
 | nhớ chat lỗi | ✅ có (tự bỏ chọn lần sau) | ❌ **bỏ hẳn** — không lọc gì |
-| phím Tab | luôn bật (bấm Tab = Chạy) | **công tắc `TAB:`** trên panel, mặc định TẮT |
+| phím Tab | **công tắc `TAB:`** trên panel, mặc định **BẬT** (bấm Tab = Chạy) | cùng công tắc đó, mặc định **TẮT** |
 | log cuối | 📊 + ⚡TỐC ĐỘ + 🌊WAVE + 📡SOCKET + 🌐API + 🧭globalId | **chỉ 📊 tổng kết** |
-| version hiển thị | `1.92.17-W200.59` | `1.92.17-STABLE` |
+| version hiển thị | `1.92.20-W200.62` | `1.92.20-STABLE` |
 
 `scripts/pancake-send-stable.user.js` được sinh từ bản gốc bằng một loạt thay đổi có đánh dấu
 `[STABLE]` — muốn sửa logic gửi thì **sửa bản gốc rồi sinh lại bản ổn định**, đừng sửa tay hai nơi.

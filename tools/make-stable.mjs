@@ -113,61 +113,13 @@ rep(`  function rememberConfirmedSocketUnavailable(conv, result) {
 rep('<button class="b b-gray" id="ssb-clear-unavailable" title="Xóa các ID lỗi đã nhớ; thao tác cần xác nhận hai lần">🧹 Xóa nhớ lỗi (0)</button>',
   '<button class="b b-gray" id="ssb-clear-unavailable" style="display:none" title="Không dùng ở bản ổn định">🧹 Xóa nhớ lỗi</button>', 'hide-clear-btn');
 
-/* 5. Công tắc phím Tab ----------------------------------------------------- */
-rep('          <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>',
-`          <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
-          <button class="badge off" id="ssb-tab" title="Bật/tắt GỬI BẰNG PHÍM TAB (mặc định TẮT — bấm Tab chỉ chuyển ô như bình thường)">TAB: TẮT</button>`, 'tab-btn');
+/* 5. Công tắc phím Tab: ĐỔI MẶC ĐỊNH (nút đã có sẵn ở bản gốc) ----------------- */
+// Bản gốc: công tắc "TAB:" mặc định BẬT (giữ đúng hành vi cũ: bấm Tab = Chạy).
+// Bản ổn định: cùng nút đó nhưng mặc định TẮT — người dùng mới bấm Tab để chuyển ô sẽ không
+// vô tình mở hộp xác nhận gửi. Người dùng vẫn bật/tắt được y như bản gốc, nhớ qua localStorage.
+rep("    tabSend: (() => { try { return localStorage.getItem('ssb_tab_send_on') !== '0'; } catch (e) { return true; } })(),",
+  "    // [STABLE] mặc định TẮT (bản gốc mặc định BẬT) — xem ghi chú ngay trên trong tools/make-stable.mjs\n    tabSend: (() => { try { return localStorage.getItem('ssb_tab_send_on') === '1'; } catch (e) { return false; } })(),", 'tab-default-off');
 
-rep('    confirmingSend: false,  // đang mở hộp xác nhận gửi / đọc clipboard — chặn bấm đúp Tab/Chạy',
-`    confirmingSend: false,  // đang mở hộp xác nhận gửi / đọc clipboard — chặn bấm đúp Tab/Chạy
-    // [STABLE] Công tắc phím Tab: TẮT mặc định (người dùng mới bấm Tab để chuyển ô sẽ không
-    // vô tình kích hoạt gửi). Bật/tắt bằng nút "TAB:" trên tiêu đề panel, nhớ qua localStorage.
-    tabSend: (() => { try { return localStorage.getItem('ssb_tab_send_on') === '1'; } catch (e) { return false; } })(),`, 'state-tabsend');
-
-rep(`    on('ssb-toggle', 'click', () => {
-      state.enabled = !state.enabled;
-      if (!state.enabled) state.deselectMode = false;
-      highlightRows(); // bật: tô lại / tắt: gỡ hết màu
-      render();
-    });`,
-`    on('ssb-toggle', 'click', () => {
-      state.enabled = !state.enabled;
-      if (!state.enabled) state.deselectMode = false;
-      highlightRows(); // bật: tô lại / tắt: gỡ hết màu
-      render();
-    });
-    // [STABLE] Công tắc phím Tab
-    on('ssb-tab', 'click', () => {
-      state.tabSend = !state.tabSend;
-      try { localStorage.setItem('ssb_tab_send_on', state.tabSend ? '1' : '0'); } catch (e0) { /* ignore */ }
-      logLine(state.tabSend
-        ? '⌨️ ĐÃ BẬT: bấm phím Tab = mở hộp xác nhận gửi (vẫn hỏi trước khi gửi).'
-        : '⌨️ ĐÃ TẮT: phím Tab chỉ chuyển ô như bình thường, muốn gửi thì bấm nút ▶.');
-      render();
-    });`, 'tab-handler');
-
-rep(`    const tgl = shadow.getElementById('ssb-toggle');
-    if (tgl) {
-      tgl.textContent = state.enabled ? 'BẬT' : 'TẮT';
-      tgl.className = 'badge ' + (state.enabled ? 'on' : 'off');
-    }`,
-`    const tgl = shadow.getElementById('ssb-toggle');
-    if (tgl) {
-      tgl.textContent = state.enabled ? 'BẬT' : 'TẮT';
-      tgl.className = 'badge ' + (state.enabled ? 'on' : 'off');
-    }
-    const tglTab = shadow.getElementById('ssb-tab');
-    if (tglTab) {
-      tglTab.textContent = 'TAB: ' + (state.tabSend ? 'BẬT' : 'TẮT');
-      tglTab.className = 'badge ' + (state.tabSend ? 'on' : 'off');
-    }`, 'tab-render');
-
-rep(`    const isTabKey = (e.key === 'Tab' || e.code === 'Tab' || e.keyCode === 9 || e.which === 9);
-    // Phím Tab: kích hoạt nút ▶ Chạy (luôn hiện hộp xác nhận trước khi gửi)`,
-`    const isTabKey = (e.key === 'Tab' || e.code === 'Tab' || e.keyCode === 9 || e.which === 9);
-    // [STABLE] Công tắc TẮT ⇒ nhường phím Tab cho trang, không preventDefault, không kích hoạt gửi.
-    if (isTabKey && !state.tabSend && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) return;
-    // Phím Tab: kích hoạt nút ▶ Chạy (luôn hiện hộp xác nhận trước khi gửi)`, 'tab-keyguard');
 
 rep('title="Bấm nút này hoặc nhấn phím Tab để chạy (có bảng xác nhận trước khi gửi)">▶ Chạy (Tab)</button>',
   'title="Bấm nút này để chạy (có bảng xác nhận trước khi gửi). Muốn dùng phím Tab thì bật công tắc TAB trên tiêu đề.">▶ Chạy</button>', 'send-btn-tip');

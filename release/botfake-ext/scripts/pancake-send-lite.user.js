@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.19-w200.61
+// @version      1.92.20-w200.62
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.19-W200.61'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.20-W200.62'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -107,6 +107,9 @@
     sending: false,
     stopRequested: false,
     confirmingSend: false,  // đang mở hộp xác nhận gửi / đọc clipboard — chặn bấm đúp Tab/Chạy
+    // Công tắc phím Tab: mặc định BẬT (giữ đúng hành vi từ trước tới nay). Tắt bằng nút "TAB:"
+    // trên tiêu đề panel — nhớ qua localStorage nên F5 vẫn giữ lựa chọn.
+    tabSend: (() => { try { return localStorage.getItem('ssb_tab_send_on') !== '0'; } catch (e) { return true; } })(),
     sendListFrozen: false,  // snapshot người nhận; bỏ checkbox UI trong suốt lượt chạy
     msgSource: 'ui',        // 'ui' (gửi bằng câu trên giao diện) | 'clipboard' (gửi bằng dữ liệu đang copy trên clipboard)
     lastCopiedText: '',     // bản sao lưu text vừa copy trên trang (dự phòng khi trình duyệt chặn clipboard API)
@@ -9337,6 +9340,7 @@
         <div class="head" id="ssb-head">
           <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v${APP_VERSION}</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
+          <button class="badge on" id="ssb-tab" title="Bật/tắt GỬI BẰNG PHÍM TAB — TẮT thì phím Tab chỉ chuyển ô như bình thường, muốn gửi bấm nút ▶">TAB: BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
         </div>
@@ -9426,6 +9430,14 @@
       state.enabled = !state.enabled;
       if (!state.enabled) state.deselectMode = false;
       highlightRows(); // bật: tô lại / tắt: gỡ hết màu
+      render();
+    });
+    on('ssb-tab', 'click', () => {
+      state.tabSend = !state.tabSend;
+      try { localStorage.setItem('ssb_tab_send_on', state.tabSend ? '1' : '0'); } catch (e0) { /* ignore */ }
+      logLine(state.tabSend
+        ? '⌨️ ĐÃ BẬT: bấm phím Tab = mở hộp xác nhận gửi (vẫn hỏi trước khi gửi).'
+        : '⌨️ ĐÃ TẮT: phím Tab chỉ chuyển ô như bình thường, muốn gửi thì bấm nút ▶.');
       render();
     });
     on('ssb-min', 'click', () => {
@@ -10317,6 +10329,11 @@
       tgl.textContent = state.enabled ? 'BẬT' : 'TẮT';
       tgl.className = 'badge ' + (state.enabled ? 'on' : 'off');
     }
+    const tglTab = shadow.getElementById('ssb-tab');
+    if (tglTab) {
+      tglTab.textContent = 'TAB: ' + (state.tabSend ? 'BẬT' : 'TẮT');
+      tglTab.className = 'badge ' + (state.tabSend ? 'on' : 'off');
+    }
     const deselectBtn = shadow.getElementById('ssb-deselect-one');
     if (deselectBtn) {
       deselectBtn.textContent = state.deselectMode ? '👆 Click chat cần bỏ chọn… (Esc hủy)' : '⊖ Bỏ chọn 1 chat';
@@ -10624,6 +10641,8 @@
   function onKeydown(e) {
     if (!e || e.__botfakeKeyHandled) return;
     const isTabKey = (e.key === 'Tab' || e.code === 'Tab' || e.keyCode === 9 || e.which === 9);
+    // Công tắc TAB đang TẮT ⇒ nhường phím Tab cho trang (không preventDefault, không kích hoạt gửi)
+    if (isTabKey && !state.tabSend && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) return;
     // Phím Tab: kích hoạt nút ▶ Chạy (luôn hiện hộp xác nhận trước khi gửi)
     if (isTabKey && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.isComposing) {
       if (!state.enabled || !isPancakeHost()) return;

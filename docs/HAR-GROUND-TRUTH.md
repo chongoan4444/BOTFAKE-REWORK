@@ -2177,3 +2177,24 @@ Nay: `finalizeSockBg` gặp `deferredToSocketRetry` ⇒ nhả khoá rồi **bắ
 (`isSocketRetryPass` ⇒ không thể defer lần 2, `socketRetriedOnce` ⇒ không lặp), chạy trên làn riêng
 48 luồng để không chiếm ghế của wave kế tiếp. An toàn: FB đã trả `markOptimisticMessageFailed`
 ⇒ tin CHƯA đi, gửi lại không thể trùng. Dòng 📡 in thêm **`retry wave N`** để lần sau đọc là biết.
+
+## §54 — Nút bật/tắt phím TAB trên giao diện bản gốc (1.92.20)
+
+Trước đây chỉ **bản ổn định** có công tắc `TAB:`; bản gốc luôn bật (bấm Tab = Chạy). Nay nút này
+nằm ở **cả hai bản**, chỉ khác mặc định:
+
+| | `pancake-send-lite.user.js` | `pancake-send-stable.user.js` |
+|---|---|---|
+| nút `TAB: BẬT/TẮT` trên tiêu đề panel | ✅ có | ✅ có (sinh tự động từ bản gốc) |
+| mặc định | **BẬT** (`!== '0'`) — giữ nguyên hành vi cũ | **TẮT** (`=== '1'`) |
+| nhớ lựa chọn | `localStorage 'ssb_tab_send_on'` | cùng key |
+
+Chi tiết kỹ thuật (quan trọng để không tự phá hành vi cũ):
+
+- Công tắc **chỉ** đổi cách xử lý phím Tab: TẮT ⇒ `onKeydown` **return ngay, không `preventDefault`**
+  ⇒ phím Tab quay về đúng chức năng chuyển ô của trang.
+- Mặc định của bản gốc đọc bằng `!== '0'` (không phải `=== '1'`): người đã dùng bản cũ **không có**
+  key trong localStorage ⇒ vẫn BẬT như trước, không ai bị đổi hành vi sau khi cập nhật.
+- Bấm nút ghi 1 dòng log (`⌨️ ĐÃ BẬT/TẮT…`) để người dùng biết mình vừa đổi gì.
+- `tools/make-stable.mjs` không còn "thêm" nút nữa (nút đã có ở bản gốc) — chỉ còn **1 phép đổi
+  mặc định**. Số thay đổi `[STABLE]` giảm 28 → 24, `npm run check` vẫn đối chiếu hai bản.
