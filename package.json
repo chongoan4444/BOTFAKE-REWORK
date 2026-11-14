@@ -1,6 +1,6 @@
 {
   "name": "botfake-extension",
-  "version": "1.91.96",
+  "version": "1.91.97",
   "private": true,
   "type": "module",
   "description": "BOTFAKE LITE — gửi hàng loạt tin nhắn Pancake (MV3 + userscript)",

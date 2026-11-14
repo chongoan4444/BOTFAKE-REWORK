@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.96-w200.38
+// @version      1.91.97-w200.39
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.96-W200.38'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.97-W200.39'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5139,9 +5139,15 @@
   const GID_EXT_MAX = 32;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
   // 🔥 [FIX-TỐC-ĐỘ] Ext gửi 48 khởi điểm, adaptive tới 64 — đủ cho ~1000 chat ngoài 24h trong 30s.
-  const BUS_PARALLEL_EXT = 48;
-  const EXT_SEND_MIN = 24;
-  const EXT_SEND_MAX = 64;
+  // [v1.91.97] NÂNG THẲNG LÀN EXT (theo yêu cầu, dựa trên số đo):
+  //   Log 09:15:37–09:15:42 = hơn 100 tin ✅ trong 5s ở 24 làn ⇒ ~20–25 tin/s, tức ~1s/lệnh.
+  //   Làn tự hạ về sàn 24 vì bão timeout rồi nằm nguyên đó ⇒ không bao giờ chạm 48.
+  //   Nay: khởi động 64, SÀN 48 (không tụt xuống 24 nữa), trần 96.
+  //   Ước lượng tuyến tính theo số đo trên: 48 làn ≈ 40–50 tin/s, 64 làn ≈ 55–65 tin/s.
+  //   Làn vẫn tự hạ khi lỗi, nhưng không bao giờ thấp hơn 48.
+  const BUS_PARALLEL_EXT = 64;
+  const EXT_SEND_MIN = 48;
+  const EXT_SEND_MAX = 96;
   // 🔥 [FIX-TỐC-ĐỘ] Socket/page 128 khởi điểm, đủ cho pace 4ms × 2 page = 500/s mà không chờ slot.
   const BUS_PARALLEL_SOCKET = 128;
   const SOCKET_LANE_MIN = 64;
@@ -5610,9 +5616,14 @@
   // tin, TUYỆT ĐỐI không bắn lại mò (lệnh gốc có thể vẫn nằm trong Extension).
   // 🔥 [FIX-TỐC-ĐỘ] Chịu được 12 timeout liên tiếp trước khi ngắt (thay vì 3) — tránh dừng Ext vì
   // vài ca chat chết riêng lẻ. Nghỉ 15s (thay vì 45s) nếu thật sự mở ngắt.
-  const EXT_SEND_BREAKER_THRESHOLD = 12;
-  const EXT_SEND_BREAKER_BASE_MS = 15000;
-  const EXT_SEND_BREAKER_MAX_MS = 45000;
+  // [v1.91.97] Ngưỡng ngắt phải co giãn theo số làn: 64 làn bay cùng lúc thì "12 lần liên tiếp
+  // không phản hồi" xảy ra thường xuyên hơn 24 làn rất nhiều ⇒ giữ 12 sẽ tự bóp làn liên tục
+  // (đúng thứ đã xảy ra ở lô 09:16: ngắt mở 45s, gửi được có 226 tin trong 78s).
+  // 12 → 30 (tỉ lệ với số làn), và trần nghỉ 45s → 15s. Vẫn là "thăm dò" chứ không mò: lệnh đã
+  // bắn mà quá hạn vẫn KHÔNG bao giờ gửi lại, chỉ kiểm chứng lịch sử để nâng ⚠→✅.
+  const EXT_SEND_BREAKER_THRESHOLD = 30;
+  const EXT_SEND_BREAKER_BASE_MS = 8000;
+  const EXT_SEND_BREAKER_MAX_MS = 15000;
   const extSendCtl = { timeoutStreak: 0, openUntil: 0, openStreak: 0, probeInFlight: false, probeToken: 0, fastStreak: 0 };
   function isExtBreakerOpen() {
     return Date.now() < extSendCtl.openUntil;

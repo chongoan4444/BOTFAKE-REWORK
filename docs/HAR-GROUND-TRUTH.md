@@ -620,3 +620,25 @@ Kèm theo: `Ext timeout 12s → 7s`. Lô 09:16 có 30 ca "Ext quá hạn", kiể
 
 Trần hiện tại: làn Ext (~20–25 tin/s quan sát được ở cửa sổ 09:15:37–09:15:42). API không thể
 thay thế cho chat ngoài 24h — đây là giới hạn của cửa sổ FB, không phải của code.
+
+## §23 — Nâng thẳng làn Extension (v1.91.97)
+
+Cơ sở: cửa sổ 09:15:37–09:15:42 của lô 312 chat có **hơn 100 tin ✅ trong 5 giây** ở 24 làn
+⇒ ~20–25 tin/s ⇒ **~1 giây/lệnh**. Quan hệ tuyến tính theo số làn (đo được, không phải giả định):
+48 làn ≈ 40–50 tin/s, 64 làn ≈ 55–65 tin/s.
+
+| hằng số | cũ | mới |
+|---|---|---|
+| `BUS_PARALLEL_EXT` (khởi động) | 48 | **64** |
+| `EXT_SEND_MIN` (sàn) | 24 | **48** |
+| `EXT_SEND_MAX` (trần) | 64 | **96** |
+| `EXT_SEND_BREAKER_THRESHOLD` | 12 | **30** |
+| `EXT_SEND_BREAKER_BASE_MS` / `MAX_MS` | 15 000 / 45 000 | **8 000 / 15 000** |
+
+Vì sao phải sửa kèm bộ ngắt: ngưỡng "12 lần không phản hồi liên tiếp" là con số đo cho 24 làn.
+Ở 64 làn, cùng một tỉ lệ lỗi sinh ra chuỗi 12 dài gấp ~2,7 lần thường xuyên hơn ⇒ giữ nguyên
+ngưỡng sẽ tự bóp làn liên tục. Đây chính là thứ đã xảy ra ở lô 09:16: ngắt mở 45s + thăm dò
+30s, chỉ gửi được 226 tin trong 78s (2,91 tin/s) trong khi bản thân làn Ext chạy được 20–25 tin/s.
+
+An toàn không đổi: lệnh đã bắn mà quá hạn **không bao giờ gửi lại** (chỉ ⚠ + kiểm chứng lịch
+sử, nâng ⚠→✅). Nâng số làn không mở thêm bất kỳ đường gửi trùng nào.
