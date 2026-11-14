@@ -1604,3 +1604,36 @@ Trước đây chỉ có "tổng", nên lô phát xong tức thì vẫn hiện 0
 Một khoá chẩn đoán (`apiFetchSamples`) làm chết **đường gửi**. Mọi thao tác trong `finally`
 phải coi mình là code không được phép ném. `npm test` không bắt được vì nó không chạy đường
 mạng thật — chỉ log vận hành mới lộ.
+
+---
+
+## §42 — XÁC NHẬN 1.92.10 (log 14:12–14:13, cùng máy, cùng tài khoản)
+
+### 42.1 Trước / sau
+
+| lô | bản | phát lệnh | "không rõ" | đuôi xác nhận | kết quả |
+|---|---|---|---|---|---|
+| 14:09 (4 chat) | 1.92.9 | 53 ms | **4/4** | **9,4 s** | 4/4 ✅ nhưng báo 0,39 tin/giây |
+| 14:09 (14 chat) | 1.92.9 | 141 ms | **11/11** | ~9 s | 14/14 ✅ nhưng báo 1,33 tin/giây |
+| 14:13:02 (25 chat) | **1.92.10** | **0,4 s** | **0** | 2,3 s | 25/25 ✅ · **67,39 tin/giây (4 043/phút)** |
+| 14:13:11 (18 chat) | **1.92.10** | **0,2 s** | **0** | 1,9 s | 18/18 ✅ · **72,29 tin/giây (4 337/phút)** |
+| 14:13:18 (11 chat) | **1.92.10** | **0,2 s** | **0** | 1,4 s | 11/11 ✅ · **67,07 tin/giây (4 024/phút)** |
+
+### 42.2 Hồi quy đã chết, đúng như chẩn đoán §41
+
+- `HTTP status [200×25]` và `OK 25 / không rõ 0` **cùng tồn tại** — trước đây luôn là `OK 0 / không rõ N`.
+- `fetch p50` nay có số thật: **874 / 984 / 1008 / 1104 ms** (trước là `0ms` vì mảng bị đổi thành số).
+
+### 42.3 Đuôi xác nhận còn 1,4–2,3 s là **thời gian thật, không phải chờ mù**
+
+Nó bằng đúng `fetch p50 ≈ 1 s` (Pancake trả lời) + ACK Socket `TB 1 310–1 391 ms`. Không còn
+khoảng chờ đồng hồ nào chen vào: `queue wait` chỉ **57–153 ms**, `429/retry 0/0`, `bỏ qua 0`.
+
+### 42.4 Ngưỡng Ext tự co theo số đo (1.92.6 chạy đúng)
+
+`Ext p90 941ms → timeout 2823ms` — không còn hằng số 7 000 ms; vòng mẫu p90 hoạt động như thiết kế.
+
+### 42.5 Lô nhỏ thì số thấp là **đúng bản chất**, không phải lỗi
+
+Lô 4 chat: 3,87 tin/giây vì trần thời gian là **một lượt fetch ~0,9 s**, chia cho 4 lệnh. Từ ~20
+lệnh trở lên, chi phí cố định đó bị chia nhỏ và tốc độ phát tiến tới mức ~67–72 tin/giây.
