@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.6-w200.48
+// @version      1.92.7-w200.49
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.6-W200.48'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.7-W200.49'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2910,6 +2910,9 @@
             const fetchMs = Math.max(0, Date.now() - fetchStartedAt);
             sendDiag.apiFetchMsTotal += fetchMs;
             sendDiag.apiFetchMsMax = Math.max(sendDiag.apiFetchMsMax, fetchMs);
+            const ar = sendDiag.apiFetchSamples;
+            ar.push(fetchMs);
+            if (ar.length > 64) ar.shift();
           }
         }
       };
@@ -6721,6 +6724,9 @@
     apiQueued: 0, apiStarted: 0, apiFetchAttempts: 0, apiSuccess: 0, apiRejected: 0, apiUnknown: 0,
     api429: 0, api429Retries: 0, apiCancelled: 0, apiFallback: 0,
     apiQueueWaitMsTotal: 0, apiQueueWaitMsMax: 0, apiFetchMsTotal: 0, apiFetchMsMax: 0,
+    // [v1.92.7] Vòng mẫu fetchMs để tính p50. TB bị max kéo lệch nên không phân biệt được
+    // "mọi request chậm" với "vài request kẹt"; p50 mới so được với HAR (xem docs §32).
+    apiFetchSamples: [],
     apiStatusCounts: Object.create(null),
   };
   const waveDiag = {
@@ -7011,7 +7017,9 @@
           + ' · HTTP status [' + apiStatuses + '] · 429/retry ' + sendDiag.api429 + '/' + sendDiag.api429Retries
           + ' · fallback ' + sendDiag.apiFallback + ' · hủy ' + sendDiag.apiCancelled
           + ' · queue wait TB/max ' + Math.round(sendDiag.apiQueueWaitMsTotal / apiStartedSafe) + '/' + sendDiag.apiQueueWaitMsMax + 'ms'
-          + ' · fetch TB/max ' + Math.round(sendDiag.apiFetchMsTotal / apiFetchSafe) + '/' + sendDiag.apiFetchMsMax + 'ms');
+          + ' · fetch TB/max ' + Math.round(sendDiag.apiFetchMsTotal / apiFetchSafe) + '/' + sendDiag.apiFetchMsMax + 'ms'
+          + ' · fetch p50 ' + (() => { const a = (sendDiag.apiFetchSamples || []).slice().sort((x, y) => x - y);
+              return a.length ? a[Math.floor(a.length / 2)] : 0; })() + 'ms');
         logLine('🧭 Chẩn đoán globalId: cache ' + gidStats.cacheHit
           + ' · HTTP ' + gidStats.httpHit
           + ' · WS ' + gidStats.wsHit

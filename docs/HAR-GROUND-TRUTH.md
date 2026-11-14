@@ -957,3 +957,84 @@ if (b.length > 0 && y.length === 0) return { success:false, sendBy:"socket", res
 | `sleep(12000)` chặn đường gửi | Không. Toàn bộ là trần `Promise.race` cho init Socket |
 | `innerHTML` chèn dữ liệu server | Không. 4 chỗ có nội suy đều từ dữ liệu nội bộ đã xử lý |
 | prune cache unavailable | Đúng thiết kế: 40 % khoá, ≤1 lần/60 s |
+
+---
+
+## §32 — Hai HAR mới tải lên `main` (1gg.har, 2gg.har)
+
+### 32.1 `1gg.har` — HỎNG, không dùng được
+
+File dừng đúng ở **byte 100 000** (`Unterminated string in JSON at position 100000`).
+Chỉ có **3 entry**, entry đầu là một `stylesheet` với khối CSS khổng lồ chiếm trọn 100 KB.
+**0 lời gọi API, 0 frame WebSocket.** Cần tải lại (hoặc chia nhỏ) mới đọc được.
+
+### 32.2 `2gg.har` — hợp lệ: đây là lúc app DỰNG danh sách hội thoại, không phải lúc gửi
+
+| chỉ số | giá trị |
+|---|---|
+| entries | 647 trong **10,1 giây** (03:16:02 → 03:16:12 UTC) |
+| status | **200 × 647** — không một lỗi, **không một 429** |
+| `POST /messages` | **0** |
+| frame WebSocket | **0** (bản export không bật WS) |
+
+| endpoint | n |
+|---|---|
+| `POST /api/v1/pages/{p}/contents/facebook` | 326 |
+| `POST …/conversations/{id}/messages/fill_admin_name` | 315 |
+| `GET …/conversations/{id}/messages` | 4 |
+| `POST …/customers/{id}/update_global_id` | 2 |
+
+⇒ Đây là app render ~315 dòng hội thoại: mỗi dòng gọi `fill_admin_name` + resolve ảnh qua
+`contents/facebook`. **Không có thông tin gì về đường gửi tin.** Nhưng có 3 số đo rất giá trị:
+
+**1. Pancake chịu được 64 request/giây.** 647 request trong 10,1 s, toàn 200, không 429.
+Khẳng định "Pancake throttle khi bắn nhiều" là **sai** với endpoint nội dung. 429 chỉ rơi vào
+endpoint danh sách (đã ghi ở §29).
+
+**2. `contents/facebook` = bộ phân giải ảnh theo `conv_id`, không phải theo khách.**
+
+```
+body : {"content_ids":"[\"1adec15a-…\"]","conv_id":"881264518397934_28142484778760027"}
+resp : {"success":true,"fb_ids":["1792719841809264"]}
+```
+
+326/326 `success:true`, `fb_ids` **luôn khác rỗng**, `timings.wait` p50 **53 ms** / p90 202 / max 538.
+Lưu ý `content_ids` là **chuỗi JSON lồng**, không phải mảng — nếu sau này dùng phải
+`JSON.stringify` lần hai. Đây vẫn là đường ảnh, không phải global_id ⇒ giữ nguyên mức ưu tiên
+thấp như §29.2 (các lô gần đây chỉ gửi chữ).
+
+**3. `global_id` dạng PSID là HỢP LỆ.** Hai lệnh `update_global_id` được server nhận (200) với:
+
+```
+{"global_id":"100087887237372", …}   ← dạng FB-scoped
+{"global_id":"61552937716477",  …}   ← dạng PSID (15 chữ số)
+```
+
+Điều này bác bỏ giả định ngầm rằng "gid lấy từ psid là đáng ngờ nên không cho vào làn bù"
+(§31.1). Pancake chấp nhận cả hai dạng ⇒ việc loại `gidFromPsid` khỏi **cả hai** nhánh retry
+là phòng xa quá mức, và chính nó đẩy 442 ca sang Extension. **Chưa sửa** vì cần một lô có đo
+`Ext p90` mới để so; nhưng đây là ứng viên số 1 cho lô sau.
+
+### 32.3 §30.4 — bí ẩn "API chậm 50–70×" đã có lời giải hợp lý
+
+So sánh cũ là sai đơn vị đo:
+
+| nguồn | đo cái gì | số |
+|---|---|---|
+| HAR `timings.wait` | chỉ thời gian **server** xử lý | p50 24 ms |
+| `sendDiag.apiFetchMs` | trọn `fetch()`: **xếp hàng trình duyệt + kết nối + server + nhận** | TB 1 766 ms |
+
+Bằng chứng: ngay trong lần chạy của chính app (2gg, tải rất nhẹ), `timings.blocked` p50 **130 ms**
+/ p90 371 ms — tức **thời gian xếp hàng phía trình duyệt còn lớn hơn cả `wait`**. `fetch()` tính
+cả phần đó, HAR `wait` thì không.
+
+Thêm nữa: làn API của mình đặt `API_SEND_PARALLEL = 96`, tức tối đa **96 POST cùng lúc lên một
+host**; app thật khi render danh sách chỉ bắn ~64 request/giây với độ song song thấp. Càng nhiều
+luồng đồng thời, phần `blocked` càng phình ⇒ fetchMs càng lớn, dù server vẫn trả trong vài chục ms.
+
+**Kết luận:** §30.4 nhiều khả năng là **thời gian xếp hàng phía client**, không phải Pancake chậm.
+Chưa đủ để kết luận dứt điểm, nên v1.92.7 thêm số đo `fetch p50` (vòng 64 mẫu) vào dòng chẩn đoán:
+- nếu `p50` **nhỏ** mà `TB` lớn ⇒ chỉ vài request kẹt (đuôi), server vẫn khoẻ;
+- nếu `p50` **cũng lớn** ⇒ nghẽn thật, lúc đó mới hạ `API_SEND_PARALLEL`.
+
+TB một mình không phân biệt được hai ca này — đó là lý do phải thêm p50 trước khi sửa gì.
