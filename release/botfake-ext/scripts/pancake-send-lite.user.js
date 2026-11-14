@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.94-w200.36
+// @version      1.91.95-w200.37
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.94-W200.36'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.95-W200.37'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2776,6 +2776,85 @@
     }
     return false;
   }
+
+  // ===== [v1.91.95] 🔬 MÁY GHI REQUEST GỬI — dò vì sao API bị từ chối còn Ext gửi được =====
+  // Lô 09:10 (1.91.94): API NỀN chạy 1 958 request ⇒ 1 952 bị từ chối, 6 OK; Ext gửi được
+  // 1 148 ca trong CHÍNH những chat API từ chối. Cờ is_record_ctx_7_days đã luôn được gửi,
+  // nên lý do từ chối là thứ HAR hiện có KHÔNG chứa (HAR đó là session của app, không phải
+  // request do Extension phát ra). Máy ghi này bắt đúng cặp (API-thất-bại, Ext-thành-công)
+  // trên CÙNG một chat, để biết khác biệt thật: token, header, hay endpoint.
+  // Không can thiệp kênh gửi: chỉ bọc fetch để ĐỌC, lỗi trong bộ ghi không được ném ra ngoài.
+  const recBuf = [];
+  const REC_MAX = 400;
+  let recOn = false;
+  try { recOn = localStorage.getItem('ssb_rec_send') === '1'; } catch (e) { /* ignore */ }
+  function recFields(body) {
+    try {
+      if (body == null) return '';
+      if (typeof body === 'string') {
+        if (body.charAt(0) === '{') { try { return 'json:' + Object.keys(JSON.parse(body)).join(','); } catch (e) { return 'json?'; } }
+        const out = []; const re = /name="([^"]+)"\r?\n\r?\n([\s\S]*?)\r?\n--/g; let m;
+        while ((m = re.exec(body))) {
+          const k = m[1]; const v = m[2];
+          out.push(k + '=' + (k === 'message' ? '<' + v.length + 'c>' : (v.length > 44 ? v.slice(0, 44) : v)));
+        }
+        return out.join('|');
+      }
+      if (typeof body.forEach === 'function') {
+        const out = []; body.forEach(function (v, k) {
+          out.push(k + '=' + (k === 'message' ? '<' + String(v).length + 'c>' : String(v).slice(0, 44)));
+        });
+        return out.join('|');
+      }
+    } catch (e) { return '?'; }
+    return String(typeof body);
+  }
+  function recPush(e) {
+    if (!recOn) return;
+    try { recBuf.push(e); while (recBuf.length > REC_MAX) recBuf.shift(); } catch (e2) { /* ignore */ }
+  }
+  try {
+    if (!window.__ssbRecFetch__ && typeof window.fetch === 'function') {
+      window.__ssbRecFetch__ = true;
+      const origFetch = window.fetch;
+      window.fetch = function (input, init) {
+        let isSend = false, url = '', f = '', t0 = 0;
+        try {
+          url = typeof input === 'string' ? input : ((input && input.url) || '');
+          isSend = recOn && /\/conversations\/[^/]+\/messages(\?|$)/.test(url) && init && String(init.method || '').toUpperCase() === 'POST';
+          if (isSend) { f = recFields(init.body); t0 = Date.now(); }
+        } catch (e3) { isSend = false; }
+        const p = origFetch.apply(this, arguments);
+        if (isSend) {
+          try {
+            p.then(function (res) {
+              try {
+                res.clone().text().then(function (txt) {
+                  recPush({ ms: Date.now() - t0, st: res.status, u: url.replace(/^https?:\/\/[^/]+/, ''), f: f, r: String(txt).slice(0, 240) });
+                }, function () { recPush({ ms: Date.now() - t0, st: res.status, u: url, f: f, r: '<body?>"' }); });
+              } catch (e4) { /* ignore */ }
+            }, function (err) {
+              recPush({ ms: Date.now() - t0, st: 'ERR', u: url, f: f, r: String(err && err.message || err).slice(0, 140) });
+            });
+          } catch (e5) { /* ignore */ }
+        }
+        return p;
+      };
+    }
+  } catch (e6) { /* ignore */ }
+  try {
+    window.__botfakeSetRec__ = function (on) {
+      recOn = !!on;
+      try { localStorage.setItem('ssb_rec_send', recOn ? '1' : '0'); } catch (e) { /* ignore */ }
+      try { recBuf.length = 0; } catch (e) { /* ignore */ }
+      try { logLine('🔬 Ghi request gửi: ' + (recOn ? 'BẬT' : 'TẮT') + ' — chạy lô nhỏ rồi dán __botfakeDumpRec__()'); } catch (e) { /* ignore */ }
+      return recOn;
+    };
+    window.__botfakeDumpRec__ = function () {
+      try { return JSON.stringify(recBuf, null, 1); } catch (e) { return '[]'; }
+    };
+  } catch (e7) { /* ignore */ }
+  // ===== hết máy ghi =====
 
   function fireApiAndWatch(conv, text, photo) {
     if (photo && !hasValidApiPhoto(photo)) return { ok: false, sent: false, error: 'Không có attachment ảnh cho API' };

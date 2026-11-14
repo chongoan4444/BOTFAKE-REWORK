@@ -566,3 +566,25 @@ logic chọn làn vẫn giữ tiền đề cũ `textOutWin = idleLong && !isReco
 ngoài 24h bị đẩy thẳng sang Ext. Đó là lý do lô 3 384 chat ghi `[API: 13 · Ext: 1 870]` và
 96 làn HTTP đứng không. v1.91.94 vô hiệu hoá tiền đề đó: chat ngoài 24h vẫn thử API trước.
 Cơ chế `alreadyTriedApi`/`dynamicDirect` lo fallback Ext khi API lỗi thật. Không gửi trùng.
+
+## §21 — Vì sao API bị từ chối 1 952/1 958 mà Ext gửi được (cần dữ liệu mới)
+
+Lô 09:10 (1.91.94, 1 958 chat): `[API: 6 · Ext: 1 148]`, và dòng chẩn đoán nền:
+
+```
+🌐 API NỀN: queued/started/fetch 1958/1958/1958 · OK/rejected 6/1952 · HTTP 200×1958 · fallback 1952
+```
+
+HTTP 200 nhưng `success:false` ⇒ FB/Pancake từ chối ở tầng ứng dụng, không phải mạng.
+Cùng những chat đó Ext gửi được 1 148 ca ⇒ API và Ext KHÔNG tương đương trên thực tế, dù §19
+chứng minh chúng cùng endpoint/cookie/origin.
+
+`buildInboxSend` đã `fd.append('is_record_ctx_7_days','true')` **vô điều kiện** và nhánh JSON
+cũng `jsonBody.is_record_ctx_7_days = true` ⇒ lý do từ chối **không phải** thiếu cờ.
+
+Chưa đủ dữ liệu để kết luận. v1.91.95 thêm máy ghi request (`__botfakeSetRec__(true)`,
+`__botfakeDumpRec__()`) để bắt **cặp trên cùng một chat**: request API thất bại + request Ext
+thành công, kèm body/status/thời gian. Chỉ khi có cặp đó mới được sửa tiếp.
+
+Điều đã biết chắc: trần hiện tại do làn Ext quyết định (~10–22 tin/s), và gate wave không
+phải nút cổ chốt (500 tin/5,4 s ⇒ gate 92 tin/s so với thực 17,7 tin/s).
