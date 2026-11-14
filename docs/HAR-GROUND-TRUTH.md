@@ -545,3 +545,24 @@ Không có rủi ro chức năng nào khi đặt API làm đường đầu.
 
 **Thay đổi 1.91.92.** Nút đổi tên thành **`🛰 Toàn bộ qua HTTP (API→Ext)`**, **bật mặc định**
 (chưa từng chỉnh ⇒ bật; người dùng tắt ⇒ lưu `0`). Thứ tự làn: `['api','ext']`, **không** Socket.
+
+## §20 — Cờ `is_record_ctx_7_days` xoá sạch `(#10)` (v1.91.94)
+
+Quét 303 `POST …/conversations/{id}/messages` trên 12 HAR, parse **multipart form-data**
+(lần trước parse JSON nên tưởng cờ này hiếm — thực ra nó là field form).
+
+| nhóm | có cờ | không cờ |
+|---|---|---|
+| `success:true` | **19** | **0** |
+| `(#10) …ứng dụng khác kiểm soát thread` (`e_subcode 2018300`) | **0** | **24** |
+| `(#551) Người này hiện không có mặt` | 5 | 4 |
+
+Kết luận: `(#10)` **không** phải "app khác giữ thread" — đó là cách FB từ chối khi gửi vào
+thread đã quá 24h mà không khai báo context. `is_record_ctx_7_days=true` mở cửa sổ 7 ngày.
+`(#551)` là người dùng thật sự không tồn tại ⇒ không sửa được bằng cờ.
+
+Hệ quả code: từ v1.91.80 script **luôn** gửi cờ (multipart `fd.append`, JSON `jsonBody`), nhưng
+logic chọn làn vẫn giữ tiền đề cũ `textOutWin = idleLong && !isRecordCtx7Days(full)` ⇒ chat
+ngoài 24h bị đẩy thẳng sang Ext. Đó là lý do lô 3 384 chat ghi `[API: 13 · Ext: 1 870]` và
+96 làn HTTP đứng không. v1.91.94 vô hiệu hoá tiền đề đó: chat ngoài 24h vẫn thử API trước.
+Cơ chế `alreadyTriedApi`/`dynamicDirect` lo fallback Ext khi API lỗi thật. Không gửi trùng.

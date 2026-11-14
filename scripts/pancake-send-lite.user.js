@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.93-w200.35
+// @version      1.91.94-w200.36
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.93-W200.35'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.94-W200.36'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5755,8 +5755,18 @@
       const hint = channelHints[conv.id];
       const idleDiff = getConvIdleMs(conv, full);
       const idleLong = !isNaN(idleDiff) && idleDiff > 86400000;
-      const textOutWin = !photo && idleLong && !isRecordCtx7Days(full);
-      const photoOutWin = !!photo && idleLong && !isRecordCtx7Days(full);
+      // [v1.91.94] BẰNG CHỨNG HAR — CỜ is_record_ctx_7_days XOÁ SẠCH (#10):
+      //   • CÓ  cờ: 19 success · 5 (#551) · **0 (#10)**
+      //   • KHÔNG cờ: 24 (#10) · 4 (#551) · **0 success**
+      // Từ v1.91.80 script LUÔN gửi is_record_ctx_7_days=true (cả multipart lẫn JSON), nên
+      // tiền đề cũ "chat ngoài 24h gọi API 100% bị từ chối ⇒ đi thẳng Ext" KHÔNG còn đúng.
+      // Logic cũ đó là lý do cả lô 3 384 chat chỉ có [API: 13 · Ext: 1 870] — 96 làn HTTP
+      // đứng không, mọi thứ dồn vào Ext bị tuần tự hoá ~22 tin/giây.
+      // Nay: chat idle >24h VẪN thử API trước (31ms p50). Chỉ khi API trả lỗi thật cho ĐÚNG
+      // chat đó mới rơi xuống Ext — cơ chế alreadyTriedApi/dynamicDirect đã có sẵn, không
+      // bao giờ gửi lại 2 lần (API lỗi ⇒ chưa phát sinh tin).
+      const textOutWin = false && !photo && idleLong && !isRecordCtx7Days(full);
+      const photoOutWin = false && !!photo && idleLong && !isRecordCtx7Days(full);
       const noApiPhoto = !!(photo && !photo.fbId);
       const alreadyTriedApi = !!(opts.deferredCtx && Array.isArray(opts.deferredCtx.triedChannels) && opts.deferredCtx.triedChannels.indexOf('api') > -1);
       const pidQuick = (full && (full.page_id || full.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
