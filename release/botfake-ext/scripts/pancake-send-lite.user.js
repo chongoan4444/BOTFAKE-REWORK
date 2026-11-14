@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.89-w200.31
+// @version      1.91.90-w200.32
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.89-W200.31'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.90-W200.32'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -139,13 +139,46 @@
   function isRememberedUnavailable(convId) {
     return !!convId && unavailableConversationIds.has(String(convId));
   }
+  let unavailablePruneNotified = false;
+  function pruneUnavailableKeys(ratio) {
+    // [v1.91.90] localStorage đầy ⇒ xoá bớt khóa unavailable CŨ để nhường chỗ.
+    // Trước đây ghi hỏng là BỎ LUÔN id ⇒ lô sau lại thử khách vắng (HAR: mỗi ca ~908ms,
+    // 40% danh sách là khách vắng ⇒ mỗi lô mất hàng phút chỉ để nhận lại đúng lỗi đó).
+    try {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i) || '';
+        if (k.indexOf(UNAVAILABLE_CONV_ID_PREFIX) === 0) keys.push(k);
+      }
+      const drop = Math.max(50, Math.floor(keys.length * (ratio || 0.4)));
+      for (let i = 0; i < drop && i < keys.length; i++) {
+        try { localStorage.removeItem(keys[i]); } catch (e0) { /* ignore */ }
+      }
+      return drop;
+    } catch (e) { return 0; }
+  }
   function persistUnavailableConversationId(id) {
+    const key = UNAVAILABLE_CONV_ID_PREFIX + encodeURIComponent(String(id));
     try {
       // localStorage.setItem là đồng bộ; mỗi kết quả được ghi bền riêng trước khi lượt tiếp tục.
-      localStorage.setItem(UNAVAILABLE_CONV_ID_PREFIX + encodeURIComponent(String(id)), '1');
+      localStorage.setItem(key, '1');
       return true;
     } catch (e) {
-      logLine('⚠ Không lưu được ID unavailable ' + String(id) + ' (localStorage đầy/bị chặn).');
+      const dropped = pruneUnavailableKeys(0.4);
+      if (dropped > 0) {
+        try {
+          localStorage.setItem(key, '1');
+          if (!unavailablePruneNotified) {
+            unavailablePruneNotified = true;
+            logLine('🧹 localStorage đầy — đã dọn ' + dropped + ' ID unavailable cũ để ghi tiếp (ID vẫn nhớ trong phiên này).');
+          }
+          return true;
+        } catch (e2) { /* vẫn đầy */ }
+      }
+      if (!unavailablePruneNotified) {
+        unavailablePruneNotified = true;
+        logLine('⚠ Không lưu được ID unavailable ' + String(id) + ' (localStorage đầy/bị chặn) — chỉ nhớ trong phiên này.');
+      }
       return false;
     }
   }
@@ -5646,8 +5679,10 @@
     if (!conv || conv.type === 'comment') return seq;
     // [v1.91.89] Chế độ "toàn bộ qua Extension": Ext trước, API dự phòng, KHÔNG dùng Socket.
     if (forceExtMode) {
-      const extPlan = ['ext'].concat(seq.filter((x) => x !== 'ext' && x !== 'socket'));
-      if (extPlan.length) return extPlan;
+      // [v1.91.90] Cùng endpoint HTTP, nhưng làn API có 76–96 luồng còn Ext chỉ 48 ⇒ lô toàn
+      // khách vắng (HAR: mỗi ca ~908ms) nhanh hơn rõ rệt khi đi API trước. Ext vẫn là dự phòng.
+      const httpPlan = ['api', 'ext'].concat(seq.filter((x) => x !== 'api' && x !== 'ext' && x !== 'socket'));
+      if (httpPlan.length) return httpPlan;
     }
     // [v1.91.86] Kênh ACK của page đã chết ⇒ đừng bắn Socket để rồi chờ hết hạn 8–20s.
     // Chỉ đổi thứ tự làn (bỏ 'socket'), Extension/API vẫn là đường gửi thật như cũ.
