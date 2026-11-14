@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.92-w200.34
+// @version      1.91.93-w200.35
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.92-W200.34'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.93-W200.35'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3007,6 +3007,12 @@
     }
   }
   let batchSkipApi = false; // API bị chặn CẤP PAGE (#10 app khác giữ thread, #613, rate limit…) → chat sau đi thẳng Socket/Ext
+  // [v1.91.93] ĐẾM LỖI THREAD-CONTROL TRƯỚC KHI TẮT API CẢ LÔ.
+  // Lô 08:48–08:51 (1.91.92): `[API: 17 · Ext: 1840]` — API gần như không được dùng dù đứng
+  // đầu thứ tự làn. Nguyên nhân: sendOne bật `batchSkipApi` ngay ở lỗi thread-control ĐẦU TIÊN
+  // (một ca #613/rate-limit lẻ) ⇒ từ đó MỌI chat bị tước API, dồn hết sang Extension (bị tuần
+  // tự hoá ~10–20 tin/giây). Nay cần 3 ca liên tiếp mới tắt API cho lô; một ca lẻ không đủ.
+  let apiThreadBlockStreak = 0;
 
   // NHỚ THEO PAGE QUA CÁC LƯỢT: page từng bị API chặn cấp page (#10 app khác giữ
   // thread…) thì các lượt SAU đi thẳng Socket/Ext ngay từ con đầu, không bắn API thử
@@ -5878,8 +5884,14 @@
       api: async () => {
         const r = await sendViaApi(conv, text, photo, ctx);
         if (!r.ok && r.sent !== 'maybe' && isThreadControlError(r.error)) {
-          batchSkipApi = true;
-          markApiBlockedForPage(conv.pageId || String(conv.id || '').split('_')[0]);
+          apiThreadBlockStreak++;
+          if (apiThreadBlockStreak >= 3 && !batchSkipApi) {
+            batchSkipApi = true;
+            markApiBlockedForPage(conv.pageId || String(conv.id || '').split('_')[0]);
+            try { logLine('⛔ API bị chặn cấp page (' + apiThreadBlockStreak + ' ca thread-control liên tiếp) — các chat sau đi thẳng Ext/Socket.'); } catch (e0) { /* ignore */ }
+          }
+        } else if (r.ok) {
+          apiThreadBlockStreak = 0;
         }
         return r;
       },
