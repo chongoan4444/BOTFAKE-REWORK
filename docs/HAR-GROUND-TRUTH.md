@@ -1426,3 +1426,71 @@ Loạt đọc này **đóng cửa nhiều hơn mở cửa**. Thứ duy nhất t�
 **timeout Ext động** (Ext 0 → 245 thắng, 37,32 → 39,86 tin/giây). Các "phát hiện" còn lại phần lớn
 là giải thích cơ chế hoặc chặn đường cụt. Việc còn lại có giá trị thật chỉ là: xoay JWT, dọn file
 rác, và (tuỳ bạn) xoá cache unavailable.
+
+---
+
+## §39 — VÌ SAO "Extension không phản hồi (quá hạn)" — tìm ra trong bundle, đã vá 1.92.8
+
+### 39.1 Nguyên nhân gốc: adapter VỨT BỎ phản hồi đến muộn
+
+`__ExtensionAdapter__.send` (`_app…v6.js` @715835) — nguyên văn:
+
+```js
+send(e, t={}) {
+  let n = this.currentTaskId++, o = t.timeout || (u.has(e.type) ? d : l); // l = 30 000
+  return new Promise(t => {
+    let s = n => { n.type === e.type + "_SUCCESS" ? t({success:true, data:n})
+                 : n.type === e.type + "_FAILURE" && t({success:false, data:n}); };
+    this.pendingMessages[n] = s;
+    window.postMessage({...e, taskId:n, from:"WEBPAGE"}, "*");
+    setTimeout(() => { delete this.pendingMessages[n]; t({success:false, data:null}); }, o);
+  });
+}
+```
+
+và listener khởi tạo:
+
+```js
+"WEBPAGE" !== e.data.from && null != e.data.taskId
+  && e.data.taskId in this.pendingMessages
+  && (this.pendingMessages[e.data.taskId](e.data), …)
+```
+
+Hai dòng cuối là mấu chốt: hết `timeout` thì `taskId` **bị xoá khỏi `pendingMessages`**, và listener
+**chỉ gọi handler khi taskId còn trong map**. ⇒ Phản hồi của Extension về sau mốc đó bị **vứt bỏ
+vĩnh viễn**, dù tin đã gửi xong.
+
+Đó đúng là hình dạng trong log người dùng: `⚠ Ext: Extension không phản hồi (quá hạn)` rồi ~20 s
+sau `🔎 kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi`. Không phải Extension chết —
+là **script không giữ chỗ nhận** lâu đủ.
+
+### 39.2 Vá 1.92.8 (không thêm một request nào)
+
+`sendExtWithLateWatch()`: gọi adapter với `timeout: 60 000` để **giữ chỗ chờ**, nhưng chỉ `await`
+tới mốc mềm `extTimeoutMs()` (2,5–9 s). Quá mốc ⇒ nhả làn như cũ, trả về đúng hình dạng
+`{success:false, data:null}`, và gắn `.then()` vào chính promise đó. Phản hồi muộn về ⇒
+`markDelivered()` + `postSendSideEffects()` + log `✅ (muộn Ns)`.
+
+Hệ quả: 1) ⚠→✅ **ngay tại chỗ**, 2) lượt đọc lịch sử 20 s sau **tự bỏ** (verify đã có guard
+`deliveredIds`), tức **giảm request** trên đường gửi, 3) `extSendCtl.timeoutStreak` được reset
+khi có phản hồi muộn ⇒ bộ ngắt 150 không mở oan.
+
+**Không gửi lại lần hai** ⇒ không thể sinh tin trùng. Bộ đếm mới trong dòng TỔNG HỢP:
+`phản hồi MUỘN (đã tính ✅) N · muộn-mà-lỗi N · im lặng hẳn N`.
+
+### 39.3 Khuếch đại: mỗi ⚠ cắt làn Ext ×0,6
+
+`noteExtSendOutcome('timeout')` (≈:5700): `extSendLane.setLimit(getLimit() * 0.6)` — mỗi ca quá hạn
+cắt 40 % số làn Ext, sàn 48. Với tỉ lệ quá hạn ~20 % (log 13:59, 2 687→2 973 trong 8 s ≈ **35,8 tin/s**),
+làn 96 → 57 → 48 chỉ sau vài ca, rồi phải 10 phản hồi nhanh mới hồi +2 slot.
+
+**Chưa sửa** — cố ý. Cắt làn có thể là backpressure ĐÚNG nếu phản hồi muộn vì 96 lệnh cùng bay.
+Ba bộ đếm ở 39.2 sẽ trả lời dứt điểm sau lượt tới:
+- `lateOk` lớn ⇒ Extension khoẻ, chỉ trả lời chậm ⇒ cắt làn ×0,6 là tự bóp oan ⇒ nới luật cắt.
+- `silent`/`fail` lớn ⇒ Extension thật sự ì ⇒ giữ nguyên (hoặc siết hơn).
+
+### 39.4 Ghi chú chi phí
+
+Mỗi lệnh giữ một `pendingMessages` + một timer 60 s phía app (không huỷ được từ ngoài).
+Ở ~36 lệnh/s ⇒ ~2 160 timer sống cùng lúc — chấp nhận được, nhưng nếu máy yếu thấy lag thì hạ
+`EXT_ADAPTER_HOLD_MS` xuống 30 000 (vẫn phủ mốc kiểm chứng 20 s).
