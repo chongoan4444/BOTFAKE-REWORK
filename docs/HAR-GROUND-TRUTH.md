@@ -527,3 +527,21 @@ localStorage đầy thì dọn 40 % khóa cũ **tối đa 1 lần/60 s** (chốn
 
 **Kỳ vọng:** 850 lỗi ⇒ phần lớn thành công; tốc độ 10,65/s ⇒ chục đến hàng trăm tin/giây tuỳ
 số ca khách vắng (mỗi ca vẫn ~0,9 s vì server trả lời chậm — không tránh được).
+
+## §19 — Kiểm HAR trước khi đổi tên/mặc định: API và Ext là CÙNG một đường (1.91.92)
+
+**Kiểm trên 303 request `POST /pages/{pageId}/conversations/{convId}/messages` trong 12 HAR:**
+
+| Kiểm | Kết quả |
+|---|---|
+| `origin` | **`https://pancake.vn` × 297**, không có request nào `chrome-extension://` |
+| header `x-api-key` / `authorization` riêng | **0** |
+| `global_id` trong body | **0** |
+| field body thấy được | `action` 58 · `message` 211 · `send_by_platform` 56 · `is_record_ctx_7_days` 24 · `content_id`/`attachment_id` 6 |
+
+⇒ API (fetch từ trang) và Ext (qua cầu nối Extension) **gọi đúng cùng endpoint, cùng ngữ cảnh
+trang, cùng cookie**. Khác biệt duy nhất là cây cầu — và chính nó bị tuần tự hoá (§18).
+Không có rủi ro chức năng nào khi đặt API làm đường đầu.
+
+**Thay đổi 1.91.92.** Nút đổi tên thành **`🛰 Toàn bộ qua HTTP (API→Ext)`**, **bật mặc định**
+(chưa từng chỉnh ⇒ bật; người dùng tắt ⇒ lưu `0`). Thứ tự làn: `['api','ext']`, **không** Socket.
