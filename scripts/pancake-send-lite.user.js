@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.90-w200.32
+// @version      1.91.91-w200.33
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.90-W200.32'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.91-W200.33'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -140,6 +140,7 @@
     return !!convId && unavailableConversationIds.has(String(convId));
   }
   let unavailablePruneNotified = false;
+  let unavailablePruneAt = 0; // [v1.91.91] chống dọn liên tục: mỗi lần dọn 2 800 khóa rồi vẫn đầy
   function pruneUnavailableKeys(ratio) {
     // [v1.91.90] localStorage đầy ⇒ xoá bớt khóa unavailable CŨ để nhường chỗ.
     // Trước đây ghi hỏng là BỎ LUÔN id ⇒ lô sau lại thử khách vắng (HAR: mỗi ca ~908ms,
@@ -164,7 +165,10 @@
       localStorage.setItem(key, '1');
       return true;
     } catch (e) {
-      const dropped = pruneUnavailableKeys(0.4);
+      // [v1.91.91] Lô 08:34: dọn lặp từng ca ⇒ vừa chậm vừa spam log. Chỉ dọn tối đa 1 lần/60s.
+      const canPrune = (Date.now() - unavailablePruneAt) > 60000;
+      const dropped = canPrune ? pruneUnavailableKeys(0.4) : 0;
+      if (dropped > 0) unavailablePruneAt = Date.now();
       if (dropped > 0) {
         try {
           localStorage.setItem(key, '1');
