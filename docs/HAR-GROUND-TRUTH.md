@@ -1038,3 +1038,42 @@ Chưa đủ để kết luận dứt điểm, nên v1.92.7 thêm số đo `fetch
 - nếu `p50` **cũng lớn** ⇒ nghẽn thật, lúc đó mới hạ `API_SEND_PARALLEL`.
 
 TB một mình không phân biệt được hai ca này — đó là lý do phải thêm p50 trước khi sửa gì.
+
+---
+
+## §33 — Lô 10:17 (8 419 chat, v1.92.6-W200.48) — chốt: ỔN, không sửa thêm
+
+| chỉ số | giá trị | so với tốt nhất trước đó |
+|---|---|---|
+| thời gian | 211 s tổng · 179 s phát lệnh | — |
+| chốt | **39,86/giây (2 392/phút)** | 1.92.3: 37,32 (2 239) |
+| thành công | **6 043 (71,8 %) · 28,61/giây (1 717/phút)** | 1.92.3: 23,61 (1 417) |
+| kênh | `[API: 50 · **Ext: 245** · Socket: 5 748]` | 1.92.3: `Ext 0` ×3 lô |
+
+### 33.1 Hai bản sửa đều có tác dụng đo được
+
+**a) Timeout Ext động (v1.92.6) — cứu được đúng thứ nó nhắm tới.**
+Dòng chẩn đoán mới: `Ext p90 1858ms → timeout 5574ms`. Timeout tự nới từ 2,5 s lên **5,57 s** theo
+số đo, và Ext **thắng 245 ca** — chấm dứt chuỗi **3 lô liên tiếp 0 thắng**. Kết luận §31.2 đúng:
+2,5 s cố định là thứ giết làn Ext, không phải "Extension chết".
+
+**b) Sửa khoá sàn làn Socket (v1.92.4) — giữ được.**
+`Socket/page limits cuối [192×1]`, `peak 256/256`. Trước đây cùng cảnh này kết ở `[64×1]`.
+
+### 33.2 Điều log này BÁC BỎ
+
+`🧭 HTTP không có gid` chỉ **4** (lô 09:44 là **442**). Nên con số 442 hôm trước là đặc thù của
+danh sách đó, **không** phải tỉ lệ cố hữu — càng ít lý do để đụng vào nhánh `gidFromPsid`.
+
+### 33.3 Điều vẫn còn treo (ghi lại, KHÔNG sửa vì người dùng đã chốt tốc độ là ổn)
+
+- `📡 ACK OK/rejected/no-ACK 5748/1799/139` — 1 799 ca FB từ chối, và **2 055 ID mới** bị ghi nhớ
+  "Socket confirmed-unavailable", nâng tổng lên **6 753**. Đây là danh sách **bỏ qua lâu dài**
+  (chỉ tự xoá khi tải/chọn lại danh sách). Nếu có khách *đáng lẽ gửi được* mà bị bỏ qua, nguyên
+  nhân nằm ở đây — không phải ở đường gửi.
+- `🧯 Ext quá hạn 261 · kiểm chứng thấy tin 0 · chưa thấy 261` — vẫn y hệt cơ chế §31.2 nhưng
+  ngược chiều: 261 ca này timeout rồi mà **không ca nào** để lại dấu vết trong lịch sử.
+- `retry lần 0` — vẫn đúng như §31.1 (đường defer không đi qua bộ đếm này).
+- `🌐 API NỀN queue wait TB/max 3/33ms` nhưng `fetch TB/max 1826/5875ms` ⇒ §30.4 **không phải**
+  thời gian xếp hàng của làn mình; phần chậm nằm **bên trong `fetch()`**. Chưa cần biết thêm vì
+  API chỉ chiếm 50/8 419 ca.
