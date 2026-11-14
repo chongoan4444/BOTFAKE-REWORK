@@ -734,3 +734,101 @@ Hai kết luận dùng được:
    kiểm chứng lịch sử nền (chỉ nâng ⚠→✅, không gửi lại), không phải bằng cách giữ làn lâu.
 
 `min 0ms` giữa hai lệnh gửi ⇒ FB không cần nhịp; không cần thêm gap nhân tạo.
+
+## §29 — Quét lại TOÀN BỘ 12 HAR (11 lượt kiểm, mọi entry)
+
+### 29.1 Kiểm kê file
+
+| file | entries | pageIds |
+|---|---|---|
+| batmesss | 348 | **11 page** (448189508385420, 578746295327894, 675541385634278, 689375157595846, 694078980461601, 764740356715221, 769625892902516, 797813096755447, 834072796450267, 881264518397934, 898735919982398) |
+| guianh1 | 37 | 834072796450267 |
+| guicau | 284 | 435021089689053 |
+| guikhachcu | 275 | 881264518397934 |
+| guisot | 170 | 898735919982398 |
+| loaddanhsach | 50 | 694078980461601 |
+| loadnhanh | **735** | 881264518397934 |
+| pancake.vn2 | 58 | (1 page, không rõ id) |
+| taidanhsach | 100 | 435021089689053 |
+| tinnhan | 216 | 834072796450267 |
+| tinnhan1 | 31 | 435021089689053 |
+| tinnhanthread | 93 | 578746295327894 |
+
+Host: `pancake.vn` 1 762 · `content.pancake.vn` 560 · **`graph.facebook.com` 25** · google-analytics 42 ·
+`wss:` 3 · `statics.pancake.vn` 2 · `fonts.googleapis.com` 1.
+⇒ Đúng **một** host thật sự phục vụ gửi tin là `pancake.vn`; `graph.facebook.com` chỉ 25 request và
+tất cả là `GET /{id}/picture` (avatar). **Không có** request GraphQL/`api/graphql` nào ⇒ trình duyệt
+KHÔNG tự gửi tin qua Facebook; mọi đường gửi đều qua `pancake.vn` hoặc WebSocket `edge-chat`.
+
+### 29.2 Endpoint thật (theo tần suất)
+
+| method | path | n | vai trò |
+|---|---|---|---|
+| GET | `/api/v1/pages/{p}/avatar/{id}` | 537 | avatar |
+| POST | `/api/v1/pages/{p}/contents/facebook` | **164** | **upload ảnh → trả `fb_ids`** (attachment_id) |
+| GET | `/api/v1/pages/{p}/conversations` | 100 | tải danh sách |
+| POST | `/api/v1/pages/{p}/conversations` | 87 | tải danh sách (phân trang) |
+| GET | `/pos-api/.../customers/check_first_order` | 50 | POS |
+| POST | `/api/v1/pages/{p}/check_inbox` | 33 | `{"success":true}` **33/33** |
+| POST | `/api/v1/pages/{p}/conversations/{c}/messages` | 303 | **gửi tin** |
+| GET | `/api/v1/pages/{p}/conversations/{c}/messages?customer_id=…&user_view=true&is_new_api=true&separate_pos=true` | 217 | đọc lịch sử |
+| POST | `/api/v1/pages/{p}/customers/{id}/update_global_id` | 7 | lưu gid |
+| POST | `/api/v1/conversations` | 13 | tải danh sách |
+
+`contents/facebook`: body `conv_id` (161) + `urls` (155) + `content_ids` (9) → response
+`{"success":true,"fb_ids":["1761420001631103"]}` (nhiều ảnh ⇒ nhiều fb_ids trong 1 lần).
+⇒ đây là cách app lấy `attachment_id` **theo từng conv**, không cần dò từng chat.
+
+### 29.3 Bảng mã lỗi đầy đủ trong 12 HAR
+
+| mã | thông điệp | n |
+|---|---|---|
+| — | `{"error_code":429,"message":"Too many requests","success":false}` | **73** |
+| 10 | `(#10) …một ứng dụng khác hiện đang kiểm soát thread này` | 24 |
+| 551 | `(#551) Người này hiện không có mặt.` | 11 |
+| — | `{"success":false}` (rỗng lý do) | 4 |
+| — | `{"existed":false,"message":"Hội thoại này không tồn tại"}` | 2 |
+
+**429 rơi 100 % vào endpoint DANH SÁCH** (41 `POST /conversations`, 32 `GET /conversations`),
+**0 lần** vào `POST /messages` ⇒ đường gửi tin không bị 429; chỉ khâu tải danh sách bị.
+
+`check_inbox` trả `success:true` **33/33** ⇒ không phải cổng chặn, đúng như đã kết luận.
+
+`update_global_id` body thật: `{"global_id":"…","conversation_id":"…","source":"send_inbox","version":1}`
+— khớp code (dòng ~4299).
+
+### 29.4 Socket: op và payload
+
+`ls_*` xuất hiện: `ls_req` (46 send) · `ls_resp` (96 receive, 3 send) · `ls_app_settings` (3) ·
+`ls_foreground_state` (3).
+
+Payload gửi tin (task `label 46`) — **đủ 7 field**, khớp 1:1 với code hiện tại:
+
+```json
+{"mark_thread_read":1,"otid":"7522294945565959207","send_type":1,
+ "source":4456448,"sync_group":205,"text":"…","thread_id":"…"}
+```
+
+Request **không có** `/ls_resp`: guikhachcu 3 · batmesss 1 · guisot 1 ⇒ **~5 %**, có thật.
+
+### 29.5 Độ trễ server (timings.wait)
+
+| endpoint | n | p50 | p90 | max |
+|---|---|---|---|---|
+| `POST …/messages` | 279 | **24 ms** | 916 ms | 6 647 ms |
+| `GET …/messages` (lịch sử) | 217 | **43 ms** | 132 ms | 2 701 ms |
+
+⇒ **Kiểm chứng lịch sử chỉ tốn ~43 ms**, rẻ hơn nhiều so với giả định trước (900 ms).
+
+### 29.6 Việc rút ra được (đã áp dụng)
+
+1. ACK Socket p50 234–326 ms ⇒ `ackWaitMs` clamp 1 200–3 000 ms (v1.92.2).
+2. `GET /messages` p50 43 ms ⇒ nới `SOCK_VERIFY_PARALLEL` 12 → 32 (v1.92.3): kiểm chứng nền
+   rẻ, và ca no-ACK ~5 % được chốt nhanh hơn. Thuần đọc lịch sử, chỉ nâng ⚠→✅, không gửi lại.
+3. Code Socket payload / history GET / update_global_id **khớp HAR** — không cần sửa.
+
+### 29.7 Giả thuyết cần kiểm nhưng CHƯA đủ bằng chứng
+
+- `batmesss.har` có **11 page** trong một phiên ⇒ nếu shop chạy nhiều page thì token/phiên theo page
+  có thể là lý do một số ca API trả `#551`/`#10` trong khi Ext/Socket gửi được. Chưa có bằng chứng
+  trực tiếp, KHÔNG sửa gì dựa trên giả thuyết này.

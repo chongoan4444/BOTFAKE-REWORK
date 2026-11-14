@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.2-w200.44
+// @version      1.92.3-w200.45
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.2-W200.44'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.3-W200.45'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6727,7 +6727,11 @@
   // đường Extension bù ⇒ mọi thứ chậm. Nay chỉ chạy tối đa 12 vòng kiểm chứng cùng lúc;
   // phần còn lại xếp hàng FIFO. KHÔNG đổi logic phán xử (vẫn cần 2 lần đọc rỗng liên tiếp
   // mới dám kết luận "chưa tới"), chỉ giới hạn số vòng đọc đồng thời.
-  const SOCK_VERIFY_PARALLEL = 12;
+  // [v1.92.3] 12 → 32. §29.5: `GET …/messages?customer_id=…` đo trên 217 request trong 12 HAR
+  // có p50 = 43ms, p90 = 132ms (không phải ~900ms như giả định cũ). Kiểm chứng lịch sử vì thế
+  // rất rẻ, trong khi ca no-ACK thật ~5 % (1/14 và 1/27 HAR) sẽ được chốt nhanh hơn nhiều.
+  // Đây chỉ là ĐỌC lịch sử để nâng ⚠→✅ — không bao giờ gửi lại, không thêm tải lên đường gửi.
+  const SOCK_VERIFY_PARALLEL = 32;
   let sockVerifyRunning = 0;
   const sockVerifyQueue = [];
   function pumpSockVerify() {
