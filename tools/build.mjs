@@ -46,6 +46,10 @@ const DIST = 'dist';
 // Folder TIỆN ÍCH HOÀN CHỈNH, tự chứa — commit lên GitHub để tải/“Load unpacked” một phát.
 // (manifest.json ở gốc repo không dùng trực tiếp được vì cạnh nó còn HAR/HTML tham chiếu.)
 const RELEASE_DIR = 'release/botfake-ext';
+// Tiện ích BẢN ỔN ĐỊNH: folder riêng, manifest riêng, chỉ nạp pancake-send-stable.user.js.
+// Chrome coi là tiện ích khác hẳn bản gốc ⇒ cài/gỡ bản này không ảnh hưởng bản kia.
+const STABLE_SCRIPT = 'scripts/pancake-send-stable.user.js';
+const STABLE_RELEASE_DIR = 'release/botfake-ext-stable';
 const KEY_CANDIDATES = [
   process.env.CRX_SIGNING_KEY,
   'installer/extension-signing-key.pem',
@@ -425,6 +429,137 @@ function syncReleaseFolder() {
   return files.length + 1;
 }
 
+/* ------------------- BẢN ỔN ĐỊNH: TIỆN ÍCH CHẠY ĐỘC LẬP ------------------- */
+
+/** Manifest của tiện ích ổn định: lấy manifest.json rồi đổi phần nhận diện + script được nạp. */
+function stableManifest(ver) {
+  const m = JSON.parse(read(MANIFEST));
+  m.name = 'BOTFAKE STABLE';
+  m.description = 'Bản ổn định: gửi hàng loạt trong tab Pancake. Không nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.';
+  m.version = ver.base;
+  delete m.update_url; // không tự cập nhật theo kênh phát hành của bản gốc
+  delete m.key;
+  for (const cs of m.content_scripts || []) {
+    cs.js = cs.js.map((f) => (f === USERSCRIPT ? STABLE_SCRIPT : f));
+  }
+  return m;
+}
+
+/**
+ * Toàn bộ nội dung folder phát hành bản ổn định: Map<'đường/dẫn', Buffer>.
+ * Chỉ chứa script ổn định — KHÔNG kèm bản gốc, để hai tiện ích không dính nhau.
+ */
+function stableFolderFiles(ver) {
+  const out = new Map();
+  out.set('manifest.json', Buffer.from(JSON.stringify(stableManifest(ver), null, 2) + '\n'));
+  const walk = (dir) => {
+    for (const e of readdirSync(abs(dir), { withFileTypes: true })) {
+      const p = `${dir}/${e.name}`;
+      if (e.isDirectory()) walk(p);
+      else out.set(p, readFileSync(abs(p)));
+    }
+  };
+  walk('extension');
+  // Bridge/popup phải nói chuyện trên kênh RIÊNG của bản ổn định, không đụng kênh bản gốc:
+  // kênh riêng ⇒ cài cả hai tiện ích cũng không thể cùng trả lời một lệnh gửi.
+  out.set('extension/bridge.js', Buffer.from(
+    read('extension/bridge.js')
+      .split('__botfake').join('__botfakeS')
+      .split('data-botfake-ext').join('data-botfake-ext-stable'),
+  ));
+  out.set('extension/popup.js', Buffer.from(
+    read('extension/popup.js').split(USERSCRIPT).join(STABLE_SCRIPT),
+  ));
+  // Overlay: id riêng để cài cả hai tiện ích thì hai thanh tiến độ không ghi đè lên nhau.
+  out.set('extension/overlay.js', Buffer.from(
+    read('extension/overlay.js')
+      .split("'botfake-ext-overlay'").join("'botfake-ext-overlay-stable'")
+      .split('__BOTFAKE_OVERLAY__').join('__BOTFAKE_OVERLAY_STABLE__'),
+  ));
+  out.set(STABLE_SCRIPT, readFileSync(abs(STABLE_SCRIPT)));
+  return out;
+}
+
+function syncStableRelease(ver) {
+  const want = stableFolderFiles(ver);
+  rmSync(abs(STABLE_RELEASE_DIR), { recursive: true, force: true });
+  for (const [p, buf] of want) {
+    const dest = `${STABLE_RELEASE_DIR}/${p}`;
+    mkdirSync(path.dirname(abs(dest)), { recursive: true });
+    writeFileSync(abs(dest), buf);
+  }
+  writeFileSync(abs(`${STABLE_RELEASE_DIR}/README-LOAD-UNPACKED.txt`), [
+    'BOTFAKE STABLE — tiện ích hoàn chỉnh, chạy ĐỘC LẬP với bản gốc',
+    '',
+    'Cài đặt:',
+    '  1. Tải cả folder này về máy (giữ nguyên cấu trúc bên trong).',
+    '  2. chrome://extensions → bật "Developer mode".',
+    '  3. "Load unpacked" → chọn ĐÚNG folder chứa manifest.json này.',
+    '',
+    'Bên trong:',
+    '  manifest.json   MV3, tên riêng "BOTFAKE STABLE"',
+    '  extension/      service worker, content script, popup, icon',
+    `  scripts/        ${STABLE_SCRIPT.split('/').pop()} (toàn bộ logic gửi)`,
+    '',
+    'Khác bản gốc: KHÔNG nhớ/lọc chat gửi lỗi · công tắc phím TAB (mặc định TẮT)',
+    '               · log cuối chỉ còn dòng tổng kết.',
+    '',
+    'Lưu ý: folder này sinh tự động từ mã nguồn ở gốc repo — không sửa trực tiếp.',
+    'Sửa ở nguồn rồi chạy: npm run build',
+    '',
+  ].join('\n'));
+  return want.size + 1;
+}
+
+function checkStableRelease(ver) {
+  if (!existsSync(abs(STABLE_SCRIPT))) {
+    notes.push(`Chưa có ${STABLE_SCRIPT} — bỏ qua tiện ích bản ổn định.`);
+    return;
+  }
+  const want = stableFolderFiles(ver);
+  // tự kiểm: manifest chỉ được trỏ tới file có trong folder, và KHÔNG được kèm bản gốc
+  const mf = JSON.parse(want.get('manifest.json').toString());
+  for (const cs of mf.content_scripts || []) {
+    for (const f of cs.js || []) {
+      if (!want.has(f)) problems.push(`${STABLE_RELEASE_DIR}: manifest trỏ tới ${f} nhưng folder không có.`);
+    }
+  }
+  if (want.has(USERSCRIPT)) problems.push(`${STABLE_RELEASE_DIR}: không được chứa bản gốc ${USERSCRIPT}.`);
+  if (!existsSync(abs(STABLE_RELEASE_DIR))) {
+    warnings.push(`Chưa có ${STABLE_RELEASE_DIR}/ — chạy "npm run build" để sinh tiện ích bản ổn định.`);
+    return;
+  }
+  let stale = 0;
+  for (const [p, buf] of want) {
+    const dest = `${STABLE_RELEASE_DIR}/${p}`;
+    if (!existsSync(abs(dest)) || !readFileSync(abs(dest)).equals(buf)) stale++;
+  }
+  const extra = [];
+  const walkD = (dir) => {
+    for (const e of readdirSync(abs(dir), { withFileTypes: true })) {
+      if (e.name === 'README-LOAD-UNPACKED.txt') continue;
+      const p = `${dir}/${e.name}`;
+      if (e.isDirectory()) walkD(p);
+      else if (!want.has(p.slice(STABLE_RELEASE_DIR.length + 1))) extra.push(p);
+    }
+  };
+  walkD(STABLE_RELEASE_DIR);
+  if (stale) warnings.push(`${STABLE_RELEASE_DIR}/ lệch ${stale} file so với nguồn — chạy "npm run build".`);
+  if (extra.length) warnings.push(`${STABLE_RELEASE_DIR}/ có ${extra.length} file thừa: ${extra.slice(0, 3).join(', ')}`);
+}
+
+function zipStable() {
+  mkdirSync(abs(DIST), { recursive: true });
+  const zipPath = path.join(DIST, 'botfake-stable.zip');
+  rmSync(abs(zipPath), { force: true });
+  // zipPath phải là đường dẫn TUYỆT ĐỐI: cwd là folder phát hành, đường dẫn tương đối sẽ trỏ sai chỗ.
+  execFileSync('zip', ['-r', '-X', '-q', abs(zipPath), '.', '-x', 'README-LOAD-UNPACKED.txt'], {
+    cwd: abs(STABLE_RELEASE_DIR),
+    stdio: ['ignore', 'ignore', 'inherit'],
+  });
+  return { zipPath, size: statSync(abs(zipPath)).size };
+}
+
 /* ------------------------------ MAIN ------------------------------ */
 
 function main() {
@@ -445,7 +580,7 @@ function main() {
 
   // 2) kiểm tra
   validateManifest(ver);
-  if (CHECK) checkReleaseFolder();
+  if (CHECK) { checkReleaseFolder(); checkStableRelease(ver); }
   validateUserscript(ver);
   validateUpdateXml(ver);
   checkCrxFreshness();
@@ -471,6 +606,15 @@ function main() {
 
   const { zipPath, size } = zipFiles();
   console.log(`✓ ${rel(zipPath)} (${(size / 1024).toFixed(0)} KB)`);
+
+  if (existsSync(abs(STABLE_SCRIPT))) {
+    const nStable = syncStableRelease(ver);
+    console.log(`✓ ${STABLE_RELEASE_DIR}/ (${nStable} file — tiện ích bản ổn định, chạy độc lập)`);
+    const zs = zipStable();
+    console.log(`✓ ${rel(zs.zipPath)} (${(zs.size / 1024).toFixed(0)} KB)`);
+  } else {
+    notes.push('Không có bản ổn định — bỏ qua tiện ích thứ hai.');
+  }
 
   const keyPath = findKey();
   if (WANT_CRX || keyPath) {

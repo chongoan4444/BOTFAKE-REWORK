@@ -2028,3 +2028,53 @@ function botfakeClaimSlot(name) {          // ai gọi trước thì giữ chỗ
 Bản gốc: `if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ || !botfakeClaimSlot('lite')) return;`
 Bản ổn định: thêm `|| window.__BOTFAKE_STABLE_ACTIVE__ || !botfakeClaimSlot('stable')`, và vẫn
 chiếm luôn cờ của bản gốc để bản gốc tự tắt.
+
+## §51 — Bản ổn định thành một TIỆN ÍCH RIÊNG (`release/botfake-ext-stable/`)
+
+### 51.1 Vì sao phải là tiện ích riêng
+
+Một manifest chỉ khai báo được một bộ `content_scripts`. Bản ổn định muốn chạy thì hoặc chui vào
+manifest của bản gốc (⇒ cài/gỡ dính nhau, `update_url` kéo nhầm bản), hoặc có manifest riêng.
+Chọn manifest riêng:
+
+| | `release/botfake-ext/` | `release/botfake-ext-stable/` |
+|---|---|---|
+| tên tiện ích | BOTFAKE LITE | **BOTFAKE STABLE** |
+| content script | `scripts/pancake-send-lite.user.js` | `scripts/pancake-send-stable.user.js` |
+| `update_url` | có | **không** (bản ổn định không tự cập nhật theo kênh bản gốc) |
+| file bản kia | không chứa | không chứa |
+| zip | `dist/botfake.zip` | `dist/botfake-stable.zip` |
+
+### 51.2 Không thể cùng gửi một tin (kể cả cài cả hai)
+
+Cài hai tiện ích thì mỗi tiện ích có bridge riêng, cùng nghe `window.postMessage` ⇒ nếu chung kênh
+thì **một lệnh của userscript sẽ được hai background cùng trả lời**, và với `BOTFAKE_BG_FETCH`
+POST là gửi trùng. Vì vậy folder ổn định được sinh với kênh riêng:
+
+| | bản gốc | bản ổn định |
+|---|---|---|
+| kênh tin nhắn | `__botfake` | `__botfakeS` |
+| dấu DOM | `data-botfake-ext` | `data-botfake-ext-stable` |
+| overlay id | `botfake-ext-overlay` | `botfake-ext-overlay-stable` |
+
+`extBgAvailable()` của bản ổn định chỉ nhìn `data-botfake-ext-stable` ⇒ nếu chỉ cài tiện ích bản
+gốc thì bản ổn định **không** dùng service worker mà fetch thẳng trên trang (đúng cookie/token).
+Ngược lại bản gốc cũng không thấy kênh của bản ổn định. Cộng với dấu `data-botfake-active`
+(§50) ⇒ hai bộ không thể cùng tồn tại trong một tab.
+
+### 51.3 Sinh tự động, không có bản sao thứ hai
+
+`tools/build.mjs` dựng folder ổn định từ nguồn, chỉ khác 4 điểm bằng phép biến đổi chuỗi:
+
+```
+manifest.json        ← JSON của manifest.json: đổi name/mô tả, bỏ update_url + key,
+                       content_scripts.js: lite → stable
+extension/bridge.js  ← __botfake → __botfakeS · data-botfake-ext → data-botfake-ext-stable
+extension/popup.js   ← scripts/pancake-send-lite.user.js → scripts/pancake-send-stable.user.js
+extension/overlay.js ← id + cờ riêng của bản ổn định
+scripts/…            ← scripts/pancake-send-stable.user.js (chỉ file này)
+```
+
+`npm run check` kiểm: manifest chỉ trỏ tới file có trong folder · folder **không** chứa bản gốc ·
+không có file lệch/thừa. Vì folder là sản phẩm sinh, sửa tay sẽ bị build ghi đè — đúng ý
+"làm một lần rồi để yên".

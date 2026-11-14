@@ -34,6 +34,17 @@ let s = read(SRC);
 const applied = [];
 
 /** Thay đúng MỘT lần; sai lệch ⇒ dừng ngay (không sinh ra bản nửa vời). */
+/** Thay TẤT CẢ (dùng cho neo xuất hiện nhiều lần, có kiểm số lần). */
+function repAll(from, to, label, times) {
+  const n = s.split(from).length - 1;
+  if (n !== times) {
+    console.error(`✗ [${label}] neo xuất hiện ${n} lần (cần ${times}) — bản gốc đã đổi, cập nhật tools/make-stable.mjs.`);
+    process.exit(1);
+  }
+  s = s.split(from).join(to);
+  applied.push(label);
+}
+
 function rep(from, to, label) {
   const n = s.split(from).length - 1;
   if (n !== 1) {
@@ -163,7 +174,22 @@ rep('title="Bấm nút này hoặc nhấn phím Tab để chạy (có bảng xá
 rep("'Khi bấm ▶ Chạy hoặc nhấn phím Tab, script sẽ tự lấy nội dung đang copy trên Clipboard và hiện hộp xác nhận trước khi gửi.'",
   "'Khi bấm ▶ Chạy (hoặc phím Tab nếu đã bật công tắc TAB), script sẽ tự lấy nội dung đang copy trên Clipboard và hiện hộp xác nhận trước khi gửi.'", 'clip-tip');
 
-/* 6. Log cuối gọn ---------------------------------------------------------- */
+/* 6. Kênh riêng với tiện ích bản ổn định ------------------------------------ */
+// Bản gốc nói chuyện với extension qua kênh \`__botfake\` + dấu <html data-botfake-ext="1">.
+// Bản ổn định dùng kênh RIÊNG (__botfakeS / data-botfake-ext-stable, xem tools/build.mjs):
+// cài cả hai tiện ích thì mỗi bên chỉ trả lời lệnh của chính nó ⇒ không thể cùng gửi một tin.
+repAll("ev.data.__botfake !== 1", "ev.data.__botfakeS !== 1", 'chan-recv', 2);
+rep("window.postMessage({ __botfake: 1, dir: 'to_sw', id: id, payload: payload }, '*');",
+  "window.postMessage({ __botfakeS: 1, dir: 'to_sw', id: id, payload: payload }, '*');", 'chan-send');
+rep("getAttribute('data-botfake-ext') === '1'",
+  "getAttribute('data-botfake-ext-stable') === '1'", 'chan-attr');
+rep('  function extCall(payload, waitMs) {',
+`  // [STABLE] Kênh nói chuyện với tiện ích: kênh RIÊNG (__botfakeS + data-botfake-ext-stable),
+  // xem tools/build.mjs. Cài cả hai tiện ích thì mỗi bên chỉ trả lời lệnh của chính nó
+  // ⇒ không thể cùng gửi một tin.
+  function extCall(payload, waitMs) {`, 'chan-note');
+
+/* 7. Log cuối gọn ---------------------------------------------------------- */
 for (const [a, b, label] of [
   ["logLine('🧾 GHI NHỚ LỖI: thêm mới '", "logDiag('🧾 GHI NHỚ LỖI: thêm mới '", 'diag-ghinho'],
   ["logLine('⚡ TỐC ĐỘ: '", "logDiag('⚡ TỐC ĐỘ: '", 'diag-tocdo'],
@@ -173,7 +199,7 @@ for (const [a, b, label] of [
   ["logLine('🧭 Chẩn đoán globalId: cache '", "logDiag('🧭 Chẩn đoán globalId: cache '", 'diag-gid'],
 ]) rep(a, b, label);
 
-/* 7. Ghi / kiểm tra -------------------------------------------------------- */
+/* 8. Ghi / kiểm tra -------------------------------------------------------- */
 if (CHECK) {
   const cur = existsSync(path.join(ROOT, DST)) ? read(DST) : '';
   if (cur !== s) {

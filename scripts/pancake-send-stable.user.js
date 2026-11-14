@@ -498,6 +498,9 @@
     extCall(payload, 3000); // báo tiến độ — không cần chờ lâu
   }
 
+  // [STABLE] Kênh nói chuyện với tiện ích: kênh RIÊNG (__botfakeS + data-botfake-ext-stable),
+  // xem tools/build.mjs. Cài cả hai tiện ích thì mỗi bên chỉ trả lời lệnh của chính nó
+  // ⇒ không thể cùng gửi một tin.
   function extCall(payload, waitMs) {
     return new Promise((resolve) => {
       try {
@@ -510,12 +513,12 @@
       } catch (e0) { /* MAIN world: không có chrome */ }
       const id = 'bf' + Date.now() + Math.random().toString(36).slice(2, 8);
       const on = (ev) => {
-        if (ev.source !== window || !ev.data || ev.data.__botfake !== 1 || ev.data.dir !== 'from_sw' || ev.data.id !== id) return;
+        if (ev.source !== window || !ev.data || ev.data.__botfakeS !== 1 || ev.data.dir !== 'from_sw' || ev.data.id !== id) return;
         window.removeEventListener('message', on);
         resolve({ res: ev.data.res, err: ev.data.err || null });
       };
       window.addEventListener('message', on);
-      window.postMessage({ __botfake: 1, dir: 'to_sw', id: id, payload: payload }, '*');
+      window.postMessage({ __botfakeS: 1, dir: 'to_sw', id: id, payload: payload }, '*');
       setTimeout(() => {
         window.removeEventListener('message', on);
         resolve({ res: null, err: 'timeout' });
@@ -531,7 +534,7 @@
       }
     } catch (e1) { /* MAIN world */ }
     const on = (ev) => {
-      if (ev.source !== window || !ev.data || ev.data.__botfake !== 1 || ev.data.dir !== 'push') return;
+      if (ev.source !== window || !ev.data || ev.data.__botfakeS !== 1 || ev.data.dir !== 'push') return;
       fn(ev.data.msg, null, function () {});
     };
     window.addEventListener('message', on);
@@ -541,7 +544,7 @@
     try {
       if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) return true;
     } catch (e) { /* ignore */ }
-    return document.documentElement.getAttribute('data-botfake-ext') === '1';
+    return document.documentElement.getAttribute('data-botfake-ext-stable') === '1';
   }
 
   function serializeBgPhoto(photo, qrPhotoByPage, apiFbIdsByPage, fbIdByPage) {

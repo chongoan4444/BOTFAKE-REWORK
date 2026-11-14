@@ -30,8 +30,13 @@ scripts/
                                   #   • có công tắc "TAB:" trên tiêu đề panel (mặc định TẮT gửi bằng Tab)
                                   #   • log cuối gọn: chỉ còn dòng tổng kết (✅/❌/⚠/thời gian)
 
+release/
+  botfake-ext/                    # folder phát hành BẢN GỐC (manifest nạp pancake-send-lite)
+  botfake-ext-stable/             # folder phát hành BẢN ỔN ĐỊNH (tiện ích riêng, nạp pancake-send-stable)
+
 tools/
-  build.mjs                       # đồng bộ version + kiểm tra + đóng gói zip/crx
+  build.mjs                       # đồng bộ version + kiểm tra + đóng gói zip cho CẢ HAI folder
+  make-stable.mjs                 # sinh scripts/pancake-send-stable.user.js từ bản gốc
 
 # ---- file tham chiếu, KHÔNG tham gia build ----
 html.txt, html2.txt, html3.txt, "html comment list", taodon   # DOM Pancake đã lưu
@@ -51,7 +56,12 @@ Trên GitHub đã có sẵn **`release/botfake-ext/`** — folder tiện ích **
 (`manifest.json` + `extension/` + `scripts/`). Tải folder đó về → `chrome://extensions` →
 Developer mode → **Load unpacked** → chọn đúng folder chứa `manifest.json`.
 
-Folder này **sinh tự động** từ mã nguồn: đừng sửa trực tiếp trong đó, sửa ở nguồn rồi chạy
+Bản ổn định có folder riêng: **`release/botfake-ext-stable/`** — tiện ích **độc lập**
+(tên `BOTFAKE STABLE`, manifest riêng, chỉ nạp `scripts/pancake-send-stable.user.js`).
+Cài/gỡ nó không ảnh hưởng bản gốc và ngược lại; hai folder này cũng không dùng chung
+`update_url` nên bản ổn định không bị kéo về code của bản gốc.
+
+Cả hai folder **sinh tự động** từ mã nguồn: đừng sửa trực tiếp trong đó, sửa ở nguồn rồi chạy
 `npm run build`. `npm run check` sẽ cảnh báo nếu folder phát hành bị lệch so với nguồn.
 
 ## Hai bản script
@@ -74,9 +84,14 @@ thắng, bản sau tự tắt) nên **không bao giờ có hai bộ cùng gửi*
 
 | Cách bạn dùng | Bản chạy |
 |---|---|
-| **Extension Chrome** (`release/botfake-ext/`, `dist/botfake.zip`) | **chỉ bản gốc** — `manifest.json` khai báo đúng một content script `scripts/pancake-send-lite.user.js`; file `-stable` có trong thư mục phát hành nhưng extension **không** nạp |
+| **Extension bản gốc** (`release/botfake-ext/`, `dist/botfake.zip`) | **bản gốc** — manifest chỉ khai báo `scripts/pancake-send-lite.user.js`; bản ổn định *không* có trong folder này |
+| **Extension bản ổn định** (`release/botfake-ext-stable/`, `dist/botfake-stable.zip`) | **bản ổn định** — manifest khai báo `scripts/pancake-send-stable.user.js`, tên `BOTFAKE STABLE`, không có `update_url` |
 | **Tampermonkey**, chỉ cài 1 file | đúng file bạn cài |
 | **Tampermonkey**, cài cả 2 file | file nào Tampermonkey nạp trước thì thắng, file kia tự tắt (thứ tự không do ta quyết) |
+
+Hai tiện ích nói chuyện với userscript trên **kênh riêng** (`__botfakeS` +
+`<html data-botfake-ext-stable>`), nên cài cả hai cũng không thể cùng trả lời một lệnh gửi.
+Dù vậy vẫn nên **cài một bản** cho gọn.
 
 Muốn biết đang chạy bản nào: nhìn dòng version trên tiêu đề panel —
 `1.92.17-W200.59` = bản gốc, `1.92.17-STABLE` = bản ổn định. Dấu `[STABLE]` cũng được in vào
