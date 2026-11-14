@@ -1494,3 +1494,55 @@ Ba bộ đếm ở 39.2 sẽ trả lời dứt điểm sau lượt tới:
 Mỗi lệnh giữ một `pendingMessages` + một timer 60 s phía app (không huỷ được từ ngoài).
 Ở ~36 lệnh/s ⇒ ~2 160 timer sống cùng lúc — chấp nhận được, nhưng nếu máy yếu thấy lag thì hạ
 `EXT_ADAPTER_HOLD_MS` xuống 30 000 (vẫn phủ mốc kiểm chứng 20 s).
+
+---
+
+## §40 — Chờ mềm toàn bộ (1.92.9 / W200.51)
+
+### 40.1 Kiểm kê trước khi sửa
+
+| loại | số chỗ | ví dụ |
+|---|---|---|
+| `sleep()` chờ theo đồng hồ | **30** | `sleep(250)` chờ thăm dò Ext, `sleep(50)` quét scan, `sleep(150)` chờ 429 |
+| `setTimeout` hẹn giờ | 33 | timeout fetch, hẹn kiểm chứng, debounce UI |
+| vòng `while + continue` | 25 | phần lớn là retry/backoff |
+
+### 40.2 Lõi mới
+
+- `softNotify(key)` / `softWait(key)` — đánh thức **ngay trong cùng tick**; `softWait` tự gỡ khỏi Set khi hết chờ (không tích rác).
+- `sleepUntil(ts, key)` — ngủ **đúng mốc**, thức sớm nếu có sự kiện hoặc bấm Dừng.
+- `waitCond(cond, key, cap)` — chờ điều kiện; 250 ms chỉ còn là lưới an toàn cuối.
+- `stopSignal()` — **một** promise dùng chung (không tạo resolver mới mỗi lần ngủ); `fireStopSignal()` gọi ở **5** chỗ đặt `stopRequested = true`; `resetStopSignal()` ở khối reset đầu lượt (nếu thiếu, lượt sau mọi sleep sẽ trả về ngay).
+- `retryAfterMs(res, fallback)` — tôn trọng `Retry-After` của server.
+- `nextFrame()` — nhường đúng 1 khung hình (rAF), tab ẩn thì lưới 34 ms.
+- `makeLane` / `makeAdaptiveLane` có thêm `onChange()` → phát sự kiện mỗi khi active/hàng đợi đổi.
+
+### 40.3 Đã chuyển (quét nhịp → sự kiện)
+
+| chỗ | trước | sau |
+|---|---|---|
+| `acquireExtSendPermit` | `sleep(250)` quét `probeInFlight` | `sleepUntil(…,'ext-probe')`, `releaseExtSendPermit` phát sự kiện |
+| `waitForGidDiscoveryIdle` | `sleep(200)` quét 2 lane | `onChange()` của `ctxFetchLane`/`gidExtLane` |
+| chờ lượt quét cũ dừng | `sleep(50)` × 80 | `waitCond(…,'scan-done')`, finally của scan phát sự kiện |
+| hết cơn 429 khi tải list | `sleep(150)` quét | `sleepUntil(rl.pauseUntil)` — đúng mốc |
+| cooldown dò gid HTTP | `sleep(25–250)` quét | `sleepUntil(gidHttpCtl.coolUntil)` |
+| `waitForSocketSynced` | `sleep(60)` quét | ngủ đúng mốc `connectAt + 1000`; 25 ms chỉ cho `requestId` |
+| Ext finder chờ 250 ms | `sleep(250)` mù | `sleepUntil(…,'gid')` — `__botfakeSaveGid__` phát sự kiện |
+| `extStartDelayMs` 80 ms | `sleep(80)` | `sleepUntil(…,'gid')` — WS có gid trước thì đi luôn |
+| Socket retry 220–350 ms | `sleep(…)` mù | `sleepUntil(…,'delivered')` — `markDelivered` phát sự kiện |
+| 429 khi gửi (3 chỗ) | `sleep(600)` / `350×n` | `retryAfterMs(res, …)` theo header |
+| nhường Tab keydown | `sleep(20)` | `nextFrame()` |
+| backoff còn lại (7 chỗ) | `await sleep(x)` | `sleepUntil(Date.now()+x)` — **ngắt được khi Dừng** |
+
+### 40.4 Cố ý GIỮ là đồng hồ (không phải "chờ cứng")
+
+- **6 chỗ `Promise.race([..., sleep(n)])`**: đó là *trần thời gian* của một phép chờ, không phải nhịp quét. Bỏ đi thì treo vô hạn: `findGlobalId` IDB 400 ms, `initSocket`/`warm` 12 000 ms, `mgr.all` 4 000 ms.
+- **Nhịp phát Socket** (`SOCKET_MIN_PACE_MS`) — đây là bộ điều tốc chủ động; rút ngắn là tăng nguy cơ bóp/khoá, không phải tăng tốc.
+- **Hẹn kiểm chứng** (20 s / 45 s / 120 s, `UNCERTAIN_VERIFY_GAP_MS`) — phụ thuộc độ trễ lan truyền phía server Pancake, không có sự kiện nào để bám.
+- **Jitter chống dồn** (ngẫu nhiên 0–180 ms sau cơn 429, 0–5 s khi rải kiểm chứng) — mục đích là *làm lệch nhịp*, phải ngẫu nhiên mới đúng.
+- **`smartGap`** — đã suy từ số đo, log 13:59 ra `0ms`.
+
+### 40.5 Rủi ro đã kiểm
+
+`node --check` ✓ · `npm run check` ✓ · `npm test` ✓ (12/12) · `npm run build` ✓.
+Không đổi nhịp phát, không đổi timeout mạng, không đổi luật chống trùng ⇒ không mở thêm đường gửi lặp.
