@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.1-w200.43
+// @version      1.92.2-w200.44
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.1-W200.43'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.2-W200.44'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4025,8 +4025,20 @@
     // [v1.91.87] HẠN CHỜ THÍCH ỨNG thay cho chờ cứng 8s/20s.
     // Lô 5 897 tin: ACK TB 1 507ms · max 3 900ms ⇒ chờ 8–20s là dư gấp nhiều lần.
     // Kênh ACK chết thì trễ đúng bằng hạn chờ rồi vẫn no-ACK ⇒ chờ dài chỉ làm chậm.
-    const ackCeiling = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 8000 : 20000;
-    const ackWaitMs = Math.min(ackCeiling, Math.max(2500, Math.round(sockAckP90() * 3)));
+    // [v1.92.2] HẠN CHỜ ACK THEO ĐÚNG SỐ ĐO HAR (thay vì 2,5–20s như trước).
+    // Đo trực tiếp 3 HAR có `_webSocketMessages`, ghép `request_id` của /ls_req với /ls_resp:
+    //   batmesss   13/14 khớp · p50 234ms · p90 256ms · max 300ms
+    //   guisot     26/27 khớp · p50 326ms · p90 390ms · max 1 531ms
+    //   guikhachcu  2/5  khớp · p50 414ms (HAR cũ, ít mẫu)
+    //   khoảng cách giữa 2 lệnh gửi liên tiếp: min 0ms ⇒ FB nhận bắn dồn, không cần nhịp.
+    // ⇒ ACK thật về sau ~0,3s; giữ slot 2,5–7,5s chỉ để chờ là tự bóp làn:
+    //   lô 09:34 có 192 làn nhưng chỉ phát 60 tin/s ⇒ mỗi lệnh chiếm ~3,2s (khớp comment "192 ÷ 3,43s").
+    // Nay: hạn chờ = 3×p90 nhưng CHẶN trong [1 200ms, 3 000ms]. ACK về muộn hơn vẫn không mất:
+    // ca quá hạn ⇒ no-ACK ⇒ đăng ký kiểm chứng lịch sử nền (chỉ nâng ⚠→✅, KHÔNG gửi lại).
+    // HAR cũng cho thấy ~5% request không có /ls_resp (1/14 và 1/27) nên ca no-ACK là có thật,
+    // nhưng chúng phải được xử lý bằng kiểm chứng nền, không phải bằng cách giữ làn 20 giây.
+    const ackCeiling = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 3000 : 3000;
+    const ackWaitMs = Math.min(ackCeiling, Math.max(1200, Math.round(sockAckP90() * 3)));
     try { if (pageId) pageLastAckWait[pageId] = ackWaitMs; } catch (e0) { /* ignore */ }
     /* ===== SỬA GỐC "MẤT ACK" Ở LÔ LỚN =====
      * Trong _app (@818834) hàm publish() làm đúng thế này:

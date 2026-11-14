@@ -710,3 +710,27 @@ Ba nút cổ chốt còn lại, đều thấy trong cùng dòng log:
 Kèm một lỗi thật: `SOCKET_LANE_MAX` được khai báo **sau** khối đọc
 `localStorage['botfake_sock_page_floor']` ⇒ mọi phép so sánh với nó ném TDZ, bị `catch` nuốt,
 nên **sàn đặt qua localStorage âm thầm không có tác dụng**. Đã chuyển khai báo lên trước.
+
+## §28 — Đo ACK Socket trực tiếp từ HAR (v1.92.2)
+
+Decode base64 → Thrift/LS của `_webSocketMessages` trong 3 HAR, ghép `request_id` giữa
+`/ls_req` (gửi) và `/ls_resp` (ACK):
+
+| HAR | khớp | p50 | p90 | max | gap 2 lệnh gửi |
+|---|---|---|---|---|---|
+| batmesss | 13/14 | **234 ms** | 256 ms | 300 ms | p50 1 414 · min 0 |
+| guisot | 26/27 | **326 ms** | 390 ms | 1 531 ms | p50 1 201 · min 0 |
+| guikhachcu | 2/5 | 414 ms | 354 ms | 474 ms | p50 32 · min 0 |
+
+Frame gửi tin (guisot) có dạng: `otid`, `send_type`, `source: 4456448`, `sync_group: 205`,
+`text`, `mark_thread_read` — **không có `thread_fbid` trong payload** (định tuyến qua task queue).
+
+Hai kết luận dùng được:
+
+1. **ACK về sau ~0,3s**, không phải 2,5–7,5s. Code cũ `ackWaitMs = max(2500, p90×3)` giữ slot
+   rất lâu ⇒ lô 09:34 chỉ phát 60 tin/s dù có 192 làn (mỗi lệnh ~3,2s). v1.92.2 đặt
+   `ackWaitMs = clamp(3×p90, 1 200, 3 000 ms)`.
+2. **~5% request không có `/ls_resp`** (1/14, 1/27) ⇒ ca no-ACK là có thật, phải xử lý bằng
+   kiểm chứng lịch sử nền (chỉ nâng ⚠→✅, không gửi lại), không phải bằng cách giữ làn lâu.
+
+`min 0ms` giữa hai lệnh gửi ⇒ FB không cần nhịp; không cần thêm gap nhân tạo.
