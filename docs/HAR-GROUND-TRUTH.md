@@ -684,3 +684,29 @@ Theo yêu cầu: ô `#ssb-forceext` **bị xoá khỏi panel** (không chỉ m�
 của bridge Extension, và từ 1.91.92 nó còn bỏ hẳn làn Socket. Không còn đường UI nào bật lại
 ⇒ một lần bấm nhầm không thể làm chậm cả lô. `__botfakeForceExt__(true)` vẫn còn trong console
 để đo đối chứng khi cần.
+
+## §27 — Socket là đường chính và ĐÃ ĐO ĐƯỢC (v1.92.1)
+
+Lô 09:34 (1 432 chat, 1.92.0, `force_ext` tắt) — lần đầu Socket được thử trên chat khoẻ sau 7 lô:
+
+```
+📡 SOCKET: ACK OK/rejected/no-ACK 917/493/0 · ACK TB/max 1 199/2 760ms
+✅ Đã gửi thành công 917/1 432 [Socket: 917]
+⚡ 32,04 tin/giây (1 922/phút) · phát lệnh xong trong 24s  ⇒ 60 tin/s lúc phát
+🌊 peak Socket/page active 192/192 · waiting 192/192
+```
+
+Kết luận: **Socket gửi được 917 tin.** Mọi dòng `ACK 0/386` trước đây là chat đã chết
+(§25) — thiên lệch chọn mẫu, đã xác nhận.
+
+Ba nút cổ chốt còn lại, đều thấy trong cùng dòng log:
+
+| Hiện tượng | Thiệt hại | Sửa |
+|---|---|---|
+| `peak Socket/page active 192/192`, `waiting 192` | làn Socket bão hoà ở 192; ACK TB 1,2s ⇒ trần lý thuyết ~160 tin/s | `BUS_PARALLEL_SOCKET` 128→**256**, `SOCKET_LANE_MAX` 192→**384** |
+| `bỏ qua lúc Ext quá tải 267` | 267 chat bị chặn Ext **bởi chính script**, mỗi chat chỉ được thử 1 lần/kênh ⇒ ❌ oan | `EXT_SEND_BREAKER_THRESHOLD` 30→**150** |
+| `Ext quá hạn 65 · kiểm chứng 0` | không mất tin (kiểm chứng xác nhận chưa đến) | giữ timeout 2,5s |
+
+Kèm một lỗi thật: `SOCKET_LANE_MAX` được khai báo **sau** khối đọc
+`localStorage['botfake_sock_page_floor']` ⇒ mọi phép so sánh với nó ném TDZ, bị `catch` nuốt,
+nên **sàn đặt qua localStorage âm thầm không có tác dụng**. Đã chuyển khai báo lên trước.

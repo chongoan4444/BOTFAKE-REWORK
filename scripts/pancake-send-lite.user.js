@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.0-w200.42
+// @version      1.92.1-w200.43
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.0-W200.42'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.1-W200.43'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5157,8 +5157,14 @@
   const EXT_SEND_MIN = 48;
   const EXT_SEND_MAX = 96;
   // 🔥 [FIX-TỐC-ĐỘ] Socket/page 128 khởi điểm, đủ cho pace 4ms × 2 page = 500/s mà không chờ slot.
-  const BUS_PARALLEL_SOCKET = 128;
+  // [v1.92.1] Socket đã được đo lại trên chat khoẻ (lô 09:34, 1 432 chat, 1.92.0):
+  //   📡 SOCKET ACK OK/rejected 917/493 · ACK TB 1 199ms · phát 1 432 lệnh trong 24s (= 60 tin/s)
+  //   peak Socket/page active 192/192 · waiting 192/192  ⇒ LÀN SOCKET ĐÃ BÃO HOÀ ở 192.
+  // Với ACK TB 1,2s thì trần của 192 làn là ~160 tin/s ⇒ đây là nút cổ chốt DUY NHẤT còn lại
+  // (Extension không còn tham gia đường chính). Nâng: khởi điểm 256, trần 384.
+  const BUS_PARALLEL_SOCKET = 256;
   const SOCKET_LANE_MIN = 64;
+  const SOCKET_LANE_MAX = 384;
   // [v1.91.84] SÀN cap Socket/page CHỈNH ĐƯỢC LÚC CHẠY — không cần build lại.
   // Bối cảnh: bộ điều tốc tự hạ 192 → 64 (0,8× mỗi lần) khi ACK chậm; log lô 10 660 tin cho
   // thấy cap cuối [64×1] trong khi trần lý thuyết (192 ÷ 3,43 s) là 56 tin/s ⇒ bị chặn dưới
@@ -5179,7 +5185,8 @@
       return 'đã đặt sàn Socket/page = ' + n + ' — áp dụng cho lượt gửi kế tiếp (tải lại trang nếu đang chạy)';
     };
   } catch (e2) { /* ignore */ }
-  const SOCKET_LANE_MAX = 192;
+  // [v1.92.1] (SOCKET_LANE_MAX đã chuyển lên trên — khai báo ở đây thì khối đọc
+  // localStorage 'botfake_sock_page_floor' ở trên bị TDZ và ném lỗi bị nuốt im lặng.)
   const SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD = 4; // thử nghiệm: tránh hạ lane vì chỉ 2 ACK đuôi chậm lẻ tẻ
   const SOCKET_LANE_NOACK_BACKOFF_THRESHOLD = 2; // no-ACK giữ ngưỡng chặt hơn vì thường báo hiệu Socket/page có vấn đề
   // [v1.91.85] CẦU DAO ACK TOÀN CỤC.
@@ -5636,7 +5643,13 @@
   // (đúng thứ đã xảy ra ở lô 09:16: ngắt mở 45s, gửi được có 226 tin trong 78s).
   // 12 → 30 (tỉ lệ với số làn), và trần nghỉ 45s → 15s. Vẫn là "thăm dò" chứ không mò: lệnh đã
   // bắn mà quá hạn vẫn KHÔNG bao giờ gửi lại, chỉ kiểm chứng lịch sử để nâng ⚠→✅.
-  const EXT_SEND_BREAKER_THRESHOLD = 30;
+  // [v1.92.1] 30 → 150. Lô 09:34 mất thẳng 267 chat vì bộ ngắt mở giữa lô:
+  //   🧯 "bỏ qua lúc Ext quá tải 267" — những chat đó ĐÃ bị Socket từ chối, còn Ext thì bị
+  //   chính script chặn, nên rơi vào ❌ oan (mỗi chat chỉ được thử 1 lần/kênh).
+  // Giờ Socket đi trước nên Ext chỉ là làn bù; ngắt giữa lô đắt hơn nhiều so với việc chịu
+  // thêm timeout. Ngưỡng 150 đủ để chỉ ngắt khi Extension CHẾT THẬT, không ngắt vì một cụm
+  // chat khó. Nghỉ vẫn 8–15s.
+  const EXT_SEND_BREAKER_THRESHOLD = 150;
   const EXT_SEND_BREAKER_BASE_MS = 8000;
   const EXT_SEND_BREAKER_MAX_MS = 15000;
   const extSendCtl = { timeoutStreak: 0, openUntil: 0, openStreak: 0, probeInFlight: false, probeToken: 0, fastStreak: 0 };
