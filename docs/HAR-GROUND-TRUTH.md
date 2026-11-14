@@ -1333,3 +1333,48 @@ gain 0,01 gần như không phát ra loa. Đây là lý do các lượt 200 s v�
 - Phần giữa `tools/build.mjs` (đồng bộ version / đóng gói) — đã đọc phần crx và `--check`.
 - `_app-*.v6.js` còn nhiều module chưa mở, nhưng các câu hỏi cốt lõi (payload, cờ ctx7, 24h, ACK,
   adapter Ext) đã có đáp án.
+
+---
+
+## §37 — Thử nhảy `next_cursor` theo mốc thời gian: THẤT BẠI (có số)
+
+### 37.1 Kết quả probe thật (page 448189508385420, 2026-11-14)
+
+Cursor dựng tay đúng định dạng Erlang, `seen=0`, `key=""`, `current_count=0`:
+
+| mốc | HTTP | trả về | mới nhất | cũ nhất |
+|---|---|---|---|---|
+| `2026-10-30` (15 ngày) | **200** | 40 hội thoại | **2026-11-14T03:22** | 2026-11-14T03:08 |
+| `2026-11-09` (5 ngày) | **500** | 0 | — | — |
+
+⇒ Server **không dùng phần thời gian** khi `key` rỗng: mốc 30/10 trả về **trang đầu danh sách
+(hôm nay)**, còn mốc 09/11 thì **500**. Cursor hợp lệ về byte, nhưng **không phải con trỏ thời gian**.
+
+### 37.2 Vì sao: cursor là KHOÁ VỊ TRÍ, không phải mốc
+
+Cursor thật trong log:
+
+```
+83 6c 00000003 | 61 01 | 6e 06 <ts LE> | 6d 00000031 | "448189508385420:448189508385420_29133591229617236" | 6a
+```
+
+`key = {page_id}:{conv_id}` — server định vị **theo hội thoại**, thời gian chỉ là trường phụ.
+Muốn nhảy tới ranh giới ngày, phải biết `conv_id` nằm đúng ranh giới đó — mà tìm được nó chính là
+việc phải đi tìm bằng mắt. Vòng luẩn quẩn.
+
+### 37.3 Còn đúng một khả năng, probe v2 kiểm trong 1 phút
+
+`tools/list-jump-probe2.js`: giữ **nguyên key thật** (lấy từ request của app), chỉ đổi `ts`
+(15 ngày / 60 ngày), so với đối chứng A.
+- `A = B = C` ⇒ ts bị bỏ qua hoàn toàn ⇒ **ý tưởng chết, không làm nữa**.
+- `A ≠ B/C` ⇒ ts có tác dụng khi key hợp lệ ⇒ còn đường.
+
+### 37.4 Thứ đáng giá hơn phát hiện được trong chính log này
+
+1. **429 xuất hiện trên request danh sách của CHÍNH APP** (2 lần, cùng cursor thật, `current_count=130`).
+   Đây là bằng chứng trực tiếp cho §29: 429 chỉ rơi vào endpoint danh sách, và nó xảy ra ngay cả với
+   app, không phải do script mình bắn nhiều.
+2. **`tags=[7,8,9]` đang được áp dụng** — danh sách của page này đã được lọc theo thẻ, nên số trang
+   cần tải nhỏ hơn nhiều so với "toàn bộ page".
+3. **`New global_user_id added: <page>,<global_id>`** — hàng trăm cặp trong vài giây: đây chính là
+   nguồn nuôi cache globalId (WS `threadMappingStoreV2`). Không cần dò từng chat.
