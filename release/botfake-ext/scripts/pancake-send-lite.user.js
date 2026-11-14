@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.14-w200.56
+// @version      1.92.15-w200.57
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.14-W200.56'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.15-W200.57'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6926,17 +6926,19 @@
   }
 
   // Đồng bộ tức thì (0ms) global_id từ WebSocket RAM cache trước khi bắn — tuyệt đối không chặn đầu lượt!
-  /* [v1.92.14] QUYẾT ĐỊNH KÊNH CỦA CẢ LÔ NẰM Ở ~2 GIÂY ĐẦU — nên phải chờ ĐÚNG điều kiện.
-   * Vì sao cùng một lô mà lúc thì chạy Socket (125 tin/s), lúc thì dồn hết vào Ext (29,7 tin/s):
-   *   `pickBestDirectOrder` chọn Socket TRƯỚC chỉ khi `sockReady = isPageSocketReady(pid)`
-   *   (MqttHelper.SOCKETS[pid] đã sync — cần ~1s sau connect + requestId ≥ 1) VÀ có global_id thật.
-   *   Nếu wave đầu tiên bắt đầu TRƯỚC khi socket sync xong ⇒ kế hoạch là ['ext','socket'], Ext
-   *   trả lời trước (bắn nhả ~0,8–3s) và THẮNG ⇒ Socket không bao giờ được thử, cả lô đi Ext.
-   *   Cùng một danh sách, cùng máy: chỉ khác nhau ở chỗ socket kịp sync trong ~2s hay không
-   *   (mạng/CPU/tab vừa F5) ⇒ kết quả lệch 4 lần. Không phải "lúc được lúc không" ngẫu nhiên.
-   * Nay: đầu lô lớn, chờ socket sync với hạn 4s (thức bằng softNotify('sock-sync'), không sleep
-   * mù). Không sync kịp thì vẫn chạy như cũ và GHI RÕ lý do vào log. */
-  async function waitSocketsReadyForSend(targets, capMs) {
+  /* [v1.92.15] QUYẾT ĐỊNH KÊNH CỦA CẢ LÔ NẰM Ở ~2 GIÂY ĐẦU.
+   * Cùng một lô mà lúc chạy Socket (125 tin/s), lúc dồn hết vào Ext (29,7 tin/s) chỉ vì:
+   *   `pickBestDirectOrder` chọn Socket TRƯỚC chỉ khi `isPageSocketReady(pid)` (SOCKETS[pid] đã
+   *   sync: connectAt + 1000ms VÀ requestId >= 1). Wave 1 chạy trước lúc sync xong ⇒ kế hoạch
+   *   ['ext','socket'] ⇒ Ext trả lời trước (0,8-3s) và THẮNG ⇒ Socket không bao giờ được thử.
+   *
+   * KHÔNG DÙNG HẠN CHỜ TỰ ĐẶT: `warmUpSockets` đã tạo sẵn `socketWarmPromises[pid]` — một
+   * promise resolve ĐÚNG lúc socket connect xong và đã chờ sync (bên trong nó gọi
+   * waitForSocketSynced(2500) rồi tự xoá). Vậy chỉ cần await CHÍNH promise đó: thức ngay khi
+   * socket báo xong (thường 0,3-2s), và nếu mạng hỏng thì nó tự bỏ cuộc theo đúng hạn sync mà
+   * code đã dùng ở mọi nơi khác — không có con số 4s nào do tôi bịa ra.
+   * Không có promise (đã resolve từ trước) thì hỏi thẳng waitForSocketSynced cùng hạn đó. */
+  async function waitSocketsReadyForSend(targets) {
     const h = window.__MqttHelper__;
     if (!h || typeof h.initSocket !== 'function') return { waited: 0, ready: 0, pages: 0 };
     const seen = {};
@@ -6946,13 +6948,28 @@
       if (pid && !seen[pid]) { seen[pid] = true; pages.push(pid); }
     });
     if (!pages.length) return { waited: 0, ready: 0, pages: 0 };
-    const allReady = () => pages.every((pid) => isPageSocketReady(pid));
-    if (allReady()) return { waited: 0, ready: pages.length, pages: pages.length };
+    const pending = pages.filter((pid) => !isPageSocketReady(pid));
+    if (!pending.length) return { waited: 0, ready: pages.length, pages: pages.length };
     const t0 = Date.now();
-    const cap = Math.max(0, Number(capMs) || 4000);
-    try { logLine('🔌 Chờ Socket sẵn sàng (tối đa ' + (cap / 1000).toFixed(0) + 's) để cả lô đi làn Socket…'); } catch (e0) { /* ignore */ }
-    // Chờ đúng sự kiện: waitForSocketSynced tự softNotify('sock-sync'); waitCond chỉ là lưới 250ms.
-    await waitCond(allReady, 'sock-sync', cap);
+    try { logLine('🔌 Chờ Socket báo sync (thức ngay khi xong, không có hạn chờ cứng)…'); } catch (e0) { /* ignore */ }
+    const waits = pending.map((pid) => {
+      const warm = socketWarmPromises[pid];
+      if (warm && typeof warm.then === 'function') return Promise.resolve(warm).catch(() => null);
+      return waitForSocketSynced(h, pid).catch(() => null);
+    });
+    // LƯỚI CHỐNG TREO (không phải hạn chờ tối ưu): nếu initSocket không bao giờ trả về thì
+    // vẫn phải chạy lô, không đứng chờ vô hạn. Đường bình thường luôn thức bằng SỰ KIỆN.
+    const SOCK_SYNC_HANG_GUARD_MS = 8000;
+    const guard = sleepUntil(Date.now() + SOCK_SYNC_HANG_GUARD_MS, 'sock-sync').then(() => 'guard');
+    // Bấm Dừng thì thoát ngay, không đứng chờ socket.
+    const winner = await Promise.race([
+      Promise.all(waits).then(() => 'ready'),
+      guard,
+      stopSignal().then(() => 'stop'),
+    ]);
+    if (winner === 'guard') {
+      try { logLine('⚠ Socket không báo sync sau ' + SOCK_SYNC_HANG_GUARD_MS + 'ms (initSocket treo) — chạy tiếp, không đứng chờ.'); } catch (eg) { /* ignore */ }
+    }
     const ready = pages.filter((pid) => isPageSocketReady(pid)).length;
     const waited = Date.now() - t0;
     if (ready === pages.length) {
@@ -8923,7 +8940,7 @@
       // "Ext ngay cho nhanh" — 3–4s chờ làm nho; đổi lại cả lô 9 455 chat đi làn chậm là lỗ lớn).
       try {
         const nTargets = (targets || []).length;
-        if (nTargets > 50) await waitSocketsReadyForSend(targets, 4000);
+        if (nTargets > 50) await waitSocketsReadyForSend(targets);
       } catch (e) { /* chờ socket lỗi không được làm hỏng lô */ }
       // SW gửi inbox thất bại: jwt → #551; cookie jar → Invalid access_token. Chỉ tab pancake.vn.
       for (let gi = 0; gi < sendGroups.length && !state.stopRequested; gi++) {

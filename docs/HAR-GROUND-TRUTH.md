@@ -1852,3 +1852,48 @@ thứ hai cũng không bao giờ được thử). Hai nguyên nhân cho cùng m�
 3. **Sàn làn Socket tự hồi**: cứ 20 ACK nhanh liên tiếp thì `socketLaneFloor` +8 (trần
    `SOCKET_LANE_MIN = 64`), trừ khi người dùng tự đặt bằng `__botfakeSetSockPageFloor__`
    (cờ `socketFloorUserSet`).
+
+## §47 — Bỏ hạn chờ cứng khi chờ Socket: await CHÍNH promise của nó
+
+### 47.1 Bản 1.92.14 chưa đủ tốt ở đâu
+
+`waitSocketsReadyForSend(targets, 4000)` đã là "chờ theo điều kiện" (thức bằng `softNotify('sock-sync')`,
+lưới 250 ms), **không phải sleep mù**. Nhưng vẫn có 2 chỗ đáng chê:
+
+1. **Con số 4 000 ms là do tôi chọn**, không đo từ đâu. Nếu máy chậm cần 4,5 s thì lô vẫn rơi vào Ext;
+   nếu máy nhanh 0,4 s thì không sao (vì thức sớm) nhưng con số vẫn vô nghĩa.
+2. Hết 4 s mà chưa sync thì **mất trắng 4 s** rồi mới chạy.
+
+### 47.2 Cách đúng: không chờ "một khoảng", chờ ĐÚNG cái đang chạy
+
+`warmUpSockets()` đã tạo `socketWarmPromises[pid]` — promise resolve **đúng lúc** `initSocket()` xong
+và đã đi qua `waitForSocketSynced(h, pid, 2500)`, sau đó tự xoá khỏi map. Nghĩa là **đã có sẵn một
+tín hiệu chính xác**; việc của ta chỉ là `await` nó:
+
+```js
+const waits = pending.map((pid) => {
+  const warm = socketWarmPromises[pid];
+  if (warm && typeof warm.then === 'function') return Promise.resolve(warm);
+  return waitForSocketSynced(h, pid);   // cùng hạn sync mà toàn bộ code đang dùng (2 500 ms)
+});
+await Promise.race([Promise.all(waits), guard, stopSignal()]);
+```
+
+- Socket sync lúc 0,4 s ⇒ chờ 0,4 s. Sync lúc 3,1 s ⇒ chờ 3,1 s. **Không có mốc nào do người viết chọn.**
+- Mạng hỏng ⇒ promise tự bỏ cuộc theo hạn sync có sẵn (2,5 s), không phải theo số tôi bịa.
+- `SOCK_SYNC_HANG_GUARD_MS = 8 000` **chỉ là lưới chống treo** (`initSocket` không bao giờ trả về),
+  không phải hạn chờ tối ưu; bắn ra log `⚠ Socket không báo sync sau 8000ms (initSocket treo)`.
+- Bấm ⏹ Dừng là thoát ngay (`stopSignal()` trong race).
+
+### 47.3 Trả lời thẳng: "cách hiện tại đã ổn chưa?"
+
+| | 1.92.14 (4 s) | 1.92.15 (promise) |
+|---|---|---|
+| thức khi nào | quét 250 ms + softNotify | **đúng lúc promise resolve** |
+| con số tự đặt | 4 000 ms | không có (chỉ lưới treo 8 s) |
+| mất thời gian khi sync hỏng | 4 000 ms | 2 500 ms (hạn sync có sẵn) |
+| ảnh hưởng lô ≤ 50 chat | không (có gate) | không (giữ gate) |
+
+Điều **vẫn còn phải chờ** — và không thể tránh — là bản chất: `isPageSocketReady()` chỉ đúng khi
+socket đã sync. Muốn cả lô đi Socket thì phải đợi đúng việc đó; giờ chỉ còn đợi **đúng bằng thời gian
+nó cần**, không hơn một nhịp.
