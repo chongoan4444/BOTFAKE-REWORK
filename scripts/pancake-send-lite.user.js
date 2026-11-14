@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.3-w200.45
+// @version      1.92.4-w200.46
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.3-W200.45'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.4-W200.46'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5499,8 +5499,29 @@
           logLine('🐢 Socket no-ACK lặp ' + SOCKET_LANE_NOACK_BACKOFF_THRESHOLD + ' lần — giảm lane page ' + pid + ' xuống ' + next + '.');
         }
       } else if (kind === 'ok' || kind === 'rejected') {
-        ctl.fastOk = 0;
-        ctl.noAckStreak = 0;
+        // [v1.92.4] LÀN SOCKET BỊ KHOÁ Ở SÀN — tìm ra cơ chế từ lô 09:44 (3 653 chat, 1.92.3):
+        //   peak Socket/page active 384/384 · waiting 192/192  (làn ĐÃ lên tới 384)
+        //   Socket/page limits cuối [64×1]                     (nhưng kết thúc ở SÀN 64!)
+        //   ACK OK/rejected 2 311/1 261 · buckets 1-2s = 2 921 ca (ACK NHANH)
+        // Nguyên nhân: `ctl.fastOk = 0;` chạy cho CẢ 'rejected'. Mỗi ca bị FB từ chối lại xoá
+        // bộ đếm, mà bộ đếm cần 20 ca ACK nhanh mới tăng làn +8 ⇒ trong lô có 35 % ca rejected,
+        // bộ đếm gần như KHÔNG BAO GIỜ đạt 20 ⇒ làn không tăng, chỉ còn các nhịp giảm 0,8×
+        // ⇒ trôi dần về sàn 64 và nằm đó. Đó là lý do phát lệnh bị chặn ở ~37 tin/s dù ACK
+        // trung bình chỉ 1 448 ms (lý thuyết 384 ÷ 1,45 ≈ 265 tin/s).
+        // Nay: 'rejected' KHÔNG xoá bộ đếm; và nếu FB trả lời nhanh (<2 500 ms) thì tính luôn
+        // là một ca tốt — vì nó chứng minh kênh ACK đang sống, khác hẳn no-ACK.
+        if (kind === 'rejected' && ms < 2500) {
+          ctl.fastOk++;
+          ctl.noAckStreak = 0;
+          noteAckLatency(ms);
+          if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX) {
+            ctl.fastOk = 0;
+            lane.setLimit(lane.getLimit() + 8);
+          }
+        } else {
+          if (kind === 'ok') ctl.fastOk = 0;
+          ctl.noAckStreak = 0;
+        }
         if (ms >= 6000) {
           ctl.slowAck++;
           if (ctl.slowAck >= SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD && lane.getLimit() > socketLaneFloor) {

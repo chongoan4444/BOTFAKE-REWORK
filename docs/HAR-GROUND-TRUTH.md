@@ -832,3 +832,46 @@ Request **không có** `/ls_resp`: guikhachcu 3 · batmesss 1 · guisot 1 ⇒ **
 - `batmesss.har` có **11 page** trong một phiên ⇒ nếu shop chạy nhiều page thì token/phiên theo page
   có thể là lý do một số ca API trả `#551`/`#10` trong khi Ext/Socket gửi được. Chưa có bằng chứng
   trực tiếp, KHÔNG sửa gì dựa trên giả thuyết này.
+
+## §30 — Lô 09:44 (3 653 chat) + 09:45: làn Socket bị khoá ở sàn
+
+### 30.1 Số liệu
+
+| lô | chat | thời gian | chốt | thành công | kênh |
+|---|---|---|---|---|---|
+| 09:44 | 3 653 | 98 s | 37,32/s | 23,61/s | **`[Socket: 2 311]`** |
+| 09:45a | 143 | 6 s | 22,23/s | **22,23/s (100 %)** | `[API: 128 · Socket: 15]` |
+| 09:45b | 17 | 4 s | 4,18/s | **100 %** | `[API: 15 · Socket: 2]` |
+
+```
+📡 SOCKET ACK OK/rejected/no-ACK 2 311/1 261/3 · ACK TB 1 448ms · buckets 1-2s = 2 921
+🌊 peak Socket/page active 384/384 · waiting 192/192 · Socket/page limits cuối [64×1]
+```
+
+### 30.2 Nguyên nhân làn tụt 384 → 64
+
+`noteSocketPageLaneOutcome` tăng làn +8 mỗi **20 ca `fastOk`**, nhưng code cũ xoá `ctl.fastOk = 0`
+cho **cả `rejected`**. Lô có 1 261/3 572 ca bị FB từ chối (35 %) ⇒ bộ đếm liên tục bị xoá,
+**không bao giờ đạt 20** ⇒ làn chỉ nhận các nhịp giảm 0,8×, trôi về sàn 64 và nằm đó.
+Đó là lý do phát lệnh ~37 tin/s dù ACK TB 1 448 ms (lý thuyết 384 ÷ 1,45 ≈ 265 tin/s).
+
+v1.92.4: `rejected` **không** xoá bộ đếm, và nếu FB trả lời < 2 500 ms thì tính là một ca tốt
+(kênh ACK đang sống, khác hẳn no-ACK).
+
+### 30.3 Ext đóng góp 0 tin — hai lô liên tiếp
+
+`[Socket: 2 311]` và `[API: 128 · Socket: 15]`: **không có `Ext:` nào**. Lô 09:44 có
+`Ext quá hạn 225 · kiểm chứng thấy tin 0`, tức 225 ca bị đẩy sang Ext rồi chờ 2,5 s và không
+cứu được ca nào. Chưa đủ để kết luận "Ext vô dụng" (mẫu 2 lô, và Ext chỉ nhận toàn ca Socket
+đã từ chối), nhưng nếu lô sau vẫn 0 thì nên cắt đoạn đuôi này để lấy lại thời gian.
+
+### 30.4 Bất thường CHƯA giải thích: API chậm hơn HAR 50–70 lần
+
+| đo | p50 | TB |
+|---|---|---|
+| HAR `POST …/messages` | **24 ms** | 212 ms |
+| Lô 09:45a (143 chat, API xong 128/128) | — | **fetch TB 1 766 ms · max 4 686 ms**, queue wait TB 1 330 ms |
+| Lô 09:45b (17 chat) | — | fetch TB 1 320 ms · max 3 876 ms |
+
+Cùng endpoint, cùng cookie, cùng máy. Chưa có lời giải thích có bằng chứng ⇒ **không sửa gì**
+dựa trên nghi ngờ này; chỉ ghi nhận để đo tiếp.
