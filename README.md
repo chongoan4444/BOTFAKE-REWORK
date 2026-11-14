@@ -24,6 +24,11 @@ extension/                        # code tiện ích (service worker, content sc
 
 scripts/
   pancake-send-lite.user.js       # TOÀN BỘ logic gửi trong tab Pancake (panel, quét list, Wave 200)
+                                  #   ↳ BẢN GỐC: dùng để tinh chỉnh, log đầy đủ (SOCKET/API/WAVE/globalId)
+  pancake-send-stable.user.js     # BẢN ỔN ĐỊNH cho người dùng cuối — sinh từ bản gốc:
+                                  #   • KHÔNG nhớ/lọc chat gửi lỗi (không có "danh sách đen")
+                                  #   • có công tắc "TAB:" trên tiêu đề panel (mặc định TẮT gửi bằng Tab)
+                                  #   • log cuối gọn: chỉ còn dòng tổng kết (✅/❌/⚠/thời gian)
 
 tools/
   build.mjs                       # đồng bộ version + kiểm tra + đóng gói zip/crx
@@ -48,6 +53,22 @@ Developer mode → **Load unpacked** → chọn đúng folder chứa `manifest.j
 
 Folder này **sinh tự động** từ mã nguồn: đừng sửa trực tiếp trong đó, sửa ở nguồn rồi chạy
 `npm run build`. `npm run check` sẽ cảnh báo nếu folder phát hành bị lệch so với nguồn.
+
+## Hai bản script
+
+| | `pancake-send-lite.user.js` | `pancake-send-stable.user.js` |
+|---|---|---|
+| dành cho | người tinh chỉnh theo log | người dùng cuối |
+| nhớ chat lỗi | ✅ có (tự bỏ chọn lần sau) | ❌ **bỏ hẳn** — không lọc gì |
+| phím Tab | luôn bật (bấm Tab = Chạy) | **công tắc `TAB:`** trên panel, mặc định TẮT |
+| log cuối | 📊 + ⚡TỐC ĐỘ + 🌊WAVE + 📡SOCKET + 🌐API + 🧭globalId | **chỉ 📊 tổng kết** |
+| version hiển thị | `1.92.15-W200.57` | `1.92.15-STABLE` |
+
+`scripts/pancake-send-stable.user.js` được sinh từ bản gốc bằng một loạt thay đổi có đánh dấu
+`[STABLE]` — muốn sửa logic gửi thì **sửa bản gốc rồi sinh lại bản ổn định**, đừng sửa tay hai nơi.
+
+Cài **một trong hai** là đủ. Nếu vô tình cài cả hai, chúng tự nhường nhau (bản nào nạp trước
+thắng, bản sau tự tắt) nên **không bao giờ có hai bộ cùng gửi** trong một tab.
 
 ## Build & phát hành
 

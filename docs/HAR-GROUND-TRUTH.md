@@ -1897,3 +1897,30 @@ await Promise.race([Promise.all(waits), guard, stopSignal()]);
 Điều **vẫn còn phải chờ** — và không thể tránh — là bản chất: `isPageSocketReady()` chỉ đúng khi
 socket đã sync. Muốn cả lô đi Socket thì phải đợi đúng việc đó; giờ chỉ còn đợi **đúng bằng thời gian
 nó cần**, không hơn một nhịp.
+
+## §48 — Bản ổn định cho người dùng (`scripts/pancake-send-stable.user.js`)
+
+Sinh từ bản gốc `scripts/pancake-send-lite.user.js` bằng bộ thay đổi có đánh dấu `[STABLE]`
+(không sửa tay hai nơi — sửa bản gốc rồi sinh lại). Khác biệt **đúng 22 điểm**, tất cả đều
+một chiều, không đụng vào đường gửi/nhịp/làn:
+
+| # | thay đổi | lý do |
+|---|---|---|
+| 1 | `@name/@namespace/@version/@description` riêng (`1.92.15-stable`) | hai bản cài song song được, phân biệt rõ |
+| 2 | `PANEL_ID = 'ssb-root-stable'`, `APP_VERSION = '1.92.15-STABLE'` | panel không đè nhau |
+| 3 | **cờ chống gửi trùng**: nếu bản gốc đang chạy → tự tắt; nếu nó chạy trước → **chiếm luôn** `__BOTFAKE_TAB_CLIPBOARD_ACTIVE__` để bản gốc cũng tự tắt | trong 1 tab luôn chỉ có MỘT bộ gửi |
+| 4 | `isRememberedUnavailable()` → `return false` | **bỏ lọc chat lỗi**: không chat nào bị loại khỏi danh sách |
+| 5 | `rememberConfirmedSocketUnavailable()` → `return false` | **bỏ lưu** ID lỗi vào localStorage (không còn "danh sách đen" tích luỹ) |
+| 6 | nút `🧹 Xóa nhớ lỗi` ẩn (`display:none`) | khỏi hiện nút vô dụng |
+| 7 | thêm `state.tabSend` (mặc định **TẮT**, nhớ qua `ssb_tab_send_on`) + nút `TAB: BẬT/TẮT` trên tiêu đề + chặn ở `onKeydown` | người mới bấm Tab để chuyển ô sẽ **không vô tình gửi** |
+| 8 | `logDiag()` cho 6 dòng chẩn đoán (`GHI NHỚ LỖI`, `TỐC ĐỘ`, `WAVE`, `SOCKET`, `API NỀN`, `Chẩn đoán globalId`) với `DIAG_LOGS = !IS_STABLE_BUILD` | **log cuối chỉ còn dòng tổng kết** `📊 TỔNG HỢP CHỐT LƯỢT GỬI` |
+
+Giữ nguyên 100 %: Wave 200, làn Socket/Ext/API, soft-wait, chống trùng (`acquireOutbound`,
+`sockFiredPending`), kiểm chứng nền chỉ nâng ⚠→✅, bù 1 lần/kênh, `waitSocketsReadyForSend`.
+
+Ghi chú kỹ thuật:
+- `logDiag` khai báo **trước** `logLine` nhưng gọi hàm khai báo (hoisting) — không lỗi.
+- `DIAG_LOGS` là `const` trong IIFE, `logDiag` đọc qua closure.
+- `state.tabSend` khởi tạo bằng IIFE `try/catch` quanh `localStorage` (chế độ chặn cookie vẫn chạy).
+- `npm run build` copy **cả hai** script vào `release/botfake-ext/scripts/` (14 file); `manifest.json`
+  vẫn chỉ nạp bản gốc làm content script — bản ổn định là file userscript độc lập, cài qua Tampermonkey.
