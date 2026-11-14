@@ -69,6 +69,7 @@ Cả hai folder **sinh tự động** từ mã nguồn: đừng sửa trực ti�
 |---|---|---|
 | dành cho | người tinh chỉnh theo log | người dùng cuối |
 | nhớ chat lỗi | ❌ **không còn** (đã xoá hẳn 1.92.21) | ❌ không có |
+| chạy nền (thu nhỏ cửa sổ) | ✅ **đồng hồ trong Web Worker** (1.92.22) | ✅ cùng code |
 | phím Tab | **công tắc `TAB:`** trên panel, mặc định **BẬT** (bấm Tab = Chạy) | cùng công tắc đó, mặc định **TẮT** |
 | log cuối | 📊 + ⚡TỐC ĐỘ + 🌊WAVE + 📡SOCKET + 🌐API + 🧭globalId | **chỉ 📊 tổng kết** |
 | version hiển thị | `1.92.20-W200.62` | `1.92.20-STABLE` |

@@ -2234,3 +2234,69 @@ Khối bị xoá dài **105 dòng**, file gốc 10 840 → 10 735 dòng. `grep` 
 - Khoá cũ trong localStorage của người đã dùng bản trước **vẫn nằm đó** (script không đọc nữa).
   Muốn dọn sạch: DevTools → Application → Local Storage → xoá các khoá bắt đầu bằng
   `SSB_CONFIRMED_UNAVAILABLE_CONV_ID_V1:`.
+
+## §56 — CHẠY NỀN: đồng hồ trong Web Worker (1.92.22)
+
+### 56.1 Vì sao bản trước tụt tốc khi thu nhỏ cửa sổ
+
+| giai đoạn | điều kiện | timer còn lại |
+|---|---|---|
+| bình thường | tab hiện, hoặc có âm thanh thật trong 30 s | đúng hẹn, sàn 4 ms |
+| throttled | tab ẩn < 5 phút (hoặc chuỗi timer < 5) | **1 lần/giây** |
+| intensive | ẩn > 5 phút + chuỗi timer ≥ 5 + im lặng | **1 lần/phút** |
+
+WebSocket **không** được miễn (chỉ âm thanh thật và WebRTC được miễn) — nên việc Pancake có
+socket chạy không cứu được gì. Đối chiếu với đường gửi của script:
+
+| chỗ chờ | tab hiện | tab ẩn (bản ≤ 1.92.21) |
+|---|---|---|
+| `paceSocketPublish` (nhịp 4 ms/page) | 250 tin/s mỗi page | **~1 tin/s mỗi page** |
+| `nextFrame()` (1 lần MỖI TIN) | ~16 ms | **~1 000 ms mỗi tin** |
+| cổng wave (`setInterval` 60 ms) | 60 ms | 1 000 ms mỗi wave |
+| đồng hồ soát tin nền (5 s) | 5 s | 60 s (⇒ chốt ⚠ oan/trễ đuôi) |
+| hạn chờ ACK Socket | `ackWaitMs` | 60 s ⇒ kết quả không chốt, lane kẹt |
+
+### 56.2 Đã làm (1.92.22)
+
+**`bgClock`** — module nhỏ ngay sau `sleep`: tab **ẩn** thì mọi chỗ chờ đi qua `setTimeout`
+**trong Web Worker** (Worker timer không bị bóp); tab **hiện** vẫn dùng `setTimeout` gốc
+(chính xác nhất, không tốn IPC). Worker chỉ báo "đã tới giờ" — **không gửi, không quyết định
+gì** ⇒ không thể sinh tin trùng. API: `wait(ms)` · `after(ms, fn)→huỷ` · `every(ms, fn)→dừng`.
+
+Đã chuyển sang `bgClock`: `sleep`, `sleepUntil` (⇒ mọi `sleepUntil` trong file), `nextFrame`
+(tab ẩn trả về NGAY — không có chu kỳ phím nào để chờ), nhịp phát Socket, `wsPoll` dò gid,
+cổng wave, đồng hồ soát tin nền 5 s, **hạn chờ ACK Socket**, hạn chờ Extension trả gid,
+nhịp "nguội" bắn lại Socket, hẹn bù (`buRetryTimer`), mốc mềm Extension, kiểm chứng sau
+Socket/Ext, kiểm chứng "không rõ kết quả", hạn `fetch` (abort) và `fetchT`.
+
+Thêm 2 lớp chống Chrome đóng băng tab: **Web Lock** giữ suốt lượt (Energy Saver không đóng
+băng trang đang giữ lock) và **âm thanh giữ tab tỉnh** có sẵn — nay nếu Chrome chặn phát âm
+thì tự thử `resume()` ở cú click/bấm phím kế tiếp thay vì bó tay.
+
+### 56.3 Cách đọc dòng mới
+
+Cuối mỗi lượt có dòng:
+
+```
+🫥 CHẠY NỀN: đồng hồ Worker ✓ (không bị bóp) · tab ẩn 87% số lần chờ · bị bóp 0 lần · không trễ thêm
+```
+
+- **`Worker ✓`** = đang chạy đúng cơ chế mới. `setTimeout (máy chặn Worker)` = CSP chặn Blob
+  worker ⇒ quay lại đường cũ, phải giữ cửa sổ Pancake phía trước.
+- **`bị bóp N lần`** = số lần một chỗ chờ ngắn (< 900 ms) thực tế kéo dài ≥ 900 ms — đây là
+  con số ĐO ĐƯỢC của việc bị Chrome bóp, không phải suy đoán. Tab hiện thì luôn 0.
+
+### 56.4 Những gì KHÔNG thể cứu từ userscript
+
+| tình huống | userscript có cứu được? |
+|---|---|
+| Thu nhỏ cửa sổ / chuyển sang tab khác | ✅ đã cứu (Worker clock) |
+| Cửa sổ bị che bởi cửa sổ khác nhưng không thu nhỏ | ✅ Chrome coi là "visible" — vốn đã không bị bóp |
+| Chrome Memory Saver / Energy Saver đóng băng tab | ⚠ đỡ bằng Web Lock, không tuyệt đối |
+| Máy sleep / gập laptop / tắt màn hình | ❌ không (cần Wake Lock mà spec tự nhả khi tab ẩn) |
+| Đóng tab, đóng Chrome, kill trình duyệt | ❌ không — cần extension/service worker thật |
+| Điện thoại khoá màn hình | ❌ không (hệ điều hành treo tab) |
+
+Cách chạy nền chắc ăn nhất mà không phải sửa code: **mở Pancake ở một cửa sổ riêng, không
+thu nhỏ** (che khuất vẫn tính là hiện). Nếu quen thu nhỏ: bản 1.92.22 giữ được tốc độ bằng
+Worker; thêm `chrome://settings/performance` → tắt Memory Saver cho trang này nếu máy yếu.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.21-stable
+// @version      1.92.22-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -72,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.21-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.22-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -142,15 +142,13 @@
                             // để nút "↺ Chọn lại list vừa gửi" chọn lại y nguyên mà KHÔNG phải tải danh sách
   };
 
-  /* [v1.92.21] ĐÃ XOÁ HẲN CƠ CHẾ "NHỚ CHAT LỖI".
+  /* [v1.92.21] ĐÃ XOÁ HẲN CƠ CHẾ "NHỚ CHAT LỖI" — kể cả hai hàm stub (v1.92.22 xoá nốt).
    * Trước đây mỗi ID bị Socket xác nhận rejected được ghi thành một khoá localStorage, lượt
    * sau tự bỏ tick những ID đó (lô 20:28 ghi thêm 2 047 ID, phải có nút dọn tay). Nay:
    *   • KHÔNG lưu gì vào localStorage, KHÔNG lọc gì khi tải/chọn danh sách;
    *   • danh sách bạn tick là ĐÚNG những chat sẽ được gửi — không có "danh sách đen" ngầm;
    *   • khoá cũ của bản trước (nếu còn) chỉ là rác, script không đọc nữa.
-   * Hai hàm dưới giữ nguyên tên để mọi chỗ gọi cũ không phải sửa, nhưng vô hiệu hoàn toàn. */
-  function isRememberedUnavailable() { return false; }
-  function rememberConfirmedSocketUnavailable() { return false; }
+   * Không còn hàm ghi nhớ/đọc nhớ nào — mọi chỗ từng gọi đã bị xoá cùng. */
 
   try {
     const savedMode = localStorage.getItem(MSG_MODE_KEY);
@@ -173,7 +171,119 @@
   const $ = (sel, root) => (root || document).querySelector(sel);
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   const norm = (s) => (s || '').normalize('NFC').replace(/\s+/g, ' ').trim();
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  /* ═══ [v1.92.22] ĐỒNG HỒ CHẠY NỀN — timer trong Web Worker ═════════════════════
+   * Sự thật của Chrome (không phải phỏng đoán):
+   *   • Tab ẩn  ⇒ setTimeout/setInterval bị bóp còn ~1 lần/GIÂY.
+   *   • Ẩn > 5 phút + chuỗi timer ≥ 5 lần + im lặng ⇒ còn 1 lần/PHÚT.
+   *   • WebSocket KHÔNG được miễn (chỉ tab phát âm thanh thật và WebRTC được miễn).
+   * Hệ quả với script này khi thu nhỏ cửa sổ: nhịp phát Socket 4 ms → ~1 000 ms (250 tin/s
+   * mỗi page tụt còn ~1 tin/s), nextFrame 34 ms → ~1 000 ms MỖI TIN, cổng wave 60 ms →
+   * ~1 000 ms mỗi wave, đồng hồ soát tin nền 5 s → 60 s.
+   * Timer trong Worker KHÔNG bị bóp ⇒ tab ẩn thì mọi chỗ chờ đi qua Worker; tab hiện thì vẫn
+   * dùng setTimeout gốc (chính xác nhất, không tốn thêm IPC). Worker chỉ báo "đã tới giờ",
+   * KHÔNG gửi, KHÔNG quyết định gì ⇒ không thể tạo tin trùng.
+   */
+  const bgClock = (() => {
+    let worker = null;
+    let blocked = false;        // CSP chặn Blob worker ⇒ quay về setTimeout
+    let seq = 0;
+    const pending = new Map();
+    const st = { waitHidden: 0, waitVisible: 0, clampHits: 0, lateHits: 0, extraMs: 0, maxExtraMs: 0, warned: false };
+    const hidden = () => { try { return !!document.hidden; } catch (e) { return false; } };
+    function boot() {
+      if (worker || blocked) return worker;
+      try {
+        const src = 'onmessage=function(e){var d=e.data||{};setTimeout(function(){postMessage(d.i)},d.ms>0?d.ms:0)}';
+        const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+        worker = new Worker(url);
+        worker.onmessage = (e) => {
+          const fn = pending.get(e.data);
+          if (!fn) return;
+          pending.delete(e.data);
+          try { fn(); } catch (e0) { /* ignore */ }
+        };
+        worker.onerror = () => {
+          blocked = true;
+          const w = worker;
+          worker = null;
+          try { w.terminate(); } catch (e0) { /* ignore */ }
+          const rest = Array.from(pending.values());
+          pending.clear();
+          rest.forEach((fn) => { try { fn(); } catch (e1) { /* ignore */ } });
+        };
+        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e0) { /* ignore */ } }, 2000);
+      } catch (e) { blocked = true; worker = null; }
+      return worker;
+    }
+    /** Chờ ms. Tab ẩn ⇒ Worker (không bị bóp). Tab hiện ⇒ setTimeout gốc. */
+    function wait(ms) {
+      const d = Math.max(0, Math.round(Number(ms) || 0));
+      if (!d) return Promise.resolve();
+      const hide = hidden();
+      if (hide) st.waitHidden++; else st.waitVisible++;
+      return new Promise((resolve) => {
+        const t0 = Date.now();
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          const real = Date.now() - t0;
+          const extra = Math.max(0, real - d);
+          if (hide && extra > 60) {
+            st.extraMs += extra;
+            if (extra > st.maxExtraMs) st.maxExtraMs = extra;
+            if (d < 900 && real >= 900) st.clampHits++; else if (extra > 400) st.lateHits++;
+            if (!worker && !st.warned) {
+              st.warned = true;
+              logLine('⚠ Tab ẩn bị Chrome bóp đồng hồ (xin ' + d + ' ms → thực ' + real
+                + ' ms) mà máy chặn Web Worker — giữ cửa sổ Pancake phía trước để chạy hết tốc.');
+            }
+          }
+          resolve();
+        };
+        if (!hide) { setTimeout(done, d); return; }
+        const w = boot();
+        if (!w) { setTimeout(done, d); return; }
+        const id = ++seq;
+        pending.set(id, done);
+        try { w.postMessage({ i: id, ms: d }); } catch (e) { pending.delete(id); setTimeout(done, d); }
+      });
+    }
+    /** Hẹn 1 lần, trả hàm huỷ (thay setTimeout ở đường gửi). */
+    function after(ms, fn) {
+      let cancelled = false;
+      wait(ms).then(() => { if (!cancelled) { try { fn(); } catch (e) { /* ignore */ } } });
+      return () => { cancelled = true; };
+    }
+    /** Lặp mỗi ms (thay setInterval ở đường gửi). Trả hàm dừng. */
+    function every(ms, fn) {
+      let stopped = false;
+      const tick = () => {
+        if (stopped) return;
+        try { fn(); } catch (e) { /* ignore */ }
+        if (stopped) return;
+        wait(ms).then(tick);
+      };
+      wait(ms).then(tick);
+      return () => { stopped = true; };
+    }
+    function reset() {
+      st.waitHidden = 0; st.waitVisible = 0; st.clampHits = 0; st.lateHits = 0;
+      st.extraMs = 0; st.maxExtraMs = 0; st.warned = false;
+    }
+    function describe() {
+      const total = st.waitHidden + st.waitVisible;
+      const hidPct = total ? Math.round((st.waitHidden * 100) / total) : 0;
+      const clock = worker ? 'Worker ✓ (không bị bóp)'
+        : (blocked ? 'setTimeout (máy chặn Worker)' : 'setTimeout (chưa cần Worker)');
+      return 'đồng hồ ' + clock + ' · tab ẩn ' + hidPct + '% số lần chờ'
+        + ' · bị bóp ' + st.clampHits + ' lần' + (st.lateHits ? ' + trễ ' + st.lateHits + ' lần' : '')
+        + (st.extraMs ? ' · cộng thêm ' + (Math.round(st.extraMs / 100) / 10) + 's'
+          + ' (nặng nhất ' + (Math.round(st.maxExtraMs / 100) / 10) + 's)' : ' · không trễ thêm');
+    }
+    return { wait, after, every, reset, describe };
+  })();
+  const sleep = (ms) => bgClock.wait(ms);
 
   // ═══ [v1.92.9] CHỜ MỀM — thức ngay khi điều kiện đạt, không quét theo nhịp cố định ═══
   // Bối cảnh: bản cũ có 30 chỗ sleep() cố định. Phần lớn là "quét cho tới khi điều kiện đúng"
@@ -216,7 +326,7 @@
   async function sleepUntil(ts, key) {
     const ms = Math.max(0, ts - Date.now());
     if (!ms) return;
-    const waits = [new Promise((r) => setTimeout(r, ms)), stopSignal()];
+    const waits = [bgClock.wait(ms), stopSignal()];
     const w = key ? softWait(key) : null;
     if (w) waits.push(w);
     await Promise.race(waits);
@@ -248,11 +358,15 @@
   }
   /** [v1.92.9] Nhường ĐÚNG một khung hình (thay vì ngủ mù 20 ms). Tab ẩn thì lưới an toàn 34 ms. */
   function nextFrame() {
+    // [v1.92.22] Tab ẩn: rAF KHÔNG chạy, nên bản cũ rơi vào lưới setTimeout(34) — và Chrome bóp
+    // nó thành ~1 000 ms MỖI TIN (thu nhỏ cửa sổ là mỗi tin chậm thêm 1 giây). Tab ẩn thì không
+    // có chu kỳ keydown/keyup nào cần chờ ⇒ trả về ngay; tab hiện vẫn nhường đúng 1 khung hình.
+    try { if (document.hidden) return Promise.resolve(); } catch (e0) { /* ignore */ }
     return new Promise((resolve) => {
       let done = false;
       const fin = () => { if (done) return; done = true; resolve(); };
-      try { if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fin); } catch (e) { setTimeout(fin, 34); return; }
-      setTimeout(fin, 34);
+      try { if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fin); } catch (e) { bgClock.wait(34).then(fin); return; }
+      bgClock.wait(34).then(fin);
     });
   }
 
@@ -289,7 +403,24 @@
   // "đang phát âm" (hiện icon loa + miễn bóp) — gain ≈ 0 thì Chrome coi như im lặng.
   let keepAliveAudio = null;
   let keepAliveLogged = false;
+  // [v1.92.22] Chrome "Energy Saver" có thể ĐÓNG BĂNG tab ẩn sau 5 phút; trang đang giữ một
+  // Web Lock thì được miễn. Giữ lock suốt lượt gửi/quét (tên riêng, không chặn gì khác).
+  let runLockRelease = null;
+  function holdRunLock() {
+    try {
+      if (runLockRelease) return;
+      if (!navigator || !navigator.locks || typeof navigator.locks.request !== 'function') return;
+      navigator.locks.request('ssb-run-' + String((location && location.host) || 'pancake'), () => new Promise((res) => { runLockRelease = res; }))
+        .catch(() => { /* trình duyệt cũ: bỏ qua */ });
+    } catch (e) { /* ignore */ }
+  }
+  function releaseRunLock() {
+    const r = runLockRelease;
+    runLockRelease = null;
+    try { if (r) r(); } catch (e) { /* ignore */ }
+  }
   function startKeepAliveAudio() {
+    holdRunLock();
     try {
       if (keepAliveAudio && keepAliveAudio.ctx && keepAliveAudio.ctx.state !== 'closed') {
         try { keepAliveAudio.ctx.resume(); } catch (e0) { /* ignore */ }
@@ -310,6 +441,13 @@
       setTimeout(() => {
         try {
           if (keepAliveAudio && keepAliveAudio.ctx === ctx && ctx.state !== 'running') {
+            // [v1.92.22] Chính sách autoplay chỉ mở khoá ở thao tác người dùng ⇒ thử lại ngay
+            // ở cú click/bấm phím kế tiếp thay vì bắt người dùng đoán.
+            try {
+              const wake = () => { try { ctx.resume(); } catch (e3) { /* ignore */ } };
+              document.addEventListener('click', wake, { once: true, capture: true });
+              document.addEventListener('keydown', wake, { once: true, capture: true });
+            } catch (e4) { /* ignore */ }
             logLine('⚠ Âm giữ tab chưa chạy (trạng thái: ' + ctx.state + ') — Chrome đang chặn phát âm; bấm vào trang 1 cái rồi gửi tiếp, hoặc giữ tab Pancake ở phía trước.');
           }
         } catch (e2) { /* ignore */ }
@@ -322,6 +460,7 @@
   }
   function stopKeepAliveAudio() {
     if (state.sending || state.scanning) return;
+    releaseRunLock();
     const ka = keepAliveAudio;
     keepAliveAudio = null;
     if (!ka) return;
@@ -812,11 +951,10 @@
     const push = (rawRow) => {
       const r = enrichRowWithRedux(rawRow);
       const old = before.get(r.id);
-      const knownUnavailable = isRememberedUnavailable(r.id);
       list.push({
         ...r,
-        knownUnavailable,
-        checked: knownUnavailable ? false : (old ? old.checked : (r.type !== 'comment')), // ID đã bị Socket xác nhận unavailable luôn để lại, không tự tick
+        knownUnavailable: false,
+        checked: old ? old.checked : (r.type !== 'comment'),
         isTarget: !!markOf(r),
         mark: markOf(r),
       });
@@ -831,11 +969,10 @@
     } else if (state.mode === 'pick') {
       state.matches.forEach((m) => {
         const r = enrichRowWithRedux(m);
-        const knownUnavailable = isRememberedUnavailable(r.id);
         list.push({
           ...r,
-          knownUnavailable,
-          checked: knownUnavailable ? false : (m.checked !== undefined ? m.checked : (r.type !== 'comment')),
+          knownUnavailable: false,
+          checked: m.checked !== undefined ? m.checked : (r.type !== 'comment'),
           isTarget: true,
           mark: m.mark || 'target',
         });
@@ -1224,14 +1361,14 @@
       try {
         // fetch trần KHÔNG tự hết hạn — kết nối treo là await treo theo → chặn toàn bộ lượt gửi
         const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
-        if (ctl) abortTimer = setTimeout(() => ctl.abort(), (reqOpts && reqOpts.timeoutMs) || 15000);
+        if (ctl) abortTimer = bgClock.after((reqOpts && reqOpts.timeoutMs) || 15000, () => ctl.abort());
         const r = await fetch(url, {
           method: isPost ? 'POST' : 'GET',
           body: (isPost && reqOpts.bodyObj) ? buildFormDataFromObj(reqOpts.bodyObj) : undefined,
           credentials: 'include', cache: 'no-store',
           signal: ctl ? ctl.signal : undefined,
         });
-        if (abortTimer) { clearTimeout(abortTimer); abortTimer = null; }
+        if (abortTimer) { try { abortTimer(); } catch (eA2) { /* ignore */ } abortTimer = null; }
         if (r.status === 429 || r.status >= 500) {
           lastErr = 'HTTP ' + r.status;
           if (t < max) { await sleepUntil(Date.now() + 400 * t); continue; }
@@ -1253,7 +1390,7 @@
           }
         }
       } catch (e) {
-        if (abortTimer) clearTimeout(abortTimer);
+        if (abortTimer) { try { abortTimer(); } catch (eA3) { /* ignore */ } }
         lastErr = (e && e.name === 'AbortError') ? 'quá ' + Math.round(((reqOpts && reqOpts.timeoutMs) || 15000) / 1000) + 's chưa phản hồi' : 'Lỗi mạng: ' + (e && e.message || e);
         if (t < max) { await sleepUntil(Date.now() + 400 * t); continue; }
         return { ok: false, error: lastErr };
@@ -2917,7 +3054,7 @@
         if (typeof AbortController !== 'undefined') {
           ctl = new AbortController();
           opts.signal = ctl.signal;
-          abTimer = setTimeout(() => { try { ctl.abort(); } catch (e0) { /* ignore */ } }, 20000);
+          abTimer = bgClock.after(20000, () => { try { ctl.abort(); } catch (e0) { /* ignore */ } });
         }
         const fetchStartedAt = Date.now();
         if (myRun === runSeq) sendDiag.apiFetchAttempts++;
@@ -2930,7 +3067,7 @@
           }
           return response;
         } finally {
-          if (abTimer) clearTimeout(abTimer);
+          if (abTimer) { try { abTimer(); } catch (eA1) { /* ignore */ } }
           if (myRun === runSeq) {
             const fetchMs = Math.max(0, Date.now() - fetchStartedAt);
             sendDiag.apiFetchMsTotal += fetchMs;
@@ -3044,9 +3181,9 @@
   async function fetchT(url, opts, ms) {
     if (typeof AbortController === 'undefined') return fetch(url, opts);
     const ctl = new AbortController();
-    const t = setTimeout(() => { try { ctl.abort(); } catch (e) { /* ignore */ } }, ms || 30000);
+    const t = bgClock.after(ms || 30000, () => { try { ctl.abort(); } catch (e) { /* ignore */ } });
     try { return await fetch(url, Object.assign({}, opts, { signal: ctl.signal })); }
-    finally { clearTimeout(t); }
+    finally { try { t(); } catch (eT) { /* ignore */ } }
   }
 
   // Đúng request mà _app-...js gửi khi nhắn tin thường (executeByApi + buildRequestBody):
@@ -3488,7 +3625,7 @@
     const cleanupRace = (keepPendingForScroll) => {
       settled = true;
       if (wsTimer) { clearTimeout(wsTimer); wsTimer = null; }
-      if (wsPoll) { clearInterval(wsPoll); wsPoll = null; }
+      if (wsPoll) { try { wsPoll(); } catch (eStop) { /* ignore */ } wsPoll = null; }
       if (!keepPendingForScroll) {
         try {
           if (mqtt && mqtt.PENDING_MESSAGES && pKey) {
@@ -3511,7 +3648,7 @@
     const cutWsShort = () => {
       if (!settled && wsResolveRef) {
         if (wsTimer) { clearTimeout(wsTimer); wsTimer = null; }
-        if (wsPoll) { clearInterval(wsPoll); wsPoll = null; }
+        if (wsPoll) { try { wsPoll(); } catch (eStop) { /* ignore */ } wsPoll = null; }
         const late = peekFastGlobalId(full, full, badGid);
         if (late) { saveCache(late); cleanupRace(false); wsResolveRef(String(late)); }
         else { cleanupRace(true); wsResolveRef(null); }
@@ -3542,8 +3679,8 @@
             resolve(String(nowGid));
             return;
           }
-          wsPoll = setInterval(() => {
-            if (settled) { if (wsPoll) { clearInterval(wsPoll); wsPoll = null; } return; }
+          wsPoll = bgClock.every(60, () => {
+            if (settled) { if (wsPoll) { try { wsPoll(); } catch (eStop) { /* ignore */ } wsPoll = null; } return; }
             const hitGid = peekFastGlobalId(full, full, badGid);
             if (hitGid) {
               foundSource = 'ws';
@@ -3552,13 +3689,13 @@
               cleanupRace(false);
               resolve(String(hitGid));
             }
-          }, 60);
+          });
           const pendingExpireTimer = setTimeout(() => {
             try { if (mqtt && mqtt.PENDING_MESSAGES && pKey) delete mqtt.PENDING_MESSAGES[pKey]; } catch (e2) { /* ignore */ }
           }, 30000);
           wsTimer = setTimeout(() => {
             wsTimer = null;
-            if (wsPoll) { clearInterval(wsPoll); wsPoll = null; }
+            if (wsPoll) { try { wsPoll(); } catch (eStop) { /* ignore */ } wsPoll = null; }
             const lateGid = peekFastGlobalId(full, full, badGid);
             if (lateGid) {
               foundSource = 'ws';
@@ -3592,16 +3729,16 @@
         }));
       } else if (typeof mqtt.findGlobalId === 'function') {
         raceTasks.push(new Promise((resolve) => {
-          const timer = setTimeout(() => resolve(null), wsWaitMs);
+          const timer = bgClock.after(wsWaitMs, () => resolve(null));
           Promise.resolve()
             .then(() => mqtt.findGlobalId(pageId, threadId))
             .then((r) => {
-              clearTimeout(timer);
+              timer();
               const val = (r && r.success && r.data && String(r.data) !== badGid) ? String(r.data) : null;
               if (val) { foundSource = 'ws'; saveCache(val); if (ctx) ctx.gidFromServerOrCache = false; cleanupRace(false); }
               resolve(val);
             })
-            .catch(() => { clearTimeout(timer); resolve(null); });
+            .catch(() => { timer(); resolve(null); });
         }));
       }
     }
@@ -3630,7 +3767,7 @@
           resolve(String(hitNow));
           return;
         }
-        const timer = setTimeout(() => {
+        const timer = bgClock.after(extWaitMs, () => {
           if (extSettled) return;
           extSettled = true;
           // Timeout chỉ có nghĩa Extension chưa trả lời kịp — KHÔNG phải "không có
@@ -3639,9 +3776,9 @@
           noteGidExtResult(false, true, Date.now() - extStartedAt);
           cutWsShort();
           resolve(null);
-        }, extWaitMs);
+        });
         const finishExt = (val, source) => {
-          clearTimeout(timer);
+          try { timer(); } catch (eT3) { /* ignore */ }
           const alreadySettled = extSettled;
           extSettled = true;
           const elapsedMs = Date.now() - extStartedAt;
@@ -4105,7 +4242,7 @@
     let myEntry = null;
     const publishPromise = new Promise((resolve) => {
       let done = false;
-      const timer = setTimeout(() => {
+      const timer = bgClock.after(ackWaitMs, () => {
         if (done) return;
         done = true;
         try {
@@ -4115,7 +4252,7 @@
           }
         } catch (e0) { /* ignore */ }
         resolve({ success: false, data: null, timedOut: true });
-      }, ackWaitMs);
+      });
       let publishRet = null;
       try {
         const rid = (typeof sock.requestId === 'number') ? sock.requestId + 1 : null;
@@ -4131,13 +4268,13 @@
         .then((res) => {
           if (done) return;
           done = true;
-          clearTimeout(timer);
+          try { timer(); } catch (eT1) { /* ignore */ }
           resolve(res);
         })
         .catch(() => {
           if (done) return;
           done = true;
-          clearTimeout(timer);
+          try { timer(); } catch (eT2) { /* ignore */ }
           resolve(null);
         });
     });
@@ -4603,10 +4740,7 @@
             // lưu gì (TỔNG HỢP in "người nhận rejected cuối 0" dù có hàng nghìn ca). Hệ quả:
             // lượt sau vẫn gửi tiếp vào đúng những chat chết đó, và trong lượt vẫn retry vô ích.
             // Log thực tế 10k: 3744 lỗi, retry 3302 lần cứu được 0, unavailable ghi nhận 0.
-            if (res && res.recipientUnavailable) {
-              sendDiag.recipientUnavailable++;
-              try { rememberConfirmedSocketUnavailable(conv, res); } catch (e0) { /* ignore */ }
-            }
+            if (res && res.recipientUnavailable) sendDiag.recipientUnavailable++;
             logLine('❌ ' + nm + ' — ' + ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)');
           }
         };
@@ -5908,9 +6042,9 @@
       return Promise.reject(e); // giữ nguyên hành vi cũ: extSendLane bọc thành "Lỗi kênh:"
     }
     let timer = null;
-    const soft = new Promise((resolve) => { timer = setTimeout(() => resolve(EXT_SOFT_MARK), softMs); });
+    const soft = new Promise((resolve) => { timer = bgClock.after(softMs, () => resolve(EXT_SOFT_MARK)); });
     return Promise.race([raw, soft]).then((first) => {
-      if (timer) { clearTimeout(timer); timer = null; }
+      if (timer) { try { timer(); } catch (eS) { /* ignore */ } timer = null; }
       if (first !== EXT_SOFT_MARK) return first; // phản hồi kịp hạn — y như trước
       Promise.resolve(raw).then((late) => {
         const good = !!(late && late.success);
@@ -7124,7 +7258,7 @@
   function noteBgPending(conv, via) {
     if (!conv || !conv.id) return;
     pendingBg[conv.id] = { at: Date.now(), name: conv.name || conv.id, via: via || '' };
-    if (!bgWatchdogTimer) bgWatchdogTimer = setInterval(sweepBgPending, 5000);
+    if (!bgWatchdogTimer) bgWatchdogTimer = bgClock.every(5000, sweepBgPending);
   }
   function clearBgPending(convId) { if (convId) delete pendingBg[convId]; }
   let bgLaneBusyAt = 0;
@@ -7161,7 +7295,7 @@
       updateBatchSummaryUI();
     }
     if (!Object.keys(pendingBg).length && bgWatchdogTimer) {
-      clearInterval(bgWatchdogTimer);
+      try { bgWatchdogTimer(); } catch (e0) { /* ignore */ }
       bgWatchdogTimer = null;
     }
   }
@@ -7268,6 +7402,7 @@
       if (isDoneAll && !batchStats.finalLogged && c.total > 0) {
         batchStats.finalLogged = true;
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
+        logLine('🫥 CHẠY NỀN: ' + bgClock.describe());
         logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total
           + ' tin (' + pct + '%)' + chStr
           + ' | ❌ Lỗi: ' + c.failTotal
@@ -7322,7 +7457,7 @@
           + ' · retry wave ' + (sendDiag.sockWaveRetry || 0)
           + ' · retry lần ' + sendDiag.sockRetry + ' (cứu ' + sendDiag.sockRetryRecovered + ' · rejected '
           + sendDiag.sockRetryRejected + ' · khác ' + sendDiag.sockRetryOther + ') · retry ảnh ' + sendDiag.photoRetry
-          + ' · người nhận rejected cuối ' + sendDiag.recipientUnavailable);
+          + ' · khách không nhận được ' + sendDiag.recipientUnavailable + ' (chỉ đếm, không lưu)');
         logDiag('🌐 API NỀN: queued/started/fetch ' + sendDiag.apiQueued + '/' + sendDiag.apiStarted + '/' + sendDiag.apiFetchAttempts
           + ' · OK/rejected/không rõ ' + sendDiag.apiSuccess + '/' + sendDiag.apiRejected + '/' + sendDiag.apiUnknown
           + ' · HTTP status [' + apiStatuses + '] · 429/retry ' + sendDiag.api429 + '/' + sendDiag.api429Retries
@@ -7477,7 +7612,7 @@
     const delay = hadDirectFail ? (150 + Math.min(buRetrySeq++, 6) * BU_SPREAD_MS) : BU_RETRY_EXT_MS;
     logLine('⏳ ' + name + ' — ' + why + ' — đang bù'
       + (remaining.length > 1 ? ' (Socket/Extension)' : (' qua ' + (remaining[0] === 'ext' ? 'Extension' : 'Socket'))) + '…');
-    buRetryTimer[conv.id] = setTimeout(() => {
+    buRetryTimer[conv.id] = bgClock.after(delay, () => {
       buRetryTimer[conv.id] = null;
       if (myRun !== runSeq) return; // có lượt gửi mới — bù của lượt cũ bỏ (tránh gửi lẫn 2 lượt)
       if (state.stopRequested) {
@@ -7536,13 +7671,10 @@
           logLine('⚠ ' + name + ' — bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
         } else if (r && r.recipientUnavailable && !hasMoreAfterSocket) {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          // [v1.91.77] ĐÂY là nơi tín hiệu "khách không nhận được" xuất hiện nhiều nhất trong
-          // thực tế: Extension trả {"errorDescription":"Người này hiện không có mặt.", "fbErrorCode":…}
-          // (log lượt 11873 tin: 4895 ca, nhưng "GHI NHỚ LỖI: thêm mới 0"). Không lưu ⇒ lượt sau
-          // lại dồn 1/3 danh sách vào đúng những chat này. Nay ghi nhớ ngay tại đây.
-          try {
-            if (rememberConfirmedSocketUnavailable(conv, r)) sendDiag.recipientUnavailable++;
-          } catch (e0) { /* ignore */ }
+          // ĐÂY là nơi tín hiệu "khách không nhận được" xuất hiện nhiều nhất (Extension trả
+          // {"errorDescription":"Người này hiện không có mặt."}). Chỉ ĐẾM cho dòng chẩn đoán —
+          // KHÔNG lưu gì, KHÔNG lọc gì ở các lượt sau (cơ chế nhớ đã bị xoá ở v1.92.21).
+          sendDiag.recipientUnavailable++;
           logLine('❌ ' + name + ' — bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
             + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)');
         } else {
@@ -7556,7 +7688,7 @@
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
         logLine('❌ ' + name + ' — bù lỗi: ' + (e && e.message || e));
       });
-    }, delay);
+    });
   }
 
   // Chốt ❌ KHÔNG bù — dùng cho mọi đường fail NGOÀI lỗi API bị từ chối rõ ràng
@@ -7775,7 +7907,7 @@
         try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
       }
     };
-    setTimeout(() => { enqueueSockVerify(__sockVerifyBody); }, verifyDelay);
+    bgClock.wait(verifyDelay).then(() => { enqueueSockVerify(__sockVerifyBody); });
   }
 
   // KIỂM CHỨNG SAU KHI EXTENSION TIMEOUT: lệnh Ext đã phát đi nhưng adapter
@@ -7810,7 +7942,7 @@
     const left = (typeof roundsLeft === 'number') ? roundsLeft : 1;
     const isRecheck = !!recheck; // lần đọc lại: KHÔNG cộng vào thống kê chốt
     const delayMs = (delayOverride || EXT_VERIFY_DELAY_MS) + Math.floor(Math.random() * 5000); // rải nhịp khi timeout theo cụm
-    setTimeout(async () => {
+    bgClock.wait(delayMs).then(async () => {
       try {
         if (myRun !== runSeq) return;
         if (state.stopRequested) return;
@@ -7868,7 +8000,7 @@
         try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
         try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
       }
-    }, delayMs);
+    });
   }
 
   /* ===== KIỂM CHỨNG CA "KHÔNG RÕ KẾT QUẢ" (API timeout / 5xx / mất mạng) =====
@@ -7890,7 +8022,7 @@
     uncertainVerifyPending[conv.id] = myRun;
     const nm = conv.name || conv.id;
     const sentAt = sentAtMs || Date.now();
-    setTimeout(async () => {
+    bgClock.wait(UNCERTAIN_VERIFY_FIRST_MS).then(async () => {
       try {
         if (myRun !== runSeq || state.stopRequested) return;
         if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
@@ -7949,7 +8081,7 @@
         try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
         try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
       }
-    }, UNCERTAIN_VERIFY_FIRST_MS);
+    });
   }
 
   // Nhóm chat theo NỘI DUNG sẽ gửi: chat thuộc câu nào → ĐÚNG chữ của câu đó;
@@ -8122,6 +8254,7 @@
     startKeepAliveAudio();
     batchSkipApi = false;
     windowBlocked = 0;
+    try { bgClock.reset(); } catch (e0) { /* ignore */ }
     // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
     // bù của lượt trước đang chờ sẽ tự hủy (runSeq) — không gửi lẫn vào lượt mới
     runSeq++;
@@ -8130,7 +8263,8 @@
     Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
     Object.keys(claimedSendIds).forEach((k) => { delete claimedSendIds[k]; });
     Object.keys(outboundLock).forEach((k) => { delete outboundLock[k]; });
-    Object.keys(buRetryTimer).forEach((k) => { try { clearTimeout(buRetryTimer[k]); } catch (e0) { /* ignore */ } delete buRetryTimer[k]; });
+    // [v1.92.22] buRetryTimer giờ giữ HÀM HUỶ (bgClock.after) — gọi là huỷ, không có id số.
+    Object.keys(buRetryTimer).forEach((k) => { try { buRetryTimer[k](); } catch (e0) { /* ignore */ } delete buRetryTimer[k]; });
     sockFiredPending.clear();
     Object.keys(pendingBg).forEach((k) => { delete pendingBg[k]; });
     Object.keys(finalFailedIds).forEach((k) => { delete finalFailedIds[k]; });
@@ -8473,8 +8607,6 @@
       if (r && (r.deferredToExt || r.deferredToSocketRetry)) {
         return r;
       }
-      // Persistent skip is deliberately narrow: only the exact Socket confirmed-unavailable result.
-      rememberConfirmedSocketUnavailable(c, r);
       if (r && r.recipientUnavailable) sendDiag.recipientUnavailable++;
       if (itemOpts && (itemOpts.isSocketRetryPass || itemOpts.isExtBacklogPass)) clearBgPending(c.id);
       const via = r.ok ? (r.sendBy === 'direct' ? ' — gửi thẳng Socket/Ext'
@@ -8648,12 +8780,12 @@
         const waitMs = Math.max(0, coolTargetMs - (Date.now() - firstAt));
         if (waitMs <= 15) { enqueueReadySocketRetry(item); return; }
         pendingSocketCoolCount++;
-        const timerId = setTimeout(() => {
+        const timerId = bgClock.after(waitMs, () => {
           socketCoolTimers.delete(timerId);
           pendingSocketCoolCount = Math.max(0, pendingSocketCoolCount - 1);
           enqueueReadySocketRetry(item);
           checkWakeAllWaiters();
-        }, waitMs);
+        });
         socketCoolTimers.set(timerId, item);
       };
 
@@ -8821,7 +8953,7 @@
             if (Date.now() - waveStartedAt >= 1600 && waveDoneCount >= softGateTarget && inFlightMainCount <= softActiveLimit) openGate();
           };
           waveGateCheckFn = evaluateGate;
-          const gateTimer = setInterval(evaluateGate, 60);
+          const gateTimer = bgClock.every(60, evaluateGate);
           const gatePromise = new Promise((resolve) => { resolveGate = resolve; evaluateGate(); });
 
           const runMainItem = async (c) => {
@@ -8857,7 +8989,7 @@
           }
           try { await gatePromise; }
           finally {
-            clearInterval(gateTimer);
+            try { gateTimer(); } catch (eGate) { /* ignore */ }
             if (waveGateCheckFn === evaluateGate) waveGateCheckFn = null;
           }
           if (waveStart + WAVE_SIZE < fullList.length && !state.stopRequested) {
@@ -8887,7 +9019,7 @@
         mainWavesLoopDone = true;
         if (state.stopRequested) {
           socketCoolTimers.forEach((item, timerId) => {
-            try { clearTimeout(timerId); } catch (e) { /* ignore */ }
+            try { if (typeof timerId === 'function') timerId(); } catch (e) { /* ignore */ }
             if (item && item.c && item.c.id) {
               clearBgPending(item.c.id);
               releaseOutbound(item.c.id);
