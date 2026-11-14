@@ -478,3 +478,27 @@ tin trùng. Log: `🧯 … page có kênh ACK chết ⇒ kiểm chứng rút cò
 **Hướng triệt để còn lại (chưa làm, cần cân nhắc).** "Lô dò": phát 1–2 tin qua Socket trước,
 chờ tối đa ~3 s; nếu không ACK thì đánh dấu chết rồi mới phát phần còn lại qua Ext. Đổi lại:
 mỗi lô trả giá ~3 s cố định, kể cả khi kênh khoẻ.
+
+## §17 — So sánh HAR: HTTP vs Socket, và nút "Toàn bộ qua Ext" (1.91.89)
+
+**Đo trên 12 file HAR, 303 request `POST /pages/{pageId}/conversations/{convId}/messages`:**
+
+| Chỉ số | Giá trị |
+|---|---|
+| Thời lượng p50 | **37 ms** |
+| p90 | 999 ms |
+| TB | 283 ms |
+| max | 6 651 ms |
+| HTTP 200 + `success:true` | 244 |
+| HTTP 200 + `success:false` (`#551` khách vắng) | 35 |
+| HTTP 200 không rõ / status 0 (hủy) | 10 / 14 |
+
+Đối chiếu Socket (log thật): ACK TB **1 507 ms** khi khoẻ, **7 463–8 229 ms** khi kênh ACK chết,
+và khi chết thì **0/74 tin giao được**. Kết luận: HTTP **nhanh hơn** và **dứt khoát hơn**
+(p50 37 ms), Socket chỉ thắng khi cần >48 làn song song ở lô rất lớn.
+
+**Nút mới (1.91.89):** checkbox `🛰 Toàn bộ qua Ext` trên panel (lưu qua F5, khoá
+`localStorage['ssb_force_ext']`, setter `__botfakeForceExt__(true|false)`).
+Bật ⇒ `pickBestDirectOrder` trả `['ext', 'api']` — **bỏ hẳn Socket**, nên:
+không chờ ACK, không có ca `⚠ không rõ`, không vòng kiểm chứng lịch sử.
+API vẫn giữ làm dự phòng khi Ext lỗi (vẫn là HTTP, không phải Socket).

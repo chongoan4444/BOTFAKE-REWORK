@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.88-w200.30
+// @version      1.91.89-w200.31
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.88-W200.30'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.89-W200.31'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5070,6 +5070,21 @@
     const a = ackLatRing.slice().sort((x, y) => x - y);
     return a[Math.min(a.length - 1, Math.floor(a.length * 0.9))];
   }
+  // [v1.91.89] CHẾ ĐỘ GỬI TOÀN BỘ QUA EXTENSION (bật/tắt bằng checkbox "🛰 Toàn bộ qua Ext").
+  // HAR 12 file, 303 request `POST /conversations/{id}/messages`: p50 = 37ms · p90 = 999ms ·
+  // TB = 283ms — nhanh hơn hẳn Socket+ACK (1 500ms khi khoẻ, 7 400–8 200ms khi kênh ACK chết)
+  // và trả kết quả DỨT KHOÁT nên không cần vòng kiểm chứng lịch sử.
+  // Bật ⇒ bỏ hẳn làn Socket (nguồn của mọi ca ⚠ "không rõ" và mọi lần chờ ACK).
+  let forceExtMode = false;
+  try { forceExtMode = localStorage.getItem('ssb_force_ext') === '1'; } catch (e) { /* ignore */ }
+  function setForceExtMode(v) {
+    forceExtMode = !!v;
+    try { localStorage.setItem('ssb_force_ext', forceExtMode ? '1' : '0'); } catch (e) { /* ignore */ }
+    try { logLine((forceExtMode ? '🛰 ĐÃ BẬT' : '🛰 ĐÃ TẮT') + ' chế độ gửi toàn bộ qua Extension'
+      + (forceExtMode ? ' — bỏ hẳn làn Socket (không chờ ACK, không ca ⚠ không rõ).' : ' — quay lại Socket/API như cũ.')); } catch (e) { /* ignore */ }
+    return forceExtMode;
+  }
+  try { window.__botfakeForceExt__ = setForceExtMode; } catch (e) { /* ignore */ }
   const pageLastAckWait = {};   // pageId → hạn chờ vừa dùng cho lần publish gần nhất
   const pageAckTimeoutRun = {}; // pageId → số lần no-ACK đủ hạn chờ liên tiếp
   const pageAckDeadAt = {};     // pageId → thời điểm đánh dấu kênh ACK chết
@@ -5629,6 +5644,11 @@
   function pickBestDirectOrder(conv, pageId, ctx, baseSeq) {
     const seq = (baseSeq || ['ext', 'socket', 'api']).slice();
     if (!conv || conv.type === 'comment') return seq;
+    // [v1.91.89] Chế độ "toàn bộ qua Extension": Ext trước, API dự phòng, KHÔNG dùng Socket.
+    if (forceExtMode) {
+      const extPlan = ['ext'].concat(seq.filter((x) => x !== 'ext' && x !== 'socket'));
+      if (extPlan.length) return extPlan;
+    }
     // [v1.91.86] Kênh ACK của page đã chết ⇒ đừng bắn Socket để rồi chờ hết hạn 8–20s.
     // Chỉ đổi thứ tự làn (bỏ 'socket'), Extension/API vẫn là đường gửi thật như cũ.
     if (pageId && isPageAckDead(pageId)) {
@@ -8640,6 +8660,9 @@
               <label class="hint" style="display:flex;align-items:center;gap:4px;cursor:pointer" title="Bắn API không chờ server xác nhận — nhanh hơn hẳn; chat bị API từ chối rõ ràng sẽ tự bù Socket/Ext trong nền">
                 <input type="checkbox" id="ssb-quick" checked style="accent-color:#22c55e;margin:0"> ⚡ Gửi nhanh
               </label>
+              <label class="hint" style="display:flex;align-items:center;gap:4px;cursor:pointer" title="Gửi MỌI tin qua Extension (HTTP, p50 ~37ms): bỏ hẳn làn Socket nên không phải chờ ACK và không còn ca ⚠ không rõ kết quả. Chậm hơn Socket khi Socket đang khoẻ ở lô rất lớn.">
+                <input type="checkbox" id="ssb-forceext" style="accent-color:#38bdf8;margin:0"> 🛰 Toàn bộ qua Ext
+              </label>
             </div>
           </div>
           <div class="row" style="align-items:center;justify-content:space-between">
@@ -9245,6 +9268,11 @@
         if (g !== null && g !== '' && gapEl) gapEl.value = g;
         const q = localStorage.getItem('ssb_quick');
         if (q !== null && q !== '' && quickEl) quickEl.checked = q !== '0';
+        const feEl = root.getElementById('ssb-forceext');
+        if (feEl) {
+          feEl.checked = forceExtMode;
+          feEl.addEventListener('change', () => { setForceExtMode(feEl.checked); });
+        }
       } catch (e) { /* ignore */ }
       if (waveEl) waveEl.addEventListener('change', () => {
         try { localStorage.setItem('ssb_wave_size_w200_v1', String(waveEl.value)); } catch (e) { /* ignore */ }
