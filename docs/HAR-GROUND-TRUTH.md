@@ -2133,3 +2133,47 @@ tuyệt đối không bắn lại). `replaceOptimsiticMessage` vẫn là bằng 
 - **Ext quá hạn bị phạt 0,6× làn** kể cả khi phản hồi muộn về sau (21 ca "muộn-mà-thành-công" ở
   lô 19:52): sàn `EXT_SEND_MIN 48` chặn thiệt hại; chưa thấy Ext kẹt sàn trong log.
 - **Kiểm chứng Ext chỉ đọc lại 1 lần** (đã cắt từ 3) — giữ nguyên, đúng ý "không hành máy yếu".
+
+## §53 — Lô 12 279 chat (20:28, 1.92.18): thang máy đã đúng chỗ, trần mới là làn 384
+
+### 53.1 Số đo (so với lô 19:52)
+
+| chỉ số | 19:52 (1.92.15) | 20:28 (1.92.18) | Δ |
+|---|---|---|---|
+| số chat | 11 844 | 12 279 | |
+| **phát lệnh** | 42,21/s | **209,23/s** | **×4,96** |
+| chốt sổ | 36,20/s | **66,23/s** | ×1,83 |
+| thành công | 29,23/s | **53,44/s** | ×1,83 |
+| ✅ / mục tiêu thật | 94,4 % | **96,8 %** | +2,4 |
+| Socket/page limits cuối | **[64×1]** | **[384×1]** | trần |
+| ACK TB / no-ACK | 3 163 ms / 459 | **1 383 ms / 1** | no-ACK −99,8 % |
+| Socket bị né (ACK chết) | 2 539 | **0** | hết hẳn |
+| wave→cổng TB/max | 8 663 / 12 580 ms | **1 984 / 3 332 ms** | ÷4,4 |
+| ❌ trừ khách FB xác nhận vắng | 59 | **63** | |
+| ⚠ | 513 | **260** (240 là "muộn-mà-lỗi") | ÷2 |
+
+Ba fix đã trả tiền đúng như dự đoán: (1) §52.A — mẫu ACK không còn bị cắt cụt ⇒ p50/p90 đo được
+**958/1 130 ms** ⇒ làn tăng 64→384; (2) §52.B — payload lỗi không còn bị chốt ✅; (3) 1.92.16 —
+"ACK nhanh" theo p50 đo, cờ ACK-chết dò theo số chat bị né ⇒ 2 539 → 0.
+`no-ACK 459 → 1`: ACK giờ về trong hạn gần như 100 % ⇒ gần như không còn ca phải kiểm chứng.
+
+### 53.2 Cái còn tốn thời gian: 127 s đuôi + 63 ca mất vì thiếu global_id
+
+- **Đuôi 126,7 s** gần như toàn bộ là **2 047 ca bù Extension cho chat FB đã từ chối** — Ext trả
+  "Người này hiện không có mặt" **2 047/2 047 lần**, cứu được **0**. Đây là tiền chuộc của luật
+  "một kênh nữa xác nhận trước khi tuyên bố khách chết", không phải lỗi.
+- **63 ca ❌ còn lại** = đúng nhóm `🧭 lần dò chưa ra 63` / `can_inbox=false 0/63`: không có
+  global_id ⇒ Socket/Ext bất khả; **API không cần gid** (HAR: URL chỉ dùng convId) nhưng lượt này
+  API chỉ chạy 302 request (không có 63 ca cứu) ⇒ đường `🛟` không được gọi ở nhánh wave.
+
+### 53.3 Sửa ở 1.92.19-W200.61 — khôi phục "bắn lại Socket 1 lần" cho đường bắn-nhả
+
+Lô này có **2 307 ca rejected** nhưng dòng 📡 ghi **`retry lần 0`**: `settleSocketResult` trả
+`deferredToSocketRetry` để xin bắn lại 1 lần (thoát burst-reject), nhưng ở đường **bắn-nhả** kết quả
+đi thẳng vào `finalizeSockBg` — nơi **không ai xử tín hiệu đó** ⇒ nó rơi, và ca rejected chuyển
+thẳng sang Ext bù (chính là 2 047 ca ở trên).
+
+Nay: `finalizeSockBg` gặp `deferredToSocketRetry` ⇒ nhả khoá rồi **bắn lại đúng 1 lần qua Socket**
+(`isSocketRetryPass` ⇒ không thể defer lần 2, `socketRetriedOnce` ⇒ không lặp), chạy trên làn riêng
+48 luồng để không chiếm ghế của wave kế tiếp. An toàn: FB đã trả `markOptimisticMessageFailed`
+⇒ tin CHƯA đi, gửi lại không thể trùng. Dòng 📡 in thêm **`retry wave N`** để lần sau đọc là biết.

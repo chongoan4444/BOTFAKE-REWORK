@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.18-stable
+// @version      1.92.19-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -72,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.18-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.19-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4677,6 +4677,18 @@
             logLine('⚠ ' + nm + ' — ' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)');
             return;
           }
+          if (res && res.deferredToSocketRetry && myRun === runSeq && !state.stopRequested) {
+            // [v1.92.19] khôi phục "bắn lại Socket 1 lần" cho đường bắn-nhả (xem chú thích đầu khối)
+            releaseOutbound(conv.id);
+            sendDiag.sockWaveRetry = (sendDiag.sockWaveRetry || 0) + 1;
+            logLine('🔁 ' + nm + ' — Socket bị từ chối lần 1 — bắn lại 1 lần qua Socket (thoát burst-reject)…');
+            const ctx2 = Object.assign({}, res.deferredCtx || {}, {
+              isSocketRetryPass: true, socketRetriedOnce: true,
+              wave200Mode: false, sockFired: true, prioritySocket: true, fastOnly: false,
+            });
+            socketWaveRetryLane(() => sendViaSocket(conv, text, photo, ctx2)).catch(() => { /* finalize của lần 2 tự chốt */ });
+            return;
+          }
           releaseOutbound(conv.id); // FB từ chối / chắc fail → nhả khóa để bù kênh khác (không sót)
           if (res && !res.recipientUnavailable && res.sent === false && (res.error || '') !== 'Đã dừng') {
             // Frame CHƯA HỀ được bắn lên FB (ví dụ Socket không kết nối hoặc lỗi xin fbId ảnh khi retry)
@@ -6109,6 +6121,9 @@
       }
     } catch (e) { releaseExtSendPermit(permit); }
   }
+  // [v1.92.19] Làn riêng cho "bắn lại Socket 1 lần" ở đường bắn-nhả. Không dùng pageLane vì retry
+  // chạy SAU khi wave đã nhả ghế — chen vào đây sẽ chiếm ghế của wave kế tiếp (chậm đều cả lô).
+  const socketWaveRetryLane = makeLane(48);
   const socketLane = makeLane(BUS_PARALLEL_SOCKET);
   const pageSocketLanes = {};
   function getPageSocketLane(pageId) {
@@ -7404,6 +7419,7 @@
           + ' · buckets <250/250-999/1-2s/2-5s/≥5s '
           + sendDiag.socketAckLt250 + '/' + sendDiag.socketAck250To999 + '/' + sendDiag.socketAck1To2s + '/'
           + sendDiag.socketAck2To5s + '/' + sendDiag.socketAckGte5s
+          + ' · retry wave ' + (sendDiag.sockWaveRetry || 0)
           + ' · retry lần ' + sendDiag.sockRetry + ' (cứu ' + sendDiag.sockRetryRecovered + ' · rejected '
           + sendDiag.sockRetryRejected + ' · khác ' + sendDiag.sockRetryOther + ') · retry ảnh ' + sendDiag.photoRetry
           + ' · người nhận rejected cuối ' + sendDiag.recipientUnavailable);
