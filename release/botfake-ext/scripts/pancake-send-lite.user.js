@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.7-w200.49
+// @version      1.92.8-w200.50
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.7-W200.49'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.8-W200.50'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4773,7 +4773,8 @@
         // p50 908ms / p90 1 197ms — 2,5s đã phủ trên p99. Ca quá hạn vẫn đi đúng đường cũ:
         // đánh ⚠ "không rõ", đăng ký kiểm chứng lịch sử nền, KHÔNG BAO GIỜ gửi lại (chỉ nâng
         // ⚠→✅). Rút ngắn thời gian chờ không mở thêm bất kỳ đường gửi trùng nào.
-        return adapter.send(payload, { timeout: extTimeoutMs() }); // [v1.92.6] suy từ p90 đo được
+        // [v1.92.8] giữ chỗ chờ để bắt phản hồi MUỘN thay vì vứt bỏ (xem sendExtWithLateWatch)
+        return sendExtWithLateWatch(adapter, payload, conv, { softMs: extTimeoutMs(), startedAt: extSendStartedAt });
       });
       if (res && res.extBreakerSkipped) {
         releaseExtSendPermit(extSendPermit);
@@ -5725,6 +5726,60 @@
     const p90 = extLatP90();
     const want = p90 > 0 ? p90 * 3 : 7000;
     return Math.min(9000, Math.max(2500, Math.round(want)));
+  }
+
+  // ==== [v1.92.8] BẮT PHẢN HỒI MUỘN CỦA EXTENSION — không thêm một request nào ====
+  // Trong __ExtensionAdapter__.send (@715835 của _app):
+  //   setTimeout(() => { delete this.pendingMessages[taskId]; resolve({success:false,data:null}); }, timeout)
+  // và listener window "message" CHỈ gọi handler khi taskId CÒN nằm trong pendingMessages
+  // ("null!=e.data.taskId&&e.data.taskId in this.pendingMessages").
+  // ⇒ Phản hồi của Extension đến sau mốc timeout bị VỨT BỎ, dù tin đã gửi xong. Đó chính là
+  //   các dòng "⚠ Ext: Extension không phản hồi (quá hạn)" rồi ~20 s sau lại "🔎 tin ĐÃ đến nơi".
+  // Cách sửa: gọi adapter với timeout DÀI để GIỮ CHỖ CHỜ, chỉ await tới mốc mềm extTimeoutMs().
+  // Quá mốc thì nhả làn như cũ và gắn .then() vào chính promise đó: phản hồi muộn về ⇒ nâng
+  // ⚠→✅ NGAY TẠI CHỖ, không cần đọc lịch sử, không gửi lại ⇒ không thể sinh tin trùng.
+  // Giá trị trả về khi quá hạn vẫn là { success:false, data:null } — đúng hình dạng adapter
+  // trả khi hết giờ, nên toàn bộ luồng xử lý phía sau giữ nguyên 100 %.
+  const EXT_ADAPTER_HOLD_MS = 60000;
+  const EXT_SOFT_MARK = { soft: true };
+  const extLateStats = { ok: 0, fail: 0, silent: 0 };
+  function sendExtWithLateWatch(adapter, payload, conv, opt) {
+    const softMs = Math.max(1000, Number(opt && opt.softMs) || 2500);
+    const startedAt = (opt && opt.startedAt) || Date.now();
+    const myRun = runSeq;
+    let raw;
+    try {
+      raw = adapter.send(payload, { timeout: Math.max(EXT_ADAPTER_HOLD_MS, softMs) });
+    } catch (e) {
+      return Promise.reject(e); // giữ nguyên hành vi cũ: extSendLane bọc thành "Lỗi kênh:"
+    }
+    let timer = null;
+    const soft = new Promise((resolve) => { timer = setTimeout(() => resolve(EXT_SOFT_MARK), softMs); });
+    return Promise.race([raw, soft]).then((first) => {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (first !== EXT_SOFT_MARK) return first; // phản hồi kịp hạn — y như trước
+      Promise.resolve(raw).then((late) => {
+        const good = !!(late && late.success);
+        if (!good) {
+          if (late && late.data) extLateStats.fail++; else extLateStats.silent++;
+          return;
+        }
+        extLateStats.ok++;
+        // Extension CÓ trả lời ⇒ nó không chết. Không để chuỗi timeout mở bộ ngắt oan.
+        try { extSendCtl.timeoutStreak = 0; } catch (e) { /* ignore */ }
+        if (myRun !== runSeq) return;
+        if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+        const lateMs = Date.now() - startedAt;
+        try { markDelivered(conv.id, 'ext'); } catch (e) { /* ignore */ }
+        try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
+        try {
+          logLine('✅ (muộn ' + (Math.round(lateMs / 100) / 10) + 's) ' + (conv.name || conv.id)
+            + ' — Extension trả lời SAU mốc quá hạn, tin ĐÃ đi — tính ✅ Ext, không gửi lại, không tốn lượt đọc lịch sử');
+        } catch (e) { /* ignore */ }
+        try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
+      }).catch(() => { extLateStats.fail++; });
+      return { success: false, data: null };
+    });
   }
   function isExtBreakerOpen() {
     return Date.now() < extSendCtl.openUntil;
@@ -6984,6 +7039,8 @@
             : '')
           + ((extTimeoutStats.timeout || extTimeoutStats.skipped || extTimeoutStats.found || extTimeoutStats.notFound || extTimeoutStats.unknown)
             ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy trong lịch sử ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
+              + ' · phản hồi MUỘN (đã tính ✅) ' + extLateStats.ok + ' · muộn-mà-lỗi ' + extLateStats.fail
+              + ' · im lặng hẳn ' + extLateStats.silent
             : '')
           + ' | ⏱ Tổng thời gian: ' + elapsedSec + 's');
         logLine('⚡ TỐC ĐỘ: đã chốt ' + c.settled + '/' + c.total + ' (' + settledPerSec.toFixed(2) + '/giây; '
