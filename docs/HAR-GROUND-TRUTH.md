@@ -663,3 +663,16 @@ giờ gửi lại**) — nên rút ngắn không tạo thêm bất kỳ khả n�
 
 Lưu ý về trần: `peak Ext queue/active 360/128` cho thấy hàng đợi 360 lệnh với 128 active —
 làn Ext không còn là nút cổ chốt duy nhất, mà là băng thông thật của bridge Extension.
+
+## §25 — Trần Extension là thật; trả mặc định về Socket để đo lại (v1.91.99)
+
+Log 09:24 (làn Ext 48–96): `peak Ext queue/active 360/128` + `12,66 tin/s` ⇒ 360 lệnh xếp hàng,
+128 đang bay, mỗi lệnh chiếm làn ~10 giây. **Tăng làn không tăng thông lượng** — bridge
+Extension tuần tự hoá bên trong. Trần quan sát được của Extension qua 6 lô: **~12–21 tin/s**.
+70–100 tin/s **không thể** đạt qua đường Extension.
+
+Vì `ssb_force_ext` BẬT mặc định từ 1.91.92, làn Socket bị bỏ hẳn ⇒ **Socket chưa từng được thử
+trên chat khoẻ**. Mọi dòng `📡 SOCKET: ACK 0/386` trong 6 lô là chat đã chết (chỉ còn lại sau
+khi Ext trượt) — thiên lệch chọn mẫu. v1.91.99 trả `ssb_force_ext` về **TẮT mặc định** để đo lại
+Socket trên chat khoẻ. Socket là kênh của chính Facebook, không qua bridge ⇒ đây là đường duy
+nhất có thể đạt mức hàng nghìn tin/phút.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.98-w200.40
+// @version      1.91.99-w200.41
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.98-W200.40'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.99-W200.41'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5223,11 +5223,20 @@
   // và trả kết quả DỨT KHOÁT nên không cần vòng kiểm chứng lịch sử.
   // Bật ⇒ bỏ hẳn làn Socket (nguồn của mọi ca ⚠ "không rõ" và mọi lần chờ ACK).
   let forceExtMode = false;
-  // [v1.91.92] Mặc định BẬT (chưa từng chỉnh ⇒ coi như bật); người dùng tắt thì lưu '0'.
+  // [v1.91.99] TRẢ MẶC ĐỊNH VỀ TẮT. Lý do — bằng chứng từ 6 lô chạy bật (1.91.92→1.91.98):
+  //   • Extension chưa bao giờ vượt ~20 tin/s: log 09:24 `peak Ext queue/active 360/128` ⇒
+  //     hàng đợi 360, 128 lệnh đang bay, vẫn 12,66 tin/s ⇒ mỗi lệnh chiếm làn ~10s. Bridge
+  //     Extension tuần tự hoá BÊN TRONG nó; tăng làn chỉ làm hàng đợi dài thêm.
+  //   • Vì chế độ này BẬT, làn Socket bị bỏ hẳn ⇒ 6 lô qua Socket chưa từng được thử trên chat
+  //     KHOẺ. Mọi dòng `📡 SOCKET: ACK 0/386` là chat ĐÃ CHẾT (chỉ còn lại sau khi Ext trượt)
+  //     — thiên lệch chọn mẫu, không phải Socket yếu. Người dùng nói rõ: tốc độ ban đầu khi đi
+  //     Socket là mức họ cần (hàng nghìn tin/phút), mà ~20 tin/s của Ext không thể đạt.
+  //   ⇒ Tắt mặc định để đo lại Socket trên chat khoẻ. Bật lại bằng checkbox hoặc
+  //     __botfakeForceExt__(true).
   try {
     const _fe = localStorage.getItem('ssb_force_ext');
-    forceExtMode = (_fe === null || _fe === '') ? true : _fe === '1';
-  } catch (e) { forceExtMode = true; }
+    forceExtMode = _fe === '1'; // chưa từng chỉnh ⇒ TẮT
+  } catch (e) { forceExtMode = false; }
   function setForceExtMode(v) {
     forceExtMode = !!v;
     try { localStorage.setItem('ssb_force_ext', forceExtMode ? '1' : '0'); } catch (e) { /* ignore */ }
@@ -8846,7 +8855,7 @@
                 <input type="checkbox" id="ssb-quick" checked style="accent-color:#22c55e;margin:0"> ⚡ Gửi nhanh
               </label>
               <label class="hint" style="display:flex;align-items:center;gap:4px;cursor:pointer" title="Gửi MỌI tin qua Extension (HTTP, p50 ~37ms): bỏ hẳn làn Socket nên không phải chờ ACK và không còn ca ⚠ không rõ kết quả. Chậm hơn Socket khi Socket đang khoẻ ở lô rất lớn.">
-                <input type="checkbox" id="ssb-forceext" checked style="accent-color:#38bdf8;margin:0"> 🛰 Toàn bộ qua HTTP (API→Ext)
+                <input type="checkbox" id="ssb-forceext" style="accent-color:#38bdf8;margin:0"> 🛰 Toàn bộ qua HTTP (API→Ext)
               </label>
             </div>
           </div>
