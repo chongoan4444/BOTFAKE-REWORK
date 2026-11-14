@@ -1924,3 +1924,74 @@ Ghi chú kỹ thuật:
 - `state.tabSend` khởi tạo bằng IIFE `try/catch` quanh `localStorage` (chế độ chặn cookie vẫn chạy).
 - `npm run build` copy **cả hai** script vào `release/botfake-ext/scripts/` (14 file); `manifest.json`
   vẫn chỉ nạp bản gốc làm content script — bản ổn định là file userscript độc lập, cài qua Tampermonkey.
+
+## §49 — Lô 11 844 chat (19:52, 1.92.15): sửa §45–§46 đã ăn, nút thắt mới là LÀN SOCKET BỊ GHIM Ở 64
+
+### 49.1 Sổ sách
+
+| chỉ số | số |
+|---|---|
+| ✅ | **9 564 (80,7 %)** — API 325 · Ext 769 · **Socket 8 470** |
+| ❌ / ⚠ | 1 767 / 513 |
+| FB unavailable | **1 708** ⇒ mục tiêu 10 136 ⇒ **94,4 %** |
+| **lỗi THẬT** | 1 767 − 1 708 = **59 ca (0,5 %)** |
+| ⏱ | phát 280,6 s · chờ 46,6 s · tổng 327 s |
+| PHÁT / chốt / thành công | **42,21/s** · 36,20/s · 29,23/s |
+| WAVE | 24 wave × 500 · `wave→cổng TB 8 663 / max 12 580 ms` · main active max 192 |
+| Socket | ACK OK/rej/no-ACK **8 470/1 759/459** · TB **3 163** / max 7 096 ms · buckets `0/0/745/9 668/275` |
+| Socket/page | peak active **296/296** · waiting **251/251** · **limits cuối [64×1]** |
+| API | 339 (325 OK) · queue wait TB **2 428** / max 9 310 ms · fetch TB 2 810 · p50 1 734 |
+| chọn kênh | Ext-trước(socket chưa sync) **0** · thiếu gid 58 · **Socket bị né (ACK chết) 2 539** · dò lại ACK chết **5 (hồi 5)** |
+
+### 49.2 Những gì đã đúng
+
+- **Socket sống lại**: 8 470 tin (72 % sản lượng) so với **0** ở lô 15:54. `Ext-trước(socket chưa sync) = 0`
+  ⇒ bước chờ sync đầu lô (§46) lần này không phải chờ ai: socket sẵn sàng trước wave 1.
+- **Không còn ca chết vì Ext tự ngẽn**: `bỏ qua lúc Ext quá tải = 0` (lô trước 1 526).
+- **Lỗi thật 59 ca** (0,5 %) — mọi ca ❌ còn lại là khách FB xác nhận vắng.
+- Tốc độ **29,74 → 42,21 tin/s** (+42 %) trên lô lớn hơn.
+
+### 49.3 Nút thắt mới: làn Socket bị GHIM ở sàn 64
+
+```
+peak Socket/page active 296/296 · waiting 251/251 · limits cuối [64×1]
+ACK TB 3 163 ms · 9 668/10 688 ACK rơi vào 2–5 s
+```
+
+Thông lượng ≈ **làn ÷ thời gian mỗi lệnh**: 64 ÷ ~3,2 s ≈ 20–30 tin/s (đo được 42,21/s toàn lô).
+Làn là mẫu số ⇒ không nâng làn thì không nhanh hơn được.
+
+Vì sao làn KHÔNG THỂ tự nâng — đúng hai dòng code:
+
+```js
+if (kind === 'ok' && ms < 2500) { ctl.fastOk++; ... if (ctl.fastOk >= 20) lane.setLimit(+8); }
+else { if (kind === 'ok') ctl.fastOk = 0; }        // ← ACK ≥ 2,5s XOÁ bộ đếm
+```
+
+- **Đường TĂNG** đòi 20 ACK **< 2 500 ms** liên tiếp. Page này ACK TB **3 163 ms** ⇒ không bao giờ đủ 20.
+- **Đường GIẢM** chỉ cần 2 no-ACK (459 ca ⇒ ~229 nhịp × 0,8) ⇒ tụt thẳng về sàn 64.
+
+Kết quả: chỉ có xuống, không có lên. Đây đúng **cùng một hình xoáy** như §43/§46, chỉ ở tầng khác.
+
+### 49.4 Cái giá của cờ "ACK chết" (đo được, không phải suy đoán)
+
+Cờ bật **5 lần**, mỗi lần dò lại sau tối đa 20 s ⇒ **2 539 chat bị né khỏi làn Socket**
+(≈508 chat/lần), dồn sang Ext (Ext chỉ 48 làn, p90 1 575 ms) hoặc API (queue wait TB 2 428 ms).
+`dò lại ACK chết 5 (hồi 5)` ⇒ cả 5 lần đều hồi ngay khi có 1 ACK — tức cờ này bật **quá nhạy**
+so với thực tế kênh vẫn sống.
+
+### 49.5 Sửa ở 1.92.16-W200.58
+
+1. **Ngưỡng "ACK nhanh" bám số đo**, không còn hằng 2 500 ms:
+   `fastAckMs() = clamp(p50 × 1,2, 2 500…6 000)` — dùng cho cả nhánh `ok` và `rejected`.
+   ACK chậm **bất thường** (≥ 6 000 ms) vẫn bị phạt như cũ ⇒ không mở cửa cho kênh hỏng.
+2. **Dò cờ "ACK chết" theo SỐ CHAT BỊ NÉ** (50) chứ không chỉ theo đồng hồ 20 s ⇒ hư hại tối đa
+   ~50 chat/lần thay vì ~508.
+3. In thêm `ACK p50/p90 → ngưỡng nhanh` vào dòng 🧭 để lần sau đọc là biết, khỏi đoán.
+
+### 49.6 Việc còn để ngỏ
+
+- `ackWaitMs` vẫn bị chặn trần **3 000 ms** trong khi ACK TB 3 163 ms ⇒ 459 no-ACK. Chưa sửa vì
+  bằng chứng cũ (§43: 117 no-ACK, kiểm chứng lịch sử **thấy tin 0**) cho thấy phần lớn no-ACK là
+  mất thật, nới hạn chờ không cứu được tin nào. Sẽ xem lại nếu log sau vẫn ≥ 4 % no-ACK.
+- `wave→cổng 8 663 ms` là hệ quả của làn hẹp (wave chỉ mở khi wave trước thoát ≥ 40 %).

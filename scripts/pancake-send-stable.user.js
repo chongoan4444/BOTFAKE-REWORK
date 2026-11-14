@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.15-stable
+// @version      1.92.16-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -58,7 +58,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.15-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.16-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5354,6 +5354,24 @@
     const a = ackLatRing.slice().sort((x, y) => x - y);
     return a[Math.min(a.length - 1, Math.floor(a.length * 0.9))];
   }
+  function sockAckP50() {
+    if (ackLatRing.length < 20) return 0; // chưa đủ mẫu ⇒ chưa dùng ngưỡng thích ứng
+    const a = ackLatRing.slice().sort((x, y) => x - y);
+    return a[Math.min(a.length - 1, Math.floor(a.length * 0.5))];
+  }
+  /* [v1.92.16] NGƯỠNG "ACK NHANH" PHẢI BÁM SỐ ĐO, KHÔNG ĐƯỢC LÀ HẰNG 2 500 ms.
+   * Lô 19:52 (11 844 chat, 1.92.15): ACK TB 3 163 ms · 9 668/10 688 ACK rơi vào 2–5 s.
+   * Với hằng 2 500 ms thì MỌI ACK của page này đều bị coi là "chậm" ⇒ nhánh else chạy
+   * `if (kind === 'ok') ctl.fastOk = 0` ⇒ bộ đếm KHÔNG BAO GIỜ đạt 20 ⇒ làn không bao giờ tăng;
+   * trong khi 459 no-ACK vẫn cắt làn 0,8× liên tục ⇒ đúng như log: "limits cuối [64×1]"
+   * (ghim ở sàn) dù "waiting 251/251". Làn là mẫu số của thông lượng ⇒ phát lệnh chỉ 42,21/s.
+   * Nay: "nhanh" = không tệ hơn chính nhịp ACK quen thuộc của page (p50 × 1,2), trong [2 500, 6 000].
+   * ACK chậm bất thường (≥6 000 ms) vẫn bị phạt như cũ. */
+  function fastAckMs() {
+    const p50 = sockAckP50();
+    if (!p50) return 2500;
+    return Math.max(2500, Math.min(6000, Math.round(p50 * 1.2)));
+  }
   // [v1.91.92] CHẾ ĐỘ GỬI TOÀN BỘ QUA HTTP — API trước, Ext dự phòng (KHÔNG dùng Socket).
   // HAR (303 request POST /conversations/{id}/messages): 303/303 có `origin: https://pancake.vn`,
   // 0 request mang origin `chrome-extension://`, không có header x-api-key riêng, và 0 lần có
@@ -5408,7 +5426,11 @@
    * đi Socket để dò; ACK về là cờ được xoá ngay (noteSocketPageLaneOutcome 'ok') ⇒ tự hồi. */
   const pageAckDeadProbeAt = {};
   const SOCK_DEAD_PROBE_MS = 20000;
-  const socketPickDiag = { deadSkip: 0, probe: 0, probeOk: 0, notReady: 0, noGid: 0 };
+  // [v1.92.16] Lô 19:52: cờ "ACK chết" bật 5 lần, mỗi lần chỉ được dò lại sau tối đa 20 s ⇒
+  // TỔNG 2 539 chat bị né khỏi làn Socket (≈508 chat/lần) và dồn sang Ext chậm hơn 4 lần.
+  // Nay: dò ngay khi số chat bị né kể từ lần dò trước chạm 50 — hư hại tối đa ~50 chat/lần,
+  // không phụ thuộc đồng hồ.
+  const socketPickDiag = { deadSkip: 0, deadSkipAtProbe: 0, probe: 0, probeOk: 0, notReady: 0, noGid: 0 };
   function isPageAckDead(pid) {
     const at = pageAckDeadAt[pid];
     if (!at) return false;
@@ -5621,7 +5643,7 @@
       if (!lane) return;
       const ctl = socketPageLaneCtl[pid] || (socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0, noAckStreak: 0 });
       const ms = Math.max(0, Number(latencyMs) || 0);
-      if (kind === 'ok' && ms < 2500) {
+      if (kind === 'ok' && ms < fastAckMs()) {
         ctl.fastOk++;
         ctl.slowAck = 0;
         ctl.noAckStreak = 0;
@@ -5692,7 +5714,7 @@
         // trung bình chỉ 1 448 ms (lý thuyết 384 ÷ 1,45 ≈ 265 tin/s).
         // Nay: 'rejected' KHÔNG xoá bộ đếm; và nếu FB trả lời nhanh (<2 500 ms) thì tính luôn
         // là một ca tốt — vì nó chứng minh kênh ACK đang sống, khác hẳn no-ACK.
-        if (kind === 'rejected' && ms < 2500) {
+        if (kind === 'rejected' && ms < fastAckMs()) {
           ctl.fastOk++;
           ctl.noAckStreak = 0;
           noteAckLatency(ms);
@@ -6141,8 +6163,10 @@
     // Chỉ đổi thứ tự làn (bỏ 'socket'), Extension/API vẫn là đường gửi thật như cũ.
     if (pageId && isPageAckDead(pageId)) {
       // [v1.92.13] Dò lại định kỳ thay vì né Socket mù 10 phút (xem chú thích ở PAGE_ACK_DEAD_TTL_MS).
-      if (Date.now() - (pageAckDeadProbeAt[pageId] || 0) >= SOCK_DEAD_PROBE_MS) {
+      const sinceProbe = socketPickDiag.deadSkip - socketPickDiag.deadSkipAtProbe;
+      if (sinceProbe >= 50 || Date.now() - (pageAckDeadProbeAt[pageId] || 0) >= SOCK_DEAD_PROBE_MS) {
         pageAckDeadProbeAt[pageId] = Date.now();
+        socketPickDiag.deadSkipAtProbe = socketPickDiag.deadSkip;
         if (seq.indexOf('socket') > -1) {
           socketPickDiag.probe++;
           return ['socket'].concat(seq.filter((x) => x !== 'socket'));
@@ -7361,6 +7385,7 @@
           + ' · batch nạp ' + gidStats.batchMappings + '/' + gidStats.batchReturned + ' mapping (lỗi ' + gidStats.batchFail + ')'
           + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
           + ' · Ext p90 ' + (extLatP90() || 0) + 'ms → timeout ' + extTimeoutMs() + 'ms'
+          + ' · ACK p50/p90 ' + (sockAckP50() || 0) + '/' + sockAckP90() + 'ms → ngưỡng nhanh ' + fastAckMs() + 'ms'
           + ' · can_inbox=false ' + ((sendDiag && sendDiag.canInboxFalse) || 0) + '/' + ((sendDiag && sendDiag.canInboxSeen) || 0)
            + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
            + ' · chọn kênh: Ext-trước(socket chưa sync) ' + socketPickDiag.notReady
