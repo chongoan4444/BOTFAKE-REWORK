@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.87-w200.29
+// @version      1.91.88-w200.30
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.87-W200.29'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.88-W200.30'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5073,7 +5073,11 @@
   const pageLastAckWait = {};   // pageId → hạn chờ vừa dùng cho lần publish gần nhất
   const pageAckTimeoutRun = {}; // pageId → số lần no-ACK đủ hạn chờ liên tiếp
   const pageAckDeadAt = {};     // pageId → thời điểm đánh dấu kênh ACK chết
-  const PAGE_ACK_DEAD_TTL_MS = 120000; // 2 phút không phục hồi thì thử lại Socket
+  // [v1.91.88] Lô 08:19 (11/11): 74 tin đi Socket, ACK OK = 0, no-ACK = 74, cả 74 phải bù Ext.
+  // 77 chat được PHÁT trong 779ms ⇒ mọi tin đi trước khi ACK đầu tiên kịp mất, nên trong cùng
+  // một wave KHÔNG thể biết trước để né Socket. Giá trị thật của cờ là GIỮ QUA CÁC LÔ: lô sau
+  // biết page đã chết ⇒ đi Ext ngay từ tin đầu. Vì vậy nới TTL 2 phút → 10 phút.
+  const PAGE_ACK_DEAD_TTL_MS = 600000;
   function isPageAckDead(pid) {
     const at = pageAckDeadAt[pid];
     if (!at) return false;
@@ -7067,7 +7071,14 @@
         // vài giây; 'yes' chốt ngay; còn lại giữ ⚠ (không bù).
         let verdict = 'unknown';
         let noStreak = 0;
-        const maxReads = (batchStats && batchStats.total > 50) ? 4 : 3;
+        // [v1.91.88] Page đã đánh dấu kênh ACK chết ⇒ Socket gần như chắc chắn KHÔNG giao được
+        // (lô 08:19: 0/74 tin tới qua Socket). Vẫn phải kiểm chứng để không bù trùng, nhưng
+        // luật "2 lần đọc rỗng liên tiếp" đã đủ ⇒ rút 4 → 2 lần đọc, giảm nửa số request.
+        let maxReads = (batchStats && batchStats.total > 50) ? 4 : 3;
+        let shortVerify = false;
+        try {
+          if (isPageAckDead(pageId)) { maxReads = 2; shortVerify = true; }
+        } catch (e0) { /* ignore */ }
         for (let attempt = 0; attempt < maxReads; attempt++) {
           if (attempt > 0) {
             await sleep(attempt === 1 ? 2000 : (attempt === 2 ? 4000 : 6000));
@@ -7109,6 +7120,9 @@
         }
         if (verdict === 'no') {
           // Đọc lại nhiều lần, mốc nước rỗng liên tiếp → publish chưa hề tới FB (socket chết ngầm)
+          if (shortVerify) {
+            try { logLine('🧯 ' + nm + ' — page có kênh ACK chết ⇒ kiểm chứng rút còn 2 lần đọc'); } catch (e0) { /* ignore */ }
+          }
           verifyStats.fired++;
           sockVerifyFired[conv.id] = myRun;
           reopenUncertain(conv.id);
