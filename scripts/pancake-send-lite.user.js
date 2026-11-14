@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.4-w200.46
+// @version      1.92.5-w200.47
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.4-W200.46'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.5-W200.47'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2735,16 +2735,21 @@
         dimensions: items.map((x) => ({ width: Number(x.w) || 0, height: Number(x.h) || 0 })),
         send_by_platform: 'web',
       };
-      // [v1.91.80] LUÔN gửi cờ này, khớp app thật 52/52 request trong 13 HAR.
-      // Trước đây chỉ gửi khi dr() đánh giá được cửa sổ 7 ngày ⇒ ca không đánh giá được
-      // bị FB trả (#10) oan. Cờ này chỉ là "ghi nhận ctx 7 ngày", app thật không bao giờ bỏ.
-      jsonBody.is_record_ctx_7_days = true;
+      // [v1.92.5] TRẢ VỀ ĐÚNG NHƯ APP — cờ CHỈ gửi khi dr() đúng.
+      // Bằng chứng trực tiếp trong bundle app: `_app-9331d46f21a84eb1.v6.js`
+      //     j = {action:"reply_inbox", ...(N?.body||{})};
+      //     (0, ev.dr)() && (j.is_record_ctx_7_days = !0);   // ← CÓ ĐIỀU KIỆN
+      // v1.91.80 đổi thành LUÔN gửi dựa trên tương quan trong HAR (19 ca thành công đều có cờ),
+      // nhưng đó là nhiễu: 19 ca đó là chat TRONG 24h (dr() đúng sẵn). Bản thân HAR cũng khớp
+      // code app: 24 ca thiếu cờ = chat ngoài cửa sổ. Gửi cờ khi không đủ điều kiện là bịa
+      // thêm dữ liệu server không mong đợi ⇒ trả lại hành vi gốc của app.
+      if (ctx7) jsonBody.is_record_ctx_7_days = true;
       return { url: url, isJson: true, jsonBody: jsonBody, ctx7: ctx7 };
     }
 
     const fd = new FormData();
     fd.append('action', 'reply_inbox');
-    fd.append('is_record_ctx_7_days', 'true'); // [v1.91.80] luôn gửi — xem chú thích nhánh JSON ở trên
+    if (ctx7) fd.append('is_record_ctx_7_days', 'true'); // [v1.92.5] chỉ khi dr() đúng — xem chú thích nhánh JSON
     fd.append('message', text);
     const p0 = items[0] || photo;
     const fbId0 = (p0 && p0.fbId) || (photo && photo.fbId) || (photo && Array.isArray(photo.fbIds) && photo.fbIds[0]) || '';
@@ -5255,10 +5260,14 @@
   //     __botfakeForceExt__(true) trong console cho lần đo đối chứng nếu cần.
   forceExtMode = false;
   function setForceExtMode(v) {
+    // [v1.92.5] KHÔNG ghi localStorage nữa: ô bật/tắt đã bị xoá khỏi panel và `forceExtMode`
+    // được gán cứng = false mỗi lần nạp trang, nên khoá 'ssb_force_ext' ghi ra sẽ không có
+    // ai đọc (đã kiểm: ghi=1, đọc=0). Ghi vào đó chỉ tạo cảm giác "đã lưu" trong khi lần nạp
+    // sau lại bỏ qua. Hàm này giờ chỉ đổi được trong PHIÊN hiện tại, đúng như nó thực sự làm.
     forceExtMode = !!v;
-    try { localStorage.setItem('ssb_force_ext', forceExtMode ? '1' : '0'); } catch (e) { /* ignore */ }
     try { logLine((forceExtMode ? '🛰 ĐÃ BẬT' : '🛰 ĐÃ TẮT') + ' chế độ gửi toàn bộ qua HTTP (API → Ext)'
-      + (forceExtMode ? ' — bỏ hẳn làn Socket (không chờ ACK, không ca ⚠ không rõ).' : ' — quay lại dùng Socket như cũ.')); } catch (e) { /* ignore */ }
+      + (forceExtMode ? ' — bỏ hẳn làn Socket (không chờ ACK, không ca ⚠ không rõ).' : ' — quay lại dùng Socket như cũ.')
+      + ' · chỉ áp dụng cho PHIÊN này (không lưu qua F5).'); } catch (e) { /* ignore */ }
     return forceExtMode;
   }
   try { window.__botfakeForceExt__ = setForceExtMode; } catch (e) { /* ignore */ }
