@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.9-w200.51
+// @version      1.92.10-w200.52
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.9-W200.51'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.10-W200.52'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2992,8 +2992,7 @@
             sendDiag.apiFetchMsTotal += fetchMs;
             sendDiag.apiFetchMsMax = Math.max(sendDiag.apiFetchMsMax, fetchMs);
             const ar = sendDiag.apiFetchSamples;
-            ar.push(fetchMs);
-            if (ar.length > 64) ar.shift();
+            if (Array.isArray(ar)) { ar.push(fetchMs); if (ar.length > 64) ar.shift(); } // [v1.92.10] chống văng cả làn
           }
         }
       };
@@ -7113,6 +7112,13 @@
       const elapsedMs = batchStats.startedAt ? Math.max(1, Date.now() - batchStats.startedAt) : 0;
       const elapsedSec = elapsedMs ? Math.max(1, Math.round(elapsedMs / 1000)) : 0;
       const elapsedExactSec = elapsedMs / 1000;
+      // [v1.92.10] TÁCH 2 CHẶNG: "phát lệnh" (đẩy lệnh đi) vs "chờ xác nhận" (ACK/kiểm chứng nền).
+      // Trước đây chỉ có tổng, nên lô phát xong trong 0,1s mà đuôi kiểm chứng 10s vẫn hiện
+      // "0,39 tin/giây" — đọc thành script chậm, trong khi phát lệnh gần như tức thì.
+      const dispatchEndAt = batchStats.dispatchEndedAt || (batchStats.loopFinished ? Date.now() : 0);
+      const dispatchMs = (dispatchEndAt && batchStats.startedAt) ? Math.max(1, dispatchEndAt - batchStats.startedAt) : 0;
+      const confirmMs = dispatchMs ? Math.max(0, elapsedMs - dispatchMs) : 0;
+      const dispatchPerSec = dispatchMs > 0 ? (c.total / (dispatchMs / 1000)) : 0;
       const settledPerSec = elapsedExactSec > 0 ? c.settled / elapsedExactSec : 0;
       const successPerSec = elapsedExactSec > 0 ? c.okTotal / elapsedExactSec : 0;
       const eligibleAfterUnavailable = Math.max(0, c.total - sendDiag.recipientUnavailable);
@@ -7168,8 +7174,16 @@
               + ' · phản hồi MUỘN (đã tính ✅) ' + extLateStats.ok + ' · muộn-mà-lỗi ' + extLateStats.fail
               + ' · im lặng hẳn ' + extLateStats.silent
             : '')
-          + ' | ⏱ Tổng thời gian: ' + elapsedSec + 's');
-        logLine('⚡ TỐC ĐỘ: đã chốt ' + c.settled + '/' + c.total + ' (' + settledPerSec.toFixed(2) + '/giây; '
+          + (dispatchMs
+            ? ' | ⏱ Phát lệnh ' + (Math.round(dispatchMs / 100) / 10) + 's'
+              + ' · chờ xác nhận ' + (Math.round(confirmMs / 100) / 10) + 's'
+              + ' · tổng ' + elapsedSec + 's'
+            : ' | ⏱ Tổng thời gian: ' + elapsedSec + 's'));
+        logLine('⚡ TỐC ĐỘ: ' + (dispatchMs
+          ? 'PHÁT ' + c.total + ' lệnh trong ' + (Math.round(dispatchMs / 100) / 10) + 's = '
+            + dispatchPerSec.toFixed(2) + '/giây (' + (dispatchPerSec * 60).toFixed(0) + '/phút) · đuôi xác nhận ' + (Math.round(confirmMs / 100) / 10) + 's · '
+          : '')
+          + 'đã chốt ' + c.settled + '/' + c.total + ' (' + settledPerSec.toFixed(2) + '/giây; '
           + (settledPerSec * 60).toFixed(0) + '/phút) · thành công ' + c.okTotal + ' (' + successPerSec.toFixed(2)
           + '/giây; ' + (successPerSec * 60).toFixed(0) + '/phút) · loại chat FB xác nhận unavailable '
           + sendDiag.recipientUnavailable + ' → mục tiêu còn ' + eligibleAfterUnavailable + ', thành công '
@@ -8017,6 +8031,7 @@
     batchStats.skippedPre = 0;
     batchStats.startedAt = Date.now();
     batchStats.loopFinished = false;
+    batchStats.dispatchEndedAt = 0;
     buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
     verifyStats.found = 0; verifyStats.fired = 0; verifyStats.unknown = 0;
     extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
@@ -8025,7 +8040,16 @@
     resetStopSignal(); // [v1.92.9] lượt mới: tín hiệu Dừng phải sống lại
     softNotify('ext-probe');
     resetGidStats();
-    Object.keys(sendDiag).forEach((k) => { sendDiag[k] = k === 'apiStatusCounts' ? Object.create(null) : 0; });
+    // [v1.92.10] FIX HỒI QUY (vào từ 1.92.7): reset cũ đặt MỌI khoá = 0, kể cả apiFetchSamples[].
+    // Sau đó timedFetch chạy `sendDiag.apiFetchSamples.push(...)` trong finally ⇒ 0.push KHÔNG phải
+    // hàm ⇒ văng ⇒ làn API ném 'Lỗi kênh:' ⇒ mọi tin API bị chấm "không rõ kết quả" rồi chờ kiểm
+    // chứng ~10s, dù HTTP 200 và tin ĐÃ tới. Reset nay theo KIỂU: mảng → rỗng, map → mới, số → 0.
+    Object.keys(sendDiag).forEach((k) => {
+      const cur = sendDiag[k];
+      if (k === 'apiStatusCounts' || (cur && typeof cur === 'object' && !Array.isArray(cur))) sendDiag[k] = Object.create(null);
+      else if (Array.isArray(cur)) cur.length = 0;
+      else sendDiag[k] = 0;
+    });
     Object.keys(waveDiag).forEach((k) => { waveDiag[k] = 0; });
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
@@ -8783,6 +8807,7 @@
     }
 
     batchStats.loopFinished = true;
+    batchStats.dispatchEndedAt = Date.now(); // [v1.92.10] mốc phát xong — tách khỏi đuôi xác nhận
     // Chưa chốt idle ở đây: còn tin đang xác nhận/bù ở nền — overlay giữ nguyên tới khi
     // markSendIdleIfSettled() chốt xong (pending = 0) mới ẩn
     try {
@@ -9811,6 +9836,7 @@
         state.stopRequested = true;
         fireStopSignal();
         batchStats.loopFinished = true;
+        batchStats.dispatchEndedAt = Date.now();
         markSendIdleIfSettled();
         if (!state.sending) {
           unfreezeSendChecklist();
