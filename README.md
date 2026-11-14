@@ -62,13 +62,25 @@ Folder này **sinh tự động** từ mã nguồn: đừng sửa trực tiếp 
 | nhớ chat lỗi | ✅ có (tự bỏ chọn lần sau) | ❌ **bỏ hẳn** — không lọc gì |
 | phím Tab | luôn bật (bấm Tab = Chạy) | **công tắc `TAB:`** trên panel, mặc định TẮT |
 | log cuối | 📊 + ⚡TỐC ĐỘ + 🌊WAVE + 📡SOCKET + 🌐API + 🧭globalId | **chỉ 📊 tổng kết** |
-| version hiển thị | `1.92.15-W200.57` | `1.92.15-STABLE` |
+| version hiển thị | `1.92.17-W200.59` | `1.92.17-STABLE` |
 
 `scripts/pancake-send-stable.user.js` được sinh từ bản gốc bằng một loạt thay đổi có đánh dấu
 `[STABLE]` — muốn sửa logic gửi thì **sửa bản gốc rồi sinh lại bản ổn định**, đừng sửa tay hai nơi.
 
 Cài **một trong hai** là đủ. Nếu vô tình cài cả hai, chúng tự nhường nhau (bản nào nạp trước
 thắng, bản sau tự tắt) nên **không bao giờ có hai bộ cùng gửi** trong một tab.
+
+### Bản nào thực sự được nạp?
+
+| Cách bạn dùng | Bản chạy |
+|---|---|
+| **Extension Chrome** (`release/botfake-ext/`, `dist/botfake.zip`) | **chỉ bản gốc** — `manifest.json` khai báo đúng một content script `scripts/pancake-send-lite.user.js`; file `-stable` có trong thư mục phát hành nhưng extension **không** nạp |
+| **Tampermonkey**, chỉ cài 1 file | đúng file bạn cài |
+| **Tampermonkey**, cài cả 2 file | file nào Tampermonkey nạp trước thì thắng, file kia tự tắt (thứ tự không do ta quyết) |
+
+Muốn biết đang chạy bản nào: nhìn dòng version trên tiêu đề panel —
+`1.92.17-W200.59` = bản gốc, `1.92.17-STABLE` = bản ổn định. Dấu `[STABLE]` cũng được in vào
+`<html data-botfake-active="…">` trong DOM để kiểm tra bằng DevTools.
 
 ## Build & phát hành
 

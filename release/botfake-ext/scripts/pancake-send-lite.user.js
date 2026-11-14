@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.16-w200.58
+// @version      1.92.17-w200.59
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -41,13 +41,28 @@
 (function () {
   'use strict';
 
-  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
+  /* Chống chạy hai bản trong cùng một tab (bản gốc + bản ổn định, hoặc extension + userscript).
+   * Cờ trên window chỉ nhìn thấy nhau khi cả hai chạy chung "page world" — đúng với @grant none.
+   * Thêm dấu trên <html data-botfake-active> làm lưới thứ hai: DOM thì luôn dùng chung, kể cả khi
+   * trình quản lý script chạy mỗi script trong một sandbox riêng. Ai chạy trước thì thắng. */
+  function botfakeClaimSlot(name) {
+    let el = null;
+    try { el = document.documentElement; } catch (e) { el = null; }
+    if (!el) return true;                 // chưa có <html> ⇒ để cờ window quyết, không chặn oan
+    try {
+      if (el.getAttribute('data-botfake-active')) return false; // bản khác đã chiếm chỗ
+      el.setAttribute('data-botfake-active', name);
+      return true;
+    } catch (e) { return true; }
+  }
+
+  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ || !botfakeClaimSlot('lite')) return;
   window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ = true;
 
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.16-W200.58'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.17-W200.59'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.16-stable
+// @version      1.92.17-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -41,16 +41,30 @@
 (function () {
   'use strict';
 
+  /* Chống chạy hai bản trong cùng một tab (bản gốc + bản ổn định, hoặc extension + userscript).
+   * Cờ trên window chỉ nhìn thấy nhau khi cả hai chạy chung "page world" — đúng với @grant none.
+   * Thêm dấu trên <html data-botfake-active> làm lưới thứ hai: DOM thì luôn dùng chung, kể cả khi
+   * trình quản lý script chạy mỗi script trong một sandbox riêng. Ai chạy trước thì thắng. */
+  function botfakeClaimSlot(name) {
+    let el = null;
+    try { el = document.documentElement; } catch (e) { el = null; }
+    if (!el) return true;                 // chưa có <html> ⇒ để cờ window quyết, không chặn oan
+    try {
+      if (el.getAttribute('data-botfake-active')) return false; // bản khác đã chiếm chỗ
+      el.setAttribute('data-botfake-active', name);
+      return true;
+    } catch (e) { return true; }
+  }
+
   /* [STABLE] CHỐNG GỬI TRÙNG KHI CÀI CẢ HAI BẢN:
    * Bản gốc thoát nếu `__BOTFAKE_TAB_CLIPBOARD_ACTIVE__` đã có. Bản ổn định:
    *   - nếu BẢN GỐC đang chạy trước → tự tắt;
    *   - nếu CHÍNH NÓ chạy trước → chiếm luôn cờ của bản gốc để bản gốc cũng tự tắt.
    * Nhờ vậy trong một tab LUÔN chỉ có đúng một bộ gửi, không bao giờ hai bộ cùng bắn. */
-  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) {
-    try { console.warn('[BOTFAKE STABLE] Bản gốc đang chạy trong tab này — bản ổn định tự tắt để tránh gửi trùng.'); } catch (e0) { /* ignore */ }
+  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ || window.__BOTFAKE_STABLE_ACTIVE__ || !botfakeClaimSlot('stable')) {
+    try { console.warn('[BOTFAKE STABLE] Đã có bản khác chạy trong tab này — bản ổn định tự tắt để tránh gửi trùng.'); } catch (e0) { /* ignore */ }
     return;
   }
-  if (window.__BOTFAKE_STABLE_ACTIVE__) return;
   window.__BOTFAKE_STABLE_ACTIVE__ = true;
   window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ = true;
   const IS_STABLE_BUILD = true;
@@ -58,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.16-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.17-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận

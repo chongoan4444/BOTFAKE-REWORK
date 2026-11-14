@@ -59,18 +59,17 @@ rep(`const APP_VERSION = '${base}-${build}'; // hiện ở tiêu đề panel —
   `const APP_VERSION = '${base}-STABLE'; // [STABLE] hiện ở tiêu đề panel`, 'app-version');
 
 /* 2. Cờ chống gửi trùng ---------------------------------------------------- */
-rep(`  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
+rep(`  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ || !botfakeClaimSlot('lite')) return;
   window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ = true;`,
 `  /* [STABLE] CHỐNG GỬI TRÙNG KHI CÀI CẢ HAI BẢN:
    * Bản gốc thoát nếu \`__BOTFAKE_TAB_CLIPBOARD_ACTIVE__\` đã có. Bản ổn định:
    *   - nếu BẢN GỐC đang chạy trước → tự tắt;
    *   - nếu CHÍNH NÓ chạy trước → chiếm luôn cờ của bản gốc để bản gốc cũng tự tắt.
    * Nhờ vậy trong một tab LUÔN chỉ có đúng một bộ gửi, không bao giờ hai bộ cùng bắn. */
-  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) {
-    try { console.warn('[BOTFAKE STABLE] Bản gốc đang chạy trong tab này — bản ổn định tự tắt để tránh gửi trùng.'); } catch (e0) { /* ignore */ }
+  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ || window.__BOTFAKE_STABLE_ACTIVE__ || !botfakeClaimSlot('stable')) {
+    try { console.warn('[BOTFAKE STABLE] Đã có bản khác chạy trong tab này — bản ổn định tự tắt để tránh gửi trùng.'); } catch (e0) { /* ignore */ }
     return;
   }
-  if (window.__BOTFAKE_STABLE_ACTIVE__) return;
   window.__BOTFAKE_STABLE_ACTIVE__ = true;
   window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ = true;
   const IS_STABLE_BUILD = true;`, 'guard');

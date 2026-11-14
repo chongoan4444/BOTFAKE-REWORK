@@ -1995,3 +1995,36 @@ so với thực tế kênh vẫn sống.
   bằng chứng cũ (§43: 117 no-ACK, kiểm chứng lịch sử **thấy tin 0**) cho thấy phần lớn no-ACK là
   mất thật, nới hạn chờ không cứu được tin nào. Sẽ xem lại nếu log sau vẫn ≥ 4 % no-ACK.
 - `wave→cổng 8 663 ms` là hệ quả của làn hẹp (wave chỉ mở khi wave trước thoát ≥ 40 %).
+
+## §50 — Hai bản script thì cái nào chạy? (làm rõ + siết chống gửi trùng)
+
+### 50.1 Đường nạp thực tế
+
+| Cách dùng | Bản chạy |
+|---|---|
+| Extension (`manifest.json`) | **chỉ bản gốc** — `content_scripts` khai báo duy nhất `scripts/pancake-send-lite.user.js`. File `-stable` chỉ là file đi kèm trong `release/botfake-ext/`, **không** được nạp |
+| Tampermonkey 1 file | đúng file đó |
+| Tampermonkey 2 file | ai nạp trước thắng, người sau tự tắt |
+
+Version trên tiêu đề panel là căn cước: `1.92.17-W200.59` (gốc) vs `1.92.17-STABLE`.
+
+### 50.2 Vì sao vẫn phải siết chống gửi trùng
+
+Cờ `window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__` chỉ dùng được khi cả hai bản chạy **chung page world**
+(đúng với `@grant none` + `world: "MAIN"`). Nếu một trình quản lý chạy mỗi script trong sandbox
+riêng thì cờ vô hình với nhau ⇒ **hai bộ cùng gửi** ⇒ gửi trùng. Vì vậy 1.92.17 thêm lưới thứ hai
+trên **DOM** (luôn dùng chung giữa các world):
+
+```js
+function botfakeClaimSlot(name) {          // ai gọi trước thì giữ chỗ, người sau trả false
+  const el = document.documentElement;     // chưa có <html> ⇒ cho qua, để cờ window quyết
+  if (!el) return true;
+  if (el.getAttribute('data-botfake-active')) return false;
+  el.setAttribute('data-botfake-active', name);   // 'lite' | 'stable'
+  return true;
+}
+```
+
+Bản gốc: `if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ || !botfakeClaimSlot('lite')) return;`
+Bản ổn định: thêm `|| window.__BOTFAKE_STABLE_ACTIVE__ || !botfakeClaimSlot('stable')`, và vẫn
+chiếm luôn cờ của bản gốc để bản gốc tự tắt.
