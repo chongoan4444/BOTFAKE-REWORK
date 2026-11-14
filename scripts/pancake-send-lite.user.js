@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.97-w200.39
+// @version      1.91.98-w200.40
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.97-W200.39'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.98-W200.40'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4745,7 +4745,15 @@
         // đủ để mở bộ ngắt ("Extension không phản hồi 12 lần liên tiếp") và pause cả làn 45s.
         // 7s vẫn gấp >2 lần mức phản hồi bình thường (0,8–3s), và ca quá hạn vẫn KHÔNG gửi lại
         // (đánh ⚠, kiểm chứng nền chỉ nâng ⚠→✅) nên rút ngắn không thể sinh tin trùng.
-        return adapter.send(payload, { timeout: 7000 });
+        // [v1.91.98] 7s→2,5s. Log 09:24 (1 457 chat, 1.91.97):
+        //   🧯 Ext quá hạn 114 · kiểm chứng thấy tin 69 · chưa thấy trong lịch sử 45
+        // ⇒ 60 % ca "Extension không phản hồi" thực ra TIN ĐÃ ĐẾN NƠI. Extension gửi xong nhưng
+        // không trả lời. Vì vậy giữ làn chờ 7 giây cho một phản hồi sẽ không bao giờ tới là mất
+        // trắng: 114 ca × 7s ÷ 48 làn ≈ 17 giây-làn, trong khi HAR đo ca lỗi THẬT trả về
+        // p50 908ms / p90 1 197ms — 2,5s đã phủ trên p99. Ca quá hạn vẫn đi đúng đường cũ:
+        // đánh ⚠ "không rõ", đăng ký kiểm chứng lịch sử nền, KHÔNG BAO GIỜ gửi lại (chỉ nâng
+        // ⚠→✅). Rút ngắn thời gian chờ không mở thêm bất kỳ đường gửi trùng nào.
+        return adapter.send(payload, { timeout: 2500 });
       });
       if (res && res.extBreakerSkipped) {
         releaseExtSendPermit(extSendPermit);

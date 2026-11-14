@@ -642,3 +642,24 @@ ngưỡng sẽ tự bóp làn liên tục. Đây chính là thứ đã xảy ra 
 
 An toàn không đổi: lệnh đã bắn mà quá hạn **không bao giờ gửi lại** (chỉ ⚠ + kiểm chứng lịch
 sử, nâng ⚠→✅). Nâng số làn không mở thêm bất kỳ đường gửi trùng nào.
+
+## §24 — Ext không phản hồi ≠ gửi trượt (v1.91.98)
+
+Lô 09:24 (1 457 chat, 1.91.97, làn Ext 48–96): `✅ 956 [API: 11 · Ext: 945] · 12,66 tin/s`,
+`peak Ext queue/active 360/128`, và:
+
+```
+🧯 Ext quá hạn 114 · kiểm chứng thấy tin 69 · chưa thấy trong lịch sử 45
+```
+
+**69/114 (60 %) ca "Extension không phản hồi" thì tin ĐÃ đến nơi.** Nghĩa là Extension gửi
+thành công nhưng không trả phản hồi về bridge. Chờ 7s cho phản hồi đó là giữ làn vô ích:
+114 × 7s ÷ 48 làn ≈ 17 giây-làn.
+
+HAR: ca lỗi thật trả về p50 **908 ms**, p90 **1 197 ms** ⇒ 2 500 ms đã phủ trên p99.
+v1.91.98: `adapter.send` timeout **7 000 → 2 500 ms**. Ca quá hạn vẫn đi đúng đường cũ —
+⚠ "không rõ" + `scheduleExtTimeoutVerify` (kiểm chứng lịch sử nền, chỉ nâng ⚠→✅, **không bao
+giờ gửi lại**) — nên rút ngắn không tạo thêm bất kỳ khả năng gửi trùng nào.
+
+Lưu ý về trần: `peak Ext queue/active 360/128` cho thấy hàng đợi 360 lệnh với 128 active —
+làn Ext không còn là nút cổ chốt duy nhất, mà là băng thông thật của bridge Extension.
