@@ -51,7 +51,9 @@ tools/build.mjs        đồng bộ version + kiểm tra đường dẫn + đón
 - `_app-9331d46f21a84eb1.v6.js`: JavaScript website tải (logic gửi tin, `executeByApi`).
 - `dashboard-fa168c408c705d9e.v6.js`: JavaScript dashboard.
 - `pancake.vn2.har` + các `*.har`: network khi dùng website (API, Socket, token).
-- `MESSAGE POST`, `post`, `lại là POST`: mẫu curl request gửi tin / fill_admin_name.
+- ~~`MESSAGE POST`, `post`, `lại là POST`~~ — **ĐÃ XOÁ (v1.92.7)**: 3 file curl này chứa cookie
+  `jwt=` còn hạn tới 2027 trong repo công khai. Nội dung cần thiết đã trích vào
+  `docs/HAR-GROUND-TRUTH.md` §34.2–34.3. Đừng thêm lại ảnh chụp network có token.
 - `BOTFAKE FULL`, `BOTFAKE.TXT`: bản userscript cũ (v1.90.4) — chỉ để đối chiếu lịch sử.
 
 Các file trên là nguồn tham khảo chính để phân tích website.

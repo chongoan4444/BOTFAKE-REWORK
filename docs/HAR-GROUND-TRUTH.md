@@ -1161,3 +1161,96 @@ Ba file được git theo dõi chứa cookie `jwt=eyJ…` (không in giá trị 
 ⇒ Bất kỳ ai đọc repo đều lấy được phiên Pancake của tài khoản đó tới tháng 1/2027.
 **Đã xoá 3 file khỏi nhánh này**, nhưng **lịch sử git vẫn còn** ⇒
 **BẮT BUỘC** đăng xuất/đổi mật khẩu tài khoản đó để vô hiệu token cũ; xoá file không đủ.
+
+---
+
+## §35 — Đọc 11 HAR còn lại, từng request (v1.92.7)
+
+### 35.1 Mỗi file một việc — không còn file nào chưa mở
+
+| HAR | req | khoảng | WS | `POST /messages` | thực chất là gì |
+|---|---|---|---|---|---|
+| `batmesss.har` | 348 | 146 s | **118** | 18 | gửi + ACK (nguồn §28) |
+| `tinnhanthread.har` | 93 | 314 s | 0 | **24** | **24 lần gửi HỎNG vào CÙNG một thread** |
+| `tinnhan.har` | 216 | 54 s | 0 | 13 | gửi thật: 11 OK · 2 × `#551` |
+| `guianh1.har` | 37 | 41 s | 0 | 2 | **gửi ảnh**: 2 lần, cả 2 `#551` |
+| `guisot.har` | 170 | 28 s | **96** | 1 | gửi + ACK |
+| `guikhachcu.har` | 275 | 29 s | 11 | 0 | duyệt khách cũ (recent_orders, customer_info) |
+| `guicau.har` | 284 | 13 s | 0 | 0 | **chỉ dựng danh sách** (155 `contents/facebook` + 129 `fill_admin_name`) |
+| `loadnhanh.har` | 735 | **11 s** | 0 | 0 | cuộn danh sách rất nhanh: 58 `GET /conversations` + 241 avatar trong 11 s |
+| `loaddanhsach.har` | 50 | 32 s | 0 | 0 | 38 `GET /conversations` |
+| `taidanhsach.har` | 100 | 28 s | 0 | 0 | **87 `POST /conversations`** = phân trang danh sách |
+| `pancake.vn2.har` | 58 | 86 s | 0 | 0 | 36 `POST /g/collect` + 11 `POST /conversations` |
+
+### 35.2 Ba hình dạng response của `POST /messages` — HTTP luôn 200
+
+```json
+THÀNH CÔNG : {"id":"m_WEqNIb…","success":true,"original_error":null}
+#10        : {"e_code":10,"e_subcode":2018300,
+              "message":"(#10) Không gửi được tin nhắn do một ứng dụng khác hiện đang kiểm soát thread này.",
+              "success":false}
+#551       : {"e_code":551,"e_subcode":1545041,
+              "message":"(#551) Người này hiện không có mặt.","success":false}
+```
+
+⇒ Ai kiểm tra `response.ok` (HTTP) sẽ coi cả hai lỗi là **thành công**. Phải đọc `success` /
+`e_code`. Code mình đọc đúng.
+
+`#551` xuất hiện cho **cả tin chữ lẫn tin ảnh** (`guianh1`: gửi ảnh → `#551`; gửi chữ ngay sau →
+`#551`) ⇒ đây là trạng thái **tài khoản người nhận**, không liên quan định dạng tin.
+
+### 35.3 Cờ `is_record_ctx_7_days`: KHÔNG phải nguyên nhân thành công
+
+Census **từng request** trên cả 11 HAR (không phải suy luận):
+
+| cờ | kết quả | n |
+|---|---|---|
+| **0** | `#10` | 24 |
+| **0** | `#551` | 6 |
+| **0** | **`success:true`** | **4** ← mấu chốt |
+| **1** | `#551` | 5 |
+| **1** | `success:true` | 19 |
+
+Bảng cũ trong `README.md` (§v1.91.73) kết luận *"(#10) phần lớn là do thiếu cờ"* dựa trên 19/19 vs
+24/24. Nhưng **4 ca gửi THÀNH CÔNG mà không có cờ** ⇒ cờ **không bắt buộc**. Cách đọc đúng hơn:
+cờ là **dấu hiệu thread còn tươi** (`dr()` đúng), và `#10` rơi vào thread cũ/đang bị phiên khác giữ —
+tương quan, không nhân quả.
+
+Đây là căn cứ cho thay đổi **v1.92.5** (chỉ gửi cờ khi `dr()` đúng, đúng như app). Lô 10:17 chạy
+theo cách đó: API **50 OK / 55**, tức không hồi quy. Nếu sau này API tụt bất thường thì đảo lại chỉ
+là 1 dòng.
+
+`tinnhanthread.har` còn cho thấy: 24 ca `#10` đều vào **cùng một thread**, cách nhau **0,0–0,1 s** ⇒
+có khả năng thứ hai: FB từ chối khi bắn dồn dập cùng một thread. Script mình không bao giờ ở tình
+trạng đó (mỗi chat một lần một lượt, `SOCKET_MIN_PACE_MS = 4`).
+
+### 35.4 Hợp đồng gửi ẢNH — khớp 100 % code mình
+
+`guianh1` cho thấy app làm đúng thứ tự: `contents/facebook` (uuid → fb_id) **rồi** mới gửi.
+
+```json
+{"action":"reply_inbox","message":"",
+ "content_ids":["4a52fa57-…","9216a540-…"],
+ "attachment_ids":["1697243988205742","913682618480798"],
+ "content_urls":["https://content.pancake.vn/2-2608/2026/8/16/…jpg","…"],
+ "dimensions":[{"width":1505,"height":2007},{"width":963,"height":1634}],
+ "send_by_platform":"web"}
+```
+
+Sau khi gửi, app gọi `check_inbox` + `contents/touch` với đúng các `content_ids` đó (side-effect).
+`attachment_ids` chính là `fb_ids` trả về từ `contents/facebook` ⇒ nhánh ảnh của mình đúng.
+
+### 35.5 Danh sách hội thoại — đường dữ liệu cho bài toán "chưa nhắn"
+
+`POST /api/v1/pages/{p}/conversations?unread_first=true&mode=OR&tags=%22ALL%22&except_tags=%5B%5D`
+body `type=ALL` → **40 hội thoại/trang**, response **base64 hoá** (`content.encoding: "base64"`).
+
+Mỗi hội thoại có đủ: `id`, `thread_id`, `thread_key` (`t_…`), `from_psid`, `customers[].fb_id`,
+`updated_at`, `message_count`, **`last_sent_by`**, `snippet`, `last_customer_interactive_at`.
+Trong 1 680 hội thoại duy nhất của `taidanhsach.har`: **100 % có `thread_id` + `thread_key` +
+`customers[0].fb_id`** ⇒ nếu cần global_id thì dữ liệu danh sách đã có sẵn, **không cần request
+từng chat**.
+
+`last_sent_by.id === from_psid` = tin cuối do khách gửi = page **chưa trả lời**. Trong mẫu này chỉ
+**10/1 680** (vì đây là danh sách đã trả lời gần hết) — đây là tín hiệu **dựa trên dữ liệu**, đúng
+tiêu chí "không đoán theo vị trí", nhưng **chưa dùng** vì việc lấy danh sách đã chốt theo hướng khác.
