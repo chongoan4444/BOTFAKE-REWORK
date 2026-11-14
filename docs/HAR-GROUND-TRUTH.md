@@ -2078,3 +2078,58 @@ scripts/…            ← scripts/pancake-send-stable.user.js (chỉ file này)
 `npm run check` kiểm: manifest chỉ trỏ tới file có trong folder · folder **không** chứa bản gốc ·
 không có file lệch/thừa. Vì folder là sản phẩm sinh, sửa tay sẽ bị build ghi đè — đúng ý
 "làm một lần rồi để yên".
+
+## §52 — Rà lại LOGIC BÙ + LOGIC NHẬN PHẢN HỒI GỬI (1.92.18)
+
+### 52.1 Hai lỗi tìm ra (đã sửa)
+
+**A. Vòng mẫu độ trễ ACK bị CẮT CỤT — đây là lý do 1.92.16 một mình chưa thể ăn.**
+
+```js
+if (kind === 'ok' && ms < fastAckMs()) { ...; noteAckLatency(ms); }   // ← chỉ ca "nhanh" được ghi
+else if (kind === 'noack') { ... }
+else if (kind === 'ok' || kind === 'rejected') { if (kind === 'ok') ctl.fastOk = 0; ... }
+```
+
+`noteAckLatency()` nằm **bên trong** nhánh "nhanh" ⇒ mọi ACK chậm hơn ngưỡng bị **vứt khỏi mẫu**.
+Hệ quả dây chuyền trên page có ACK ~2–3 s:
+
+1. vòng mẫu rỗng ⇒ `sockAckP50() = 0` ⇒ `fastAckMs() = 2 500 ms` (sàn);
+2. ACK thật ~2 900 ms > 2 500 ⇒ không ca nào là "nhanh" ⇒ không ghi mẫu (quay lại 1);
+3. `fastOk` không bao giờ đạt 20 ⇒ làn không tăng; 459 no-ACK vẫn cắt 0,8× ⇒ **`[64×1]`**.
+
+Thống kê tự lừa chính nó. **Sửa:** ghi mẫu cho **mọi** ACK `ok`/`rejected` trước khi phân nhánh
+(bỏ 2 lời gọi bên trong để không đếm đôi). Chỉ ghi nhận — không đổi đường gửi, hạn chờ ACK vẫn
+bị chặn trần 3 000 ms.
+
+**B. `/ls_resp` mang cờ lỗi vẫn bị chốt ✅.**
+
+`classify()` chỉ tìm `markOptimisticMessageFailed`; payload **không có action nào** (kể cả
+`error` / `error_code` / `success:false`) rơi thẳng xuống `{ kind: 'ok' }` ⇒ tính ✅, **không**
+đăng ký kiểm chứng, **không** bù ⇒ mất tin im lặng — loại lỗi tệ nhất.
+**Sửa:** thiếu `replaceOptimsiticMessage` **và** có cờ lỗi ⇒ `'noack'` (⚠ + kiểm chứng lịch sử,
+tuyệt đối không bắn lại). `replaceOptimsiticMessage` vẫn là bằng chứng dương tính duy nhất.
+
+**C. Dọn:** `ackCeiling` là tam phân vô nghĩa (`? 3000 : 3000`) → hằng 3 000 kèm lý do.
+
+### 52.2 Đã rà và thấy ĐÚNG — không sửa
+
+| hạng mục | kết luận |
+|---|---|
+| 3 lớp chống trùng (`deliveredIds` · `sockFiredPending` · `outboundLock`) | `acquireOutbound` kiểm cả 3; `dupBlockedResult` trả ok-giả để không kênh nào bắn lại; `outboundLock` xoá sạch đầu mỗi lượt ⇒ không rò giữa lượt |
+| `sent:'maybe'` (không rõ) | không bao giờ thử kênh khác; chỉ đi kiểm chứng lịch sử — đúng luật |
+| Nhánh DUY NHẤT được bắn lại | Socket `verdict 'no'` (2 lần đọc liên tiếp) và API `verdict 'no'` (2 lần) — cả hai đều `reopenUncertain()` + `releaseOutbound()` **trước** `scheduleBuRetry` (thiếu 1 trong 2 là chết im lặng: `scheduleBuRetry` tự chặn khi `uncertainIds` còn) |
+| `historyVerdict` — múi giờ | HAR `loadnhanh.har`: `inserted_at` mới nhất `05:11:35.555` vs entry `05:13:47Z` ⇒ **UTC không kèm Z** ⇒ `rawT + 'Z'` là ĐÚNG |
+| `historyVerdict` — lọc "tin do page gửi" (`from.id === pageId`) | cùng quy ước với `fetchCommentTarget` (đường trả lời bình luận đang chạy được) |
+| `scheduleBuRetry` chống chồng | 6 lớp: `buRetryTimer` · `sockFiredPending` · `deliveredIds` · `uncertain/finalFailed` · `runSeq` · kiểm lại ngay trước khi bắn trong `busEnqueue` |
+| Socket ACK khớp `request_id` | đọc id sát lệnh `publish` (1 microtask cũng không có); timeout chỉ xoá entry **của chính mình** (`PENDING_MESSAGES[myKey] === myEntry`) |
+| Bấm Dừng khi frame còn xếp hàng | mọi lane resolve `{ok:false,'Đã dừng'}` **mà không gọi hàm trong hàng** ⇒ `.then` tự gọi `notifySlotStarted(false)` ⇒ worker không treo (đã kiểm để loại giả thuyết treo, không cần cờ chờ thêm) |
+
+### 52.3 Ghi nhận có chủ ý (chưa đổi)
+
+- **Bù không đưa API vào danh sách kênh cuối** (chỉ `ext`/`socket`): ca trong 24 h đã đi API trước
+  đó; ca ngoài 24 h API gần như chắc `(#551)/(#10)`. Chỉ thêm nếu log sau có nhiều ❌ mà lịch sử
+  xác nhận "chưa có tin".
+- **Ext quá hạn bị phạt 0,6× làn** kể cả khi phản hồi muộn về sau (21 ca "muộn-mà-thành-công" ở
+  lô 19:52): sàn `EXT_SEND_MIN 48` chặn thiệt hại; chưa thấy Ext kẹt sàn trong log.
+- **Kiểm chứng Ext chỉ đọc lại 1 lần** (đã cắt từ 3) — giữ nguyên, đúng ý "không hành máy yếu".

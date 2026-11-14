@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.17-stable
+// @version      1.92.18-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -72,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.17-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.18-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4174,7 +4174,9 @@
     // ca quá hạn ⇒ no-ACK ⇒ đăng ký kiểm chứng lịch sử nền (chỉ nâng ⚠→✅, KHÔNG gửi lại).
     // HAR cũng cho thấy ~5% request không có /ls_resp (1/14 và 1/27) nên ca no-ACK là có thật,
     // nhưng chúng phải được xử lý bằng kiểm chứng nền, không phải bằng cách giữ làn 20 giây.
-    const ackCeiling = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 3000 : 3000;
+    // Trần 3 000 ms: ACK thật của Pancake về sau ~0,3 s (HAR); giữ làn lâu hơn chỉ bóp thông lượng.
+    // Ca vượt trần ⇒ 'noack' ⇒ kiểm chứng lịch sử, KHÔNG bắn lại.
+    const ackCeiling = 3000;
     const ackWaitMs = Math.min(ackCeiling, Math.max(1200, Math.round(sockAckP90() * 3)));
     try { if (pageId) pageLastAckWait[pageId] = ackWaitMs; } catch (e0) { /* ignore */ }
     /* ===== SỬA GỐC "MẤT ACK" Ở LÔ LỚN =====
@@ -4265,6 +4267,19 @@
       if (hasPhoto && hasText && failed.length > 0 && replaced.length > 0) {
         recordSocketAckOutcome('rejected', Date.now() - publishedAt, pageId);
         return { kind: 'photo_failed_text_ok' };
+      }
+      /* [v1.92.18] CHỐT ✅ PHẢI CÓ BẰNG CHỨNG DƯƠNG TÍNH.
+       * Trước đây mọi payload không có markOptimisticMessageFailed đều rơi xuống 'ok' — kể cả
+       * payload mang cờ lỗi (error / error_code / success:false). Ca đó bị chốt ✅ ⇒ không kiểm
+       * chứng lịch sử, không bù ⇒ MẤT TIN IM LẶNG (đúng loại lỗi tệ nhất).
+       * Nay: không có replaceOptimsiticMessage + có cờ lỗi ⇒ 'noack' = KHÔNG RÕ.
+       * 'noack' đi đúng đường an toàn sẵn có: chốt ⚠, kiểm chứng lịch sử nền, KHÔNG BAO GIỜ
+       * bắn lại (chỉ ⚠→✅ hoặc bắn cứu khi lịch sử chứng minh chưa tới). */
+      const errFlag = !!(resp && (resp.error || resp.error_code != null
+        || (Array.isArray(resp.errors) && resp.errors.length) || resp.success === false));
+      if (!replaced.length && errFlag) {
+        recordSocketAckOutcome('noack', Date.now() - publishedAt, pageId);
+        return { kind: 'noack', publishedAt: publishedAt };
       }
       recordSocketAckOutcome('ok', Date.now() - publishedAt, pageId);
       return { kind: 'ok' };
@@ -4726,6 +4741,9 @@
           ctx.nonReusableFbId = null;
           ctx.nonReusableFbIds = null;
         }
+        // Bấm Dừng: mọi lane đều resolve { ok:false, error:'Đã dừng' } mà KHÔNG gọi hàm trong hàng
+        // (xem start() của makeLane/makeAdaptivePriorityLane) ⇒ .then bên dưới tự gọi
+        // notifySlotStarted(false) ⇒ slotStartedPromise luôn được giải phóng, không treo worker.
         const slotStarted = await slotStartedPromise;
         if (!slotStarted) {
           sockFiredPending.delete(conv.id);
@@ -5660,12 +5678,19 @@
       if (!lane) return;
       const ctl = socketPageLaneCtl[pid] || (socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0, noAckStreak: 0 });
       const ms = Math.max(0, Number(latencyMs) || 0);
+      /* [v1.92.18] MẪU ĐỘ TRỄ ACK BỊ CẮT CỤT — SỬA GỐC.
+       * noteAckLatency() cũ chỉ chạy TRONG nhánh "ACK nhanh" (ms < fastAckMs) ⇒ mọi ACK chậm
+       * hơn ngưỡng bị VỨT khỏi vòng mẫu. Vòng mẫu vì thế chỉ toàn ca nhanh ⇒ p50 thấp ⇒ ngưỡng
+       * "nhanh" đứng ở sàn 2 500 ms ⇒ với page có ACK 2–3 s thì KHÔNG ca nào được tính là nhanh
+       * ⇒ fastOk không bao giờ đạt 20 ⇒ làn không tăng (đúng "[64×1]" của lô 19:52).
+       * Thống kê tự lừa chính nó: phải lấy CẢ ca chậm mới biết nhịp ACK thật của page.
+       * Chỉ ghi nhận (không đổi đường gửi); hạn chờ ACK vẫn bị chặn trần 3 000 ms. */
+      if (kind === 'ok' || kind === 'rejected') noteAckLatency(ms);
       if (kind === 'ok' && ms < fastAckMs()) {
         ctl.fastOk++;
         ctl.slowAck = 0;
         ctl.noAckStreak = 0;
         sockNoAckRun = 0; // ACK hồi ⇒ reset cầu dao
-        noteAckLatency(ms); // [v1.91.87] học độ trễ thật để tính hạn chờ
         if (pid) { delete pageAckTimeoutRun[pid]; if (pageAckDeadAt[pid]) { socketPickDiag.probeOk++; delete pageAckDeadProbeAt[pid]; } delete pageAckDeadAt[pid]; }
         if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX) {
           ctl.fastOk = 0;
@@ -5734,7 +5759,6 @@
         if (kind === 'rejected' && ms < fastAckMs()) {
           ctl.fastOk++;
           ctl.noAckStreak = 0;
-          noteAckLatency(ms);
           if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX) {
             ctl.fastOk = 0;
             lane.setLimit(lane.getLimit() + 8);
