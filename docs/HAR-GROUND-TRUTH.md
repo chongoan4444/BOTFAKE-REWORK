@@ -1692,3 +1692,52 @@ bị từ chối. Hành vi đúng thiết kế, nhưng cho thấy **thời gian 
 `phản hồi MUỘN (đã tính ✅) 0 · muộn-mà-lỗi 9 · im lặng hẳn 0` trên 40 ca quá hạn.
 ⇒ 9 ca Extension trả lời muộn và trả lời **lỗi thật** (không phải tin đã đi). Còn 31 ca chưa có kết quả
 lúc in tổng hợp (mốc giữ chỗ 60 s chưa hết) — `im lặng hẳn` vì vậy đọc là "chưa tới hạn", không phải 0 ca.
+
+## §44 — Bốn lượt NHỎ sau 1.92.11 (14:41–14:44) + sửa race "gửi khi danh sách đang tải"
+
+### 44.1 Số đo (cùng một tab, cùng script 1.92.11-W200.53)
+
+| lượt | n | PHÁT | chờ xác nhận | tổng | phát/s | chốt/s | API/Socket | lỗi |
+|---|---|---|---|---|---|---|---|---|
+| 1 (188) | 188 | 3,7 s | 4,5 s | 8 s | 51,39 | 22,94 | 170/17 (+1) | 1 |
+| 2 (37)  | 37  | 0,5 s | 1,9 s | 2 s | 75,82 | 15,70 | 31/6 | 0 |
+| 3 (54)  | 54  | 0,9 s | 1,9 s | 3 s | 59,60 | 19,31 | 49/5 | 0 |
+| 4 (39)  | 39  | 0,5 s | 1,7 s | 2 s | 84,78 | 18,18 | 32/7 | 0 |
+| 5 (24)  | 24  | 0,99 s| 1,7 s | 3 s | 24,27 | 9,08 | 19/5 | 0 |
+
+Toàn bộ: `429/retry 0/0` · `fallback 0` · `bỏ qua 0` · HTTP `200×n` · fetch p50 **911–1 102 ms** (rất ổn định).
+
+### 44.2 Vì sao lượt nhỏ "nhanh thật"
+
+- `fetch p50 ≈ 1 s` là hằng số ⇒ n ≤ lane thì cả lượt xong trong ~1 lần fetch: `queue wait TB` chỉ **106–429 ms**, `peak API waiting 0`.
+- n = 188 > lane ⇒ bắt đầu xếp hàng: `queue wait TB 2 485 / max 4 386 ms`, `peak API waiting 75`, `fetch TB 2 263 / max 6 026 ms` (server chậm lại khi bị dồn) ⇒ phát 51,39/s.
+- Đuôi xác nhận **1,7–1,9 s KHÔNG co theo n** (nó là ACK của vài chat Socket chậm nhất: ACK TB 1 067–1 550 ms). Vì đuôi là hằng số nên n nhỏ ⇒ tỉ lệ nghịch: tổng ≈ n/phát + 1,8 s.
+- Ở 4 lượt nhỏ, **API thắng 87–92 %** (khác lô lớn 14:34 chỉ 2/1 958) — khách mới còn trong cửa sổ nên API nhận ngay.
+
+### 44.3 Lỗi thật phát hiện từ log: GỬI khi danh sách CÒN ĐANG TẢI
+
+Dòng thời gian lượt 2:
+
+```
+14:43:02  (quét danh sách bắt đầu)
+14:43:03  ⚡ Đang tự tải danh sách cho chuỗi đã chọn: Nguyễn Hằng → Nguyễn Thanh…
+14:43:04  🧹 Đã xóa checkbox/chọn chat ngay khi bắt đầu lượt gửi.
+14:43:04  🚀 Bắt đầu gửi 37 chat
+14:43:06  ⚡ API: 346 chat (next_cursor hết)          ← quét xong SAU khi đã gửi
+14:43:06  🔗 CHUỖI CHỌN: … ⚠ Không tìm thấy đủ 2 đầu chuỗi
+```
+
+Hai lỗi, cùng một gốc:
+
+1. **`sendToAll` không chặn `state.scanning`** ⇒ lượt gửi chụp `state.matches` khi chuỗi chọn mới
+   có phần đầu danh sách ⇒ **có thể gửi thiếu chat** so với dải đã chọn (không phải gửi trùng,
+   nhưng sai tập gửi — đúng thứ người dùng cấm).
+2. Dòng `⚠ Không tìm thấy đủ 2 đầu chuỗi` là **báo động giả**: `clearSelection()` của lượt gửi đã
+   xoá `state.matches`, nên `completeRange` sau khi quét xong thấy `n = 0`.
+
+### 44.4 Sửa ở 1.92.12-W200.54
+
+- `sendToAll`: nếu `state.scanning` ⇒ khoá nút, log rõ, **chờ đúng sự kiện** `waitCond(() => !state.scanning, 'scan-done', 180 s)`
+  (scan `finally` đã `softNotify('scan-done')` — không sleep mù), hết hạn vẫn đang quét thì **không gửi**.
+  Chờ xong mới đọc lại `state.listIncomplete` và chụp `state.matches`.
+- `completeRange`: chỉ in dòng `CHUỖI CHỌN`/`⚠` khi chuỗi chọn **còn nguyên** (`chainAlive`); bị lượt gửi cắt ngang thì im lặng.

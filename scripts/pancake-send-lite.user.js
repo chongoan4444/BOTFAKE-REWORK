@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.11-w200.53
+// @version      1.92.12-w200.54
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.11-W200.53'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.12-W200.54'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1005,11 +1005,18 @@
     render();
     await scanFullList({ forRange: true, restartIfBusy: true });
     computeMatches({ silentMissingLog: true });
+    const chainAlive = state.mode === 'range' && state.rangeStart
+      && String(state.rangeStart.id) === String(start.id);
     const hasStart = state.matches.some((m) => m.id === start.id);
     const hasEnd = state.matches.some((m) => m.id === endInfo.id);
 
     const n = state.matches.length;
-    if (!hasStart || !hasEnd || !n) {
+    // [v1.92.12] Lượt GỬI chen ngang sẽ clearSelection() ⇒ state.matches rỗng, và dòng
+    // "⚠ Không tìm thấy đủ 2 đầu chuỗi" chỉ là BÁO ĐỘNG GIẢ (log 14:43:06, ngay sau khi
+    // gửi 37 chat trong lúc quét). Chỉ báo khi chuỗi chọn còn nguyên vẹn.
+    if (!chainAlive) {
+      /* lượt chọn đã bị lượt gửi cắt ngang — im lặng, không báo sai */
+    } else if (!hasStart || !hasEnd || !n) {
       logLine('🔗 CHUỖI CHỌN: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id)
         + ' — ⚠ Không tìm thấy đủ 2 đầu chuỗi trong danh sách hiện tại.');
     } else {
@@ -7861,6 +7868,26 @@
     if (state.sendListFrozen) {
       logLine('⏳ Danh sách đang được xử lý — chờ lượt gửi/cập nhật hiện tại hoàn tất rồi chạy lượt mới.');
       return;
+    }
+    // [v1.92.12] KHÔNG gửi khi danh sách còn ĐANG TẢI.
+    // Log 14:43:03–14:43:06: người dùng chốt chuỗi chọn (Nguyễn Hằng → Nguyễn Thanh), script
+    // bắt đầu quét danh sách, rồi bấm Gửi sau ~1s ⇒ gửi 37 chat trong lúc lượt quét 346 chat
+    // còn chạy, quét xong mới in "Không tìm thấy đủ 2 đầu chuỗi" (báo động giả — xem completeRange).
+    // Chuỗi chọn lúc đó mới chỉ có PHẦN đầu danh sách ⇒ có thể gửi THIẾU chat so với dải đã chọn.
+    // Nay: chờ ĐÚNG sự kiện quét xong (softNotify 'scan-done', không sleep mù) rồi mới chụp danh sách.
+    if (state.scanning) {
+      state.confirmingSend = true; // khóa bấm đúp trong lúc chờ
+      applyRunStopButtons();
+      logLine('⏳ Danh sách đang tải dở — chờ tải xong rồi mới chụp đúng danh sách để gửi (tránh gửi thiếu chat)…');
+      await waitCond(() => !state.scanning, 'scan-done', 180000);
+      state.confirmingSend = false;
+      if (state.scanning) {
+        applyRunStopButtons();
+        logLine('⛔ Danh sách vẫn đang tải — CHƯA gửi. Bấm ⏹ Dừng tải (hoặc chờ) rồi gửi lại.');
+        return;
+      }
+      logLine('▶ Danh sách đã tải xong — dùng đúng lựa chọn sau khi tải để gửi.');
+      render();
     }
     if (state.listIncomplete) {
       alert('Danh sách tải CHƯA ĐẦY ĐỦ nên chưa thể gửi.\nHãy bấm “⚡ Tải danh sách” để tải lại cho đủ rồi mới gửi.');
