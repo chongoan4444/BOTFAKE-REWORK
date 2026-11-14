@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.91.95-w200.37
+// @version      1.91.96-w200.38
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -47,7 +47,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.95-W200.37'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.91.96-W200.38'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4739,7 +4739,13 @@
         }
         extSendStartedAt = Date.now();
         // 🔥 [FIX-TỐC-ĐỘ] 35s→12s: Extension bình thường trả 0,8–3s. 35s chỉ làm kẹt worker khi Ext ì.
-        return adapter.send(payload, { timeout: 12000 });
+        // [v1.91.96] 12s→7s. Log 09:16 (312 chat): 30 ca "Ext quá hạn" ⇒ kiểm chứng lịch sử
+        // sau đó chỉ 1 ca là tin ĐÃ đến nơi, 29 ca thật sự không đi. Tức 12 giây chờ gần như
+        // không bao giờ cứu được tin nào, nhưng với 24 làn thì 30 ca × 12s = 6 phút-làn bị giữ,
+        // đủ để mở bộ ngắt ("Extension không phản hồi 12 lần liên tiếp") và pause cả làn 45s.
+        // 7s vẫn gấp >2 lần mức phản hồi bình thường (0,8–3s), và ca quá hạn vẫn KHÔNG gửi lại
+        // (đánh ⚠, kiểm chứng nền chỉ nâng ⚠→✅) nên rút ngắn không thể sinh tin trùng.
+        return adapter.send(payload, { timeout: 7000 });
       });
       if (res && res.extBreakerSkipped) {
         releaseExtSendPermit(extSendPermit);
@@ -5844,8 +5850,19 @@
       // Nay: chat idle >24h VẪN thử API trước (31ms p50). Chỉ khi API trả lỗi thật cho ĐÚNG
       // chat đó mới rơi xuống Ext — cơ chế alreadyTriedApi/dynamicDirect đã có sẵn, không
       // bao giờ gửi lại 2 lần (API lỗi ⇒ chưa phát sinh tin).
-      const textOutWin = false && !photo && idleLong && !isRecordCtx7Days(full);
-      const photoOutWin = false && !!photo && idleLong && !isRecordCtx7Days(full);
+      // [v1.91.96] SỬA LẠI KẾT LUẬN SAI CỦA v1.91.94.
+      // Chú thích cũ ở đây (v1.91.94) nói "is_record_ctx_7_days xoá sạch (#10)" — SAI.
+      // (#10) có HAI e_subcode:
+      //   • 2018300 "một ứng dụng khác đang kiểm soát thread"  → cờ ctx7 có tác dụng
+      //   • "Tin nhắn này được gửi NGOÀI KHOẢNG THỜI GIAN cho phép" → cờ ctx7 KHÔNG cứu được
+      // 19 ca "thành công + có cờ" trong HAR đều là chat TRONG 24h ⇒ chỉ là tương quan,
+      // không phải nhân quả. Log thật 09:15 chứng minh: chat ngoài 24h bị (#10)-window và
+      // (#551), sau đó Ext gửi ĐƯỢC ngay.
+      // Giá phải trả khi bắt API đi trước (1.91.94/1.95): mỗi chat chờ queue 1 218ms +
+      // fetch 1 067ms rồi mới rơi về Ext. Lô 312 chat: 2,91 tin/s (so với 20,77 tin/s của
+      // 1.91.93 khi Ext đi trước). Vì vậy: chat đã ngoài 24h ⇒ Ext/Socket TRƯỚC như cũ.
+      const textOutWin = !photo && idleLong && !isRecordCtx7Days(full);
+      const photoOutWin = !!photo && idleLong && !isRecordCtx7Days(full);
       const noApiPhoto = !!(photo && !photo.fbId);
       const alreadyTriedApi = !!(opts.deferredCtx && Array.isArray(opts.deferredCtx.triedChannels) && opts.deferredCtx.triedChannels.indexOf('api') > -1);
       const pidQuick = (full && (full.page_id || full.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];

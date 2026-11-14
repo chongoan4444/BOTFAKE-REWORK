@@ -588,3 +588,35 @@ thành công, kèm body/status/thời gian. Chỉ khi có cặp đó mới đư�
 
 Điều đã biết chắc: trần hiện tại do làn Ext quyết định (~10–22 tin/s), và gate wave không
 phải nút cổ chốt (500 tin/5,4 s ⇒ gate 92 tin/s so với thực 17,7 tin/s).
+
+## §22 — SỬA SAI §20/§21: cờ ctx7 KHÔNG mở được cửa sổ 24h
+
+`(#10)` có **hai** `e_subcode` khác nghĩa:
+
+| e_subcode | Thông điệp | Cờ `is_record_ctx_7_days` |
+|---|---|---|
+| 2018300 | "một ứng dụng khác đang kiểm soát thread này" | có tác dụng |
+| (window) | "Tin nhắn này được gửi **ngoài khoảng thời gian cho phép**" | **KHÔNG cứu được** |
+
+§20 kết luận "cờ xoá sạch #10" là **sai vì nhiễu**: 19 ca "thành công + có cờ" trong HAR đều là
+chat **trong** 24h ⇒ tương quan, không phải nhân quả. Log thật 09:15 chứng minh: chat ngoài 24h
+bị `#10`-window hoặc `#551` từ API, sau đó **Extension gửi được ngay** lúc cờ vẫn đang được gửi.
+
+Hệ quả đo được (cùng loại danh sách, cùng máy):
+
+| bản | thứ tự làn | tốc độ |
+|---|---|---|
+| 1.91.93 | Ext trước | **20,77 tin/s** |
+| 1.91.94 | API trước | 17,74 tin/s |
+| 1.91.95 | API trước | **2,91 tin/s** |
+
+Giá của "API đi trước" với chat ngoài 24h: `queue wait TB 1 218ms` + `fetch TB 1 067ms` cho
+MỖI chat, rồi mới rơi về Ext (`rejected 311/312`, `fallback 311`). v1.91.96 revert: chat đã
+ngoài 24h ⇒ Ext/Socket trước.
+
+Kèm theo: `Ext timeout 12s → 7s`. Lô 09:16 có 30 ca "Ext quá hạn", kiểm chứng lịch sử chỉ
+1 ca thật sự đến nơi ⇒ 12s chờ hầu như vô ích, nhưng 30 ca × 12s trên 24 làn đủ mở bộ ngắt
+("12 lần liên tiếp không phản hồi") và pause cả làn 45s.
+
+Trần hiện tại: làn Ext (~20–25 tin/s quan sát được ở cửa sổ 09:15:37–09:15:42). API không thể
+thay thế cho chat ngoài 24h — đây là giới hạn của cửa sổ FB, không phải của code.
