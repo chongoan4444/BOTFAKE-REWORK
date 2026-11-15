@@ -35,8 +35,9 @@ function extractFn(name) {
 
 const code = [
   extractFn('normalizeMsgText'),
+  extractFn('attachmentMatches'),
   extractFn('historyVerdict'),
-  'return { normalizeMsgText, historyVerdict };',
+  'return { normalizeMsgText, attachmentMatches, historyVerdict };',
 ].join('\n\n');
 
 const batchStats = { startedAt: 0 };
@@ -162,6 +163,7 @@ check('khớp nội dung thắng mốc nước',
   const src2 = SRC;
   const code2 = [
     extractFn('normalizeMsgText'),
+    extractFn('attachmentMatches'),
     extractFn('historyVerdict'),
     'return { historyVerdict };',
   ].join('\n\n');
@@ -175,6 +177,62 @@ check('khớp nội dung thắng mốc nước',
   }];
   check('lệch đồng hồ 60 s vẫn khớp đúng tin của mình',
     fn2.historyVerdict(msgServerClock, PAGE, 'Câu mới', null, t0Local), 'yes');
+}
+
+// 20) [v1.92.27] Tin NGẮN không được khớp bừa với tin khác của page
+//     Lô thật: có tin chỉ là "Dạ"/"Ok" ⇒ nếu dùng "chứa" thì mọi tin khác đều khớp ⇒ ✅ oan.
+{
+  const hist = [msg({ text: 'Dạ shop chào chị, em gửi bảng size ngay ạ', at: T0 + 1500 })];
+  checkNot('tin ngắn "Dạ" không được khớp với tin dài chứa nó',
+    historyVerdict(hist, PAGE, 'Dạ', null, T0), 'yes');
+  check('tin dài khớp kiểu "chứa" vẫn được chấp nhận (>= 20 ký tự)',
+    historyVerdict([msg({ text: 'Dạ shop chào chị, em gửi bảng size ngay ạ', at: T0 + 1500 })],
+      PAGE, 'em gửi bảng size ngay', null, T0), 'yes');
+}
+
+// 21) [v1.92.27] Tin COMMENT không được dùng để chốt tin INBOX đã gửi
+checkNot('message COMMENT trùng nội dung KHÔNG chốt được',
+  historyVerdict([Object.assign(msg({ text: 'Câu mới cần gửi', at: T0 + 1000 }), { type: 'COMMENT' })],
+    PAGE, 'Câu mới cần gửi', null, T0), 'yes');
+check('message INBOX trùng nội dung vẫn chốt được',
+  historyVerdict([Object.assign(msg({ text: 'Câu mới cần gửi', at: T0 + 1000 }), { type: 'INBOX' })],
+    PAGE, 'Câu mới cần gửi', null, T0), 'yes');
+
+// 22) [v1.92.27] ẢNH: chỉ chốt khi khớp ĐÚNG width×height (hoặc id), không chốt "có attachment là xong"
+{
+  const photo = { items: [{ w: 1820, h: 2427 }] };
+  const rightSize = [msg({
+    at: T0 + 1200,
+    attachments: [{ type: 'photo', url: 'https://content.pancake.vn/x.jpg', image_data: { width: 1820, height: 2427 } }],
+  })];
+  const wrongSize = [msg({
+    at: T0 + 1200,
+    attachments: [{ type: 'photo', url: 'https://content.pancake.vn/y.jpg', image_data: { width: 1080, height: 1080 } }],
+  })];
+  check('ảnh khớp đúng kích thước → yes', historyVerdict(rightSize, PAGE, '', photo, T0), 'yes');
+  check('ảnh KHÁC kích thước → unknown (không chốt bừa)', historyVerdict(wrongSize, PAGE, '', photo, T0), 'unknown');
+  check('ảnh không có thông tin để khớp (không id, không w/h) → unknown',
+    historyVerdict(rightSize, PAGE, '', { items: [{}] }, T0), 'unknown');
+}
+
+// 23) [v1.92.27] Mẫu lệch đồng hồ RÁC không được làm bẩn phép hiệu chỉnh
+{
+  const s1 = SRC;
+  const fnCode = [
+    'let serverSkewMs = 0;',
+    'let serverSkewSamples = 0;',
+    extractFn('noteServerClock'),
+    'return { noteServerClock, get: () => serverSkewMs, n: () => serverSkewSamples };',
+  ].join('\n');
+  const clock = new Function(fnCode)();
+  const hdr = (v) => ({ get: () => v });
+  clock.noteServerClock(hdr(new Date(Date.now() + 4000).toUTCString()));   // mẫu tốt +4s
+  const afterGood = clock.get();
+  clock.noteServerClock(hdr(new Date(Date.now() - 351388961).toUTCString())); // mẫu rác
+  check('mẫu lệch hợp lệ được ghi nhận (~+4s)', String(afterGood > 2000 && afterGood < 6000), 'true');
+  check('mẫu rác bị chặn, không kéo lệch phép hiệu chỉnh', String(clock.get() === afterGood), 'true');
+  clock.noteServerClock(hdr('not a date'));
+  check('header Date hỏng bị bỏ qua', String(clock.get() === afterGood), 'true');
 }
 
 /* ---------------- ngân sách thử lại Socket (v1.92.26) ---------------- */

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.26-w200.68
+// @version      1.92.27-w200.69
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.26-W200.68'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.27-W200.69'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -350,6 +350,9 @@
       const srv = Date.parse(d);
       if (isNaN(srv)) return;
       const skew = srv - Date.now();
+      // [v1.92.27] CHẶN MẪU RÁC: HAR có response lệch −351 388 961 ms (giờ hệ thống hỏng /
+      // entry tổng hợp). Một mẫu rác lọt vào EMA sẽ kéo minTime lệch hàng phút ⇒ chốt ✅ oan.
+      if (!isFinite(skew) || Math.abs(skew) > 120000) return;
       serverSkewSamples++;
       serverSkewMs = serverSkewSamples === 1 ? skew : Math.round(serverSkewMs * 0.8 + skew * 0.2);
     } catch (e) { /* ignore */ }
@@ -6687,6 +6690,19 @@
         ctx.gidFromPsid = false;
         ctx.gid = null;
       }
+      // [v1.92.27] THIẾU global_id Ở BẤT KỲ KÊNH NÀO ⇒ vẫn còn làn API.
+      // Lệnh gửi API chỉ cần conversation_id (HAR: 0/58 request gửi có global_id), nên chat
+      // không dò được gid vẫn PHẢI được gửi. Trước đây plan ['api','ext','socket'] mà api bị
+      // loại (ngoài 24h) thì Ext/Socket đều bất khả ⇒ kết thúc ❌ mà chưa hề gửi.
+      if (r.gidUnknown && !batchSkipApi && conv.type !== 'comment'
+          && !(photo && !photo.fbId) && seq.indexOf('api') < 0) {
+        const pidLoop = (ctx.full && (ctx.full.page_id || ctx.full.pageId)) || conv.pageId
+          || String(conv.id || '').split('_')[0];
+        if (pidLoop && !isApiBlockedForPage(pidLoop)) {
+          seq.push('api');
+          sendDiag.apiNoGidFallback++;
+        }
+      }
       if (r.error && r.error.indexOf('Token') === 0) {
         recycleUnusedFbId(pid0, ctx);
         return r; // token hỏng — dừng hẳn
@@ -7864,6 +7880,40 @@
    *   2) FALSE-NEGATIVE: "không thấy tin" bị coi là "chưa gửi" chỉ sau 1 lần đọc ⇒ bù ⇒ LẶP CÂU
    *      khi API lịch sử của Pancake trễ vài giây. Nay 'no' đòi hỏi mốc nước + đọc lặp.
    * minTime vẫn chặn nhìn lùi về lượt trước (chống khớp nhầm tin cũ). */
+  /* [v1.92.27] KHỚP ẢNH — thay cho "có attachment là chốt".
+   * HAR: attachment trong lịch sử KHÔNG có trường id; chỉ có {type,url} và
+   * image_data{width,height} (230 mẫu: image_data 161 · ad 55 · comment 4 · khác 10).
+   * Ảnh ta gửi có content_id (đôi khi) + width/height đúng như request gửi đi, nên chỉ chốt khi:
+   *   • id khớp (cả hai cùng có), hoặc
+   *   • ĐÚNG cặp width×height trong image_data.
+   * Không đủ thông tin để khớp ⇒ KHÔNG chốt (để 'unknown' ⇒ giữ ⚠, không bao giờ bắn lại).
+   */
+  function attachmentMatches(m, photo) {
+    const items = photo && (Array.isArray(photo.items) ? photo.items : [photo]);
+    if (!Array.isArray(items) || !items.length) return false;
+    const ids = [];
+    const dims = [];
+    for (const p of items) {
+      if (!p) continue;
+      if (p.id) ids.push(String(p.id));
+      const w = Number(p.w) || 0;
+      const h = Number(p.h) || 0;
+      if (w && h) dims.push(w + 'x' + h);
+    }
+    if (!ids.length && !dims.length) return false;
+    const atts = Array.isArray(m.attachments) ? m.attachments : [];
+    for (const a of atts) {
+      if (!a) continue;
+      if (a.id && ids.indexOf(String(a.id)) > -1) return true;
+      const im = a.image_data || a.imageData;
+      if (im && dims.length) {
+        const key = (Number(im.width) || 0) + 'x' + (Number(im.height) || 0);
+        if (dims.indexOf(key) > -1) return true;
+      }
+    }
+    return false;
+  }
+
   function historyVerdict(msgs, pageId, want, photo, sentAt) {
     /* [v1.92.25] PHÂN XỬ LỊCH SỬ CHỈ CÒN HAI KẾT LUẬN: yes (bằng chứng dương) và unknown.
      * Đã BỎ hẳn kết luận 'no' ("mốc nước rỗng ⇒ chắc chắn chưa đi") vì nó là PHÁN ĐOÁN chứ
@@ -7890,12 +7940,18 @@
       const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
       if (isNaN(t)) continue;
       if (!m.from || String(m.from.id) !== String(pageId)) continue; // chỉ tin DO PAGE gửi
+      // HAR: 1 311 tin lịch sử = 1 305 INBOX + 6 COMMENT. Bình luận KHÔNG phải tin inbox nên
+      // không được dùng để chốt "reply_inbox đã gửi".
+      if (m.type && String(m.type).toUpperCase() !== 'INBOX') continue;
       if (t < minTime) continue;
       const hasAtt = Array.isArray(m.attachments) && m.attachments.length > 0;
       if (want) {
         const normMsg = normalizeMsgText(m.message);
-        if (normMsg && (normMsg === want || normMsg.indexOf(want) > -1)) return 'yes';
-      } else if (hasAtt) {
+        // [v1.92.27] KHỚP CHẶT: khớp ĐÚNG (sau chuẩn hoá) luôn là bằng chứng; khớp kiểu "chứa"
+        // chỉ nhận khi chuỗi ta gửi đủ dài (≥ 20 ký tự). Nếu không, một tin NGẮN ("Dạ", "Ok")
+        // sẽ khớp bừa với tin khác của page ⇒ chốt ✅ oan ⇒ mất tin im lặng.
+        if (normMsg && (normMsg === want || (want.length >= 20 && normMsg.indexOf(want) > -1))) return 'yes';
+      } else if (hasAtt && attachmentMatches(m, photo)) {
         return 'yes';
       }
     }

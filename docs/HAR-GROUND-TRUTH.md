@@ -2345,25 +2345,36 @@ Mục tiêu: **không còn chỗ nào kết luận mà không có bằng chứng
 bằng chứng đọc lại từ 12 HAR trong repo + bundle `_app-*.js`, rồi đối chiếu từng điểm quyết định
 trong script. Mọi số liệu đều đếm được, không suy đoán.
 
-### 59.1 Bằng chứng từ HAR — đường HTTP (303 request `POST /conversations/{id}/messages`)
+### 59.1 Bằng chứng từ HAR — đường HTTP (⚠ ĐÃ SỬA SỐ ở §61.1)
 
-Tổng **303** request gửi, chỉ có **8** dạng phản hồi:
+> **ĐÍNH CHÍNH (1.92.27).** Bảng dưới đây ở bản đầu đếm **303** request vì lọc theo
+> `POST …/messages*`, tức là **gộp cả hai endpoint phụ** `…/messages/fill_admin_name` (152) và
+> `…/messages/load_shop_page_customers` (93) — hai endpoint này cũng trả `{success:true}` /
+> `{success:true, customers…}` / `status 0` / `body rỗng`, nên các dòng 1, 2, 7, 8 là **sai
+> nguồn**. Endpoint gửi tin THẬT chỉ có **58** request, và 58/58 đều `status 200` với đúng
+> 3 dạng: 23 `success:true`, 24 `#10`, 11 `#551`. Bảng đúng ở §61.1; phần kết luận bên dưới
+> không đổi (vẫn đúng với 58 mẫu thật).
+
+Tổng **303** request "có đuôi `/messages*`" (58 gửi tin + 245 endpoint phụ), 8 dạng phản hồi:
 
 | # | dạng phản hồi | số ca | kết luận ĐÚNG |
 |---|---|---|---|
-| 1 | `{success:true}` | 153 | ✅ đã gửi |
-| 2 | `{success:true, customers…, reports_by_phone…}` | 68 | ✅ đã gửi |
+| 1 | `{success:true}` | 153 | ✅ đã gửi (phần lớn là endpoint phụ — xem đính chính) |
+| 2 | `{success:true, customers…, reports_by_phone…}` | 68 | ✅ đã gửi (endpoint `load_shop_page_customers`) |
 | 3 | `{success:true, id:"m_…", original_error:null}` | 19 | ✅ đã gửi (có cả id tin của FB) |
 | 4 | `{success:true, id:"m_…"}` | 4 | ✅ đã gửi |
 | 5 | `{success:false, e_code:10, e_subcode:2018300, message:"(#10) …ứng dụng khác…kiểm soát thread"}` | 24 | ❌ CHẮC CHẮN chưa đi (FB từ chối) |
 | 6 | `{success:false, e_code:551, e_subcode:1545041, message:"(#551) Người này hiện không có mặt."}` | 11 | ❌ chắc chắn chưa đi, khách chết |
-| 7 | `status=200` nhưng **body RỖNG** (`len=0`, mime `x-unknown`) | 10 | ⚠ KHÔNG RÕ |
-| 8 | `status=0`, `net::ERR_ABORTED` | 14 | ⚠ KHÔNG RÕ |
+| 7 | `status=200` nhưng **body RỖNG** | 10 | ⚠ KHÔNG RÕ (endpoint phụ — KHÔNG có ca nào ở endpoint gửi) |
+| 8 | `status=0`, `net::ERR_ABORTED` | 14 | ⚠ KHÔNG RÕ (endpoint phụ — KHÔNG có ca nào ở endpoint gửi) |
 
-Hai điều đáng chú ý:
-- `original_error` xuất hiện 19 lần và **luôn là `null`** ⇒ success:true không giấu lỗi. Không
-  cần suy diễn gì thêm.
-- Dạng 7 và 8 **không được phép** coi là ❌ (chưa chắc tin chưa đi) cũng không được coi là ✅.
+Ba điều đáng chú ý:
+- `original_error` xuất hiện 19 lần và **luôn là `null`** ⇒ success:true không giấu lỗi.
+- Ở **endpoint gửi thật** (58 ca) không hề có status 0 / body rỗng / non-JSON ⇒ hai dạng
+  "không rõ" vẫn phải giữ trong code (mạng có thể hỏng), nhưng chưa từng thấy trong HAR.
+- Ảnh hưởng tới logic: **không có**. `classify` của script xét `success:true` / `e_code` /
+  "không rõ" độc lập với tên endpoint, nên việc bảng cũ gộp endpoint không làm sai phân xử —
+  chỉ làm sai *số liệu dẫn chứng*.
 
 ### 59.2 Bằng chứng từ HAR — đường Socket (`/ls_req` → `/ls_resp`)
 
@@ -2528,3 +2539,94 @@ không, vì số không khớp là dấu hiệu code đếm sai chứ không ph�
   Muốn vượt phải đo riêng: chi phí main-thread cho mỗi khung `/ls_resp` (mỗi khung chứa hàng
   chục action) so với chi phí `publish`. Chưa có số đo ⇒ chưa đổi pacing (§59.8: không đoán).
 * Tỉ lệ 96,7% trong log là **trên phần khả thi**, không phải 96,7% khách hàng thật.
+
+## §61 — SOÁT 50 ĐIỂM TRƯỚC KHI TEST THỰC TẾ (1.92.27)
+
+Soát lại **toàn bộ 12 HAR** trong repo + đọc lại từng nhánh quyết định trong script. Mỗi dòng
+dưới đây là một phép kiểm tra đã **chạy thật** (script đếm trên HAR) hoặc **đọc code đối chiếu**
+và ghi rõ kết quả. 7 điểm ✗/⚠ đã được sửa ngay trong 1.92.27.
+
+### 61.1 Nhóm A — số liệu HAR (A1–A28)
+
+| # | điểm kiểm tra | kết quả |
+|---|---|---|
+| A1 | số lệnh gửi tin THẬT (`POST …/conversations/<id>/messages`) | **58** (bản cũ ghi 303 — sai vì gộp 245 request của `fill_admin_name` + `load_shop_page_customers`) ✗→đính chính §59.1 |
+| A2 | status của 58 lệnh gửi | 200 × 58 (không có 0/4xx/5xx) |
+| A3 | `{success:true, id}` | 23 |
+| A4 | `{success:true, id, original_error}` | 19 — `original_error` **luôn null** |
+| A5 | `e_code 10 / sub 2018300` | 24 |
+| A6 | `e_code 551 / sub 1545041` | 11 |
+| A7 | body rỗng / ERR_ABORTED ở endpoint gửi | **0** (10 + 14 ca thuộc endpoint phụ) ✗→đính chính |
+| A8 | request gửi có `global_id`? | **0/58** ⇒ làn API không cần global_id ✔ (cơ sở của bản sửa 1.92.26/27) |
+| A9 | request gửi có `from_psid`? | 0/58 |
+| A10 | `action` | `reply_inbox` × 58/58 |
+| A11 | `send_by_platform` | `web` × 58/58 |
+| A12 | multipart / JSON | 52 / 6 |
+| A13 | cờ `is_record_ctx_7_days` × kết quả | có cờ: 19 OK + 5 ×#551 · không cờ: **24 ×#10** + 4 OK + 6 ×#551 ⇒ #10 **chỉ** xảy ra khi thiếu cờ (24/24) ✔ khớp chú thích `buildInboxSend` |
+| A14 | request gửi ảnh | có `content_id`/`attachment_id`/`content_url`/`width`/`height` ✔ khớp `buildInboxSend` |
+| A15 | URL lịch sử script dùng | `?customer_id&user_view=true&is_new_api=true&separate_pos=true` — đúng một dạng có trong HAR ✔ |
+| A16 | số tin mỗi response lịch sử | min 1 · p50 11 · **max 25** ⇒ API trả cửa sổ tối đa 25 tin (không phân trang) |
+| A17 | shape message trong lịch sử | 1 311 tin · **1 shape duy nhất** |
+| A18 | `inserted_at` | `YYYY-MM-DDTHH:MM:SS.ffffff` — **không Z, không offset**, 100% mẫu ✔ `+ 'Z'` là đúng |
+| A19 | `type` | INBOX 1 305 · COMMENT 6 ⇒ phải lọc COMMENT khi chốt "đã gửi" ✗→sửa |
+| A20 | `from.id == pageId` cho tin của page | 1 230/1 230, không lẫn tin khách ✔ |
+| A21 | tin khách có `from.uid == pageId` (gây nhầm) | 0/81 ✔ |
+| A22 | attachment trong lịch sử | 230 mẫu nhưng **KHÔNG có trường `id`**; có `image_data{width,height}` 161 · ad 55 · comment 4 · khác 10 ⇒ không thể khớp ảnh bằng id ✗→sửa (khớp theo width×height) |
+| A23 | thứ tự mảng lịch sử | tăng dần 89/89 response ⇒ phần tử cuối là tin mới nhất |
+| A24 | `Date` header | 2 312 response; lệch p50 **+1,95 s** · p90 **+14,1 s** · max 15,1 s · **min −351 388 961 ms = RÁC** ✗→sửa (chặn mẫu rác) |
+| A25 | khung WebSocket | 225 khung: `ls_resp` 98 · `ls_req` 46 · khác 81 |
+| A26 | `ls_resp` parse được payload thật | 96/98 · `markOptimisticMessageFailed` **1** · `replaceOptimsiticMessage` **0** |
+| A27 | khung thất bại có gì | `taskExists[19,"1"]` + `markOptimisticMessageFailed(<otid>, "Không gửi được.")` + `updateSubscriptErrorMessage` |
+| A28 | publish của app có `otid` không | CÓ (`/ls_req`: `otid`, `thread_id`, `send_type`, `sync_group 205`) ⇒ **khớp otid là hướng chốt ✅ dương tính thật** (chưa làm) |
+
+### 61.2 Nhóm B — logic phân xử (B1–B22)
+
+| # | điểm kiểm tra | kết quả |
+|---|---|---|
+| B1 | `historyVerdict` chỉ trả `yes`/`unknown` | ✔ (test 13: 0 ca trả `no`) |
+| B2 | khớp chữ theo kiểu "chứa" | ✗ tin ngắn (`Dạ`, `Ok`) khớp bừa mọi tin khác ⇒ **sửa: đúng-bằng, hoặc "chứa" khi ≥ 20 ký tự** |
+| B3 | lọc `type` khi chốt | ✗ trước đây nhận cả COMMENT ⇒ **sửa: chỉ INBOX** |
+| B4 | khớp ảnh | ✗ trước đây "có attachment là ✅" ⇒ **sửa: khớp id hoặc width×height; thiếu dữ kiện ⇒ unknown** |
+| B5 | mốc `minTime` | `max(batchStart−3 s, atServer−5 s)` — không nhìn lùi quá lượt trước ✔ |
+| B6 | hiệu chỉnh lệch đồng hồ | ✔ dùng `serverSkewMs`, nhưng ✗ **không chặn mẫu rác** ⇒ **sửa: |skew| > 120 s bị bỏ** |
+| B7 | mẫu lệch có được lấy trên đúng đường verify | ✔ (verify gọi `fetchJson` → `noteServerClock`) |
+| B8 | verify có bắn lại bao giờ chưa | ✔ không: chỉ nâng ⚠→✅ (test 14) |
+| B9 | `classify` socket khớp chuẩn app | ✔ `failed && !replaced ⇒ rejected`; có `replaced` ⇒ ok; giống hệt app (§59.3) |
+| B10 | ảnh + chữ: chữ OK mà ảnh bị từ chối | ✔ `photo_failed_text_ok` (chỉ bắn bù phần ảnh) |
+| B11 | `noack` (mất ACK) | ✔ ⚠ + verify nền, **không** bắn lại |
+| B12 | cờ lỗi trong payload mà không có `replace` | ✔ `noack` (từ 1.92.18) |
+| B13 | gate no-gid ở nhánh `dynamicDirect` | ✗ trước đây **bỏ chat** ⇒ **sửa: đi làn API** |
+| B14 | gate no-gid ở `sendViaExtension` | ✗ trước đây plan `['ext','socket']` kết thúc ❌ ⇒ **sửa: vòng lặp tự thêm `api`** |
+| B15 | gate no-gid chạy TRƯỚC khi acquire outbound? | ✔ có (cả Ext và Socket đều return trước khi giữ khóa) ⇒ thêm `api` không thể trùng |
+| B16 | fallback API tôn trọng chặn | ✔ `batchSkipApi`, `isApiBlockedForPage`, comment, ảnh thiếu `fbId` |
+| B17 | ngân sách thử lại Socket | ✔ 40 ca · 0 cứu · 10–70% ⇒ đóng · dò 1/200 · cứu được ⇒ mở (test 15–19) |
+| B18 | ngân sách dùng chung 2 đường (bắn-nhả & sync) | ✔ `sockRetryBudgetState` ở phạm vi module, reset mỗi lượt |
+| B19 | đường bỏ thử lại (bắn-nhả) có đếm trùng không | ✔ không: wave đã đếm khi `fired`, nhánh này chỉ chốt ❌ + nhả khóa |
+| B20 | đường bỏ thử lại (sync) | ✔ có `done++/fail++` + `releaseOutbound` + `clearBgPending` (đường này chưa đếm ở `sendOneAndLog`) |
+| B21 | `eligibleAfterUnavailable` | ✔ `max(0, total − unavailable − bỏ thử lần 2)`, không âm, không chia 0 |
+| B22 | HTTP "không rõ" | ✔ `ERR_ABORTED`/408/499/5xx/body rỗng ⇒ `sent:'maybe'` ⇒ không bù, không gửi thêm |
+
+### 61.3 Nhóm C — đường Ext / watchdog / bù (C1–C8)
+
+| # | điểm kiểm tra | kết quả |
+|---|---|---|
+| C1 | Ext `success:true` | ✅ |
+| C2 | Ext `success:false` CÓ lý do | ❌ chắc chắn chưa đi ⇒ bù kênh khác |
+| C3 | Ext `success:false` KHÔNG lý do (adapter hết giờ) | ⚠ + kiểm chứng nền |
+| C4 | Ext văng exception giữa chừng | ⚠ `sent:'maybe'` — không kênh nào bắn lần 2 |
+| C5 | Ext trả lời MUỘN | chỉ nâng ⚠→✅, không gửi lại |
+| C6 | watchdog chờ nền hết hạn | ⚠ (không bao giờ ❌) |
+| C7 | `scheduleBuRetry` có chống bù chồng | ✔ `buRetryTimer` + `sockFiredPending` |
+| C8 | bù chỉ dùng kênh CHƯA thử | ✔ `triedChannels` loại kênh đã thử |
+
+### 61.4 Việc còn để ngỏ (không sửa lần này)
+
+1. **Chốt ✅ dương tính thật bằng `otid`** (A27/A28): publish của ta đã sinh `otid` cho từng task,
+   và khung `/ls_resp` mang đúng `otid` đó khi FB thay thế / đánh dấu hỏng. Bắt khung
+   `replaceOptimsiticMessage(<otid của ta>)` ở **mọi** `/ls_resp` sẽ là bằng chứng dương tính
+   tuyệt đối, thay cho suy luận "không có dấu hiệu lỗi ⇒ ✅". Cần hook vào luồng frame của
+   `__MqttHelper__` ⇒ làm thành bản riêng, có test, không gộp vào lượt này.
+2. **Cửa sổ 25 tin của API lịch sử** (A16): chưa biết chắc trả 25 tin *mới nhất* hay *cũ nhất*.
+   Nếu là cũ nhất thì verify sẽ luôn `unknown` cho chat dài (an toàn, không sai) — cần log
+   `số tin đọc được + tuổi tin mới nhất` để kết luận bằng số.
+3. **Tốc độ**: chưa có số đo chi phí main-thread/khung `/ls_resp`, nên chưa đổi pacing (§60.3).
