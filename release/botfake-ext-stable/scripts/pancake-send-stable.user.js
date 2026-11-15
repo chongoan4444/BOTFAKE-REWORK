@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.22-stable
-// @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
+// @version      1.92.23-stable
+// @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn. Đồng hồ chạy nền bằng Web Worker; mỗi lúc chỉ 1 tab Pancake được gửi.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -72,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.22-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.23-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -404,20 +404,69 @@
   let keepAliveAudio = null;
   let keepAliveLogged = false;
   // [v1.92.22] Chrome "Energy Saver" có thể ĐÓNG BĂNG tab ẩn sau 5 phút; trang đang giữ một
-  // Web Lock thì được miễn. Giữ lock suốt lượt gửi/quét (tên riêng, không chặn gì khác).
-  let runLockRelease = null;
+  // Web Lock thì được miễn. Lock này là CHIA SẺ (nhiều tab cùng giữ được) và không bao giờ chờ.
+  const runLockName = (suffix) => 'ssb-' + suffix + '-' + String((location && location.host) || 'pancake');
+  let runLockRelease = null;   // lock chia sẻ: chống đóng băng tab
+  let sendLockRelease = null;  // lock độc quyền: mỗi lúc chỉ MỘT tab được Chạy
   function holdRunLock() {
     try {
       if (runLockRelease) return;
       if (!navigator || !navigator.locks || typeof navigator.locks.request !== 'function') return;
-      navigator.locks.request('ssb-run-' + String((location && location.host) || 'pancake'), () => new Promise((res) => { runLockRelease = res; }))
-        .catch(() => { /* trình duyệt cũ: bỏ qua */ });
+      navigator.locks.request(runLockName('run'), { mode: 'shared', ifAvailable: true }, (lk) => {
+        if (!lk) return undefined; // tab khác đang giữ lock chung ⇒ cũng đã được bảo vệ
+        return new Promise((res) => { runLockRelease = res; });
+      }).catch(() => { /* trình duyệt cũ: bỏ qua */ });
     } catch (e) { /* ignore */ }
+  }
+  let sendLockWatch = null;
+  function releaseSendLock() {
+    const w = sendLockWatch;
+    sendLockWatch = null;
+    if (w) { try { w(); } catch (e0) { /* ignore */ } }
+    const r = sendLockRelease;
+    sendLockRelease = null;
+    try { if (r) r(); } catch (e) { /* ignore */ }
+  }
+  /**
+   * Lưới an toàn của lock gửi: nhỡ lượt gửi KHÔNG thực sự bắt đầu (người dùng Cancel hộp xác
+   * nhận, danh sách chưa tải, chưa chọn chat, alert chặn…) thì nhả lock trong ~1,5 s. Chỉ nhả
+   * khi thật sự rảnh (không gửi / không xác nhận / không quét) nên KHÔNG nhả giữa lượt:
+   * confirm() và alert() chặn JS nên timer không thể chạy chen vào lúc hộp thoại đang mở.
+   */
+  function armSendLockWatch() {
+    if (sendLockWatch) return;
+    sendLockWatch = bgClock.every(1500, () => {
+      if (state.sending || state.confirmingSend || state.scanning) return;
+      releaseSendLock();
+    });
   }
   function releaseRunLock() {
     const r = runLockRelease;
     runLockRelease = null;
     try { if (r) r(); } catch (e) { /* ignore */ }
+    releaseSendLock();
+  }
+  /**
+   * [v1.92.23] ⛔ CHỐNG 2 TAB PANCAKE CÙNG GỬI (nguồn gửi trùng duy nhất còn lại):
+   * outboundLock + deliveredIds + sentIds chỉ nằm trong 1 tab, nên hai tab cùng bấm Chạy
+   * sẽ coi cùng một chat là "chưa gửi" và cùng bắn. Lock độc quyền theo origin chặn việc đó:
+   * tab thứ hai bị TỪ CHỐI chạy (không xếp hàng, không chờ ngầm). Đóng tab/tắt máy thì
+   * trình duyệt tự nhả lock. Không có Web Locks (bản cũ) ⇒ chạy như trước, không chặn oan.
+   */
+  function claimSendLock() {
+    if (sendLockRelease) return Promise.resolve(true);
+    if (!navigator || !navigator.locks || typeof navigator.locks.request !== 'function') return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let answered = false;
+      try {
+        navigator.locks.request(runLockName('send'), { ifAvailable: true }, (lk) => {
+          if (!lk) { answered = true; resolve(false); return undefined; }
+          answered = true;
+          resolve(true);
+          return new Promise((res) => { sendLockRelease = res; });
+        }).catch(() => { if (!answered) { answered = true; resolve(true); } });
+      } catch (e) { if (!answered) { answered = true; resolve(true); } }
+    });
   }
   function startKeepAliveAudio() {
     holdRunLock();
@@ -10081,13 +10130,21 @@
         logLine('📝 Đã chuyển sang chế độ: GỬI BẰNG CÂU TRÊN GIAO DIỆN');
       }
     });
-    const triggerSendRun = () => {
+    const triggerSendRun = async () => {
       try { markSendIdleIfSettled(); } catch (e0) { /* ignore */ }
       if (state.confirmingSend) return;
       if (state.sending) {
         logLine('⏳ Đang trong lượt gửi — hãy chờ hoàn tất hoặc bấm ⏹ Dừng trước khi chạy lượt mới.');
         return;
       }
+      // [v1.92.23] Chỉ MỘT tab Pancake được gửi tại một thời điểm — chống gửi trùng giữa các tab.
+      if (!(await claimSendLock())) {
+        logLine('⛔ Có tab Pancake KHÁC đang gửi — tab này KHÔNG chạy để tránh gửi trùng.'
+          + ' Chờ tab kia xong (hoặc bấm ⏹ Dừng ở tab đó) rồi bấm Chạy lại.');
+        render();
+        return;
+      }
+      armSendLockWatch();
       if (state.sentIds && state.sentIds.size > 0) {
         logLine('⏩ Có ' + state.sentIds.size + ' chat đã gửi ở lượt trước — sẽ bỏ qua, chỉ gửi phần còn lại.');
       }
