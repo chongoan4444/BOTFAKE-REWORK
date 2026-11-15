@@ -2338,3 +2338,134 @@ Ca socket chết ngầm **thật** (frame không tới FB) giờ nằm ở **⚠
 Đây là lựa chọn có chủ ý: thà mất một tin còn hơn khách nhận hai lần. Nếu sau này muốn cứu nhóm
 đó thì phải có bằng chứng **dương** (ví dụ lịch sử có mốc nước rỗng **mà** thread đã được server
 làm mới), không được suy từ "chưa thấy tin".
+
+## §59 — AUDIT LẠI TOÀN BỘ "PHÂN XỬ KẾT QUẢ GỬI" (1.92.25)
+
+Mục tiêu: **không còn chỗ nào kết luận mà không có bằng chứng** ("phán tù mù"). Dưới đây là
+bằng chứng đọc lại từ 12 HAR trong repo + bundle `_app-*.js`, rồi đối chiếu từng điểm quyết định
+trong script. Mọi số liệu đều đếm được, không suy đoán.
+
+### 59.1 Bằng chứng từ HAR — đường HTTP (303 request `POST /conversations/{id}/messages`)
+
+Tổng **303** request gửi, chỉ có **8** dạng phản hồi:
+
+| # | dạng phản hồi | số ca | kết luận ĐÚNG |
+|---|---|---|---|
+| 1 | `{success:true}` | 153 | ✅ đã gửi |
+| 2 | `{success:true, customers…, reports_by_phone…}` | 68 | ✅ đã gửi |
+| 3 | `{success:true, id:"m_…", original_error:null}` | 19 | ✅ đã gửi (có cả id tin của FB) |
+| 4 | `{success:true, id:"m_…"}` | 4 | ✅ đã gửi |
+| 5 | `{success:false, e_code:10, e_subcode:2018300, message:"(#10) …ứng dụng khác…kiểm soát thread"}` | 24 | ❌ CHẮC CHẮN chưa đi (FB từ chối) |
+| 6 | `{success:false, e_code:551, e_subcode:1545041, message:"(#551) Người này hiện không có mặt."}` | 11 | ❌ chắc chắn chưa đi, khách chết |
+| 7 | `status=200` nhưng **body RỖNG** (`len=0`, mime `x-unknown`) | 10 | ⚠ KHÔNG RÕ |
+| 8 | `status=0`, `net::ERR_ABORTED` | 14 | ⚠ KHÔNG RÕ |
+
+Hai điều đáng chú ý:
+- `original_error` xuất hiện 19 lần và **luôn là `null`** ⇒ success:true không giấu lỗi. Không
+  cần suy diễn gì thêm.
+- Dạng 7 và 8 **không được phép** coi là ❌ (chưa chắc tin chưa đi) cũng không được coi là ✅.
+
+### 59.2 Bằng chứng từ HAR — đường Socket (`/ls_req` → `/ls_resp`)
+
+Giải mã 97 khung `/ls_resp` (base64 → JSON, `payload` lồng JSON): **chỉ có 1 khung liên quan
+đến gửi tin**, và nó là **thất bại**:
+
+```
+payload.step = … taskExists → markOptimisticMessageFailed("7522294945565959207", "Không gửi được.")
+                … updateSubscriptErrorMessage(<khách>, <otid>, "Không gửi được.")
+```
+
+Số khung có `replaceOptimsiticMessage` (dấu hiệu THÀNH CÔNG): **0**. Nghĩa là HAR **không** có
+mẫu thành công của Socket ⇒ không thể tự suy ra hình dạng "success", phải đọc code của chính app.
+
+### 59.3 Chuẩn phân xử của CHÍNH PANCAKE (`_app-*.js`, offset ~833 035)
+
+Nguyên văn logic app dùng cho gửi qua socket:
+
+```js
+let g = await this.publish(e, '/ls_req', f, 3);
+if (!(g?.payload)) return { success: false };                       // mất ACK ⇒ app coi là THẤT BẠI
+let _ = JSON.parse(g.payload);
+let y = findAllBlockActions(_.step, 'replaceOptimsiticMessage');     // tin được thay thế (kèm otid)
+let b = findAllBlockActions(_.step, 'markOptimisticMessageFailed');  // tin bị đánh dấu hỏng
+if (b?.length > 0 && y?.length == 0) return { success: false, response: _ };
+if (!(y.length > 0)) return { success: true, … };                    // KHÔNG có replace ⇒ app vẫn coi là THÀNH CÔNG
+… chờ tối đa 10 s khung insertMessage khớp otid … không thấy VẪN success: true
+```
+
+⇒ `classify()` của script đang bám **đúng** chuẩn này (kể cả nhánh "không thấy dấu hiệu gì ⇒ ✅"),
+nên đó **không phải** phán đoán tự chế. Khác biệt duy nhất — và là khác biệt có lợi cho người
+dùng: app coi "mất ACK" là THẤT BẠI, còn script coi là **KHÔNG RÕ** và không bao giờ gửi lại.
+
+App còn cho thấy một **kênh bằng chứng dương** nữa (offset ~923 439): `processMessage` giữ
+`pendingSendMessages[otid]` và resolve khi có khung `replaceOptimsiticMessage` mang **otid của
+chính mình** (bất kỳ khung nào, không nhất thiết `/ls_resp`). Đây là hướng nâng ⚠→✅ rẻ nhất
+cho tương lai (ghi lại để làm sau, chưa đưa vào bản này).
+
+### 59.4 Bằng chứng từ HAR — API lịch sử (dùng cho kiểm chứng)
+
+91 response `GET …/messages` có mảng tin; **mọi** object tin có cùng một shape:
+
+| trường | giá trị thật | hệ quả cho `historyVerdict` |
+|---|---|---|
+| `inserted_at` | `"2026-10-19T10:10:19.000000"` — **UTC không kèm Z**, 6 chữ số lẻ | phải `+ 'Z'`; **đã kiểm chứng** `Date.parse` của V8 nhận đúng dạng 6 chữ số (trả về `.000Z`) |
+| `from.id` (tin của shop) | `"769625892902516"` = **đúng id page** | so `String(m.from.id) === String(pageId)` là chính xác |
+| `from.id` (tin của khách) | `"39224298167184827"` = PSID khách | không bị nhầm là tin page |
+| `message` | HTML: `"<div>Áo shop SALE 30%…</div>"`, tin ảnh là `"<div></div>"` + `attachments` | `normalizeMsgText` bóc tag; ảnh khớp qua `attachments` |
+| `is_removed` | có | tin thu hồi bị loại |
+
+**Không đọc được gì từ HAR về độ trễ của lịch sử** (HAR không có mốc "tin vừa gửi xuất hiện ở
+lần đọc nào") ⇒ mọi ngưỡng thời gian ở đây đều là **cửa sổ an toàn**, không phải bằng chứng.
+
+### 59.5 Bằng chứng về LỆCH ĐỒNG HỒ
+
+Header `Date` có mặt ở **2 283/2 368** response cùng origin. So `Date` với thời điểm nhận
+(`startedDateTime + time`) trên chính bộ HAR đó: p50 **+1,9 s**, p90 **+10,8 s**, và có những
+entry lệch tới **hàng chục giây** (máy chỉnh giờ sai / nhiều máy trộn trong HAR).
+
+⇒ Mọi phép so `inserted_at` (đồng hồ server) với `publishedAt` (đồng hồ máy) **phải hiệu chỉnh
+lệch**, và **không được dùng phép so đó để kết luận "chưa đi"**.
+
+### 59.6 Từng điểm quyết định trong script
+
+| # | chỗ quyết định | bằng chứng dùng | khi KHÔNG có bằng chứng | trạng thái |
+|---|---|---|---|---|
+| 1 | HTTP `success===true` | body JSON (244 ca HAR) | — | ✅ đúng |
+| 2 | HTTP `success===false` + `e_code` | #10 (24) / #551 (11) | — | ✅ chắc chắn chưa đi ⇒ bù kênh khác an toàn |
+| 3 | HTTP body rỗng / `ERR_ABORTED` / 408 / 499 / ≥500 | không có | ⚠ không rõ, không gửi lại | ✅ đúng |
+| 4 | Socket `markOptimisticMessageFailed` & không `replace` | 1 khung HAR + code app | — | ✅ chắc chắn chưa đi ⇒ bù an toàn |
+| 5 | Socket không payload / JSON hỏng | — | ⚠ `noack` | ✅ đúng |
+| 6 | Socket có cờ lỗi & không `replace` | code app | ⚠ `noack` | ✅ đúng (v1.92.18) |
+| 7 | Socket "không thấy dấu hiệu gì" ⇒ ✅ | **chuẩn của chính app** (§59.3) | — | ✅ giữ nguyên (không phải phán đoán tự chế) |
+| 8 | Socket ảnh+chữ: chữ OK, ảnh bị từ chối | `replace`+`failed` cùng có | — | ✅ tách riêng phần ảnh |
+| 9 | Socket `dead` trước khi publish | socket không kết nối | — | ✅ bù an toàn |
+| 10 | Kiểm chứng lịch sử: khớp nội dung ⇒ ✅ | tin page + đúng chữ + cửa sổ giờ | — | ✅ chỉ nâng cấp |
+| 11 | Kiểm chứng lịch sử: **không** khớp | — | trước 1.92.25: **'no' ⇒ bắn cứu** | 🔴→ đã bỏ cả 'no' lẫn bắn cứu |
+| 12 | Ext `success:true` | response | — | ✅ |
+| 13 | Ext `success:false` CÓ lý do | `errorDescription` / `fbErrorCode` | — | ✅ chắc chắn chưa đi |
+| 14 | Ext `success:false` KHÔNG lý do / exception | — | ⚠ timeout, kiểm chứng nền | ✅ |
+| 15 | Ext trả lời MUỘN | response muộn | — | ✅ chỉ nâng ⚠→✅ |
+| 16 | Watchdog 180 s hết hạn chờ nền | — | ⚠ không rõ (không ❌) | ✅ |
+
+### 59.7 Đã sửa trong 1.92.25
+
+1. **BỎ HẲN kết luận `'no'`** trong `historyVerdict`. Hàm giờ chỉ trả `'yes'` (bằng chứng dương)
+   hoặc `'unknown'`. Lý do: `'no'` là phép so **hai đồng hồ khác nhau** (§59.5) cộng giả định
+   "lịch sử cập nhật ngay" — không phải bằng chứng. Chính nó là mắt xích của chuỗi gửi trùng §58.
+2. **Đo lệch đồng hồ** bằng header `Date` (`noteServerClock`, làm trơn EMA 0,8/0,2) và **hiệu
+   chỉnh** mọi mốc so sánh trong `historyVerdict` ⇒ khớp `'yes'` đúng cả khi máy chỉnh giờ sai.
+   Không đo được ⇒ 0 (hành vi như cũ).
+3. Bỏ 2 nhánh `verdict === 'no'` + biến `noStreak` ở cả hai đường kiểm chứng; nhánh "không chứng
+   minh được" giờ là đường duy nhất và luôn **giữ ⚠, không bắn lại**.
+4. Test: 12 → **14 kịch bản**, thêm ca "không bao giờ trả 'no'" và ca "lệch đồng hồ 60 s vẫn khớp
+   đúng tin của mình". `npm test` = 14/14.
+
+### 59.8 Điều KHÔNG chứng minh được (ghi lại để không ai tự tin quá)
+
+- **Chưa có mẫu `/ls_resp` thành công** trong 12 HAR ⇒ không thể chứng minh "không có
+  `markOptimisticMessageFailed` ⇒ tin đã tới". Ta chỉ biết nó khớp chuẩn của app. Vì vậy đường
+  an toàn (⚠ + kiểm chứng chỉ nâng cấp) là bắt buộc, không phải tuỳ chọn.
+- **Độ trễ cập nhật lịch sử của Pancake** không đo được từ HAR ⇒ mọi ngưỡng giờ ở đây là cửa sổ
+  an toàn.
+- Muốn có bằng chứng dương thật cho Socket: bắt khung `replaceOptimsiticMessage` mang **otid của
+  mình** (§59.3) — hướng đã xác định, chưa làm.

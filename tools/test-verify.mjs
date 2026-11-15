@@ -85,13 +85,15 @@ check('tin page khác nội dung → unknown (bản cũ: true)',
   historyVerdict([msg({ text: 'Câu của lượt trước', at: T0 + 1000 })], PAGE, 'Câu mới cần gửi', null, T0),
   'unknown');
 
-// 3) Lịch sử rỗng + mốc nước cũ hơn lúc bắn → chắc chắn chưa đi (được phép bù)
-check('lịch sử cũ hơn lúc bắn → no',
+// 3) [v1.92.25] Lịch sử chỉ có tin CŨ hơn lúc bắn → 'unknown', KHÔNG còn 'no'.
+//    Lý do: 'no' so inserted_at (đồng hồ server) với publishedAt (đồng hồ máy) ⇒ phán đoán,
+//    không phải bằng chứng, và chính nó là mắt xích tạo chuỗi gửi trùng ở lô 09:46 (§58).
+check('lịch sử cũ hơn lúc bắn → unknown (bản cũ: no)',
   historyVerdict([
     msg({ text: 'khách hỏi giá', from: '12345', at: T0 - 3600_000 }),
     msg({ text: 'shop trả lời cũ', at: T0 - 3500_000 }),
   ], PAGE, 'Câu mới cần gửi', null, T0),
-  'no');
+  'unknown');
 
 // 4) Có tin mới hơn lúc bắn nhưng không phải tin ta cần → chưa kết luận được
 check('có tin mới nhưng không khớp → unknown',
@@ -101,8 +103,7 @@ check('có tin mới nhưng không khớp → unknown',
   'unknown');
 
 // 5) Lịch sử chỉ có tin KHỚP nội dung nhưng thuộc LƯỢT TRƯỚC (quá xa sentAt).
-//    Tuyệt đối không được coi là 'yes' (nếu coi là yes thì tin của lượt này KHÔNG BAO GIỜ được bù).
-//    Kết luận đúng là 'no' — mốc nước nói rằng chưa có gì mới đi ra.
+//    Tuyệt đối không được coi là 'yes' — nếu không, tin của lượt này sẽ bị chốt ✅ oan.
 checkNot('tin khớp nhưng của lượt trước → KHÔNG được yes',
   historyVerdict([msg({ text: 'Câu mới cần gửi', at: T0 - 120_000 })], PAGE, 'Câu mới cần gửi', null, T0), 'yes');
 
@@ -144,6 +145,37 @@ check('khớp nội dung thắng mốc nước',
     msg({ text: 'Câu mới cần gửi', at: T0 + 2000 }),
   ], PAGE, 'Câu mới cần gửi', null, T0),
   'yes');
+
+// 13) [v1.92.25] KHÔNG BAO GIỜ trả 'no' — quét mọi ca "mốc nước rỗng"
+{
+  const cases = [
+    [[msg({ text: 'cũ', from: '1', at: T0 - 10 * 86_400_000 })], 'abc'],
+    [[msg({ text: 'cũ', at: T0 - 3000 })], 'abc'],
+    [[msg({ text: 'x', from: '1', at: T0 - 1 })], 'abc'],
+  ];
+  const bad = cases.filter(([ms]) => historyVerdict(ms, PAGE, 'abc', null, T0) === 'no').length;
+  check('không còn kết luận "no" ở bất kỳ ca nào', String(bad), '0');
+}
+
+// 14) Lệch đồng hồ: máy chậm 60 s so với server ⇒ tin vừa tới (mốc server = T0) vẫn phải khớp 'yes'
+{
+  const src2 = SRC;
+  const code2 = [
+    extractFn('normalizeMsgText'),
+    extractFn('historyVerdict'),
+    'return { historyVerdict };',
+  ].join('\n\n');
+  // serverSkewMs khai báo bằng `let` ở phạm vi ngoài hàm ⇒ giả lập bằng cách chèn biến cùng tên
+  const fn2 = new Function('batchStats', 'serverSkewMs', code2)({ startedAt: 0 }, 60_000);
+  const t0Local = Date.now(); // máy chậm 60 s ⇒ publishedAt(server) = t0Local + 60 000
+  const msgServerClock = [{
+    id: 'm', message: '<div>Câu mới</div>',
+    inserted_at: new Date(t0Local + 60_000).toISOString().replace('Z', '').replace(/\.\d{3}/, '.000000'),
+    from: { id: PAGE }, attachments: [], is_removed: false,
+  }];
+  check('lệch đồng hồ 60 s vẫn khớp đúng tin của mình',
+    fn2.historyVerdict(msgServerClock, PAGE, 'Câu mới', null, t0Local), 'yes');
+}
 
 /* ------------------------------- kết quả ------------------------------- */
 
