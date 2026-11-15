@@ -2300,3 +2300,41 @@ Cuối mỗi lượt có dòng:
 Cách chạy nền chắc ăn nhất mà không phải sửa code: **mở Pancake ở một cửa sổ riêng, không
 thu nhỏ** (che khuất vẫn tính là hiện). Nếu quen thu nhỏ: bản 1.92.22 giữ được tốc độ bằng
 Worker; thêm `chrome://settings/performance` → tắt Memory Saver cho trang này nếu máy yếu.
+
+## §58 — Vì sao lô 09:46 lặp tin, và đã bịt bằng gì (1.92.24)
+
+### 58.1 Chuỗi nhân quả (đọc từ log, không suy đoán)
+
+| # | số đo trong log | hệ quả |
+|---|---|---|
+| 1 | ACK TB **2 609 ms** · p50/p90 **2 490/3 086 ms** | nhịp ACK của page chậm hơn mọi lô trước (lô 20:28: p90 1 130 ms) |
+| 2 | trần chờ ACK **cứng 3 000 ms** (`ackCeiling = 3000`) | hạn chờ **3 000 < p90 3 086** ⇒ **16 ca "no-ACK" OAN** — ACK chỉ chậm hơn 3 s, không hề mất |
+| 3 | `need = 2`: 2 ca no-ACK liên tiếp (mỗi ca trượt đúng hạn chờ) | page bị tuyên bố **"ACK CHẾT"** (2 lần trong 5 s) ⇒ rút `maxReads` xuống 2 và đẩy kênh sang Extension |
+| 4 | kiểm chứng đọc lịch sử **2 lần, cách nhau 2 s** | lịch sử Pancake trễ vài giây/vài phút ⇒ verdict `no` (chưa thấy tin) |
+| 5 | `verdict === 'no'` ⇒ **`scheduleBuRetry` bắn cứu 1 vòng qua Extension** | **9 ca "✅ bù THÀNH CÔNG"** = khách nhận **2 lần** nếu tin Socket đã tới |
+
+Tổng hợp lô: ✅ 166/188 (88,3 %) · ❌ 17 · ⚠ 5 · **Bù OK 9 (Kiểm chứng ACK: 9)** · kiểm chứng
+"đã đến nơi 0 · bắn cứu 11 · không kiểm chứng được 5". Chính con số **bắn cứu 11 → bù OK 9** là
+bằng chứng gửi trùng: 9 tin được cho là "chưa đi" rồi gửi lại lần hai.
+
+### 58.2 Đã sửa
+
+1. **BỎ HẲN nhánh "bắn cứu" sau kiểm chứng** (cả Socket no-ACK và API timeout/5xx).
+   `verdict === 'no'` ⇒ **giữ ⚠, không gửi lại**. Kiểm chứng chỉ còn **một** quyền: nâng ⚠ → ✅.
+   Đây đúng luật đã đặt từ đầu nhưng code còn vi phạm: "no-ACK nghĩa là frame ĐÃ giao cho
+   socket, chỉ mất phản hồi ⇒ 'đọc 2 lần không thấy' KHÔNG chứng minh được là chưa đi".
+2. **Trần chờ ACK bám số đo:** `ackCeiling = clamp(p90 × 1,6, 3000, 6000)` thay cho hằng
+   `3000`. p90 nhỏ (HAR 256 ms) ⇒ vẫn 3 000 ms y như cũ; p90 lớn như lô này (3 086) ⇒ 4 938 ms
+   ⇒ hết no-ACK oan.
+3. **Kết luận "ACK chết" khó hơn:** `need` 2 → **3** ca no-ACK liên tiếp đủ hạn chờ.
+4. **Bỏ nhánh "page ACK chết ⇒ rút còn 2 lần đọc"**: đọc lịch sử giờ chỉ để nâng ⚠→✅ nên đọc
+   thêm không thể gây trùng, chỉ cứu thêm ca ACK trễ thật. Mọi page đọc cùng số lần (3–4).
+5. Dòng TỔNG HỢP đổi `bắn cứu N` → **`giữ ⚠ (không bắn lại) N`** để log không còn cổ vũ hành vi
+   gửi lại.
+
+### 58.3 Giá phải trả (nói trước)
+
+Ca socket chết ngầm **thật** (frame không tới FB) giờ nằm ở **⚠** thay vì được cứu bằng Extension.
+Đây là lựa chọn có chủ ý: thà mất một tin còn hơn khách nhận hai lần. Nếu sau này muốn cứu nhóm
+đó thì phải có bằng chứng **dương** (ví dụ lịch sử có mốc nước rỗng **mà** thread đã được server
+làm mới), không được suy từ "chưa thấy tin".

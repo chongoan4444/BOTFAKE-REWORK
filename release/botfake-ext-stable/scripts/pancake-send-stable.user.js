@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.22-stable
+// @version      1.92.24-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -72,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.22-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.24-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4215,7 +4215,12 @@
     // nhưng chúng phải được xử lý bằng kiểm chứng nền, không phải bằng cách giữ làn 20 giây.
     // Trần 3 000 ms: ACK thật của Pancake về sau ~0,3 s (HAR); giữ làn lâu hơn chỉ bóp thông lượng.
     // Ca vượt trần ⇒ 'noack' ⇒ kiểm chứng lịch sử, KHÔNG bắn lại.
-    const ackCeiling = 3000;
+    // [v1.92.24] TRẦN CHỜ ACK PHẢI BÁM SỐ ĐO — KHÔNG ĐƯỢC CHẶN DƯỚI p90.
+    // Lô 09:46 (188 chat, 1.92.22): ACK TB 2 609 ms · p50/p90 2 490/3 086 ms · trần CỨNG 3 000 ms
+    // ⇒ hạn chờ 3 000 < p90 ⇒ 16 ca "no-ACK" OAN (thật ra ACK chỉ chậm hơn 3 s), kéo theo 11 chuỗi
+    // kiểm chứng + bắn cứu ⇒ GỬI TRÙNG. Nay trần = p90 × 1,6, kẹp trong [3 000, 6 000]:
+    // p90 nhỏ như HAR (256 ms) vẫn 3 000 ms y như cũ; p90 lớn thì nới đúng theo số đo.
+    const ackCeiling = Math.max(3000, Math.min(6000, Math.round(sockAckP90() * 1.6)));
     const ackWaitMs = Math.min(ackCeiling, Math.max(1200, Math.round(sockAckP90() * 3)));
     try { if (pageId) pageLastAckWait[pageId] = ackWaitMs; } catch (e0) { /* ignore */ }
     /* ===== SỬA GỐC "MẤT ACK" Ở LÔ LỚN =====
@@ -5770,11 +5775,11 @@
           // minh được kênh ACK chết (mọi ACK OK đều xoá bộ đếm này). Đòi 2 ca LIÊN TIẾP: đổi lại
           // chỉ tốn thêm ~3s trước khi kết luận, nhưng không còn cảnh "trượt một ca ⇒ cả lô 9 455
           // chat rơi vào Extension".
-          const need = 2;
+          const need = 3; // [v1.92.24] 2 → 3: hạn chờ 3 s < p90 3 086 ms của lô 09:46 làm 2 ca trượt liên tiếp là chuyện thường ⇒ tuyên bố "chết" oan rồi đẩy cả page sang Extension
           if (pageAckTimeoutRun[pid] >= need && !isPageAckDead(pid)) {
             pageAckDeadAt[pid] = Date.now();
             try { if (lane.getLimit() > socketLaneFloor) lane.setLimit(socketLaneFloor); } catch (e0) { /* ignore */ }
-            logLine('🧯 Socket ACK của page ' + pid + ' coi như CHẾT (2 lần no-ACK đủ hạn chờ ~'
+            logLine('🧯 Socket ACK của page ' + pid + ' coi như CHẾT (3 lần no-ACK liên tiếp đủ hạn chờ ~'
               + Math.round(ms / 1000) + 's) — bỏ Socket khỏi thứ tự làn, đi Extension/API cho tới khi hồi (thử lại sau 2 phút)');
           }
         }
@@ -7242,7 +7247,7 @@
     sockVerifyQueue.push(fn);
     pumpSockVerify();
   }
-  const verifyStats = { found: 0, fired: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
+  const verifyStats = { found: 0, held: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP (held = giữ ⚠, không bắn lại)
   const extVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng sau khi Ext timeout
   // [v1.91.79] Ca ĐỌC LẠI nhịp giãn: KHÔNG được tính vào "đang chờ" của bảng TỔNG HỢP.
   // Log 19:01→19:04 (10672 tin): phát lệnh xong 19:01:29 nhưng mãi 19:04:25 mới chốt vì
@@ -7411,8 +7416,8 @@
           + ((buStats.ok || buStats.cancelled)
             ? ' | 🔁 Bù OK: ' + buStats.ok + ' (' + Object.keys(buStats.byWhy).map((k) => k + ': ' + buStats.byWhy[k]).join(' · ') + ') · hủy bù tránh trùng: ' + buStats.cancelled
             : '')
-          + ((verifyStats.found || verifyStats.fired || verifyStats.unknown)
-            ? ' | 🔎 Kiểm chứng ACK: đã đến nơi ' + verifyStats.found + ' · bắn cứu ' + verifyStats.fired + ' · không kiểm chứng được ' + verifyStats.unknown
+          + ((verifyStats.found || verifyStats.held || verifyStats.unknown)
+            ? ' | 🔎 Kiểm chứng ACK: đã đến nơi ' + verifyStats.found + ' · giữ ⚠ (không bắn lại) ' + verifyStats.held + ' · không kiểm chứng được ' + verifyStats.unknown
             : '')
           + ((extTimeoutStats.timeout || extTimeoutStats.skipped || extTimeoutStats.found || extTimeoutStats.notFound || extTimeoutStats.unknown)
             ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy trong lịch sử ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
@@ -7835,11 +7840,10 @@
         // [v1.91.88] Page đã đánh dấu kênh ACK chết ⇒ Socket gần như chắc chắn KHÔNG giao được
         // (lô 08:19: 0/74 tin tới qua Socket). Vẫn phải kiểm chứng để không bù trùng, nhưng
         // luật "2 lần đọc rỗng liên tiếp" đã đủ ⇒ rút 4 → 2 lần đọc, giảm nửa số request.
-        let maxReads = (batchStats && batchStats.total > 50) ? 4 : 3;
-        let shortVerify = false;
-        try {
-          if (isPageAckDead(pageId)) { maxReads = 2; shortVerify = true; }
-        } catch (e0) { /* ignore */ }
+        // [v1.92.24] Bỏ nhánh "page ACK chết ⇒ rút còn 2 lần đọc": lần đọc này giờ CHỈ để nâng
+        // ⚠ → ✅ (không còn bắn cứu) nên đọc thêm không thể gây trùng, chỉ giúp cứu thêm ca
+        // ACK trễ thật. Mọi page đọc cùng số lần.
+        const maxReads = (batchStats && batchStats.total > 50) ? 4 : 3;
         for (let attempt = 0; attempt < maxReads; attempt++) {
           if (attempt > 0) {
             await sleepUntil(Date.now() + (attempt === 1 ? 2000 : (attempt === 2 ? 4000 : 6000))); // [v1.92.9]
@@ -7880,17 +7884,17 @@
           return;
         }
         if (verdict === 'no') {
-          // Đọc lại nhiều lần, mốc nước rỗng liên tiếp → publish chưa hề tới FB (socket chết ngầm)
-          if (shortVerify) {
-            try { logLine('🧯 ' + nm + ' — page có kênh ACK chết ⇒ kiểm chứng rút còn 2 lần đọc'); } catch (e0) { /* ignore */ }
-          }
-          verifyStats.fired++;
-          sockVerifyFired[conv.id] = myRun;
-          reopenUncertain(conv.id);
-          releaseOutbound(conv.id); // tin chắc chưa đi → nhả khóa để kênh cứu được bắn (đúng luật khóa outbound)
-          noteBgPending(conv, 'verify-bu');
-          logLine('🔎 ' + nm + ' — kiểm chứng: đọc ' + maxReads + ' lần vẫn KHÔNG có tin — bắn cứu 1 vòng qua Extension');
-          scheduleBuRetry(conv, text, photo, nm, 'Socket mất ACK (kiểm chứng ' + maxReads + ' lần chưa thấy tin)', ['socket']);
+          /* [v1.92.24] ⛔ BỎ HẲN NHÁNH "BẮN CỨU" SAU KIỂM CHỨNG — ĐÂY LÀ NGUỒN GỬI TRÙNG.
+           * Lô 09:46 (188 chat): 16 ca no-ACK → 11 ca "bắn cứu 1 vòng qua Extension" → 9 ca báo
+           * "✅ bù THÀNH CÔNG". Nhưng no-ACK nghĩa là frame ĐÃ giao cho socket, chỉ mất phản hồi:
+           * tin có thể đã tới FB. "Đọc 2 lần không thấy" KHÔNG chứng minh được điều ngược lại —
+           * API lịch sử của Pancake trễ vài giây tới vài phút và chỉ trả tin mới sau khi thread
+           * được làm mới (chính comment ở trên đã ghi đúng như thế). Vì vậy mọi ca "không thấy
+           * tin" giữ nguyên ⚠ KHÔNG GỬI LẠI. Kiểm chứng chỉ còn một quyền: nâng ⚠ → ✅.
+           * Giá phải trả: ca socket chết ngầm thật sẽ nằm ở ⚠ thay vì được cứu — đúng luật
+           * "thà mất một tin còn hơn gửi trùng" mà người dùng đặt ra. */
+          verifyStats.held = (verifyStats.held || 0) + 1;
+          logLine('🔎 ' + nm + ' — kiểm chứng: đọc ' + maxReads + ' lần chưa thấy tin — GIỮ ⚠, KHÔNG bắn cứu (chống trùng)');
           return;
         }
         verifyStats.unknown++;
@@ -8066,11 +8070,11 @@
           return;
         }
         if (verdict === 'no') {
-          reopenUncertain(conv.id);
-          releaseOutbound(conv.id);
-          noteBgPending(conv, 'verify-bu');
-          logLine('🔎 ' + nm + ' — kiểm chứng: đọc 2 lần vẫn KHÔNG thấy tin — bắn cứu 1 vòng qua kênh khác');
-          scheduleBuRetry(conv, text, photo, nm, 'API không rõ kết quả (kiểm chứng chưa thấy tin)', ['api']);
+          // [v1.92.24] ⛔ Cùng lý do như nhánh Socket: "chưa thấy tin trong lịch sử" ≠ "chưa gửi".
+          // API timeout/5xx là KHÔNG RÕ; đọc lịch sử 2 lần vài giây sau đó không đủ để kết luận
+          // là tin chưa đi ⇒ giữ ⚠, KHÔNG bắn cứu (tránh khách nhận 2 lần).
+          verifyStats.held = (verifyStats.held || 0) + 1;
+          logLine('🔎 ' + nm + ' — kiểm chứng: đọc 2 lần chưa thấy tin — GIỮ ⚠, KHÔNG bắn cứu (chống trùng)');
           return;
         }
         logLine('🔎 ' + nm + ' — kiểm chứng KHÔNG kết luận được (' + clip(why || 'không rõ', 60) + ') — giữ ⚠, KHÔNG gửi lại để tránh trùng');
@@ -8292,7 +8296,7 @@
     batchStats.loopFinished = false;
     batchStats.dispatchEndedAt = 0;
     buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
-    verifyStats.found = 0; verifyStats.fired = 0; verifyStats.unknown = 0;
+    verifyStats.found = 0; verifyStats.held = 0; verifyStats.unknown = 0;
     extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
     extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
     extSendCtl.probeInFlight = false; // lượt mới không được kẹt bởi thăm dò của lượt cũ đã dừng
