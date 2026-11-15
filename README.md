@@ -74,8 +74,9 @@ Cả hai folder **sinh tự động** từ mã nguồn: đừng sửa trực ti�
 | log cuối | 📊 + ⚡TỐC ĐỘ + 🌊WAVE + 📡SOCKET + 🌐API + 🧭globalId | **chỉ 📊 tổng kết** |
 | FB từ chối nhận tin | thử lại **1 lần** để phân biệt "burst tạm thời" với "khách không nhận được"; **đo đủ 40 ca mà cứu 0 ⇒ tự đóng ngân sách** (vẫn dò lại 1 ca/200 để mở lại) — 1.92.26 | cùng code |
 | thiếu `global_id` | tự chuyển **làn API bằng conversation_id** thay vì bỏ chat (HAR: lệnh gửi API không cần `global_id`) — 1.92.26 | cùng code |
+| gặp "không rõ" | **không bao giờ bù** — chốt ⚠ + ghi `uncertainIds`, mọi đường bù khác tự chặn (1.92.28) | cùng code |
 | kiểm chứng sau gửi | **chỉ nâng cấp** ⚠→✅ (đọc lại lịch sử) · không tìm thấy tin ⇒ **giữ ⚠, không bao giờ bắn lại** (1.92.25) | cùng code |
-| version hiển thị | `1.92.27-W200.69` | `1.92.27-STABLE` |
+| version hiển thị | `1.92.28-W200.70` | `1.92.28-STABLE` |
 
 `scripts/pancake-send-stable.user.js` được sinh từ bản gốc bằng một loạt thay đổi có đánh dấu
 `[STABLE]` — muốn sửa logic gửi thì **sửa bản gốc rồi sinh lại bản ổn định**, đừng sửa tay hai nơi.
@@ -97,7 +98,7 @@ Hai tiện ích nói chuyện với userscript trên **kênh riêng** (`__botfak
 Dù vậy vẫn nên **cài một bản** cho gọn.
 
 Muốn biết đang chạy bản nào: nhìn dòng version trên tiêu đề panel —
-`1.92.27-W200.69` = bản gốc, `1.92.27-STABLE` = bản ổn định. Dấu `[STABLE]` cũng được in vào
+`1.92.28-W200.70` = bản gốc, `1.92.28-STABLE` = bản ổn định. Dấu `[STABLE]` cũng được in vào
 `<html data-botfake-active="…">` trong DOM để kiểm tra bằng DevTools.
 
 ## Build & phát hành

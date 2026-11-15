@@ -253,7 +253,19 @@ const budgetApi = new Function(budgetConsts.concat([
 ]).join('\n\n'))();
 
 const { sockRetryBudgetAllows, sockRetryBudgetNote } = budgetApi;
-const newBudget = () => ({ tried: 0, saved: 0, skipped: 0, sinceProbe: 0, closed: false });
+const newBudget = () => ({ tried: 0, saved: 0, skipped: 0, sinceProbe: 0, closed: false, closePct: -1 });
+
+/* cửa sổ 200 ACK gần nhất (v1.92.28) */
+const recentCode = [
+  SRC.match(/const SOCK_ACK_RECENT_N = \d+;/)[0],
+  SRC.match(/const sockAckRecent = \{[^}]*\};/)[0],
+  extractFn('resetSockAckRecent'),
+  extractFn('noteSockAckRecent'),
+  extractFn('socketRejectPctRecent'),
+  'return { resetSockAckRecent, noteSockAckRecent, socketRejectPctRecent, sockAckRecent };',
+].join('\n\n');
+const recent = new Function(recentCode)();
+const { resetSockAckRecent, noteSockAckRecent, socketRejectPctRecent } = recent;
 
 // 15) Đúng tình huống lô 10:04 → đóng ngân sách
 check('40 lần thử lại mà cứu 0 (FB từ chối 34%) → ĐÓNG ngân sách',
@@ -307,6 +319,47 @@ check('đã đóng mà cứu được ⇒ MỞ LẠI',
 
 // 19) Không có ngân sách (đường cũ) ⇒ không chặn oan
 check('không có ngân sách ⇒ cho thử lại', sockRetryBudgetAllows(null), true);
+
+// 24) [v1.92.28] Cửa sổ 200 ACK gần nhất — phân biệt "lô nhiều khách chết" với "burst-reject"
+{
+  resetSockAckRecent();
+  for (let i = 0; i < 39; i++) noteSockAckRecent('rejected');
+  check('chưa đủ 40 mẫu ⇒ chưa kết luận (-1)', String(socketRejectPctRecent()), '-1');
+  noteSockAckRecent('rejected');
+  check('40 mẫu toàn rejected ⇒ 100%', String(Math.round(socketRejectPctRecent())), '100');
+
+  resetSockAckRecent();
+  for (let i = 0; i < 200; i++) noteSockAckRecent('ok');      // 200 ca OK cũ
+  for (let i = 0; i < 200; i++) noteSockAckRecent('rejected'); // rồi 200 ca rejected
+  check('cửa sổ chỉ tính 200 ca GẦN NHẤT ⇒ 100%', String(Math.round(socketRejectPctRecent())), '100');
+
+  resetSockAckRecent();
+  for (let i = 0; i < 200; i++) noteSockAckRecent(i % 2 ? 'rejected' : 'ok');
+  check('nửa OK nửa rejected ⇒ 50%', String(Math.round(socketRejectPctRecent())), '50');
+
+  resetSockAckRecent();
+  check('reset ⇒ -1', String(socketRejectPctRecent()), '-1');
+}
+
+// 25) [v1.92.28] Luật đóng ngân sách: -1 (chưa đủ mẫu) và < 15% thì KHÔNG đóng
+check('chưa đủ mẫu (-1) ⇒ không đóng ngân sách',
+  (() => { const b = newBudget(); for (let i = 0; i < 80; i++) sockRetryBudgetNote(b, 'tried', -1); return b.closed; })(),
+  false);
+check('lô sạch (12% từ chối) ⇒ không đóng',
+  (() => { const b = newBudget(); for (let i = 0; i < 80; i++) sockRetryBudgetNote(b, 'tried', 12); return b.closed; })(),
+  false);
+check('lô nhiều khách chết (50%) ⇒ đóng đúng ở ca thứ 40',
+  (() => {
+    const b = newBudget();
+    for (let i = 0; i < 39; i++) sockRetryBudgetNote(b, 'tried', 50);
+    const before = b.closed;
+    sockRetryBudgetNote(b, 'tried', 50);
+    return (before === false && b.closed === true) ? 'ok' : 'sai';
+  })(),
+  'ok');
+check('đóng ngân sách ghi lại % để in vào log',
+  (() => { const b = newBudget(); for (let i = 0; i < 40; i++) sockRetryBudgetNote(b, 'tried', 47.6); return String(b.closePct); })(),
+  '48');
 
 /* ------------------------------- kết quả ------------------------------- */
 

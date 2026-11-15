@@ -132,7 +132,7 @@ for (const [a, b, label] of [
   ["logLine('⚡ TỐC ĐỘ: '", "logDiag('⚡ TỐC ĐỘ: '", 'diag-tocdo'],
   ["logLine('🌊 WAVE: script '", "logDiag('🌊 WAVE: script '", 'diag-wave'],
   ["logLine('📡 SOCKET: ACK OK/rejected/no-ACK '", "logDiag('📡 SOCKET: ACK OK/rejected/no-ACK '", 'diag-socket'],
-  ["logLine('🌐 API NỀN: queued/started/fetch '", "logDiag('🌐 API NỀN: queued/started/fetch '", 'diag-api'],
+  ["logLine('🌐 API NỀN: queued(nền)/started(nền+đồng bộ)/fetch '", "logDiag('🌐 API NỀN: queued(nền)/started(nền+đồng bộ)/fetch '", 'diag-api'],
   ["logLine('🧭 Chẩn đoán globalId: cache '", "logDiag('🧭 Chẩn đoán globalId: cache '", 'diag-gid'],
 ]) rep(a, b, label);
 

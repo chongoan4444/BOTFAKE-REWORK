@@ -2630,3 +2630,68 @@ và ghi rõ kết quả. 7 điểm ✗/⚠ đã được sửa ngay trong 1.92.2
    Nếu là cũ nhất thì verify sẽ luôn `unknown` cho chat dài (an toàn, không sai) — cần log
    `số tin đọc được + tuổi tin mới nhất` để kết luận bằng số.
 3. **Tốc độ**: chưa có số đo chi phí main-thread/khung `/ls_resp`, nên chưa đổi pacing (§60.3).
+
+## §62 — SOÁT LẠI "CƠ CHẾ XÁC NHẬN TIN" + LÔ 10:21 (1.92.28)
+
+Yêu cầu: *"để không bù lung tung thì cơ chế xác nhận tin phải đúng"*. Vì vậy lần này soát
+**mọi đường có thể sinh ra bù** (gửi thêm), không chỉ đường Socket.
+
+### 62.1 Bốn đường có thể bù — và điều kiện thật của từng đường
+
+| # | chỗ gọi | điều kiện vào | có bằng chứng "chắc chắn CHƯA gửi"? |
+|---|---|---|---|
+| 1 | `fireApiAndWatch` (lõi) | `certainFail = isCertainHttpNotSent(status, data, parsed)` | ✅ có (và `releaseOutbound` trước khi bù) |
+| 2 | `scheduleBuRetry` (kênh kế) | sau khi kênh trước trả `sent === false` | ✅ có (mỗi kênh đúng 1 lần) |
+| 3 | `finalizeSockBg` (bắn-nhả) | `!recipientUnavailable && sent === false` | ✅ có |
+| 4 | **bù nền qua extension/background** (`BOTFAKE_BG_FALLBACK`) | nhánh `else if (r && !r.ok)` | 🔴 **KHÔNG** — nhánh này bao gồm cả `r.uncertain` |
+
+### 62.2 Lỗ hổng tìm thấy (đã sửa)
+
+`sendOne(...)` trả `{ok:false, uncertain:true, sent:'maybe'}` khi socket mất ACK / Ext quá hạn —
+tức **tin CÓ THỂ đã đi**. Nhưng ở đường bù nền, `!r.ok` đúng với cả trường hợp này, nên script
+vừa log ⚠ vừa gọi `scheduleBuRetry` ⇒ **gửi thêm trong khi tin có thể đã tới**. Hai lớp bảo vệ
+khác không cứu được vì ở đường này `uncertainIds` chưa được ghi và `sockFiredPending` không dùng
+(đường đồng bộ, không bắn-nhả).
+
+**Nay**: nhánh `r.uncertain` riêng — ghi `uncertainIds`, log ⚠, **không gửi thêm**. Mọi đường bù
+khác từ đó cũng tự chặn (scheduleBuRetry kiểm `uncertainIds` ở cả 3 thời điểm: lúc gọi, lúc
+timer chạy, và ngay trước khi bắn trong lane).
+
+### 62.3 Sáu sửa đổi của 1.92.28
+
+1. **Chặn bù khi "không rõ"** ở đường bù nền (§62.2).
+2. **Ngân sách thử lại Socket đo trên 200 ACK GẦN NHẤT** thay vì tỉ lệ tích luỹ. Lô 10:21:
+   tích luỹ đầu lô > 70% (mấy wave đầu nhiều khách chết) ⇒ ngân sách chỉ đóng sau **657** lần
+   thử (lẽ ra ~40). Luật mới: < 15% (lô sạch) hoặc > 85% (burst/sự cố) ⇒ **không đóng**;
+   15–85% ⇒ đóng đúng ở ca thứ 40; vẫn dò lại 1 ca/200 và mở lại ngay nếu cứu được.
+   Log khi bỏ in kèm `% từ chối gần đây` để lần sau đọc là hiểu.
+3. **Bỏ dòng 🛟 lặp**: nhánh chuyển làn API (1.92.27) rơi tiếp xuống khối cứu cũ ⇒ 2 dòng/ca
+   (481 ca ở lô 10:21). Nay đánh dấu `apiNoGidDone`.
+4. **Hết đếm đôi ở dòng `🔎 Kiểm chứng`**: trước đây cùng một ca tăng cả `held` và `unknown`
+   nên in "giữ ⚠ 5 · không kiểm chứng được 5" cho 5 ca.
+5. **Đếm cả lệnh API gọi trực tiếp**: lô 10:21 có **481** lệnh API thật mà dòng `🌐 API NỀN`
+   vẫn in `queued/started/fetch 0/0/0` (chỉ đường nền được đếm) ⇒ số liệu vô dụng.
+6. **Đo AI GIỮ CỔNG WAVE**: thêm 4 bộ đếm `giữ cổng (bay/retry/ext/api)`. Lô 10:21 có
+   `wave→cổng TB 6,8 s · max 22,96 s` nhưng không biết ai giữ ⇒ lần sau đọc số, không đoán.
+
+### 62.4 Đối chiếu lô 10:21 (12 407 chat) — sổ sách khớp 100%
+
+| phép tính | kết quả |
+|---|---|
+| ✅ 7 215 + ❌ 5 187 + ⚠ 5 | **12 407** ✓ |
+| 12 407 − 481 (không publish được qua Socket) + 657 (thử lại) | **12 583** = ACK OK 7 215 + rejected 5 363 + no-ACK 5 ✓ |
+| rejected 5 363 − 657 | **4 706** = 4 049 (ngân sách) + 657 (đã thử) ✓ |
+| ❌ 5 187 = 4 706 + 481 | ✓ |
+
+Nhận xét đo được:
+- **67,67 lệnh/s** (lô trước 59,73/s).
+- `cứu thiếu globalId 481` — đường rò "thiếu global_id" đã bịt; **0/481** gửi được (dòng ✅ chỉ
+  có `[Socket: 7 215]`) ⇒ 481 ca đó đúng là khách không nhận được, không phải script bỏ sót.
+- Thử lại vô ích: 657/12 583 = **5,2%** lưu lượng (lô trước 27%) — và 1.92.28 kéo xuống ~0,3%.
+- `#551` của API **vẫn không** bị coi là "khách chết" (có bằng chứng ngược: log 07:36, API trả
+  #551 rồi Ext gửi được) ⇒ giữ nguyên, đúng luật "không kết luận khi chưa đủ".
+
+### 62.5 Test
+
+14 → 23 → 33 → **42 kịch bản** (`npm test`): thêm cửa sổ 200 ACK (chỉ tính 200 ca gần nhất,
+nửa OK nửa rejected = 50%, reset = -1), luật đóng ngân sách (-1 / 12% / 40 ca ở 50% / ghi %).
