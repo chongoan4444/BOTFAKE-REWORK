@@ -36,8 +36,9 @@ function extractFn(name) {
 const code = [
   extractFn('normalizeMsgText'),
   extractFn('attachmentMatches'),
+  extractFn('msgTimeMs'),
   extractFn('historyVerdict'),
-  'return { normalizeMsgText, attachmentMatches, historyVerdict };',
+  'return { normalizeMsgText, attachmentMatches, msgTimeMs, historyVerdict };',
 ].join('\n\n');
 
 const batchStats = { startedAt: 0 };
@@ -164,6 +165,7 @@ check('khớp nội dung thắng mốc nước',
   const code2 = [
     extractFn('normalizeMsgText'),
     extractFn('attachmentMatches'),
+    extractFn('msgTimeMs'),
     extractFn('historyVerdict'),
     'return { historyVerdict };',
   ].join('\n\n');
@@ -360,6 +362,48 @@ check('lô nhiều khách chết (50%) ⇒ đóng đúng ở ca thứ 40',
 check('đóng ngân sách ghi lại % để in vào log',
   (() => { const b = newBudget(); for (let i = 0; i < 40; i++) sockRetryBudgetNote(b, 'tried', 47.6); return String(b.closePct); })(),
   '48');
+
+// 26) [v1.92.29] Kiểm chứng bằng `snippet` của hội thoại — nguồn DUY NHẤT thấy tin CUỐI
+//     (HAR: đọc lịch sử chỉ trả 25 tin cũ nhất nên thread dài không bao giờ khớp).
+{
+  const scode = [
+    extractFn('normalizeMsgText'),
+    extractFn('msgTimeMs'),
+    extractFn('snippetText'),
+    extractFn('snippetVerdict'),
+    'return { snippetVerdict, snippetText };',
+  ].join('\n\n');
+  const S = new Function('serverSkewMs', scode)(0);
+  const P = '898735919982398';
+  const PSID = '39224298167184827';
+  const CID = P + '_' + PSID;
+  const t0 = Date.parse('2026-11-11T10:00:00Z');
+  const sendTxt = 'Chị cho em xin chiều cao cân nặng của bé với ạ';
+  const conv = (o) => Object.assign({
+    id: CID, page_id: P, from_psid: PSID,
+    snippet: sendTxt, updated_at: new Date(t0).toISOString().replace('Z', '').replace(/\.\d{3}/, '.000000'),
+    last_sent_by: { id: P },
+  }, o);
+
+  check('snippet khớp đúng tin vừa gửi ⇒ yes',
+    S.snippetVerdict([conv({})], CID, P, PSID, sendTxt, t0), 'yes');
+  check('snippet bị cắt (~50 ký tự) vẫn nhận ra ⇒ yes',
+    S.snippetVerdict([conv({ snippet: sendTxt.slice(0, 24) + '....' })], CID, P, PSID, sendTxt, t0), 'yes');
+  check('snippet là tin CÙNG NỘI DUNG nhưng gửi từ hôm trước ⇒ KHÔNG chốt ✅',
+    S.snippetVerdict([conv({ updated_at: new Date(t0 - 86400000).toISOString().replace('Z', '').replace(/\.\d{3}/, '.000000') })], CID, P, PSID, sendTxt, t0), 'unknown');
+  check('tin cuối do người/page KHÁC gửi ⇒ KHÔNG chốt ✅',
+    S.snippetVerdict([conv({ last_sent_by: { id: '123456789' } })], CID, P, PSID, sendTxt, t0), 'unknown');
+  check('khác hội thoại ⇒ KHÔNG chốt ✅',
+    S.snippetVerdict([conv({ id: P + '_999', from_psid: '999' })], CID, P, PSID, sendTxt, t0), 'unknown');
+  check('khác page ⇒ KHÔNG chốt ✅',
+    S.snippetVerdict([conv({ id: '111_222', page_id: '111', from_psid: '222' })], CID, P, PSID, sendTxt, t0), 'unknown');
+  check('text ngắn (<12 ký tự) ⇒ không đủ chắc, giữ unknown',
+    S.snippetVerdict([conv({ snippet: 'Dạ' })], CID, P, PSID, 'Dạ', t0), 'unknown');
+  check('snippet rỗng ⇒ unknown',
+    S.snippetVerdict([conv({ snippet: '' })], CID, P, PSID, sendTxt, t0), 'unknown');
+  check('snippetText bỏ đuôi "...." và khoảng trắng',
+    S.snippetText('<div>Chào chị ạ </div>....'), 'Chào chị ạ');
+}
 
 /* ------------------------------- kết quả ------------------------------- */
 

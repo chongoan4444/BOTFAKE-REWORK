@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.28-stable
+// @version      1.92.29-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -72,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.28-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.29-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -7320,7 +7320,10 @@
       else if (kind === 'rejected') sendDiag.socketAckRejected++;
       else if (kind === 'noack') sendDiag.socketNoAck++;
       noteSockAckRecent(kind); // [v1.92.28] cửa sổ 200 ACK gần nhất (dùng cho ngân sách thử lại)
-      if (kind === 'ok' || kind === 'rejected' || kind === 'noack') {
+      // [v1.92.29] Ca 'noack' mang thời gian HẾT HẠN CHỜ (vd 5 263 ms), không phải ACK thật:
+      // lô 13:42 in "ACK TB/max 5263/5263 · bucket ≥5s = 1" cho một ca mất ACK ⇒ p50/p90 lệch
+      // ⇒ "ngưỡng nhanh" sai. Chỉ ok/rejected mới là ACK.
+      if (kind === 'ok' || kind === 'rejected') {
         sendDiag.socketAckMsTotal += ms;
         sendDiag.socketAckMsMax = Math.max(sendDiag.socketAckMsMax, ms);
         if (ms < 250) sendDiag.socketAckLt250++;
@@ -7723,6 +7726,11 @@
   const sockRetryBudgetState = { tried: 0, saved: 0, skipped: 0, sinceProbe: 0, closed: false, closePct: -1 };
   function resetSockRetryBudget() {
     resetSockAckRecent();
+    // [v1.92.29] Chuỗi no-ACK phải bắt đầu lại từ 0 mỗi lượt. Lô 13:42 (4 chat, 1 ca mất ACK)
+    // vẫn in "🐢 Socket no-ACK lặp 2 lần — giảm lane xuống 64" vì chuỗi 1 ca còn dư từ lô trước.
+    try {
+      Object.keys(socketPageLaneCtl).forEach(function (k) { socketPageLaneCtl[k].noAckStreak = 0; });
+    } catch (e) { /* ignore */ }
     sockRetryBudgetState.tried = 0;
     sockRetryBudgetState.saved = 0;
     sockRetryBudgetState.skipped = 0;
@@ -7993,6 +8001,95 @@
     return false;
   }
 
+  /* ===== [v1.92.29] BẰNG CHỨNG DƯƠNG CHO THREAD DÀI =====
+   * ĐO TRÊN TOÀN BỘ 12 HAR, đối chiếu chéo 3 cách độc lập:
+   *   • GET …/conversations/{id}/messages trả 25 tin **CŨ NHẤT**, sắp TĂNG DẦN — 89/89 response.
+   *   • 34 response trả đúng 25 tin: tin mới nhất trong đó cũ hơn lúc đọc TRUNG VỊ 4 330 s
+   *     (max ~295 ngày). Ghép `message_count` của list: thread 465 tin → 25 tin trả về chỉ
+   *     trải 2 ngày đầu; thread 39 tin → trải 3 ngày đầu.
+   *   ⇒ Với thread > 25 tin, tin vừa gửi **KHÔNG BAO GIỜ** nằm trong response ⇒ kiểm chứng
+   *     kiểu đọc lịch sử không thể nâng ⚠→✅ (đúng như đo: 0/26 lô 10:39, 0/1 lô 13:42).
+   *   • FB **không dội lại** tin page tự gửi qua WebSocket: 14/14 lần gửi không xuất hiện lại
+   *     trong 225 khung WS (trong khi tin của khách thì có) ⇒ không có khung ACK nào để bắt.
+   * Nguồn DUY NHẤT trong HAR có tin CUỐI:
+   *   GET /v1/conversations/customer/{psid}?pages[<pid>]=0
+   *   → conversations[] có `snippet` (= tin cuối), `updated_at`, `last_sent_by.id`, `message_count`.
+   *   Đo: 2/2 lần gọi đều phản ánh đúng tin vừa gửi, trễ 7,2 / 9,1 / 10,0 s (nhỏ, 1 request).
+   * LUẬT: chỉ ĐỌC. Khớp ⇒ nâng ⚠→✅. Không khớp ⇒ giữ ⚠. KHÔNG BAO GIỜ gửi lại từ đây.
+   */
+  function msgTimeMs(raw) {
+    const t = String(raw || '');
+    if (!t) return NaN;
+    // HAR: inserted_at = "2026-10-19T10:10:19.000000" — UTC, KHÔNG kèm Z, 6 chữ số phần lẻ.
+    return Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(t) ? t : t + 'Z');
+  }
+  function newestMsgTimeMs(msgs) {
+    let best = 0;
+    for (let i = 0; i < (msgs ? msgs.length : 0); i++) {
+      const t = msgTimeMs(msgs[i] && msgs[i].inserted_at);
+      if (!isNaN(t) && t > best) best = t;
+    }
+    return best;
+  }
+  function psidOf(conv, full) {
+    const f = full || conv || {};
+    const s = String(f.from_psid || f.fromPsid || (f.from && f.from.id) || '');
+    if (s) return s;
+    const id = String((conv && conv.id) || ''); // pageId_psid
+    const i = id.indexOf('_');
+    return i > 0 ? id.slice(i + 1) : '';
+  }
+  // `snippet` bị cắt ~50 ký tự và có thể dính "...." ở cuối ⇒ bỏ đuôi chấm trước khi so.
+  function snippetText(s) {
+    return normalizeMsgText(s).replace(/[.\u2026\s]+$/, '').trim();
+  }
+  function snippetVerdict(convs, convId, pageId, psid, want, sentAt) {
+    if (!Array.isArray(convs) || !convs.length) return 'unknown';
+    const w = normalizeMsgText(want);
+    // Text < 12 ký tự ("Dạ", "Ok") khớp bừa rất dễ ⇒ thà giữ ⚠ còn hơn chốt ✅ oan.
+    if (w.length < 12) return 'unknown';
+    const at = Number(sentAt) || 0;
+    const skew = (typeof serverSkewMs === 'number') ? serverSkewMs : 0;
+    for (let i = 0; i < convs.length; i++) {
+      const c = convs[i];
+      if (!c) continue;
+      const cid = String(c.id || '');
+      const pid = String(c.page_id || (cid.indexOf('_') > 0 ? cid.slice(0, cid.indexOf('_')) : ''));
+      if (pageId && pid && pid !== String(pageId)) continue;      // khác page ⇒ bỏ
+      const fromPsid = String(c.from_psid || (c.customers && c.customers[0] && c.customers[0].fb_id) || '');
+      const isThis = (cid && convId && cid === String(convId))
+        || (fromPsid && psid && fromPsid === String(psid) && (!pageId || pid === String(pageId)));
+      if (!isThis) continue;                                      // khác hội thoại ⇒ bỏ
+      const sn = snippetText(c.snippet);
+      if (!sn) continue;
+      const textOk = (sn === w)
+        || (sn.length >= 12 && w.indexOf(sn) === 0)               // snippet là phần ĐẦU của text (bị cắt)
+        || (w.length >= 12 && sn.indexOf(w) === 0);
+      if (!textOk) continue;
+      // Tin cuối phải MỚI — nếu không, một tin CÙNG NỘI DUNG gửi hôm trước sẽ bị tính "đã tới".
+      // updated_at dùng đồng hồ SERVER (nhanh hơn máy ~5–40 s) ⇒ trừ skew, cho dư 60 s.
+      const t = msgTimeMs(c.updated_at);
+      if (at && !isNaN(t) && t < at + skew - 60000) continue;
+      const by = c.last_sent_by && (c.last_sent_by.id || c.last_sent_by.uid);
+      if (by && pageId && String(by) !== String(pageId)) continue; // tin cuối do page/người khác gửi
+      return 'yes';
+    }
+    return 'unknown';
+  }
+  async function confirmViaSnippet(conv, full, pageId, convId, want, sentAtMs) {
+    try {
+      const psid = psidOf(conv, full);
+      if (!pageId || !psid) return 'unknown';
+      if (normalizeMsgText(want).length < 12) return 'unknown';
+      const url = apiBase() + '/v1/conversations/customer/' + encodeURIComponent(psid)
+        + '?pages[' + encodeURIComponent(pageId) + ']=0';
+      const res = await ctxFetchLane(() => fetchJson(url, 1, { timeoutMs: 8000 }));
+      if (!res || !res.ok || !res.data || res.data.success === false) return 'unknown';
+      const convs = res.data.conversations || (res.data.data && res.data.data.conversations) || [];
+      return snippetVerdict(convs, convId, pageId, psid, want, sentAtMs);
+    } catch (e) { return 'unknown'; }
+  }
+
   function historyVerdict(msgs, pageId, want, photo, sentAt) {
     /* [v1.92.25] PHÂN XỬ LỊCH SỬ CHỈ CÒN HAI KẾT LUẬN: yes (bằng chứng dương) và unknown.
      * Đã BỎ hẳn kết luận 'no' ("mốc nước rỗng ⇒ chắc chắn chưa đi") vì nó là PHÁN ĐOÁN chứ
@@ -8016,7 +8113,7 @@
       if (!rawT) continue;
       // HAR (batmesss/guisot/guikhachcu): inserted_at = "2026-10-19T10:10:19.000000" — UTC
       // KHÔNG kèm Z, 6 chữ số phần lẻ; Date.parse của V8 nhận đúng dạng này (đã kiểm chứng).
-      const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
+      const t = msgTimeMs(rawT);
       if (isNaN(t)) continue;
       if (!m.from || String(m.from.id) !== String(pageId)) continue; // chỉ tin DO PAGE gửi
       // HAR: 1 311 tin lịch sử = 1 305 INBOX + 6 COMMENT. Bình luận KHÔNG phải tin inbox nên
@@ -8082,6 +8179,7 @@
         // Nay: chỉ kết luận 'no' khi thấy MỐC NƯỚC RỖNG ở HAI LẦN ĐỌC LIÊN TIẾP, cách nhau
         // vài giây; 'yes' chốt ngay; còn lại giữ ⚠ (không bù).
         let verdict = 'unknown';
+        let histTruncatedOld = false; // response đúng 25 tin VÀ tin mới nhất đã cũ ⇒ cửa sổ là ĐẦU thread
         // [v1.91.88] Page đã đánh dấu kênh ACK chết ⇒ Socket gần như chắc chắn KHÔNG giao được
         // (lô 08:19: 0/74 tin tới qua Socket). Vẫn phải kiểm chứng để không bù trùng, nhưng
         // luật "2 lần đọc rỗng liên tiếp" đã đủ ⇒ rút 4 → 2 lần đọc, giảm nửa số request.
@@ -8114,6 +8212,25 @@
           if (!Array.isArray(msgs)) continue;
           verdict = historyVerdict(msgs, pageId, want, photo, sentAt);
           if (verdict === 'yes') break; // có bằng chứng dương là dừng đọc ngay
+          // [v1.92.29] Response đúng 25 tin + tin mới nhất đã cũ hơn 60 s ⇒ 25 tin này là ĐẦU
+          // thread (HAR: 34 ca như vậy, trung vị cũ hơn 4 330 s) ⇒ đọc thêm chỉ ra đúng 25 tin
+          // đó, tốn 2–3 request vô ích. Dừng và chuyển sang kiểm bằng `snippet`.
+          if (msgs.length >= 25) {
+            const newest = newestMsgTimeMs(msgs);
+            if (newest && (Date.now() - newest) > 60000) { histTruncatedOld = true; break; }
+          }
+        }
+        // [v1.92.29] Đường thay thế: 1 request hội thoại của khách → `snippet` = tin CUỐI.
+        if (verdict !== 'yes') {
+          const snip = await confirmViaSnippet(conv, f, pageId, convId, want, sentAt);
+          if (snip === 'yes') {
+            // Chốt luôn + thoát, không in thêm dòng "tin ĐÃ đến nơi" cho khỏi 2 dòng/ca.
+            verifyStats.found++;
+            markDelivered(conv.id, 'socket');
+            try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
+            logLine('🔎 ' + nm + ' — kiểm chứng bằng HỘI THOẠI: snippet = tin vừa gửi, do chính page này gửi — tính ✅ Socket');
+            return;
+          }
         }
         if (verdict === 'yes') {
           verifyStats.found++;
@@ -8127,7 +8244,9 @@
         // [v1.92.28] Chỉ tính "giữ ⚠" — trước đây tăng CẢ unknown lẫn held cho cùng một ca
         // nên dòng tổng kết in "giữ ⚠ 5 · không kiểm chứng được 5" trong khi chỉ có 5 ca.
         verifyStats.held = (verifyStats.held || 0) + 1;
-        logLine('🔎 ' + nm + ' — kiểm chứng: đọc ' + maxReads + ' lần chưa thấy tin — GIỮ ⚠, KHÔNG bắn lại (chống trùng)');
+        logLine('🔎 ' + nm + ' — kiểm chứng: ' + (histTruncatedOld
+          ? 'lịch sử chỉ trả 25 tin CŨ NHẤT (thread dài) và hội thoại chưa hiện tin này'
+          : 'đọc ' + maxReads + ' lần chưa thấy tin') + ' — GIỮ ⚠, KHÔNG bắn lại (chống trùng)');
       } catch (e) {
         verifyStats.unknown++;
         logLine('🔎 ' + nm + ' — kiểm chứng lỗi (' + (e && e.message || e) + ') — giữ ⚠ như cũ, không gửi lại');
@@ -8203,7 +8322,10 @@
         }
         const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
         if (!Array.isArray(msgs)) { if (!isRecheck) extTimeoutStats.unknown++; return; }
-        const found = isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAtMs);
+        let found = isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAtMs);
+        // [v1.92.29] Thread > 25 tin thì đọc lịch sử không bao giờ thấy tin mới ⇒ kiểm thêm
+        // bằng `snippet`. Chỉ nâng ⚠→✅, không bao giờ gửi lại.
+        if (!found) found = (await confirmViaSnippet(conv, f, pageId, convId, want, sentAtMs)) === 'yes';
         if (found) {
           extTimeoutStats.found++;
           markDelivered(conv.id, 'ext');
@@ -8276,6 +8398,7 @@
           + '/messages?customer_id=' + encodeURIComponent(custId)
           + '&user_view=true&is_new_api=true&separate_pos=true';
         let verdict = 'unknown';
+        let histTruncatedOld = false;
         for (let attempt = 0; attempt < 2; attempt++) {
           if (attempt) {
             await sleepUntil(Date.now() + UNCERTAIN_VERIFY_GAP_MS); // [v1.92.9] ngắt được khi Dừng
@@ -8289,6 +8412,13 @@
           if (!Array.isArray(msgs)) continue;
           verdict = historyVerdict(msgs, pageId, want, photo, sentAt);
           if (verdict === 'yes') break; // có bằng chứng dương là dừng đọc ngay
+          if (msgs.length >= 25) {
+            const newest = newestMsgTimeMs(msgs);
+            if (newest && (Date.now() - newest) > 60000) { histTruncatedOld = true; break; }
+          }
+        }
+        if (verdict !== 'yes') {
+          if ((await confirmViaSnippet(conv, f, pageId, convId, want, sentAt)) === 'yes') verdict = 'yes';
         }
         if (verdict === 'yes') {
           markDelivered(conv.id, 'api');

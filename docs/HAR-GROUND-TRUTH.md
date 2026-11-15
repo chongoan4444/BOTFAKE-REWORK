@@ -2695,3 +2695,53 @@ Nhận xét đo được:
 
 14 → 23 → 33 → **42 kịch bản** (`npm test`): thêm cửa sổ 200 ACK (chỉ tính 200 ca gần nhất,
 nửa OK nửa rejected = 50%, reset = -1), luật đóng ngân sách (-1 / 12% / 40 ca ở 50% / ghi %).
+
+## §63 — KIỂM CHỨNG TIN: VÌ SAO 0/27 RỒI SỬA THẾ NÀO (1.92.29)
+
+### 63.1 Đo trên 12 HAR (3 cách độc lập, khớp nhau)
+
+`GET /v1/pages/{pid}/conversations/{cid}/messages?customer_id=…` trả **25 tin CŨ NHẤT**:
+
+| cách kiểm | số đo |
+|---|---|
+| thứ tự trong response | **89/89 tăng dần** (cũ → mới), 0 response mới-trước |
+| response đúng 25 tin vs lúc đọc | 34 ca: tin mới nhất cũ hơn lúc đọc **p50 4 330 s** (max ~295 ngày) |
+| response < 25 tin (thread đủ) | 57 ca: tin mới nhất chỉ cũ hơn **p50 5 s** |
+| ghép `message_count` của list ↔ số tin đọc được | thread **465 tin** → 25 tin trả về chỉ trải **2 ngày** đầu; thread **39 tin** → 3 ngày đầu |
+
+⇒ **Thread > 25 tin thì tin vừa gửi KHÔNG BAO GIỜ có trong response** ⇒ kiểm chứng kiểu đọc
+lịch sử không thể nâng ⚠→✅. Đúng bằng số đo thực tế: **0/26** (lô 10:39) và **0/1** (lô 13:42).
+
+Kiểm thêm: **FB không dội lại tin page tự gửi qua WebSocket.** Trong 225 khung WS của 3 HAR có
+WebSocket: tin của KHÁCH có mặt (action `insertMessage` / `upsertMessage` /
+`setMessageDisplayedContentTypes` / `updateThreadSnippet`, kèm `mid.$…`), còn **14/14** tin do
+page gửi **không** xuất hiện lại ở bất kỳ khung nào. ⇒ Không có khung ACK nào để bắt; đừng đi
+tìm "khớp request_id tốt hơn".
+
+Hai lý do phụ (đo được): **31/122** lần đọc lịch sử trả rỗng (24 ca `status 0` = request bị
+Chrome huỷ, 7 ca body rỗng) ⇒ 3 lần đọc vẫn có thể trắng cả 3. Đồng hồ server nhanh hơn máy
+**~5–40 s** (p50 delta = −5 s) ⇒ so thời gian mong manh, phải trừ `serverSkewMs`.
+
+### 63.2 Nguồn thay thế duy nhất có trong HAR
+
+`GET /v1/conversations/customer/{psid}?pages[<pid>]=0` → `conversations[]` với
+**`snippet` = tin CUỐI**, `updated_at`, `last_sent_by.id`, `message_count`.
+
+Đo trên 2 lần gọi có trong HAR (mỗi lần trả 2 hội thoại): cả 4 hội thoại đều phản ánh đúng tin
+vừa gửi — trễ **7,2 s / 9,1 s / 10,0 s**. Mỗi lượt gửi chỉ dùng **1 page** nên chỉ cần 1 tham số
+`pages[<pid>]=0`. Không cần `access_token`. Response ~1 KB ⇒ nhẹ hơn hẳn 3–4 lần đọc × 25 tin.
+
+### 63.3 Đã sửa (1.92.29)
+
+1. **Dừng đọc lịch sử vô ích**: response đúng 25 tin **và** tin mới nhất đã cũ > 60 s ⇒ biết ngay
+   cửa sổ là đầu thread ⇒ thoát vòng đọc (bỏ 2–3 request/ca) và chuyển sang (2).
+2. **Kiểm bằng `snippet`** (`confirmViaSnippet` + `snippetVerdict`) cho cả 3 đường kiểm chứng
+   (Socket mất ACK, Extension quá hạn, API không rõ). Luật chốt ✅:
+   đúng hội thoại (id hoặc psid+page) **và** snippet khớp phần đầu text đã gửi (≥ 12 ký tự)
+   **và** `updated_at` không cũ hơn lúc gửi 60 s **và** `last_sent_by.id === pageId`.
+   Không đủ 4 điều kiện ⇒ giữ ⚠. **Không bao giờ gửi lại từ kiểm chứng.**
+3. **`noack` không còn trộn vào thống kê ACK** (lô 13:42 in "ACK TB/max 5263/5263 · bucket ≥5s = 1"
+   cho đúng 1 ca mất ACK ⇒ p50/p90 và "ngưỡng nhanh" bị lệch).
+4. **Chuỗi no-ACK reset mỗi lượt** (lô 13:42 báo "🐢 no-ACK lặp 2 lần — giảm lane xuống 64" khi
+   lô chỉ có **1** ca mất ACK; chuỗi dư từ lô trước).
+5. Test: 42 → **51 kịch bản** (thêm 8 ca cho `snippetVerdict` + 1 ca `snippetText`).
