@@ -2469,3 +2469,62 @@ lệch**, và **không được dùng phép so đó để kết luận "chưa đ
   an toàn.
 - Muốn có bằng chứng dương thật cho Socket: bắt khung `replaceOptimsiticMessage` mang **otid của
   mình** (§59.3) — hướng đã xác định, chưa làm.
+
+## §60 — LÔ 10:04 (2 413 chat, 1.92.25): đọc số ra lỗi gì (1.92.26)
+
+Log do người dùng gửi, **chưa sửa gì**. Việc đầu tiên: cộng lại xem các con số có khớp nhau
+không, vì số không khớp là dấu hiệu code đếm sai chứ không phải khách chết.
+
+### 60.1 Đối chiếu số (tất cả khớp tới từng đơn vị)
+
+| phép tính | kết quả | nghĩa |
+|---|---|---|
+| ACK OK + rejected = 1 501 + 1 722 | **3 223** | số lệnh socket THỰC SỰ đã phát |
+| 2 413 (chat) + 861 (`retry wave`) | **3 274** | 3 274 − 3 223 = **51** ⇒ 51 chat KHÔNG hề phát lệnh nào |
+| 1 722 rejected = 861 × 2 | **861 lần thử lại, cứu 0** | mọi lần thử lại đều bị từ chối y hệt |
+| ❌ 912 = 861 + 51 | **912** | "912 lỗi" thực chất = 861 bị FB từ chối + 51 bị bỏ sót |
+
+⇒ Hai bệnh, cả hai đều là lỗi của script:
+
+1. **51 chat (2,1%) không được gửi ở bất kỳ kênh nào.** Log ghi `gate bỏ Ext no-gid 51`,
+   `🌐 API NỀN queued/started/fetch 0/0/0 · fallback 0`. Nguyên nhân: gate `gidGateSkipExt`
+   trong `sendOne` (nhánh `dynamicDirect`) **return ❌ ngay** khi server/Batch/WS/Ext đều
+   không có `global_id`, mà KHÔNG thử làn API — dù HAR đã chứng minh lệnh gửi API chỉ dùng
+   `conversation_id` (§59.1: 58/58 request gửi không có `global_id`). Đường cứu `apiNoGidFallback`
+   trong `sendDirect` không bao giờ chạy ở chế độ wave vì wave gọi `awaitDirect: true`.
+2. **861 lần thử lại vô ích** — 27% lưu lượng socket (3 223 thay vì 2 413), 861 dòng log,
+   861 ACK phải phân tích, và `retryBacklog > 80` **chặn cổng mở wave** (`evaluateGate`) nên
+   trực tiếp làm lô chậm (wave→cổng TB 5 542 ms).
+
+### 60.2 Đã sửa (1.92.26)
+
+1. **Gate no-gid → đi làn API thay vì bỏ.** Còn làn API dùng được (`!batchSkipApi`,
+   page chưa bị chặn, không phải comment, ảnh đã có `fbId`) thì `seq` được thêm `'api'` và
+   đưa lên đầu; log `🛟 … chuyển làn API bằng conversation_id`. Chưa bắn gì trước đó ⇒
+   **không thể trùng**. Chỉ khi API cũng không dùng được mới trả ❌ như cũ.
+2. **Ngân sách thử lại Socket — tự đo, tự đóng** (`sockRetryBudgetAllows` / `sockRetryBudgetNote`,
+   dùng chung cho **cả hai** đường thử lại: `finalizeSockBg` và `pushToSocketRetry`):
+   * chưa thử đủ **40** ca ⇒ thử lại như cũ;
+   * đã thử ≥ 40 ca, **cứu được 0**, và tỉ lệ FB từ chối trong khoảng **10–70%** ⇒ **đóng** ngân sách:
+     ca sau chốt ❌ ngay với log `KHÔNG thử lần 2 (đã thử N ca, cứu được 0)`;
+   * đã đóng vẫn **dò lại 1 ca mỗi 200 ca bị bỏ**; cứu được 1 ca là **mở lại** toàn bộ
+     (tỉ lệ từ chối thấp = burst cục bộ, hoặc > 70% = burst/sự cố toàn phần ⇒ **không bao giờ
+     đóng**, vì đó đúng là lúc cần thử lại nhất).
+   * reset mỗi lượt (`resetSockRetryBudget`).
+   Với lô 10:04: 40 lần thử + ~4 lần dò thay vì 861 ⇒ **bớt ~820 lệnh socket (−25% lưu lượng)**,
+   bớt 820 dòng log, và `retryBacklog` không còn giữ cổng wave.
+3. **Báo cáo trung thực hơn:** dòng TỐC ĐỘ tách `unavailable A + bỏ thử lần 2 B (cùng nhóm,
+   đã đo 0 cứu được)`; mục tiêu tính theo cả A+B ⇒ `1501/1553 = 96,7%` vẫn đọc được, thay vì
+   trộn 860 khách chết của FB vào "62,2%" như trước. Dòng SOCKET in thêm `bỏ thử lần 2 (ngân sách)`,
+   dòng API in thêm `cứu thiếu globalId`.
+4. Test: 14 → **23 kịch bản** (thêm 9 ca cho ngân sách: đóng đúng lúc, không đóng khi tỉ lệ
+   thấp, không đóng khi từ chối 95%, mở lại khi cứu được, dò lại 1/200, không chặn khi không
+   có ngân sách).
+
+### 60.3 Điều KHÔNG sửa trong lượt này (và vì sao)
+
+* **Tốc độ 59,73 lệnh/s** không phải do cổng wave: cổng chỉ mở khi 40% wave xong, nên
+  "wave→cổng 5,5 s" là *hệ quả* của tốc độ xử lý mỗi chat (~36–60/s), không phải nguyên nhân.
+  Muốn vượt phải đo riêng: chi phí main-thread cho mỗi khung `/ls_resp` (mỗi khung chứa hàng
+  chục action) so với chi phí `publish`. Chưa có số đo ⇒ chưa đổi pacing (§59.8: không đoán).
+* Tỉ lệ 96,7% trong log là **trên phần khả thi**, không phải 96,7% khách hàng thật.

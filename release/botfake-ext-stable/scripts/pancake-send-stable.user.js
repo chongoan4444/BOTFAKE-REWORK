@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.25-stable
+// @version      1.92.26-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -72,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.25-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.26-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4736,6 +4736,8 @@
           const nm = conv.name || conv.id;
           if (res && res.ok) {
             reopenUncertain(conv.id); // ⚡ [FIX-4b] hạ ⚠ nếu watchdog đã chốt trước khi ACK về
+            // [v1.92.26] lần thử lại mà cứu được ⇒ giả thuyết "burst-reject" còn sống ⇒ mở ngân sách
+            if (ctx && ctx.isSocketRetryPass) sockRetryBudgetNote(sockRetryBudgetState, 'saved', 0);
             markDelivered(conv.id, 'socket');
             postSendSideEffects(conv);
             return;
@@ -4749,6 +4751,21 @@
           if (res && res.deferredToSocketRetry && myRun === runSeq && !state.stopRequested) {
             // [v1.92.19] khôi phục "bắn lại Socket 1 lần" cho đường bắn-nhả (xem chú thích đầu khối)
             releaseOutbound(conv.id);
+            // [v1.92.26] NGÂN SÁCH THỬ LẠI (xem sockRetryBudgetAllows): lô 10:04 thử lại 861
+            // lần, cứu 0 (ACK rejected 1 722 = 861 x 2) — tức 27% lưu lượng socket là vô ích.
+            // Đã đo đủ thì chốt ❌ ngay, ghi rõ lý do, KHÔNG bắn thêm lệnh chắc chắn hỏng.
+            const ackAllBg = sendDiag.socketAckOk + sendDiag.socketAckRejected + sendDiag.socketNoAck;
+            const rejectPctBg = ackAllBg ? (sendDiag.socketAckRejected * 100 / ackAllBg) : 0;
+            if (!sockRetryBudgetAllows(sockRetryBudgetState)) {
+              sockRetryBudgetNote(sockRetryBudgetState, 'skipped', rejectPctBg);
+              sendDiag.sockRetryBudgetSkipped++;
+              if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+              logLine('❌ ' + nm + ' — Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử '
+                + sockRetryBudgetState.tried + ' ca, cứu được 0 ⇒ thử nữa chỉ tốn lệnh)');
+              return;
+            }
+            if (sockRetryBudgetState.closed) sockRetryBudgetNote(sockRetryBudgetState, 'probe', rejectPctBg);
+            sockRetryBudgetNote(sockRetryBudgetState, 'tried', rejectPctBg);
             sendDiag.sockWaveRetry = (sendDiag.sockWaveRetry || 0) + 1;
             logLine('🔁 ' + nm + ' — Socket bị từ chối lần 1 — bắn lại 1 lần qua Socket (thoát burst-reject)…');
             const ctx2 = Object.assign({}, res.deferredCtx || {}, {
@@ -6566,11 +6583,33 @@
             // GATE NO-GID: HTTP/Batch/WS/Ext đều đã xác nhận không có global_id ở khâu dò.
             // Không bắn REPLY_INBOX_PHOTO thread-only nữa — đây là nút nghẽn 6 luồng ở đuôi lô.
             recycleUnusedFbId(pid0, ctx);
-            return {
-              ok: false, sent: false, gidUnknown: true, noGidGate: true,
-              discoveryState: ctx.gidDiscoveryState || 'ext-responded-no-gid',
-              error: 'Không tìm được global_id để gửi (server/Batch/WS/Ext đều không có) — bỏ qua Ext thread-only cho nhanh',
-            };
+            // [v1.92.26] LỖ RÒ 51 TIN (lô 10:04): gate này trả ❌ mà KHÔNG thử làn API, dù
+            // lệnh gửi API chỉ dùng conversation_id (HAR: 58/58 request gửi không có
+            // global_id). Đó là lý do log ghi "🌐 API NỀN queued 0 · fallback 0" trong khi
+            // 51 chat (2,1% lô) không hề được gửi ở kênh nào. Nay: còn làn API dùng được thì
+            // đi thẳng làn API; chưa bắn gì nên tuyệt đối không thể trùng.
+            const canApiNoGid = !batchSkipApi && !isApiBlockedForPage(pid0)
+              && seq.indexOf('api') < 0 && !(photo && !photo.fbId) && conv.type !== 'comment';
+            if (canApiNoGid) {
+              seq.push('api');
+              ctx.apiNoGidFirst = true;
+              ctx.gidUnknown = false;
+              ctx.noGidConfirmedByExt = false;
+              ctx.extThreadOnlyRescue = true;
+              ctx.gid = null;
+              ctx.gidFromPsid = false;
+              ctx.gidResolved = true;
+              sendDiag.apiNoGidFallback++;
+              logLine('🛟 ' + (conv.name || conv.id)
+                + ' — server/Batch/WS/Ext đều không có global_id ⇒ chuyển làn API bằng conversation_id'
+                + ' (HAR: lệnh gửi API không cần global_id)');
+            } else {
+              return {
+                ok: false, sent: false, gidUnknown: true, noGidGate: true,
+                discoveryState: ctx.gidDiscoveryState || 'ext-responded-no-gid',
+                error: 'Không tìm được global_id để gửi (server/Batch/WS/Ext đều không có) — bỏ qua Ext thread-only cho nhanh',
+              };
+            }
           }
           // Chưa hề có tin nào được bắn cho chat này, nên cứu hộ ở đây không thể gây trùng:
           // thử Extension bằng thread_id trước, sau đó API bằng conversation_id (đúng fallback
@@ -6590,6 +6629,9 @@
       }
       const pid = (ctx.full && (ctx.full.page_id || ctx.full.pageId)) || pid0;
       seq = pickBestDirectOrder(conv, pid, ctx, seq);
+      // [v1.92.26] Không có global_id ⇒ Ext/Socket chắc chắn bất khả, chỉ còn làn API:
+      // đưa lên đầu để khỏi tốn 3 lượt thử vô ích cho mỗi ca.
+      if (ctx.apiNoGidFirst) seq = ['api'].concat(seq.filter((x) => x !== 'api'));
     }
 
     const tried = Array.isArray(ctx.triedErrors) ? ctx.triedErrors.slice() : [];
@@ -7171,6 +7213,9 @@
   const sendDiag = {
     sockRetry: 0, sockRetryRecovered: 0, sockRetryRejected: 0, sockRetryOther: 0, photoRetry: 0,
     recipientUnavailable: 0,
+    // [v1.92.26] Ca bị FB từ chối lần 1 mà KHÔNG thử lại (ngân sách đã đóng) và ca được
+    // cứu sang làn API vì không có global_id (trước đây bị bỏ luôn -> mất tin).
+    sockRetryBudgetSkipped: 0, apiNoGidFallback: 0,
     // [v1.92.13] Số ca bị CHÍNH bộ ngắt quá tải của Ext chặn trước khi bắn (chưa hề gửi lệnh nào)
     // mà kế hoạch không còn kênh nào khác ⇒ bị tính ❌ oan. Lô 15:54: 1 526 ca.
     extOverloadSkips: 0,
@@ -7397,7 +7442,10 @@
       const dispatchPerSec = dispatchMs > 0 ? (c.total / (dispatchMs / 1000)) : 0;
       const settledPerSec = elapsedExactSec > 0 ? c.settled / elapsedExactSec : 0;
       const successPerSec = elapsedExactSec > 0 ? c.okTotal / elapsedExactSec : 0;
-      const eligibleAfterUnavailable = Math.max(0, c.total - sendDiag.recipientUnavailable);
+      // [v1.92.26] Mục tiêu khả thi = tổng - (khách FB xác nhận không nhận được) - (ca bị từ
+      // chối lần 1 mà ngân sách đã đóng, tức nhóm đã đo được 0/N cứu lại). Nhờ vậy con số
+      // "thành công/…" phản ánh việc script làm được, không bị 860 khách chết của FB kéo xuống.
+      const eligibleAfterUnavailable = Math.max(0, c.total - sendDiag.recipientUnavailable - sendDiag.sockRetryBudgetSkipped);
       const eligibleSuccessPct = eligibleAfterUnavailable ? (c.okTotal / eligibleAfterUnavailable) * 100 : 0;
       const socketAckCount = sendDiag.socketAckOk + sendDiag.socketAckRejected + sendDiag.socketNoAck;
       const socketAckAvgMs = socketAckCount ? Math.round(sendDiag.socketAckMsTotal / socketAckCount) : 0;
@@ -7460,8 +7508,10 @@
           : '')
           + 'đã chốt ' + c.settled + '/' + c.total + ' (' + settledPerSec.toFixed(2) + '/giây; '
           + (settledPerSec * 60).toFixed(0) + '/phút) · thành công ' + c.okTotal + ' (' + successPerSec.toFixed(2)
-          + '/giây; ' + (successPerSec * 60).toFixed(0) + '/phút) · loại chat FB xác nhận unavailable '
-          + sendDiag.recipientUnavailable + ' → mục tiêu còn ' + eligibleAfterUnavailable + ', thành công '
+          + '/giây; ' + (successPerSec * 60).toFixed(0) + '/phút) · loại chat FB từ chối nhận (unavailable '
+          + sendDiag.recipientUnavailable + (sendDiag.sockRetryBudgetSkipped
+            ? ' + bỏ thử lần 2 ' + sendDiag.sockRetryBudgetSkipped + ' (cùng nhóm, đã đo 0 cứu được)' : '')
+          + ') → mục tiêu còn ' + eligibleAfterUnavailable + ', thành công '
           + c.okTotal + '/' + eligibleAfterUnavailable + ' (' + eligibleSuccessPct.toFixed(1) + '%) · đang chờ ' + c.pending
           + ' · lỗi ' + c.failTotal + ' · không rõ ' + c.unsureTotal + ' · bỏ qua ' + c.skipTotal
           + (sendDiag.extOverloadSkips
@@ -7486,12 +7536,14 @@
           + sendDiag.socketAck2To5s + '/' + sendDiag.socketAckGte5s
           + ' · retry wave ' + (sendDiag.sockWaveRetry || 0)
           + ' · retry lần ' + sendDiag.sockRetry + ' (cứu ' + sendDiag.sockRetryRecovered + ' · rejected '
-          + sendDiag.sockRetryRejected + ' · khác ' + sendDiag.sockRetryOther + ') · retry ảnh ' + sendDiag.photoRetry
+          + sendDiag.sockRetryRejected + ' · khác ' + sendDiag.sockRetryOther           + ' · retry ảnh ' + sendDiag.photoRetry
+          + ' · bỏ thử lần 2 (ngân sách) ' + sendDiag.sockRetryBudgetSkipped
           + ' · khách không nhận được ' + sendDiag.recipientUnavailable + ' (chỉ đếm, không lưu)');
         logDiag('🌐 API NỀN: queued/started/fetch ' + sendDiag.apiQueued + '/' + sendDiag.apiStarted + '/' + sendDiag.apiFetchAttempts
           + ' · OK/rejected/không rõ ' + sendDiag.apiSuccess + '/' + sendDiag.apiRejected + '/' + sendDiag.apiUnknown
           + ' · HTTP status [' + apiStatuses + '] · 429/retry ' + sendDiag.api429 + '/' + sendDiag.api429Retries
-          + ' · fallback ' + sendDiag.apiFallback + ' · hủy ' + sendDiag.apiCancelled
+          + ' · fallback ' + sendDiag.apiFallback + ' · cứu thiếu globalId ' + sendDiag.apiNoGidFallback
+          + ' · hủy ' + sendDiag.apiCancelled
           + ' · queue wait TB/max ' + Math.round(sendDiag.apiQueueWaitMsTotal / apiStartedSafe) + '/' + sendDiag.apiQueueWaitMsMax + 'ms'
           + ' · fetch TB/max ' + Math.round(sendDiag.apiFetchMsTotal / apiFetchSafe) + '/' + sendDiag.apiFetchMsMax + 'ms'
           + ' · fetch p50 ' + (() => { const a = (sendDiag.apiFetchSamples || []).slice().sort((x, y) => x - y);
@@ -7581,6 +7633,48 @@
     updateBatchSummaryUI();
   };
 
+  /* ===== NGÂN SÁCH THỬ LẠI SOCKET — TỰ ĐO RỒI TỰ ĐÓNG (v1.92.26) =====
+   * Thử lại Socket 1 lần chỉ có MỘT mục đích: phân biệt "burst-reject tạm thời" với
+   * "khách không nhận được". Lô 10:04 (2 413 chat, bản 1.92.25): thử lại 861 lần, cứu 0
+   * (ACK rejected 1 722 = 861 x 2) trong khi tổng lưu lượng socket là 3 223 lệnh thay vì
+   * 2 413 => 27% lưu lượng là công vô ích, kèm 861 dòng log và 861 ACK phải phân tích.
+   * Luật mới — đo rồi mới kết luận, không đoán:
+   *   - chưa thử đủ 40 ca            => vẫn thử lại như cũ;
+   *   - đã thử >= 40 ca mà cứu 0 VÀ tỉ lệ FB từ chối >= 10% (burst thật thì tỉ lệ thấp)
+   *                                  => ĐÓNG ngân sách: ca sau chốt ❌ ngay, ghi rõ;
+   *   - đã đóng vẫn dò lại 1 ca mỗi 200 ca bị bỏ; cứu được 1 ca là MỞ LẠI ngay.
+   */
+  const sockRetryBudgetState = { tried: 0, saved: 0, skipped: 0, sinceProbe: 0, closed: false };
+  function resetSockRetryBudget() {
+    sockRetryBudgetState.tried = 0;
+    sockRetryBudgetState.saved = 0;
+    sockRetryBudgetState.skipped = 0;
+    sockRetryBudgetState.sinceProbe = 0;
+    sockRetryBudgetState.closed = false;
+  }
+  const SOCK_RETRY_BUDGET_MIN = 40;
+  const SOCK_RETRY_PROBE_EVERY = 200;
+  const SOCK_RETRY_MIN_REJECT_PCT = 10;
+  // Trần: từ chối gần như TOÀN BỘ (> 70%) là dấu hiệu FB burst-reject / sự cố tạm thời chứ
+  // không phải "lô toàn khách chết" ⇒ KHÔNG đóng ngân sách, vẫn thử lại (đúng lúc cần nhất).
+  const SOCK_RETRY_MAX_REJECT_PCT = 70;
+  function sockRetryBudgetAllows(budget) {
+    if (!budget || !budget.closed) return true;
+    return budget.sinceProbe >= SOCK_RETRY_PROBE_EVERY;
+  }
+  function sockRetryBudgetNote(budget, outcome, rejectPct) {
+    if (!budget) return;
+    if (outcome === 'skipped') { budget.skipped++; budget.sinceProbe++; return; }
+    if (outcome === 'probe') { budget.sinceProbe = 0; return; }
+    if (outcome === 'tried') budget.tried++;
+    if (outcome === 'saved') { budget.saved++; budget.closed = false; budget.sinceProbe = 0; return; }
+    const pct = Number(rejectPct);
+    if (!budget.closed && budget.saved === 0 && budget.tried >= SOCK_RETRY_BUDGET_MIN
+        && pct >= SOCK_RETRY_MIN_REJECT_PCT && pct <= SOCK_RETRY_MAX_REJECT_PCT) {
+      budget.closed = true;
+      budget.sinceProbe = 0;
+    }
+  }
   function isRetryableLoss(err) {
     const s = String(err || '');
     // (#100) Không tìm thấy người dùng phù hợp = tài khoản FB không tồn tại → không kênh nào gửi được
@@ -8474,6 +8568,7 @@
     waveDiag.plannedWaves = sendGroups.reduce((n2, g) => n2 + Math.ceil(g.list.length / WAVE_SIZE), 0);
     batchStats.total = totalAll;
     batchStats.startedAt = Date.now();
+    resetSockRetryBudget(); // [v1.92.26] ngân sách thử lại Socket đo lại từ đầu mỗi lượt
     updateBatchSummaryUI();
     const useWaves = totalAll > WAVE_SIZE;
     logLine(useWaves
@@ -8780,6 +8875,26 @@
 
       const pushToSocketRetry = (item) => {
         if (!item || !item.c || !item.c.id) return;
+        // [v1.92.26] NGÂN SÁCH: hết ngân sách thì chốt ❌ ngay, không bắn thêm 1 lệnh socket
+        // mà 40 ca trước đã chứng minh là chắc chắn bị từ chối y hệt (lô 10:04: 0/861 cứu được).
+        const ackAll = sendDiag.socketAckOk + sendDiag.socketAckRejected + sendDiag.socketNoAck;
+        const rejectPct = ackAll ? (sendDiag.socketAckRejected * 100 / ackAll) : 0;
+        if (!sockRetryBudgetAllows(sockRetryBudgetState)) {
+          sockRetryBudgetNote(sockRetryBudgetState, 'skipped', rejectPct);
+          sendDiag.sockRetryBudgetSkipped++;
+          clearBgPending(item.c.id);
+          releaseOutbound(item.c.id);
+          done++; fail++;
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(item.c.id, 'fail');
+          logLine('❌ [' + done + '/' + totalAll + '] ' + (item.c.name || item.c.id)
+            + ' — Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử ' + sockRetryBudgetState.tried
+            + ' ca, cứu được 0 ⇒ thử nữa chỉ tốn lệnh)');
+          updateBatchSummaryUI();
+          checkWakeAllWaiters();
+          return;
+        }
+        if (sockRetryBudgetState.closed) sockRetryBudgetNote(sockRetryBudgetState, 'probe', rejectPct);
+        sockRetryBudgetNote(sockRetryBudgetState, 'tried', rejectPct);
         noteBgPending(item.c, 'wave200-socket-retry');
         const pid = item.c.pageId || String(item.c.id).split('_')[0];
         const deadStreak = socketConfirmedDeadStreak[pid] || 0;
@@ -8846,7 +8961,7 @@
               isSocketRetryPass: true,
               deferredCtx: item.deferredCtx || {},
             });
-            if (r && r.ok && !r.skippedDup) sendDiag.sockRetryRecovered++;
+            if (r && r.ok && !r.skippedDup) { sendDiag.sockRetryRecovered++; sockRetryBudgetNote(sockRetryBudgetState, 'saved', 0); }
             else if (r && r.recipientUnavailable) sendDiag.sockRetryRejected++;
             else sendDiag.sockRetryOther++;
             if (r && r.deferredToExt) pushToExtBacklog({ c: item.c, deferredCtx: r.deferredCtx || item.deferredCtx || {} });

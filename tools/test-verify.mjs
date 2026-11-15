@@ -177,6 +177,79 @@ check('khớp nội dung thắng mốc nước',
     fn2.historyVerdict(msgServerClock, PAGE, 'Câu mới', null, t0Local), 'yes');
 }
 
+/* ---------------- ngân sách thử lại Socket (v1.92.26) ---------------- */
+// Lô 10:04: thử lại Socket 861 lần, cứu được 0 (ACK rejected 1 722 = 861 x 2) nhưng chiếm
+// 27% lưu lượng socket ⇒ phải có luật "đo đủ thì dừng", và luật đó phải có test.
+
+const budgetConsts = ['SOCK_RETRY_BUDGET_MIN', 'SOCK_RETRY_PROBE_EVERY', 'SOCK_RETRY_MIN_REJECT_PCT', 'SOCK_RETRY_MAX_REJECT_PCT']
+  .map((n) => {
+    const m = SRC.match(new RegExp('const ' + n + ' = (\\d+);'));
+    if (!m) throw new Error('không tìm thấy hằng ' + n);
+    return `const ${n} = ${m[1]};`;
+  });
+
+const budgetApi = new Function(budgetConsts.concat([
+  extractFn('sockRetryBudgetAllows'),
+  extractFn('sockRetryBudgetNote'),
+  'return { sockRetryBudgetAllows, sockRetryBudgetNote };',
+]).join('\n\n'))();
+
+const { sockRetryBudgetAllows, sockRetryBudgetNote } = budgetApi;
+const newBudget = () => ({ tried: 0, saved: 0, skipped: 0, sinceProbe: 0, closed: false });
+
+// 15) Đúng tình huống lô 10:04 → đóng ngân sách
+check('40 lần thử lại mà cứu 0 (FB từ chối 34%) → ĐÓNG ngân sách',
+  (() => { const b = newBudget(); for (let i = 0; i < 40; i++) sockRetryBudgetNote(b, 'tried', 34); return b.closed; })(),
+  true);
+check('đã đóng ⇒ ca kế tiếp KHÔNG thử lại',
+  (() => { const b = newBudget(); for (let i = 0; i < 40; i++) sockRetryBudgetNote(b, 'tried', 34); return sockRetryBudgetAllows(b); })(),
+  false);
+
+// 16) Tỉ lệ FB từ chối thấp = burst cục bộ ⇒ vẫn phải thử lại (không được đóng oan)
+check('tử chối chỉ 2% ⇒ KHÔNG đóng (burst cục bộ vẫn đáng thử)',
+  (() => { const b = newBudget(); for (let i = 0; i < 40; i++) sockRetryBudgetNote(b, 'tried', 2); return b.closed; })(),
+  false);
+
+// 16b) Từ chối gần như TOÀN BỘ (95%) = burst/sự cố ⇒ KHÔNG đóng, phải tiếp tục thử lại
+check('từ chối 95% (burst toàn phần) ⇒ KHÔNG đóng',
+  (() => { const b = newBudget(); for (let i = 0; i < 200; i++) sockRetryBudgetNote(b, 'tried', 95); return b.closed; })(),
+  false);
+
+// 17) Có cứu được ⇒ giữ thử lại; đã đóng mà cứu được ⇒ mở lại ngay
+check('có cứu được 1 ca ⇒ không đóng',
+  (() => {
+    const b = newBudget();
+    for (let i = 0; i < 31; i++) sockRetryBudgetNote(b, 'tried', 34);
+    sockRetryBudgetNote(b, 'saved', 0);
+    for (let i = 0; i < 20; i++) sockRetryBudgetNote(b, 'tried', 34);
+    return b.closed;
+  })(),
+  false);
+check('đã đóng mà cứu được ⇒ MỞ LẠI',
+  (() => { const b = newBudget(); b.closed = true; sockRetryBudgetNote(b, 'saved', 0); return b.closed; })(),
+  false);
+
+// 18) Đã đóng vẫn dò lại đúng 1 ca / 200 ca bị bỏ (không bỏ hẳn vĩnh viễn)
+{
+  const b = newBudget();
+  for (let i = 0; i < 40; i++) sockRetryBudgetNote(b, 'tried', 34);
+  let probes = 0;
+  for (let i = 0; i < 1000; i++) {
+    if (sockRetryBudgetAllows(b)) {
+      probes++;
+      sockRetryBudgetNote(b, 'probe', 34);
+      sockRetryBudgetNote(b, 'tried', 34);
+    } else {
+      sockRetryBudgetNote(b, 'skipped', 34);
+    }
+  }
+  check('1000 ca sau khi đóng ⇒ đúng 4 lần dò lại', String(probes), '4');
+  check('đếm đủ số ca bị bỏ', String(b.skipped), '996');
+}
+
+// 19) Không có ngân sách (đường cũ) ⇒ không chặn oan
+check('không có ngân sách ⇒ cho thử lại', sockRetryBudgetAllows(null), true);
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {
@@ -184,5 +257,5 @@ if (fails.length) {
   fails.forEach((f) => console.log('  ✗ ' + f));
   process.exit(1);
 }
-console.log(`✓ ${pass} kịch bản phân xử lịch sử đều đúng.`);
+console.log(`✓ ${pass} kịch bản đều đúng (phân xử lịch sử + ngân sách thử lại Socket).`);
 console.log('  (gồm 4 ca mà bản cũ kết luận sai: khác nội dung, lượt trước, thiếu mốc giờ, tin thu hồi)');
