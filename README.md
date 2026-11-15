@@ -77,7 +77,7 @@ Cả hai folder **sinh tự động** từ mã nguồn: đừng sửa trực ti�
 | kiểm chứng tin ⚠ | đọc lịch sử (thread ≤ 25 tin) **+ `snippet` hội thoại** (thread dài) — chỉ nâng ⚠→✅, không bắn lại | cùng code |
 | gặp "không rõ" | **không bao giờ bù** — chốt ⚠ + ghi `uncertainIds`, mọi đường bù khác tự chặn (1.92.28) | cùng code |
 | kiểm chứng sau gửi | **chỉ nâng cấp** ⚠→✅ (đọc lại lịch sử) · không tìm thấy tin ⇒ **giữ ⚠, không bao giờ bắn lại** (1.92.25) | cùng code |
-| version hiển thị | `1.92.29-W200.71` | `1.92.29-STABLE` |
+| version hiển thị | `1.92.30-W200.72` | `1.92.30-STABLE` |
 
 `scripts/pancake-send-stable.user.js` được sinh từ bản gốc bằng một loạt thay đổi có đánh dấu
 `[STABLE]` — muốn sửa logic gửi thì **sửa bản gốc rồi sinh lại bản ổn định**, đừng sửa tay hai nơi.
@@ -99,7 +99,7 @@ Hai tiện ích nói chuyện với userscript trên **kênh riêng** (`__botfak
 Dù vậy vẫn nên **cài một bản** cho gọn.
 
 Muốn biết đang chạy bản nào: nhìn dòng version trên tiêu đề panel —
-`1.92.29-W200.71` = bản gốc, `1.92.29-STABLE` = bản ổn định. Dấu `[STABLE]` cũng được in vào
+`1.92.30-W200.72` = bản gốc, `1.92.30-STABLE` = bản ổn định. Dấu `[STABLE]` cũng được in vào
 `<html data-botfake-active="…">` trong DOM để kiểm tra bằng DevTools.
 
 ## Build & phát hành

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.29-w200.71
+// @version      1.92.30-w200.72
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.29-W200.71'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.30-W200.72'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -691,7 +691,8 @@
                 logLine('⚠ ' + nm + ' — bù: ' + clip((r && r.error) || 'không rõ', 90) + ' — KHÔNG gửi thêm (chống trùng)');
               } else if (r && !r.ok) {
                 logLine('⚠ ' + nm + ' — bù: ' + clip((r && r.error) || 'không rõ', 90));
-                scheduleBuRetry(conv, tx, lastBgPhoto, nm, 'API từ chối (' + clip(msg.error || '', 90) + ')', ['api']);
+                scheduleBuRetry(conv, tx, lastBgPhoto, nm, 'API từ chối (' + clip(msg.error || '', 90) + ')', ['api'],
+                  { ambiguous: true, via: 'api', sentAt: Date.now() });
               }
             })
             .catch((e) => { logLine('❌ ' + nm + ' — bù lỗi: ' + (e && e.message || e)); })
@@ -3168,7 +3169,8 @@
         // Bù ĐÚNG 1 lần/kênh qua kênh CHƯA thử (Ext → Socket — đúng plan của app).
         logLine('⚠ ' + nm + ' — API từ chối (' + clip(msg, 90) + ')'
           + (win ? ' — ngoài cửa sổ 24h' : ''));
-        scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + clip(msg, 90) + ')', ['api']);
+        scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + clip(msg, 90) + ')', ['api'],
+          { ambiguous: true, via: 'api', sentAt: Date.now() });
       } else {
         sendDiag.apiUnknown++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
@@ -4678,6 +4680,10 @@
         return {
           ok: false,
           sent: false,
+          // [v1.92.30] KHUNG `markOptimisticMessageFailed` KHÔNG nói nó thuộc tin nào ⇒ đây là
+          // phán đoán, không phải bằng chứng "chưa gửi". Cổng chứng minh vắng mặt sẽ quyết định
+          // trước khi bắn lần 2 (xem proveAbsentBeforeBu) — đây là nguồn lặp của bản cũ.
+          ambiguous: true,
           recipientUnavailable: isConfirmedUnavailable,
           error: isConfirmedUnavailable
             ? 'Socket: FB từ chối nhận tin (khách hiện không có mặt / đã khóa nick)'
@@ -5101,6 +5107,9 @@
         if (!ownLock) releaseOutbound(conv.id);
         return {
           ok: false, sent: false,
+          // [v1.92.30] Lý do của adapter có thể đến từ bước SAU khi chữ đã đi (dò global_id,
+          // thread_key, fbId ảnh) ⇒ phán đoán, không phải bằng chứng ⇒ phải chứng minh vắng mặt.
+          ambiguous: true,
           recipientUnavailable: deadUser,
           gidUnknown: gidUnknownThread,
           discoveryState: (ctx && ctx.gidDiscoveryState) || 'unknown',
@@ -6686,6 +6695,24 @@
       tried.push((ch === 'ext' ? 'Ext' : ch) + ': ' + (r.error || 'fail'));
       if (r.gidUnknown) sawGidUnknown = true;
       if (r.extBreakerOpen) { sawExtOverload = true; sendDiag.extOverloadSkips++; }
+      // [v1.92.30] `sent:false` nhưng là PHÁN ĐOÁN (Socket bị FB từ chối / Ext trả lỗi có lý do /
+      // API success:false) ⇒ KHÔNG chạy kênh kế ngay tại đây. Chuyển sang cổng "chứng minh vắng
+      // mặt": nếu hội thoại ĐÃ CÓ tin thì hủy bù (chặn lặp), chứng minh được vắng mặt thì mới bắn.
+      // Worker được giải phóng NGAY (trả về đây) ⇒ tốc độ lô không bị bù chồng giữ lại.
+      // KHÔNG áp cho 2 ca mà code đã có bằng chứng riêng: khách không nhận được tin
+      // (recipientUnavailable — FB trả mã 1545041 / "không có mặt") và token hỏng.
+      if (r.ambiguous && !r.recipientUnavailable && !(r.error && r.error.indexOf('Token') === 0)) {
+        recycleUnusedFbId(pid0, ctx);
+        sendDiag.buProofGated++;
+        scheduleBuRetry(conv, text, photo, (conv.name || conv.id),
+          (ch === 'ext' ? 'Extension' : (ch === 'socket' ? 'Socket' : 'API')) + ' báo lỗi ('
+            + clip(String(r.error || 'không rõ'), 70) + ')',
+          triedCh.slice(), { ambiguous: true, via: ch, sentAt: Date.now() });
+        return {
+          ok: false, gated: true, sent: 'maybe', tried: triedCh.slice(),
+          error: tried.join(' | ') + ' — đang chứng minh vắng mặt trước khi bù (không bắn mù)',
+        };
+      }
       // "không rõ" = tin CÓ THỂ đã đi — thử tiếp kênh khác sẽ gửi TRÙNG → dừng ngay
       if (r.sent === 'maybe') {
         recycleUnusedFbId(pid0, ctx);
@@ -7252,6 +7279,11 @@
     // "mọi request chậm" với "vài request kẹt"; p50 mới so được với HAR (xem docs §32).
     apiFetchSamples: [],
     apiStatusCounts: Object.create(null),
+    // [v1.92.30] Cổng chứng minh vắng mặt trước khi bù: bao nhiêu ca HỦY được bù vì tin ĐÃ tới
+    // (buProofPresent = số lần lặp chặn được), bao nhiêu ca chứng minh được vắng mặt, không rõ,
+    // và bao nhiêu ca dùng lại kết quả đã dò (không tốn thêm request).
+    buProofPresent: 0, buProofAbsent: 0, buProofUnknown: 0, buProofCached: 0,
+    buProofGated: 0, buProofCancelled: 0,
   };
   const waveDiag = {
     waveSize: 0, configuredGapMs: 0, quickEnabled: false, plannedWaves: 0, wavesStarted: 0,
@@ -7555,6 +7587,11 @@
           + ((verifyStats.found || verifyStats.held || verifyStats.unknown)
             ? ' | 🔎 Kiểm chứng ACK: đã đến nơi ' + verifyStats.found + ' · giữ ⚠ (không bắn lại) ' + verifyStats.held + ' · không kiểm chứng được ' + verifyStats.unknown
             : '')
+          + ((sendDiag.buProofGated || sendDiag.buProofPresent || sendDiag.buProofCancelled)
+            ? ' | 🛡 Cổng chống lặp: chặn bù mù ' + sendDiag.buProofGated + ' ca · tin ĐÃ tới (hủy bù) ' + sendDiag.buProofCancelled
+              + ' · chứng minh vắng mặt ' + sendDiag.buProofAbsent + ' · không chứng minh được ' + sendDiag.buProofUnknown
+              + ' · dùng lại kết quả ' + sendDiag.buProofCached
+            : '')
           + ((extTimeoutStats.timeout || extTimeoutStats.skipped || extTimeoutStats.found || extTimeoutStats.notFound || extTimeoutStats.unknown)
             ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy trong lịch sử ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
               + ' · phản hồi MUỘN (đã tính ✅) ' + extLateStats.ok + ' · muộn-mà-lỗi ' + extLateStats.fail
@@ -7765,8 +7802,13 @@
   // thử lại, nhưng kênh CHƯA thử vẫn PHẢI thử tiếp (chuỗi như plan của app: api → extension ⇄ socket).
   // Cả Extension lẫn Socket đều hỗ trợ gửi cả chữ lẫn ảnh (cho chat inbox). Bình luận (comment) chỉ
   // hỗ trợ API/Extension. 'maybe'/đã đến nơi → DỪNG tuyệt đối (chống trùng).
-  function scheduleBuRetry(conv, text, photo, name, why, tried) {
+  function scheduleBuRetry(conv, text, photo, name, why, tried, opts) {
     if (!conv) return;
+    // [v1.92.30] `opts.ambiguous` = phán quyết lỗi là SUY LUẬN (không phải bằng chứng) ⇒ phải
+    // chứng minh vắng mặt trước khi bắn lần 2. `opts.sentAt` = mốc bắt đầu lần gửi đầu.
+    const buGated = !!(opts && opts.ambiguous);
+    const buSentAt = (opts && Number(opts.sentAt)) || Date.now();
+    const buVia = (opts && opts.via) || 'socket';
     if (buRetryTimer[conv.id]) return; // đã có chuỗi bù đang chờ — không chạy song song (chống gửi 2 lần)
     if (sockFiredPending.has(conv.id)) {
       // Socket đã bắn và ACK chưa chốt — bù kênh khác lúc này có thể gây TRÙNG câu. Chờ xác nhận nền chốt.
@@ -7778,7 +7820,7 @@
       logLine('✓ ' + name + ' — tin đã đến nơi (xác nhận) — không bù.');
       return;
     }
-    if (uncertainIds[conv.id] || finalFailedIds[conv.id]) {
+    if (finalFailedIds[conv.id] || (uncertainIds[conv.id] && !buGated)) {
       // Đã có nơi chốt cuối cho chat này (watchdog chốt ⚠ quá hạn / đã chốt ❌) — chốt đó là
       // TUYỆT ĐỐI theo luật chống trùng: kết quả Socket về muộn không được kích bù nữa,
       // nếu không sẽ bắn lần 2 lên tin có thể đã đến nơi (lặp ít, chủ yếu tin ảnh chốt chậm)
@@ -7820,9 +7862,9 @@
         return;
       }
       if (deliveredIds[conv.id]) return; // trong lúc chờ, tin đã đến nơi qua đường khác — thôi
-      if (uncertainIds[conv.id] || finalFailedIds[conv.id]) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2
+      if (finalFailedIds[conv.id] || (uncertainIds[conv.id] && !buGated)) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2
       const buCtx = { gidForceFind: hadDirectFail, isBuRetry: true, apiRejected551: isApi551 };
-      busEnqueue(async () => {
+      const actuallySendBu = () => busEnqueue(async () => {
         // Kiểm tra LẠI ngay trước khi bắn: trong lúc xếp hàng chờ lane (có thể cả phút ở
         // lô lớn), ACK của lần đầu có thể đã về hoặc watchdog đã chốt — kiểm tra ở timer
         // là chưa đủ, cứ bắn là LẶP (đây là nguồn của đoàn "bù thành công" cuối log)
@@ -7831,7 +7873,7 @@
           logLine('✓ ' + name + ' — tin đã đến nơi trong lúc chờ bù — hủy bù (tránh trùng).');
           return { ch: null, delivered: true };
         }
-        if (uncertainIds[conv.id] || finalFailedIds[conv.id]) {
+        if (finalFailedIds[conv.id] || (uncertainIds[conv.id] && !buGated)) {
           buStats.cancelled++;
           logLine('✓ ' + name + ' — đã chốt trạng thái cuối trong lúc chờ bù — hủy bù (tránh trùng).');
           return { ch: null, delivered: true };
@@ -7887,6 +7929,27 @@
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
         logLine('❌ ' + name + ' — bù lỗi: ' + (e && e.message || e));
       });
+      /* [v1.92.30] CỔNG CHỨNG MINH VẮNG MẶT — chỉ cho phán quyết SUY LUẬN.
+       * Phán quyết là BẰNG CHỨNG (socket chết trước publish, lỗi trước khi bắn) đi thẳng:
+       * 0 request, 0 chờ ⇒ giữ nguyên tốc độ cũ. */
+      if (!buGated) { actuallySendBu(); return; }
+      noteBgPending(conv, 'bu-proof');
+      const afterProof = (v) => {
+        if (myRun !== runSeq) { clearBgPending(conv.id); return; }
+        if (v === 'yes') {
+          clearBgPending(conv.id);
+          buStats.cancelled++;
+          sendDiag.buProofCancelled++;
+          markDelivered(conv.id, buVia);
+          logLine('✅ ' + name + ' — hội thoại ĐÃ CÓ tin vừa gửi ⇒ tin đã tới nơi, HỦY bù — KHÔNG gửi lần 2 (chặn lặp)');
+          updateBatchSummaryUI();
+          return;
+        }
+        if (v === 'absent') logLine('🔎 ' + name + ' — chứng minh VẮNG MẶT (hội thoại không đổi sau lúc gửi) ⇒ bù an toàn');
+        else logLine('🔎 ' + name + ' — chưa chứng minh được vắng mặt ⇒ bù như cũ (ưu tiên không sót)');
+        actuallySendBu();
+      };
+      proveAbsentBeforeBu(conv, text, buSentAt).then(afterProof).catch(() => { actuallySendBu(); });
     });
   }
 
@@ -8074,6 +8137,97 @@
       const convs = res.data.conversations || (res.data.data && res.data.data.conversations) || [];
       return snippetVerdict(convs, convId, pageId, psid, want, sentAtMs);
     } catch (e) { return 'unknown'; }
+  }
+
+  /* ===== [v1.92.30] CỔNG "CHỨNG MINH VẮNG MẶT" TRƯỚC MỌI LẦN BẮN THỨ 2 =====
+   * LỖI GỐC CỦA VIỆC LẶP: bù chỉ được phép chạy khi `sent === false`, mà trong code có 6 nguồn trả
+   * `sent:false` — chỉ 3 nguồn là BẰNG CHỨNG (tin chưa từng được phát: socket chết trước publish,
+   * gate no-gid, upload ảnh lỗi, Ext đang nghỉ hồi sức), còn 3 nguồn là SUY LUẬN:
+   *   • Socket `markOptimisticMessageFailed` — khung không nói nó thuộc tin nào;
+   *   • Ext `success:false` CÓ kèm lý do — lý do có thể đến từ bước SAU khi chữ đã đi;
+   *   • API `success:false` / 4xx — lỗi có thể của bước phụ hoặc của gateway.
+   * Ba nguồn đó mà kết luận sai ⇒ bù ⇒ khách nhận 2 tin. Vì vậy: TRƯỚC khi bắn lần 2 cho một
+   * phán quyết SUY LUẬN, hỏi thẳng hội thoại 1–2 request (endpoint snippet, trễ đo được 7,2–10,0 s):
+   *   'yes'    → tin ĐÃ ở trong hội thoại ⇒ HỦY bù (đây là ca chặn được lặp);
+   *   'absent' → chứng minh vắng mặt (hội thoại KHÔNG hề đổi sau lúc gửi ≥ 30 s) ⇒ bù an toàn;
+   *   'unknown'→ không chứng minh được ⇒ bù như cũ (ưu tiên KHÔNG SÓT, giữ nguyên hành vi).
+   * Toàn bộ chạy ở buProbeLane + bgClock, KHÔNG giữ lane gửi ⇒ tốc độ lô không đổi. */
+  const BU_PROOF_WAIT_MS = 10000;   // phải chờ đủ mốc này kể từ lúc gửi rồi mới dám kết luận "vắng mặt"
+  const BU_PROOF_STALE_MS = 30000;  // hội thoại phải im ≥ 30 s trước lúc gửi (dư sức vượt độ trễ 10 s)
+  const buProofCache = new Map();   // convId|mốc → { at, promise } — 1 chat chỉ chứng minh 1 lần
+  const buProbeLane = makeLane(32); // làn riêng: không bao giờ chiếm ghế của làn gửi
+
+  function absenceVerdict(convs, convId, pageId, psid, want, sentAt, late) {
+    if (!Array.isArray(convs) || !convs.length) return 'unknown';
+    if (snippetVerdict(convs, convId, pageId, psid, want, sentAt) === 'yes') return 'yes';
+    if (!late) return 'unknown'; // dò sớm: "chưa thấy" KHÔNG có nghĩa là "chưa đi" (trễ 7–10 s)
+    const at = Number(sentAt) || 0;
+    if (!at) return 'unknown';
+    const skew = (typeof serverSkewMs === 'number') ? serverSkewMs : 0;
+    let hit = null;
+    for (let i = 0; i < convs.length; i++) {
+      const c = convs[i];
+      if (!c) continue;
+      const cid = String(c.id || '');
+      const pid = String(c.page_id || (cid.indexOf('_') > 0 ? cid.slice(0, cid.indexOf('_')) : ''));
+      if (pageId && pid && pid !== String(pageId)) continue;
+      const fromPsid = String(c.from_psid || (c.customers && c.customers[0] && c.customers[0].fb_id) || '');
+      const isThis = (cid && convId && cid === String(convId))
+        || (fromPsid && psid && fromPsid === String(psid) && (!pageId || pid === String(pageId)));
+      if (isThis) { hit = c; break; }
+    }
+    if (!hit) return 'unknown';
+    const t = msgTimeMs(hit.updated_at);
+    if (!t || isNaN(t)) return 'unknown';
+    if (t >= at + skew - BU_PROOF_STALE_MS) return 'unknown'; // hội thoại vừa động ⇒ không dám kết luận
+    return 'absent';
+  }
+
+  async function probeBuVerdict(conv, pageId, convId, want, sentAtMs, late) {
+    try {
+      const psid = psidOf(conv, peekConv(conv) || conv);
+      if (!psid || !pageId) return 'unknown';
+      const url = apiBase() + '/v1/conversations/customer/' + encodeURIComponent(psid)
+        + '?pages[' + encodeURIComponent(pageId) + ']=0';
+      const res = await buProbeLane(() => fetchJson(url, 1, { timeoutMs: 8000 }));
+      if (!res || !res.ok || !res.data || res.data.success === false) return 'unknown';
+      const convs = res.data.conversations || (res.data.data && res.data.data.conversations) || [];
+      return absenceVerdict(convs, convId, pageId, psid, want, sentAtMs, late);
+    } catch (e) { return 'unknown'; }
+  }
+
+  function proveAbsentBeforeBu(conv, text, sentAtMs) {
+    if (!conv || !conv.id) return Promise.resolve('unknown');
+    const want = String(text || '');
+    // Text < 12 ký tự ("Dạ", "Ok") khớp bừa rất dễ ⇒ không dùng snippet để kết luận.
+    if (normalizeMsgText(want).length < 12) return Promise.resolve('unknown');
+    const at = Number(sentAtMs) || Date.now();
+    const key = conv.id + '|' + Math.round(at / 20000);
+    const cached = buProofCache.get(key);
+    if (cached) { sendDiag.buProofCached++; return cached.promise; }
+    const entry = { at: Date.now(), promise: null };
+    entry.promise = (async () => {
+      try {
+        const fullC = peekConv(conv) || conv;
+        const pageId = (fullC && (fullC.page_id || fullC.pageId)) || conv.pageId || String(conv.id).split('_')[0];
+        if (!pageId) return 'unknown';
+        const v1 = await probeBuVerdict(conv, pageId, conv.id, want, at, false);
+        if (v1 === 'yes') { sendDiag.buProofPresent++; return 'yes'; } // chặn được 1 lần lặp
+        const target = at + BU_PROOF_WAIT_MS;
+        if (Date.now() < target) await sleepUntil(target, 'bu-proof');
+        const v2 = await probeBuVerdict(conv, pageId, conv.id, want, at, true);
+        if (v2 === 'yes') sendDiag.buProofPresent++;
+        else if (v2 === 'absent') sendDiag.buProofAbsent++;
+        else sendDiag.buProofUnknown++;
+        return v2;
+      } catch (e) { sendDiag.buProofUnknown++; return 'unknown'; }
+    })();
+    buProofCache.set(key, entry);
+    if (buProofCache.size > 4000) { // dọn bộ nhớ khi lô vài nghìn chat
+      const now = Date.now();
+      buProofCache.forEach((v, k) => { if (now - v.at > 120000) buProofCache.delete(k); });
+    }
+    return entry.promise;
   }
 
   function historyVerdict(msgs, pageId, want, photo, sentAt) {
@@ -8633,6 +8787,11 @@
     batchStats.loopFinished = false;
     batchStats.dispatchEndedAt = 0;
     buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
+    // [v1.92.30] cổng chống lặp: reset sổ mỗi lượt (cache chứng minh cũng xoá để không dùng
+    // kết quả của lượt trước).
+    sendDiag.buProofGated = 0; sendDiag.buProofPresent = 0; sendDiag.buProofAbsent = 0;
+    sendDiag.buProofUnknown = 0; sendDiag.buProofCached = 0; sendDiag.buProofCancelled = 0;
+    try { buProofCache.clear(); } catch (eBp) { /* ignore */ }
     verifyStats.found = 0; verifyStats.held = 0; verifyStats.unknown = 0;
     extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
     extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
@@ -8964,6 +9123,13 @@
         if (r.fired) { firedN++; noteBgPending(c, r.sendBy); } // vào sổ watchdog — quá 90s tự chốt, không kẹt
         logLine('✅ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — đã gửi' + via
           + (r.fired ? ' (đang xác nhận nền)' : ''));
+      } else if (r.gated) {
+        // [v1.92.30] Phán đoán sai (không phải bằng chứng) ⇒ cổng chứng minh vắng mặt đang chạy
+        // ở làn riêng. Vẫn tính ⚠ (để sổ sách đúng) và vẫn ghi uncertainIds — cổng có quyền đi
+        // xuyên qua chốt đó vì nó dựa trên BẰNG CHỨNG, không phải phán đoán.
+        unsure++;
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+        logLine('🔎 [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error);
       } else if (r.uncertain) {
         unsure++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
@@ -9133,6 +9299,15 @@
         }
         if (sockRetryBudgetState.closed) sockRetryBudgetNote(sockRetryBudgetState, 'probe', rejectPct);
         sockRetryBudgetNote(sockRetryBudgetState, 'tried', rejectPct);
+        // [v1.92.30] Khung `markOptimisticMessageFailed` là PHÁN ĐOÁN ⇒ chứng minh vắng mặt
+        // TRƯỚC khi bắn lại. Bắt đầu ngay tại đây để thời gian chờ (≈10 s) chạy SONG SONG với
+        // lúc item nằm trong hàng đợi — worker chỉ việc chờ kết quả, không tốn thêm lane.
+        if (!item.proof) {
+          try {
+            const pAt = (item.deferredCtx && item.deferredCtx.firstRejectedAt) || Date.now();
+            item.proof = proveAbsentBeforeBu(item.c, gtext, pAt);
+          } catch (e0) { item.proof = Promise.resolve('unknown'); }
+        }
         noteBgPending(item.c, 'wave200-socket-retry');
         const pid = item.c.pageId || String(item.c.id).split('_')[0];
         const deadStreak = socketConfirmedDeadStreak[pid] || 0;
@@ -9190,6 +9365,22 @@
               clearBgPending(item.c.id);
               releaseOutbound(item.c.id);
               continue;
+            }
+            if (item.proof) {
+              let pv = 'unknown';
+              try { pv = await item.proof; } catch (e0) { pv = 'unknown'; }
+              if (pv === 'yes') {
+                clearBgPending(item.c.id);
+                releaseOutbound(item.c.id);
+                markDelivered(item.c.id, 'socket');
+                done++; ok++;
+                sendDiag.buProofCancelled++;
+                logLine('✅ [' + done + '/' + totalAll + '] ' + (item.c.name || item.c.id)
+                  + ' — FB báo "không gửi được" nhưng hội thoại ĐÃ CÓ tin ⇒ tin đã đi, KHÔNG bắn lần 2 (chặn lặp)');
+                updateBatchSummaryUI();
+                checkWakeAllWaiters();
+                continue;
+              }
             }
             releaseOutbound(item.c.id);
             sendDiag.sockRetry++;

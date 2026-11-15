@@ -405,6 +405,36 @@ check('đóng ngân sách ghi lại % để in vào log',
     S.snippetText('<div>Chào chị ạ </div>....'), 'Chào chị ạ');
 }
 
+// 27) [v1.92.30] Cổng "chứng minh vắng mặt" trước lần bắn thứ 2 — chỗ chặn LẶP.
+//     Bù chỉ được chạy khi: hoặc tin ĐÃ thấy (hủy bù), hoặc hội thoại CHỨNG MINH không đổi
+//     sau lúc gửi. "Chưa thấy tin" một mình KHÔNG BAO GIỜ được coi là "chưa gửi".
+{
+  const acode = [
+    extractFn('normalizeMsgText'),
+    extractFn('msgTimeMs'),
+    extractFn('snippetText'),
+    extractFn('snippetVerdict'),
+    extractFn('absenceVerdict'),
+    'return { absenceVerdict };',
+  ].join('\n\n');
+  const A = new Function('serverSkewMs', 'BU_PROOF_STALE_MS', acode)(0, 30000);
+  const P = '898735919982398';
+  const PSID = '39224298167184827';
+  const CID = P + '_' + PSID;
+  const t0 = Date.parse('2026-11-11T10:00:00Z');
+  const sendTxt = 'Chị cho em xin chiều cao cân nặng của bé với ạ';
+  const raw = (ms) => new Date(ms).toISOString().replace('Z', '').replace(/\.\d{3}/, '.000000');
+  const conv = (o) => Object.assign({ id: CID, page_id: P, from_psid: PSID, snippet: sendTxt, updated_at: raw(t0), last_sent_by: { id: P } }, o);
+
+  check('cổng: tin ĐÃ có trong snippet ⇒ yes (hủy bù ngay, không chờ)', A.absenceVerdict([conv({})], CID, P, PSID, sendTxt, t0, false), 'yes');
+  check('cổng: dò SỚM thấy hội thoại chưa đổi ⇒ KHÔNG được kết luận vắng mặt', A.absenceVerdict([conv({ snippet: 'Tin cũ của shop', updated_at: raw(t0 - 600000) })], CID, P, PSID, sendTxt, t0, false), 'unknown');
+  check('cổng: dò MUỘN, hội thoại im từ trước lúc gửi ⇒ absent (bù an toàn)', A.absenceVerdict([conv({ snippet: 'Tin cũ của shop', updated_at: raw(t0 - 600000) })], CID, P, PSID, sendTxt, t0, true), 'absent');
+  check('cổng: hội thoại VỪA động sau lúc gửi nhưng snippet khác ⇒ unknown (không dám bù)', A.absenceVerdict([conv({ snippet: 'Tin khác', updated_at: raw(t0 + 2000) })], CID, P, PSID, sendTxt, t0, true), 'unknown');
+  check('cổng: thiếu updated_at ⇒ unknown', A.absenceVerdict([conv({ snippet: 'Tin cũ', updated_at: '' })], CID, P, PSID, sendTxt, t0, true), 'unknown');
+  check('cổng: hội thoại khác ⇒ unknown', A.absenceVerdict([conv({ id: P + '_999', from_psid: '999', snippet: 'Tin cũ', updated_at: raw(t0 - 600000) })], CID, P, PSID, sendTxt, t0, true), 'unknown');
+  check('cổng: danh sách rỗng ⇒ unknown', A.absenceVerdict([], CID, P, PSID, sendTxt, t0, true), 'unknown');
+}
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {

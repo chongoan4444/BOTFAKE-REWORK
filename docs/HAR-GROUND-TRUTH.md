@@ -2745,3 +2745,67 @@ vừa gửi — trễ **7,2 s / 9,1 s / 10,0 s**. Mỗi lượt gửi chỉ dùn
 4. **Chuỗi no-ACK reset mỗi lượt** (lô 13:42 báo "🐢 no-ACK lặp 2 lần — giảm lane xuống 64" khi
    lô chỉ có **1** ca mất ACK; chuỗi dư từ lô trước).
 5. Test: 42 → **51 kịch bản** (thêm 8 ca cho `snippetVerdict` + 1 ca `snippetText`).
+
+## §64 — LẶP CHỈ SINH Ở CƠ CHẾ BÙ: 3 PHÁN QUYẾT LÀ SUY LUẬN, KHÔNG PHẢI BẰNG CHỨNG (1.92.30)
+
+### 64.1 Cửa vào duy nhất của mọi lần bắn thứ 2
+
+`sendOne` chỉ chạy kênh kế khi `r.sent === false`; `scheduleBuRetry` cũng chỉ được gọi từ các
+nhánh `sent:false`. Vậy **mọi ca lặp đều đi qua đúng một cửa: một phán quyết `sent:false`**.
+Trong code có 6 nguồn `sent:false`:
+
+| nguồn | bằng chứng? | vì sao |
+|---|---|---|
+| Socket `kind:'dead'` (socket chết TRƯỚC publish) | **có** | chưa hề phát frame nào |
+| Gate no-gid / upload ảnh lỗi / Ext đang nghỉ hồi sức | **có** | chưa chạm tới lệnh gửi |
+| Socket `markOptimisticMessageFailed` | **không** | khung **không nói** nó thuộc tin nào; code chỉ so `failed.length && !replaced.length` trên toàn bộ `resp.step` |
+| Extension `success:false` **có kèm lý do** | **không** | lý do có thể đến từ bước SAU khi chữ đã đi (dò `global_id`, `thread_key`, fbId ảnh) |
+| API `success:false` / 400·401·403·404·405·413·415·422·429 | **không** | `success:false` là cờ của một bước phụ; 4xx có thể do gateway trả sau khi request đã tới backend |
+
+Ba nguồn dưới mà kết luận sai ⇒ bù ⇒ **khách nhận 2 tin**. Và toàn bộ lớp chống trùng cũ
+(`deliveredIds`, `sockFiredPending`, `uncertainIds`, `buRetryDone`) chỉ chặn khi đã có phán quyết
+**dương** — không có lớp nào hỏi lại hội thoại trước khi bắn lần 2. Đó chính là lỗ hổng.
+
+### 64.2 Sửa: cổng "chứng minh vắng mặt" (`proveAbsentBeforeBu`)
+
+Dùng đúng endpoint snippet của §63 (`/v1/conversations/customer/{psid}?pages[<pid>]=0`) nhưng
+đọc theo hướng ngược lại — **chứng minh KHÔNG có**, không phải chỉ chứng minh CÓ:
+
+| kết luận | điều kiện | hành động |
+|---|---|---|
+| `yes` | snippet khớp text đã gửi + đúng hội thoại + `updated_at` mới + `last_sent_by` = page | **HỦY bù** ⇒ chặn được lặp, không tốn lệnh gửi |
+| `absent` | dò **muộn** (≥ `BU_PROOF_WAIT_MS` = 10 s sau lúc gửi, vượt trần trễ 10,0 s đo được) **và** `updated_at` vẫn cũ hơn lúc gửi ≥ `BU_PROOF_STALE_MS` = 30 s | bù — lần này là bắn có bằng chứng |
+| `unknown` | dò sớm / hội thoại vừa động / thiếu `updated_at` / khác hội thoại / request lỗi / text < 12 ký tự | bù **như cũ** (ưu tiên KHÔNG SÓT, giữ nguyên hành vi) |
+
+Nguyên tắc: **"chưa thấy tin" một mình không bao giờ là "chưa gửi"** — đúng bài học của
+`historyVerdict` (§58, v1.92.25 bỏ hẳn kết luận `no`) và của `snippetVerdict` (§63).
+
+### 64.3 Tốc độ — vì sao không chậm đi
+
+1. **Chỉ ca phán quyết SUY LUẬN mới qua cổng.** Socket `dead`, gate no-gid, upload lỗi, Ext nghỉ
+   hồi sức đi thẳng: **0 request, 0 chờ**, y như cũ.
+2. **Worker được giải phóng NGAY.** `sendOne` không còn chạy kênh kế tại chỗ cho ca suy luận
+   (trước đây một chat lỗi giữ ghế qua Ext 2,5 s rồi Socket). Nay trả về `gated` và để làn nền lo.
+3. **Cổng chạy ở `buProbeLane` (32 làn riêng) + `bgClock`** — không bao giờ chiếm ghế của
+   `busEnqueue` / `apiSendLane` / `extSendLane`, không nằm trong 96–384 làn gửi.
+4. **Dò sớm ngay 0 ms**: nhiều ca tin đã kịp hiện ⇒ hủy bù tức thì (ít hơn 1 lệnh gửi so với trước).
+5. **Retry Socket bắt đầu chứng minh NGAY lúc xếp hàng** ⇒ 10 s chờ chạy *song song* với lúc item
+   nằm trong hàng đợi, gần như không thêm vào đuôi lô lớn.
+6. **Cache theo `convId|mốc 20 s`** ⇒ một chat chỉ chứng minh 1 lần dù có nhiều đường gọi.
+7. Trần phụ: 1–2 request/ca; ca `yes`/`absent` còn **bớt** được 1 request kiểm chứng về sau
+   (`markDelivered` đóng luôn ca ⚠).
+
+### 64.4 Số đo mới trong log
+
+`🛡 Cổng chống lặp: chặn bù mù N ca · tin ĐÃ tới (hủy bù) X · chứng minh vắng mặt Y ·
+không chứng minh được Z · dùng lại kết quả C`
+
+- `X > 0` = số lần **lặp đã chặn được** (mỗi ca là một tin khách không nhận 2 lần).
+- `Y` = số ca bù hợp lệ (tin thật sự chưa đi ⇒ không sót).
+- `Z` = số ca không đủ bằng chứng ⇒ bù như cũ (đây là trần rủi ro còn lại, có đếm được).
+
+### 64.5 Test
+
+`npm test`: 51 → **58 kịch bản**, thêm 7 ca cho `absenceVerdict` (trong đó 2 ca then chốt:
+*dò sớm thấy hội thoại chưa đổi ⇒ phải `unknown`, không được `absent`*; *hội thoại vừa động mà
+snippet khác ⇒ `unknown`, không được bù*).
