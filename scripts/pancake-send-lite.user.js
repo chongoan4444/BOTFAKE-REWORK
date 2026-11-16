@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.40-w200.83
+// @version      1.92.41-w200.84
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.40-W200.83'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.41-W200.84'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4781,6 +4781,26 @@
             if (!sockRetryBudgetAllows(sockRetryBudgetState)) {
               sockRetryBudgetNote(sockRetryBudgetState, 'skipped', rejectPctBg);
               sendDiag.sockRetryBudgetSkipped++;
+              /* [v1.92.41] Ngân sách này chỉ có quyền nói "KHÔNG BẮN LẠI SOCKET" — không có quyền
+               * kết luận "chat này không gửi được". FB vừa TỪ CHỐI ĐỨT KHOÁT ⇒ chưa có tin nào
+               * được gửi ⇒ thử Extension là AN TOÀN (không thể trùng). Log 16:11: 3 311 ca bị
+               * chốt ❌ ở đúng nhánh này trong khi làn Ext trống hoàn toàn. */
+              const hasExt1545 = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+              if (hasExt1545 && extFallback1545Allowed()) {
+                extTry1545.tried++;
+                scheduleBuRetry(conv, text, photo, nm,
+                  'Socket bị FB từ chối (ngân sách thử lại Socket đã đóng)', ['socket'],
+                  { ambiguous: false, fromUncertain: true, via: 'socket', sentAt: Date.now() });
+                logFailGrouped(nm, 'Socket: FB từ chối — KHÔNG bắn lại Socket, chuyển Extension 1 lần '
+                  + '(tin chưa đi nên không thể trùng)', '🛟', conv.id);
+                return;
+              }
+              if (hasExt1545 && !extFallback1545Allowed()) {
+                // Đã đo xong: Extension cũng không cứu được ⇒ ⚠ "chưa gửi" để người dùng gửi tay
+                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+                logFailGrouped(nm, 'Socket: FB từ chối · đã đo 200 ca thì Extension cũng bị chặn ⇒ GIỮ ⚠ (chưa gửi), vào danh sách gửi tay', '⚠', conv.id);
+                return;
+              }
               if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
               logFailGrouped(nm, 'Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử '
                 + sockRetryBudgetState.tried + ' ca, cứu được 0, từ chối gần đây '
@@ -6822,6 +6842,33 @@
       // (fbErrorCode 1545041) hoặc (#100) không tìm thấy người dùng → dừng luôn
       if (r.recipientUnavailable || /\(#100\)|Không tìm thấy người dùng phù hợp/i.test(r.error || '')) {
         recycleUnusedFbId(pid0, ctx);
+        /* [v1.92.41] "NGƯỜI NÀY HIỆN KHÔNG CÓ MẶT" (1545041) là lỗi CỦA KÊNH, không phải bằng
+         * chứng khách chặn: Socket đã bị từ chối như vậy 5 800 lần trong 2 lô 16:07/16:11, trong
+         * khi Extension — đi qua tab Facebook thật — gửi được 186 tin. Chưa có tin nào được gửi
+         * ⇒ thử Extension 1 lần là an toàn tuyệt đối, và có ngân sách dò 200 ca để tự đóng nếu
+         * Extension cũng bị chặn y như vậy. */
+        const _isNoFace1545 = /1545041|không có mặt/i.test(String(r.error || ''));
+        const _extAvail1545 = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+        if (_isNoFace1545 && ch !== 'ext' && _extAvail1545 && !conv.__extFallback1545) {
+          if (extFallback1545Allowed()) {
+            conv.__extFallback1545 = true;
+            extTry1545.tried++;
+            scheduleBuRetry(conv, text, photo, (conv.name || conv.id),
+              'FB báo "người này hiện không có mặt" ở kênh ' + ch, triedCh.slice(),
+              { ambiguous: false, fromUncertain: true, via: ch, sentAt: Date.now() });
+            return {
+              ok: false, gated: true, sent: 'maybe', tried: triedCh.slice(),
+              error: 'FB báo "người này hiện không có mặt" ở kênh ' + ch
+                + ' — tin CHƯA gửi ⇒ thử Extension 1 lần (không thể trùng)',
+            };
+          }
+          conv.__extFallback1545 = true;
+          return {
+            ok: false, sent: false, uncertain: true, tried: triedCh.slice(),
+            error: 'FB báo "người này hiện không có mặt" · đã đo 200 ca thì Extension cũng bị chặn'
+              + ' — GIỮ ⚠ (chưa gửi), vào danh sách gửi tay',
+          };
+        }
         // [v1.92.34] Chốt ❌ NGAY (không bù, không kiểm chứng trong lượt — chống gửi lặp),
         // nhưng ghi vào sổ để SAU LÔ tự đọc lại lịch sử: nếu tin thật ra đã tới thì lật ✅.
         if (r.deadUserHint) queueDeadUserRecheck(conv, text, photo, Date.now());
@@ -7479,6 +7526,26 @@
   const outboundLock = {}; // convId → đang/đã bắn tin (chưa xác nhận fail) — chặn POST/publish chồng
   const buRetryTimer = {}; // convId → timeout bù đang chờ (chống 2 chuỗi bù chạy song song)
   const buLateRetryCount = {}; // [v1.92.40] số lần hẹn thử lại vì Ext bị bộ ngắt chặn (tối đa 2)
+  /* [v1.92.41] NGÂN SÁCH DÒ EXT CHO CA FB TỪ CHỐI "NGƯỜI NÀY HIỆN KHÔNG CÓ MẶT" (1545041).
+   * Số đo 2 lô 16:07/16:11 (1.92.38): Socket bị FB từ chối 3 425 + 2 367 ca; script KHÔNG thử
+   * kênh nào khác ⇒ chốt ❌ 3 311 + 2 214 ca, trong khi làn API và Ext gần như TRỐNG
+   * (API 15/45 lệnh, Ext queue 0/0). Đó là lý do hai lô chỉ đạt 43,1 % và 60,1 %.
+   * Nhưng không được bù mù: nếu Ext cũng bị đúng lỗi đó thì 5 500 lệnh chỉ làm chậm lô.
+   * Vì vậy DÒ CÓ ĐO: thử Ext cho tối đa 200 ca đầu; cứu được ≥1 ⇒ giữ mở; 0 cứu ⇒ ĐÓNG và
+   * phần còn lại vào danh sách gửi tay (⚠ "chưa gửi"), KHÔNG chốt ❌ oan. */
+  const extTry1545 = { tried: 0, saved: 0, closed: false, PROBE: 200 };
+  function extFallback1545Allowed() { return !extTry1545.closed; }
+  function noteExt1545Fail() {
+    if (extTry1545.closed) return;
+    if (extTry1545.tried >= extTry1545.PROBE && extTry1545.saved === 0) {
+      extTry1545.closed = true;
+      try {
+        logLine('🔒 Đóng ngân sách dò Extension cho ca "người này hiện không có mặt": đã thử '
+          + extTry1545.tried + ' ca, cứu được 0 ⇒ Extension cũng bị FB chặn. Phần còn lại vào '
+          + 'danh sách gửi tay (⚠ chưa gửi), không chốt ❌ oan.');
+      } catch (e0) { /* ignore */ }
+    }
+  }
   const finalFailedIds = {}; // convId → đã thất bại hẳn (hết kênh hoặc khách khóa nick)
   const uncertainIds = {};   // convId → không rõ kết quả ('maybe')
   const skippedLateIds = {}; // convId → bỏ qua lúc gửi (tag cấm / icon điện thoại vừa gắn)
@@ -7760,6 +7827,10 @@
           + ' tin (' + pct + '%)' + chStr
           + ' | ❌ Lỗi: ' + c.failTotal
           + (c.unsureTotal ? ' | ⚠ Không rõ: ' + c.unsureTotal : '')
+          + (extTry1545.tried
+            ? ' | 🛟 Dò Ext cho ca FB từ chối: thử ' + extTry1545.tried + ' · cứu ' + extTry1545.saved
+              + (extTry1545.closed ? ' · ĐÓNG (Ext cũng bị chặn ⇒ phần còn lại vào danh sách gửi tay)' : '')
+            : '')
           + (countRescuing() ? ' | ⏳ ĐANG CỨU tự động: ' + countRescuing() + ' chat (Extension, ~10–13 s)' : '')
           + (countManualResendWait() ? ' | 🖐 CẦN GỬI TAY: ' + countManualResendWait() + ' chat (xem 💾 .txt)' : '')
           + (c.skipTotal ? ' | 🧹 Bỏ qua: ' + c.skipTotal : '')
@@ -8166,6 +8237,7 @@
           markDelivered(conv.id, ch);
           postSendSideEffects(conv);
           markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
+          if (conv.__extFallback1545) extTry1545.saved++; // [v1.92.41] Ext CỨU ĐƯỢC ca 1545041
           buStats.ok++;
           buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
           logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅', conv.id);
@@ -8173,6 +8245,7 @@
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
           logFailGrouped(name, 'bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)', '⚠', conv.id);
         } else if (r && r.recipientUnavailable && !hasMoreAfterSocket) {
+          if (conv.__extFallback1545) noteExt1545Fail(); // [v1.92.41] Ext cũng bị chặn — đo tiếp
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
           // ĐÂY là nơi tín hiệu "khách không nhận được" xuất hiện nhiều nhất (Extension trả
           // {"errorDescription":"Người này hiện không có mặt."}). Chỉ ĐẾM cho dòng chẩn đoán —
@@ -8181,6 +8254,7 @@
           logFailGrouped(name, 'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
             + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)', '❌', conv.id);
         } else {
+          if (conv.__extFallback1545) noteExt1545Fail();
           logFailGrouped(name, 'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
             + clip((r && r.error) || 'lỗi không rõ', 90) + ' — sang kênh kế nếu còn', '❌', conv.id);
           // CHUỖI BÙ: kênh kế CHƯA thử (mỗi kênh đúng 1 lần — không lặp kênh vừa thua)

@@ -3261,3 +3261,65 @@ dựng lại ảnh, không đáng đổi rủi ro). Chat vẫn vào danh sách g
 
 `sendDiag.extOverloadSkips` cũng được đếm đúng MỘT lần (ngay chỗ bộ ngắt chặn), trước đây vừa
 không được tăng ở đâu, vừa có nguy cơ đếm đôi ở vòng lặp kênh.
+
+## §75 — HAI LÔ 16:07 / 16:11 (1.92.38): 5 525 CA ❌ VÌ "NGÂN SÁCH" CHẶN OAN
+
+### 75.1 Số đo
+
+| | Lô 16:11 (5 919 chat) | Lô 16:07 (11 954 chat) |
+|---|---|---|
+| ✅ | **2 550 (43,1 %)** · API 15 · **Ext 2** · Socket 2 533 | **7 187 (60,1 %)** · API 45 · **Ext 186** · Socket 6 956 |
+| ❌ | **3 369** | **4 713** |
+| ⚠ / 🖐 | 0 / **0** (không có danh sách gửi tay) | 54 / 54 |
+| 📡 ACK OK/rej/no-ACK | 2 533 / **3 425** / 2 | 6 878 / **2 367** / 161 |
+| `bỏ thử lần 2 (ngân sách)` | **3 311** | **2 214** |
+| `khách không nhận được` (1545041) | 58 | 1 891 |
+| Peak Ext queue/active | **0/1** — làn Ext TRỐNG | 1 |
+| Peak API waiting | 0 | 0 |
+| ⏱ | phát 131 s · tổng 135 s | phát 652 s · tổng 653 s |
+
+Toàn log có **1 781** lần mã `1545041` và **1 970** lần `"Người này hiện không có mặt."`
+
+### 75.2 Nguyên nhân (một nhánh, một dòng log, một lỗi logic)
+
+Mọi ca ❌ gần như đều in cùng một câu:
+
+> `Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử 40 ca, cứu được 0, từ chối gần đây 20 % ⇒ thử nữa chỉ tốn lệnh)`
+
+Dòng này nằm ở nhánh `!sockRetryBudgetAllows(...)` — **ngân sách thử lại Socket** thêm ở 1.92.26.
+Ngân sách đó ra đời để chặn việc **BẮN LẠI SOCKET** (861 lần thử, cứu 0). Nhưng khi viết, nó bị
+cài thành **kết luận cho cả chat**:
+
+```js
+if (!sockRetryBudgetAllows(budget)) {
+  trackStatus(conv.id, 'fail');   // ← ❌ và KHÔNG thử kênh nào khác
+```
+
+⇒ 3 311 + 2 214 = **5 525 chat bị chốt ❌ mà CHƯA HỀ thử Extension hay API**, trong khi
+`peak Ext queue/active 0/1` (làn Ext trống) và API cũng trống. Hai lô đáng lẽ gửi được thêm
+một phần lớn trong 5 525 ca đó.
+
+### 75.3 Vì sao Socket bị từ chối nhiều thế — và vì sao Ext lại gửi được
+
+`1545041 "Người này hiện không có mặt"` là **lỗi của KÊNH**, không phải bằng chứng khách chặn:
+chat đã ra ngoài cửa sổ 24 h thì Socket/API bị FB chặn, còn Extension đi qua **tab Facebook thật**
+nên gửi được — lô 16:07 có **186 tin ✅ qua Ext** đúng trong tình huống này (và code đã ghi nhận
+hiện tượng này từ log 09:15, §30). Đây cũng là lý do API chỉ có 15–45 lệnh: chat ngoài 24 h bị
+`skipFutileApi` bỏ API từ đầu, rồi rơi thẳng vào Socket — sai kênh.
+
+### 75.4 Sửa (1.92.41)
+
+1. **Ngân sách thử lại Socket chỉ còn quyền nói "không bắn lại Socket"**, không có quyền kết luận
+   chat không gửi được. FB từ chối đứt khoát ⇒ **chưa có tin nào đi** ⇒ thử Extension 1 lần là
+   **an toàn tuyệt đối** (không thể trùng). Nhánh đó nay gọi `scheduleBuRetry(['socket'])` ⇒ Ext.
+2. **1545041 ở đường chính** (Socket/API) cũng đi đường đó, thay vì chốt ❌ ngay.
+3. **Dò có đo, không bù mù:** `extTry1545 = { tried, saved, closed, PROBE 200 }`.
+   - Thử Ext cho tối đa **200 ca** đầu.
+   - Cứu được **≥ 1** ⇒ giữ mở, các ca sau đi Ext bình thường.
+   - **0 cứu** sau 200 ca ⇒ **ĐÓNG** (Extension cũng bị FB chặn), phần còn lại vào
+     **`🖐 CẦN GỬI TAY`** với trạng thái ⚠ "chưa gửi" — **không chốt ❌ oan** nữa.
+4. Dòng TỔNG HỢP in: `🛟 Dò Ext cho ca FB từ chối: thử N · cứu M (· ĐÓNG …)`.
+
+Chi phí tối đa của bước dò: 200 ca ÷ ~18 tin/s ≈ **11 s** — không đáng kể so với 131–652 s của
+một lô. Nếu Ext cứu được thì 5 525 ca có cơ hội được gửi thật; nếu không thì người dùng nhận được
+**danh sách gửi tay** thay vì một con số ❌ vô nghĩa.
