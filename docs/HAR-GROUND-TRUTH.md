@@ -3368,3 +3368,97 @@ Thêm `GATE_EXT_BACKLOG_LIMIT = 1200` **chỉ dùng cho cổng**: cổng chỉ g
    trễ trung bình ~1,4 s/lần ⇒ **main thread quá tải** (192 slot + hàng nghìn promise + fetch).
    Đây là nghi phạm số 1 cho việc "phát 45 tin/s dù làn cho phép 265 tin/s", nhưng **chưa có
    phép đo tách bạch** ⇒ chưa đụng.
+
+---
+
+## §77 — BỐN VIỆC NGƯỜI DÙNG GIAO SAU HAI LÔ LỚN 1.92.42 (16:51 / 16:52)
+
+Nguồn số: `…170052.txt` (7 073 chat · 398 s · 17,75 tin/s) và `…170324.txt` (13 204 chat ·
+716 s · 18,45 tin/s), cả hai bản **1.92.42**. Kết luận bao trùm của §76 vẫn đúng: **cổng Ext đã
+hết là nút thắt** (`giữ cổng ext` 6 426 → 2 957 / 3 753), nhưng **tổng thời gian gần như không
+đổi** ⇒ nút thắt đã **chuyển sang slot main**.
+
+### 77.1 Công thức thời gian lô (khớp 99 %)
+
+`t ≈ số chat × 10,7 s ÷ 192`
+
+| lô | dự đoán | thực tế |
+|---|---|---|
+| 7 073 chat | 394 s | 398 s |
+| 13 204 chat | 736 s | 716 s |
+
+⇒ Muốn nhanh thì phải **giảm thời gian giữ slot** (hiện ~10,7 s/chat), **không** phải tăng làn:
+192 slot × 2 s ⇒ ~96 chat/s, tức nhanh gấp 5,3 lần. Nhưng **trước 1.92.43 repo KHÔNG có phép đo
+nào tách 10,7 s đó ra thành phần** ⇒ mọi con số "ai giữ slot" chỉ là suy đoán.
+
+### 77.2 Đã sửa: cầu dao ACK không còn bóp làn về 16 tới hết phiên
+
+Tìm được **đúng đường hạ lane** đã nợ ở §76.4 (1):
+
+```
+16:52:36 🧯 Mất ACK liên tục 25 tin — hạ SÀN socket xuống 32 rồi 16/page (cầu dao giữ tới hết phiên)
+        🔧 ACK hồi ổn định — nâng lại sàn Socket/page 24/64 → 48/64
+        Socket/page limits cuối [16×1]   ← kết thúc lô vẫn ở 16 làn
+```
+
+Cơ chế: `SOCK_ACK_STORM_RUN = 25` ca no-ACK ⇒ sàn `socketLaneFloor` **chia đôi** (64 → 32 → 16,
+đáy `16`), rồi `lane.setLimit(floor)`; nhánh "page ACK chết" cũng `setLimit(socketLaneFloor)`.
+Đường **nâng lại** chỉ `+8` mỗi 20 ACK nhanh và **trần 64** ⇒ từ 16 lên 64 cần 120 ACK nhanh
+liền, thực tế không bao giờ kịp. Kết quả: **1/24 cấu hình** cho phần còn lại của lô.
+
+Sửa (1.92.43): sàn thấp nhất **32** (không phải 16) và khi ACK nhanh 20 nhịp liền thì
+**nâng sàn dứt điểm về 64** thay vì +8.
+
+### 77.3 Đã sửa: ngân sách dò Ext đóng đúng chỗ
+
+`🛟 Dò Ext ca FB từ chối` = **thử 799 · cứu 0** (lô A) và **thử 1 431 · cứu 0** (lô B) dù ngân
+sách thiết kế là 200 ca. Nguyên nhân: ca Ext **quá hạn** rơi vào nhánh `r.sent === 'maybe'`, mà
+cờ đóng ngân sách trước đây chỉ gắn ở nhánh `recipientUnavailable`. Nay gọi `noteExt1545Fail()`
+ở **mọi** nhánh thất bại (kể cả `maybe`) ⇒ `tried` không thể vượt ngân sách.
+
+Bằng chứng "bù Ext vô ích" cho nhóm `1545041`: 2 230 lần thử, **cứu 0**.
+
+### 77.4 Đã sửa: tải danh sách đúng 1 lần
+
+Mỗi lần bấm `⚡ Tải danh sách` là một chuỗi request `next_cursor` **vào đúng endpoint danh sách**
+(§29 HAR: 429 chỉ rơi vào endpoint này — 73/73). Người dùng chọn đi chọn lại nhiều lượt trên cùng
+danh sách ⇒ tải lại vô ích và tự chuốc 429.
+
+1.92.43: danh sách đã tải đủ, chưa quá **10 phút**, không phải tải dở ⇒ bấm ⚡ **dùng lại ngay**
+(`♻ Dùng lại danh sách đã tải (N chat, Xs trước) — KHÔNG gọi lại API`). Muốn tải mới thật:
+**giữ SHIFT** khi bấm (hoặc `window.__botfakeReloadList__` chưa có — dùng SHIFT).
+
+### 77.5 Đã sửa: nhiều tab cùng cửa sổ tranh nhau gửi
+
+Mỗi tab là một bản script độc lập: **client Socket riêng**, làn riêng (192 main · 384/page ·
+128 Ext) nhưng **chung một page Facebook và chung một hạn mức ACK**. Hai tab chạy cùng lúc =
+2× làn trên cùng một kênh ⇒ ACK chậm, lane tự hạ, cả hai cùng chậm.
+
+1.92.43: khoá `ssb_send_tab_lock_v1` (heartbeat 2 s · TTL 6 s). Tab thứ hai bấm Chạy sẽ bị chặn
+kèm `🛑 TAB KHÁC ĐANG GỬI (…)`. Bỏ chặn: `window.__botfakeAllowMultiTab__(true)`.
+
+### 77.6 Đã sửa: đuôi xác nhận bù thôi giữ sổ 3 phút
+
+| lô | Ext quá hạn | kiểm chứng **thấy tin** | chưa thấy |
+|---|---|---|---|
+| 7 073 | 623 | **0** | 516 |
+| 13 204 | 847 | **0** | 822 |
+
+1 338 ca dò lại (20 s + 45 s + **120 s** mỗi ca) **cứu 0 chat** nhưng giữ sổ "chờ xác nhận" tới
+3 phút sau khi lô xong. 1.92.43 bỏ lượt 120 s, giữ **một** lượt 45 s (đủ cho adapter p90 8,3 s +
+hàng đợi) rồi chốt thẳng `⚠ Ext quá hạn — chưa thấy tin`.
+
+### 77.7 Thêm phép đo để chốt "ai giữ slot 10,7 s"
+
+Dòng 🌊/WAVE nay in thêm:
+
+```
+⏱ GIỮ SLOT TB chờ Xms · chuẩn bị Yms · còn lại Zms (n=…)
+```
+
+- **chờ** = thời gian xếp hàng để có slot main (nếu lớn ⇒ cổng/làn là nút thắt, không phải gửi),
+- **chuẩn bị** = `ensureConvCtx` (đọc conversation, ghép tên khách, ảnh),
+- **còn lại** = thân lần gọi kênh (dò gid + publish + chờ ACK).
+
+Chỉ khi có 3 số này mới được sửa tiếp phần gửi — §76.4 (2) (`tab ẩn bị bóp`, callback trễ
+~1,4 s) vẫn là nghi phạm chưa có phép đo tách bạch.
