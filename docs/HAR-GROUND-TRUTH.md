@@ -2927,3 +2927,55 @@ chứng) — nằm trong **file**, không làm nặng bảng log trên màn hìn
 
 Không đổi một số làn, một ngưỡng, một nhánh chốt ✅/⚠/❌. `markDelivered` chỉ **thêm** một dòng
 ghi nhận (trước `return` cũ), `logFailGrouped` chỉ **thêm** tham số id để ghi sổ.
+
+## §68 — HAR CHỐT LẠI GỐC CỦA `1545041`: EXT TRẢ LỖI THẬT, KHÔNG PHẢI "GỬI SAI THREAD" (1.92.34)
+
+Nguồn: lô `botfake-log-20261116-134405.txt` (4 573 chat, 1.92.33-W200.76) + 12 file HAR **trong repo**
+(`batmesss`, `guicau`, `guikhachcu`, `guisot`, `guianh1`, `tinnhan`, `tinnhan1`, `tinnhanthread`,
+`loaddanhsach`, `loadnhanh`, `taidanhsach`, `pancake.vn2`).
+
+### 68.1 Bằng chứng request/response
+
+* **11 request** `POST https://pancake.vn/api/v1/pages/{pid}/conversations/{pid}_{threadId}/messages`
+  ⇒ response **98 byte**: `{"e_code":551,"e_subcode":1545041,"message":"(#551) Người này hiện không
+  có mặt.","success":false}` — HTTP **200**, `success:false`.
+* Chuỗi `1545041` xuất hiện trong **6** entry của `batmesss`, **2** của `guianh1`, **1** của `guisot`,
+  **2** của `tinnhan`. Chuỗi `INCORRECT THREAD` xuất hiện **0 lần** trong **tất cả** HAR.
+* `graph.facebook.com` chỉ có **20 request `GET /picture` (400)** — không có request gửi tin nào ra
+  Graph API ⇒ mọi lệnh gửi đều đi qua endpoint Pancake ở trên.
+* **0 request `chrome-extension://…`, 0 `reference_thread_key`** trong cả 12 HAR ⇒ **không có mẫu
+  payload Extension thật** để đối chiếu; mọi suy đoán "Ext dựng sai thread" đều không có bằng chứng.
+
+### 68.2 Đọc `_app-9331d46f21a84eb1.v6.js` (bundle của Pancake)
+
+* `executeByExtOnce()` gọi `concurrentlyGetGLobalId(...)`; nếu `!C && !S` (không lấy được
+  `globalUserId`) ⇒ trả `{success:false, error:'no_global_id_found'}` — **không hề gửi**.
+* Sau khi gửi, chỉ có 2 kết quả được nhận: `REPLY_INBOX_PHOTO` / `REPLY_INBOX_PRODUCT`. Lỗi ⇒
+  `errorMessage = payload.repliedMessage ? i18n('notification.extensionError') : 'extensionFailure'`.
+* Payload Ext gồm `threadId`, `convId` (= `thread_key`), `globalUserId`, `customerName`, `photoUrls`
+  — **không có** `reference_thread_key`.
+
+⇒ **Extension không bao giờ trả chuỗi `1545041` hay `INCORRECT THREAD`.** Hai chuỗi đó trong log đến
+từ **làn Socket/API** (cùng endpoint ở 68.1). Lỗi Ext thật chỉ là: `extensionFailure`,
+`no_global_id_found`, `extensionDisconnected`, `uploadPhotoFail`.
+
+### 68.3 Hệ quả — 1 089 ca bị chốt ❌ sai nguồn
+
+`sendViaExtension()` chỉ coi là "khách không nhận được" khi **thiếu `globalUserId`**
+(`deadUser && (!globalUserId || !ctx.gidFromPsid)`), nên ca **có** gid rơi vào nhánh `ambiguous`
+⇒ bị đem đi *chứng minh vắng mặt* + *bù kênh khác* dù kết luận đã có. Lô 13:38: **1 089 ca**
+`1545041`, trong đó **23** INCORRECT THREAD, **23** đi kiểm chứng, **23** bù Socket — 0 ca cứu được.
+
+### 68.4 Đã đổi trong 1.92.34
+
+| Mục | Thay đổi |
+|---|---|
+| **C1** | Làn page `makeAdaptivePriorityLane(…, socketLaneFloor, …)` chụp sàn **lúc tạo** ⇒ cầu dao hạ 64→32→16 bị `setLimit` kẹp ngược lên 64 (55 dòng `🐢 … xuống 64` là **no-op**). Nay `min = SOCKET_LANE_HARD_FLOOR = 16`, sàn thật vẫn do `socketLaneFloor` quản. |
+| **C2** | Nới lane +8 chỉ khi `sockAckP50() ≤ 1 800 ms` (lô 13:38: p50 2 194 ms vẫn "nhanh" theo ngưỡng `p50×1,2` ⇒ nới 256→384 lúc 13:38:30, sập lúc 13:38:48: 1 343 chat sau đó **0 ✅**, 8,2 chat/s). Số lần bỏ nới in ở dòng `📡 SOCKET`. |
+| **C3** | Dò lại Socket chết: `sinceProbe >= 50` → **20** ca (nhịp thời gian đã là `SOCK_DEAD_PROBE_MS = 20 s`; lô 13:38 né Socket 1 697 lần nhưng chỉ dò 34 lần, 0 lần hồi). Dòng `🧯` in đúng nhịp dò thay vì "2 phút". |
+| **C4** | `1545041` ⇒ `recipientUnavailable` **bất kể có gid** ⇒ chốt ❌ ngay, **không bù, không kiểm chứng trong lượt** (chống lặp). Kèm `deadUserHint` ⇒ xếp vào sổ **HẬU KIỂM**: sau lô tự đọc lại lịch sử từng ca (`/messages?is_new_api=true` + `isMessageDeliveredInHistory` + `confirmViaSnippet`); **thấy tin ⇒ lật ✅** + `postSendSideEffects`, **không gửi lại**. Chỉ đọc, tối đa 400 ca/lượt, 8 luồng, chờ 25 s. |
+| **A** | `🐢` chỉ in khi **thật sự giảm** + gộp 1 dòng/2 s (`384 → 196 (3 lần hạ)`); `⏳`/`✓` gộp theo lý do; bỏ cụm "không gửi thêm để tránh trùng" in hai lần; nén `1545041`/`INCORRECT THREAD` (98 → 36 ký tự). |
+| **B** | Nạp `nameById` **một lần cho cả danh sách** ở đầu lượt ⇒ dòng `✅` (do `markDelivered` gọi `auditPush('✅', convId, '')`) **không còn mất tên**; sổ báo rõ khi trống sau F5. |
+
+**Còn mở:** làn **API** (chỉ cần `conversation_id`) gửi được **4/33** ca trong nhóm "thiếu gid" của
+lô 13:38 ⇒ có thể là đường cứu cho chính nhóm `1545041` (chưa làm vì người dùng chốt "chốt ❌ ngay").
