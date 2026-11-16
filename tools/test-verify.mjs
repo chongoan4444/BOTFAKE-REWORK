@@ -468,6 +468,45 @@ check('đóng ngân sách ghi lại % để in vào log',
   check('ảnh: danh sách rỗng ⇒ unknown', A.photoMovedVerdict([], CID, P, PSID, t0), 'unknown');
 }
 
+// 22) [v1.92.45] PHÂN LOẠI "CHẮC CHẮN KHÔNG GỬI ĐƯỢC" — quyết định CHỜ 10 s hay CHỐT NGAY.
+//     Sai ở đây theo hướng nào cũng tốn: nhận nhầm ca mơ hồ là "dứt khoát" ⇒ chốt ⚠ trong khi
+//     tin có thể đã đi (mất cơ hội nâng ✅); bỏ sót ca dứt khoát ⇒ bắt người dùng chờ 10–35 s
+//     cho một ca mà FB đã nói rõ là không nhận.
+//     Bộ ca lấy ĐÚNG mã có trong network-log.har của làn Ext (1545041 ×86, 1545012 ×4).
+{
+  const code4 = [
+    extractFn('isDefinitiveNotSent'),
+    extractFn('isTransientServerError'),
+    'return { isDefinitiveNotSent, isTransientServerError };',
+  ].join('\n\n');
+  const F = new Function(code4)();
+
+  // --- phải là "dứt khoát" (chốt ngay, không chờ) ---
+  check('1545041 · người này hiện không có mặt ⇒ dứt khoát',
+    F.isDefinitiveNotSent('(#551) Người này hiện không có mặt.'), true);
+  check('1545041 · chuỗi từ Ext (không có #551) ⇒ dứt khoát',
+    F.isDefinitiveNotSent('Ext: FB từ chối — Người này hiện không có mặt'), true);
+  check('1545012 · lỗi tạm thời ⇒ dứt khoát (server chưa tạo tin)',
+    F.isDefinitiveNotSent('Đã xảy ra lỗi tạm thời, vui lòng thử lại.'), true);
+  check('(#10) ngoài khoảng thời gian cho phép ⇒ dứt khoát',
+    F.isDefinitiveNotSent('(#10) Tin nhắn này được gửi ngoài khoảng thời gian cho phép'), true);
+  check('(#10) thread do app khác kiểm soát ⇒ dứt khoát',
+    F.isDefinitiveNotSent('(#10) Không gửi được tin nhắn do một ứng dụng khác hiện đang kiểm soát thread này.'), true);
+  check('(#100) không tìm thấy người dùng ⇒ dứt khoát',
+    F.isDefinitiveNotSent('(#100) Không tìm thấy người dùng phù hợp'), true);
+
+  // --- KHÔNG được coi là dứt khoát (vẫn phải chờ + kiểm chứng) ---
+  check('Socket mất ACK ⇒ KHÔNG dứt khoát (phải chờ cổng)', F.isDefinitiveNotSent('Socket không rõ kết quả (không có ACK)'), false);
+  check('Ext quá hạn ⇒ KHÔNG dứt khoát', F.isDefinitiveNotSent('Extension không phản hồi (quá hạn) — không gửi thêm để tránh trùng'), false);
+  check('API timeout ⇒ KHÔNG dứt khoát', F.isDefinitiveNotSent('HTTP 504'), false);
+  check('chuỗi rỗng ⇒ KHÔNG dứt khoát', F.isDefinitiveNotSent(''), false);
+
+  // --- thử lại được (không thể trùng) ---
+  check('1545012 ⇒ thử lại được', F.isTransientServerError('Đã xảy ra lỗi tạm thời, vui lòng thử lại.'), true);
+  check('mã 1545012 trần ⇒ thử lại được', F.isTransientServerError('error 1545012'), true);
+  check('1545041 ⇒ KHÔNG thử lại tự động', F.isTransientServerError('Người này hiện không có mặt'), false);
+}
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {

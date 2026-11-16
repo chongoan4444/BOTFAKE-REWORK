@@ -3670,3 +3670,52 @@ nhật muộn 10 s ⇒ `yes`; khách tự nhắn ⇒ `unknown`; page khác ⇒ `
 1. **Thiếu danh sách ≠ danh sách sai.** Chỉ chặn đúng thao tác nguy hiểm (chọn tất cả), đừng chặn cả lượt gửi.
 2. **"Bị chặn vì trùng" không phải "đã gửi".** Mọi kết quả `ok:true` mà **không bắn gì** phải được đếm riêng.
 3. **Cờ 0 mà không có chú thích = bom chờ.** `helperBudget: 0` từng bị hiểu là "có 11 luồng tải".
+
+### 77.16 Đuôi chờ xác nhận — vì sao "gửi 100 chat mà chờ 1–2 chat lâu" và đã cắt ở đâu (1.92.45-W200.91)
+
+Nguồn: `network-log.har` người dùng push lên main — **94 request của extension Pancake v2 phát ra
+trong lúc tool chạy**. Đây là lần đầu repo có bằng chứng về chính **làn Ext** (trước đó mọi kết luận
+về làn này đều suy từ log). Số đo:
+
+| chỉ số | giá trị |
+|---|---|
+| thời gian | 6,74 s cho **90 lệnh** `POST business.facebook.com/messaging/send/` |
+| kết quả | **0 thành công / 90 thất bại** · `payload: null` ở 90/90 |
+| mã lỗi | `1545041` ×**86** (khách không có mặt) · `1545012` ×**4** (lỗi tạm thời, `transientError:1`) |
+| độ trễ phản hồi | p50 **0,99 s** · p90 1,45 s · max 2,13 s (⇒ **không ca nào chạm timeout 2,5–9 s**) |
+| `1545012` vs `1545041` | p50 **0,34 s** vs 1,00 s (lỗi tạm thời trả về nhanh hơn) |
+| song song thật | 90 lệnh / 6,74 s = **13,4 lệnh/s**, đỉnh in-flight **42** (làn 48–96 chưa bao giờ đầy) |
+| 2 khách bị gửi 2 lần | cả 4 lệnh đều ra `1545012` ⇒ không có khoá chống trùng ở tầng request |
+
+**Vì sao đuôi dài.** Có **hai** nguyên nhân cộng lại, không phải một:
+
+1. **Cổng chứng minh vắng mặt khởi động MUỘN.** Trong `scheduleSocketVerify`, `proofP` được tạo
+   *bên trong* vòng đọc (sau lần đọc đầu), mà cổng lại phải chờ mốc `sentAt + 10 s`. Tổng =
+   3 s (chờ) + đọc lần 1 + 2 + 4 + 6 s rồi **mới** tới hạn 10 s của cổng ⇒ ca xấu nhất **25–35 s**
+   cho một chat. Đo trên code, không phải đoán: `maxReads = 4` cho lô > 50, giãn cách 2/4/6 s.
+2. **Ca chắc chắn không gửi được vẫn bị bắt chờ.** `1545041` / `1545012` / `(#10)` là FB nói rõ
+   "tin không được nhận", nhưng chúng đi vào diện `ambiguous` ⇒ 10 s cổng + (nếu rơi nhánh
+   `buProofGated`) tới **35 s** (`scheduleBuRetry` → `proveAbsentBeforeBu` chờ 10 s + `sleepUntil`
+   25 s). Với lô 100 chat, chỉ **1–2 chat lỗi** là đủ giữ nguyên bảng TỔNG HỢP thêm nửa phút.
+
+**Đã sửa (1.92.45):**
+
+| chỗ | trước | sau |
+|---|---|---|
+| `scheduleSocketVerify` | cổng khởi động sau lần đọc 1 ⇒ 14–35 s | **khởi động ngay trước vòng đọc** ⇒ về đúng `+10 s`, không thêm request nào |
+| ca dứt khoát | vào `ambiguous` ⇒ chờ 10 s | `isDefinitiveNotSent()` ⇒ chốt ⚠ **ngay trong làn gửi**, log ghi rõ "FB đã từ chối DỨT KHOÁT ⇒ chốt luôn" |
+| `1545012` | **không có trong code** (grep = 0) | `isCertainHttpNotSent` coi là "chắc chắn chưa gửi" + `isTransientServerError` ⇒ **thử lại ngay 1 lần** sau 600 ms (server chưa tạo tin ⇒ không thể trùng) |
+| hết kênh + lý do dứt khoát | bù mù rồi chờ cổng | `definiteFail` khi `seq` rỗng ⇒ chốt ngay |
+| mẫu p90 độ trễ Ext | lấy **mọi** phản hồi | **chỉ ca thành công** (ca lỗi trả lời nhanh ⇒ siết timeout xuống sàn 2,5 s ⇒ cổng quá hạn nổ oan) |
+| AIMD làn Ext | `latencyMs < 5000` ⇒ +2 slot | chỉ ca **success** mới tăng (HAR: 90 ca lỗi vẫn < 2,2 s ⇒ làn leo 64 → 96 bằng toàn lệnh hỏng) |
+| đo đuôi | không có số | `tailChats` · `tailMaxMs` · `unavailFast` in ở TỔNG HỢP |
+
+**Nguyên tắc rút ra:**
+1. **"Có phản hồi" ≠ "khoẻ".** Mọi AIMD/mẫu độ trễ phải lọc theo `success`, nếu không làn sẽ leo
+   bằng chính các ca hỏng.
+2. **Cổng chờ phải khởi động cùng lúc với việc đọc**, không phải sau. Cái đắt không phải request
+   mà là **thứ tự** các mốc chờ.
+3. **Ca FB đã nói rõ thì đừng chờ.** Thời gian chờ chỉ có giá trị với ca *mơ hồ thật* (Socket mất
+   ACK, Ext quá hạn, API timeout). Với `1545041`/`1545012`/`(#10)` chờ 10 s chỉ làm chậm lô.
+4. **Trần của làn Ext ~13,4 lệnh/s** (đo thật). Nâng sàn/trần làn không làm lô nhanh hơn — sửa
+   comment cũ ghi "48 làn ≈ 40–50 tin/s" để lần sau không tối ưu sai chỗ.

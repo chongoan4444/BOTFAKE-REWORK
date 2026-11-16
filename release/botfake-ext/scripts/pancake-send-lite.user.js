@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.44-w200.90
+// @version      1.92.45-w200.91
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.44-W200.90'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.45-W200.91'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3194,6 +3194,13 @@
   // KHÔNG RÕ (5xx/lỗi mạng) → chỉ báo "không rõ" — KHÔNG gửi lại để tránh trùng tin.
   function isCertainHttpNotSent(status, data, parsed) {
     if (data && data.success === false) return true;
+    /* [v1.92.45] `1545012` / `transientError:1` = server TỪ CHỐI NGAY, chưa tạo tin.
+     * Bằng chứng: network-log.har (làn Ext của extension Pancake v2) có 4/90 ca mã này,
+     * `payload: null`, thời gian phản hồi p50 0,34 s (lỗi nhanh) so với 1,00 s của 1545041.
+     * Coi nó là "không rõ" (như bản cũ) thì mỗi ca phải chờ cổng 10 s rồi mới bù — chậm vô ích
+     * cho một ca mà server đã nói rõ "chưa nhận". Đây là từ chối đứt khoát ⇒ thử lại AN TOÀN. */
+    if (data && (Number(data.error) === 1545012 || data.transientError === 1
+        || /Đã xảy ra lỗi tạm thời/i.test(String(data.errorDescription || data.message || '')))) return true;
     const st = Number(status) || 0;
     if (st === 408 || st === 499 || st >= 500 || st <= 0) return false;
     if (st === 400 || st === 401 || st === 403 || st === 404 || st === 405 || st === 413 || st === 415 || st === 422 || st === 429) {
@@ -3389,6 +3396,33 @@
             if (d2 && d2.success === false) msg = msg2; // cờ đã có mà vẫn (#10) → chặn thật của chat này
           }
         }
+        /* [v1.92.45] `1545012` (lỗi TẠM THỜI, server chưa tạo tin) ⇒ THỬ LẠI NGAY 1 LẦN.
+         * Bản cũ: rơi thẳng xuống cổng "chứng minh vắng mặt" 10 s rồi mới bù kênh khác ⇒ mỗi ca
+         * lỗi tạm thời làm lô chậm thêm ~10 s dù server đã nói rõ "chưa nhận gì".
+         * Chỉ 1 lần/chat, nghỉ 600 ms, rồi mới tin kết quả của lần 2. */
+        const transientNow = !(ctx7Retried[conv.id + '|tr']) && isTransientServerError(msg);
+        if (transientNow) {
+          ctx7Retried[conv.id + '|tr'] = true;
+          sendDiag.transientRetries = (sendDiag.transientRetries || 0) + 1;
+          await sleepUntil(Date.now() + 600, 'api-transient-retry');
+          if (myRun !== runSeq) return;
+          const reqTr = buildInboxSend(conv, text, photo, { forceCtx7: !!req.ctx7 });
+          if (!reqTr.error) {
+            const resTr = await timedFetch(reqTr);
+            let dTr = null;
+            try { dTr = await resTr.json(); } catch (eTr) { dTr = null; }
+            if (resTr.ok && dTr && dTr.success) {
+              sendDiag.apiSuccess++;
+              sendDiag.transientRetryOk = (sendDiag.transientRetryOk || 0) + 1;
+              markDelivered(conv.id, 'api'); postSendSideEffects(conv);
+              logLine('🔁 ' + nm + ' — lỗi TẠM THỜI (1545012) → gửi lại NGAY, THÀNH CÔNG.');
+              return;
+            }
+            const msgTr = (dTr && (dTr.message || dTr.error)) || ('HTTP ' + resTr.status);
+            if (dTr && dTr.success === false) msg = msgTr; // lấy lỗi của lần 2 làm kết luận
+            res = resTr; data = dTr;
+          }
+        }
         if (isThreadControlError(msg)) {
           // Không blacklist page vì 1 ca: chỉ chặn khi lỗi cấp page lặp liên tiếp.
           const streak = notePageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
@@ -3574,6 +3608,41 @@
     return m.indexOf('(#551)') > -1
       || m.indexOf('Người này hiện không có mặt') > -1
       || m.indexOf('ngoài khoảng thời gian cho phép') > -1;
+  }
+
+  /* [v1.92.45] PHÂN LOẠI "CHẮC CHẮN KHÔNG GỬI ĐƯỢC" — để KHÔNG bắt người dùng chờ.
+   *
+   * Vấn đề thật (không phải tối ưu tốc độ gửi): một ca mà FB đã trả lời dứt khoát là tin
+   * KHÔNG được nhận (khách không có mặt / ngoài cửa sổ 24h / thread do app khác giữ / lỗi
+   * tạm thời phía server) vẫn bị đưa vào CỔNG CHỨNG MINH VẮNG MẶT 10 s + có khi 2 lần dò ⇒
+   * lô 100 chat phát xong trong ~5 s nhưng bảng TỔNG HỢP treo thêm 10–35 s chỉ để chờ 1–2 ca
+   * mà kết quả đã biết từ đầu. Đo được trong 2 lô lớn: 762 và 3 851 ca ❌, trong đó phần lớn
+   * là 1545041/1545012 — tức phần lớn thời gian đuôi là chờ NHỮNG CA ĐÃ CHẾT.
+   *
+   * Ngược lại, phải giữ nguyên cổng 10 s cho nhóm thật sự mơ hồ (Socket không ACK, Ext quá
+   * hạn, API timeout/5xx) — đó mới là chỗ "có thể đã đi" và là chỗ chống gửi trùng.
+   *
+   * `1545012` = "Đã xảy ra lỗi tạm thời, vui lòng thử lại" (transientError:1) — HAR
+   * network-log.har (extension Pancake v2, 90 request): 4 ca mã này, tất cả `payload: null`
+   * ⇒ server CHƯA tạo tin ⇒ thử lại an toàn (không thể trùng). Trước bản này script mù hoàn
+   * toàn với mã đó (grep = 0 lần).
+   */
+  /** Chỉ đúng ca "server tạm thời không xử lý" — thử lại ngay được, KHÔNG THỂ trùng. */
+  function isTransientServerError(msg) {
+    const m = String(msg || '');
+    return /1545012/.test(m) || /Đã xảy ra lỗi tạm thời/i.test(m)
+      || /(^|\D)5\d\d(\D|$)/.test(m);
+  }
+
+  function isDefinitiveNotSent(msg) {
+    const m = String(msg || '');
+    if (!m) return false;
+    if (/(#551)|Người này hiện không có mặt|không có mặt/i.test(m)) return true;              // 1545041
+    if (/ngoài khoảng thời gian cho phép|outside.*window/i.test(m)) return true;             // (#10) cửa sổ 24h
+    if (/kiểm soát thread|đang kiểm soát/i.test(m)) return true;                             // (#10) 2018300
+    if (/1545012|Đã xảy ra lỗi tạm thời/i.test(m)) return true;                              // transientError:1
+    if (/(#100)|Không tìm thấy người dùng/i.test(m)) return true;                            // người dùng không tồn tại
+    return false;
   }
 
   // Rút bằng chứng từ chuỗi lỗi (có thể là "Ext: … | api: (#10)…") — log gọn, đúng nghĩa
@@ -5315,16 +5384,20 @@
         if (String(res.error).indexOf('Lỗi kênh:') === 0) {
           // adapter.send VĂNG exception (lane bọc thành 'Lỗi kênh:…') — không rõ đã bắn
           // hay chưa (có thể văng SAU khi gửi) → "không rõ", cấm kênh khác bắn lần 2 (LẶP)
+          extSendCtl.lastOutcomeOk = false;
           noteExtSendOutcome('timeout', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
           extTimeoutStats.timeout++;
           if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
           return { ok: false, sent: 'maybe', error: 'Extension lỗi giữa chừng — không gửi thêm để tránh trùng' };
         }
+        extSendCtl.lastOutcomeOk = false; // [v1.92.45] "có phản hồi" KHÔNG phải "khoẻ" (HAR: 90/90 lỗi mà vẫn <2,2 s)
+        noteExtSendOutcome('responded', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
         releaseExtSendPermit(extSendPermit);
         if (!ownLock) releaseOutbound(conv.id);
         return { ok: false, sent: false, error: res.error };
       }
       if (res && res.success) {
+        extSendCtl.lastOutcomeOk = true; // [v1.92.45] chỉ ca này mới được nuôi p90 + tăng làn
         noteExtSendOutcome('responded', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
         // HỌC THEO app (onSuccess → update_global_id): globalUserId extension trả về có thể ĐÚNG
         // hơn giá trị mình đoán (có khách globalId là FBID 1000… chứ không phải PSID) — cache lại
@@ -5366,6 +5439,7 @@
           // (setTimeout trong __ExtensionAdapter__.send) — Extension có thể ĐÃ gửi rồi mà
           // phản hồi về chậm. Kết luận "chưa gửi" ở đây là bắn lần 2 (LẶP) → phải là "không rõ".
           // Chỉ đăng ký kiểm chứng bằng lịch sử tin; không bắn kênh khác cho chat này.
+          extSendCtl.lastOutcomeOk = false;
           noteExtSendOutcome('timeout', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
           extTimeoutStats.timeout++;
           if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
@@ -5406,6 +5480,7 @@
         };
       }
       // không có phản hồi (timeout/hủy) → extension có thể đã gửi → KHÔNG rõ
+      extSendCtl.lastOutcomeOk = false;
       noteExtSendOutcome('timeout', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
       extTimeoutStats.timeout++;
       if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
@@ -5709,7 +5784,12 @@
   //   Log 09:15:37–09:15:42 = hơn 100 tin ✅ trong 5s ở 24 làn ⇒ ~20–25 tin/s, tức ~1s/lệnh.
   //   Làn tự hạ về sàn 24 vì bão timeout rồi nằm nguyên đó ⇒ không bao giờ chạm 48.
   //   Nay: khởi động 64, SÀN 48 (không tụt xuống 24 nữa), trần 96.
-  //   Ước lượng tuyến tính theo số đo trên: 48 làn ≈ 40–50 tin/s, 64 làn ≈ 55–65 tin/s.
+  // [v1.92.45] SỬA CON SỐ ƯỚC LƯỢNG SAI Ở ĐÂY. Dòng cũ ghi "48 làn ≈ 40–50 tin/s, 64 làn ≈
+  //   55–65 tin/s" — đo trên network-log.har (90 lệnh thật của extension Pancake v2 trong lúc
+  //   tool chạy) thì TRẦN THẬT của làn Ext là ~13,4 lệnh/s (90 lệnh / 6,74 s), đỉnh in-flight
+  //   chỉ 42/48 — tức làn CHƯA BAO GIỜ là nút cổ chai, chính Extension tự tuần tự hoá. Nâng
+  //   sàn/trần làn không làm lô nhanh hơn; cái làm lô chậm là ĐUÔI CHỜ XÁC NHẬN và các ca
+  //   chắc chắn không gửi được mà vẫn bị bắt chờ 10 s (đã sửa ở 1.92.45).
   //   Làn vẫn tự hạ khi lỗi, nhưng không bao giờ thấp hơn 48.
   const BUS_PARALLEL_EXT = 64;
   const EXT_SEND_MIN = 48;
@@ -6392,7 +6472,10 @@
   const extSendCtl = { timeoutStreak: 0, openUntil: 0, openStreak: 0, probeInFlight: false, probeToken: 0, fastStreak: 0,
     // [v1.92.6] Vòng mẫu độ trễ THẬT của Extension (chỉ ca CÓ phản hồi — ca quá hạn là số
     // liệu bị cắt cụt, đưa vào p90 sẽ tự ru ngủ chính nó). Dùng để suy timeout, xem extTimeoutMs().
-    latSamples: [] };
+    // [v1.92.45] Nay chỉ lấy ca THÀNH CÔNG — ca lỗi trả lời rất nhanh (HAR: p50 0,34–1,0 s) nên
+    // đưa vào mẫu sẽ siết timeout xuống sàn 2,5 s và làm cổng quá hạn nổ oan.
+    latSamples: [],
+    lastOutcomeOk: false }; // kết quả lần gửi Ext gần nhất (dùng cho AIMD + mẫu độ trễ)
   const EXT_LAT_RING = 24;
   /** p90 độ trễ phản hồi Ext gần nhất; 0 = chưa có số đo. */
   function extLatP90() {
@@ -6501,13 +6584,25 @@
       if (kind === 'responded') {
         // Extension CÓ trả lời (dù thành công hay báo lỗi rõ ràng) = còn sống.
         extSendCtl.timeoutStreak = 0;
-        if (latencyMs != null && latencyMs > 0) {
+        /* [v1.92.45] HAI SỬA Ở ĐÂY — cả hai đều bắt nguồn từ network-log.har của làn Ext
+         * (90 request của extension Pancake v2 trong lúc tool chạy): 90/90 CÓ phản hồi, p50
+         * 0,99 s, max 2,13 s — nhưng 90/90 là LỖI (1545041 ×86, 1545012 ×4, payload null).
+         *
+         * 1) MẪU ĐỘ TRỄ chỉ lấy ca THÀNH CÔNG. `latSamples` nuôi `extLatP90()` → `extTimeoutMs()`
+         *    = 3 × p90. Trước đây ca lỗi cũng vào mẫu; lỗi thì luôn nhanh (p50 0,34–1,0 s) nên
+         *    timeout bị SIẾT về sàn 2,5 s trong khi ca thành công thật lại chậm hơn ⇒ cổng quá
+         *    hạn nổ oan, mỗi ca sinh thêm vòng kiểm chứng 20 s + đọc lại 45 s.
+         *
+         * 2) AIMD KHÔNG được tăng làn bằng ca LỖI. Bản cũ: `latencyMs < 5000` ⇒ +2 slot/10 lần.
+         *    Với 90 ca lỗi mà vẫn trả lời trong <2,2 s, làn sẽ leo 64 → 96 (trần) sau ~160 lệnh
+         *    TOÀN HỎNG — đúng hình dạng "Ext nhanh mà cứu 0" trong log. Nay chỉ ca success mới
+         *    được tăng; `responded` không còn đồng nghĩa với "khoẻ".
+         * Chú thích cũ ghi "tối đa 24" là SAI: lane bị kẹp [EXT_SEND_MIN 48, EXT_SEND_MAX 96]. */
+        if (kind === 'responded' && extSendCtl.lastOutcomeOk && latencyMs != null && latencyMs > 0) {
           extSendCtl.latSamples.push(latencyMs);
           if (extSendCtl.latSamples.length > EXT_LAT_RING) extSendCtl.latSamples.shift();
         }
-        // AIMD làn Ext gửi: trả nhanh (<5s) tích lũy 10 lần → tăng +2 slot (tối đa 24).
-        // Có 1 lệnh hơi chậm (>5s nhưng không timeout) chỉ trừ nhẹ bộ đếm chứ không xóa về 0.
-        if (latencyMs != null) {
+        if (extSendCtl.lastOutcomeOk && latencyMs != null) {
           if (latencyMs < 5000) {
             extSendCtl.fastStreak++;
             if (extSendCtl.fastStreak >= 10) {
@@ -6517,6 +6612,8 @@
           } else {
             extSendCtl.fastStreak = Math.max(0, extSendCtl.fastStreak - 2);
           }
+        } else {
+          extSendCtl.fastStreak = 0; // ca lỗi: không tăng, và cắt chuỗi "nhanh" đang tích
         }
         if (permit && permit.probe) {
           releaseExtSendPermit(permit);
@@ -7083,6 +7180,21 @@
       }
       // Khách đã khóa nick/chặn page được chính Extension xác nhận bằng global_id thật
       // (fbErrorCode 1545041) hoặc (#100) không tìm thấy người dùng → dừng luôn
+      /* [v1.92.45] DANH SÁCH KÊNH ĐÃ CẠN + FB ĐÃ NÓI RÕ LÝ DO ⇒ chốt ⚠ NGAY, không cổng 10 s.
+       * `seq` ở đây là các kênh CÒN LẠI. Rỗng nghĩa là đã thử hết mọi kênh mà không kênh nào
+       * nhận; cộng với việc lý do là loại dứt khoát (khách không có mặt / ngoài 24h / thread bị
+       * app khác giữ / 1545012 tạm thời) ⇒ không còn gì để chờ. Không đánh ✅ oan (vẫn ⚠ +
+       * danh sách gửi tay), chỉ bỏ 10 s chờ vô ích.
+       * Ca mơ hồ thật (Socket mất ACK, Ext quá hạn) KHÔNG đi qua đây vì chúng trả `ambiguous`
+       * hoặc `sent:'maybe'` với lý do không khớp `isDefinitiveNotSent`. */
+      if (!seq.length && isDefinitiveNotSent(r.error || '') && !r.recipientUnavailable) {
+        recycleUnusedFbId(pid0, ctx);
+        return {
+          ok: false, sent: false, definiteFail: true, definitiveNotSent: true,
+          tried: triedCh.slice(),
+          error: tried.join(' | ') + ' — FB từ chối dứt khoát ở mọi kênh đã thử (chốt ngay, không chờ xác nhận)',
+        };
+      }
       if (r.recipientUnavailable || /\(#100\)|Không tìm thấy người dùng phù hợp/i.test(r.error || '')) {
         recycleUnusedFbId(pid0, ctx);
         /* [v1.92.41] "NGƯỜI NÀY HIỆN KHÔNG CÓ MẶT" (1545041) là lỗi CỦA KÊNH, không phải bằng
@@ -7679,6 +7791,12 @@
     buProofGated: 0, buProofCancelled: 0,
     // [v1.92.44] số ca bị khoá chống trùng chặn lại (KHÔNG phải lệnh gửi thật)
     dupBlocked: 0,
+    /* [v1.92.45] ĐUÔI CHỜ XÁC NHẬN — đo đúng cái người dùng phàn nàn: "gửi 100 con mà chờ
+     * 1–2 con xác nhận lâu quá". Tách 3 số để biết thời gian nằm ở đâu:
+     *   tailChats   = số chat phải chờ xác nhận nền sau khi đã phát xong lệnh
+     *   tailMaxMs   = ca chờ lâu nhất (từ lúc phát tới lúc có kết luận)
+     *   unavailFast = số ca chốt "khách không nhận được" NGAY trong làn gửi (không vào cổng chờ) */
+    tailChats: 0, tailMaxMs: 0, unavailFast: 0,
   };
   const waveDiag = {
     waveSize: 0, configuredGapMs: 0, quickEnabled: false, plannedWaves: 0, wavesStarted: 0,
@@ -7898,10 +8016,23 @@
   const BG_SETTLE_DEADLINE_MS = 180000;
   function noteBgPending(conv, via) {
     if (!conv || !conv.id) return;
+    /* [v1.92.45] ĐO ĐUÔI CHỜ XÁC NHẬN. Người dùng phàn nàn đúng chỗ này: "gửi list 100 con
+     * mà chờ xác nhận 1–2 con tới chưa lâu quá". Trước bản này không có con số nào cho biết
+     * cái đuôi đó dài bao nhiêu và do ca nào giữ ⇒ mọi tối ưu đều là đoán. Ghi mốc phát lệnh
+     * ở đây, chốt độ dài ở markDelivered/clearBgPending. */
     pendingBg[conv.id] = { at: Date.now(), name: conv.name || conv.id, via: via || '' };
+    sendDiag.tailChats = (sendDiag.tailChats || 0) + 1;
     if (!bgWatchdogTimer) bgWatchdogTimer = bgClock.every(5000, sweepBgPending);
   }
-  function clearBgPending(convId) { if (convId) delete pendingBg[convId]; }
+  function clearBgPending(convId) {
+    if (!convId) return;
+    const e = pendingBg[convId];
+    if (e && e.at) {
+      const ms = Math.max(0, Date.now() - e.at);
+      if (ms > (sendDiag.tailMaxMs || 0)) sendDiag.tailMaxMs = ms;
+    }
+    delete pendingBg[convId];
+  }
   let bgLaneBusyAt = 0;
   function sendLanesBusy() {
     try {
@@ -8104,6 +8235,17 @@
             : '')
           + (sendDiag.dupBlocked
             ? ' | 🛡 Chặn trùng: ' + sendDiag.dupBlocked + ' ca đã có lệnh bay nên KHÔNG bắn thêm (không tính là đã gửi)'
+            : '')
+          /* [v1.92.45] ĐUÔI CHỜ XÁC NHẬN — in số thật thay vì để người dùng đoán.
+           * `unavailFast` = ca FB từ chối dứt khoát nên chốt ngay (bản cũ bắt chờ cổng 10 s).
+           * `tailMaxMs` = ca chờ lâu nhất sau khi đã phát xong lệnh. */
+          + ((sendDiag.tailChats || sendDiag.unavailFast || sendDiag.transientRetries)
+            ? ' | ⏳ Đuôi chờ xác nhận: ' + (sendDiag.tailChats || 0) + ' ca vào sổ chờ · lâu nhất '
+              + ((sendDiag.tailMaxMs || 0) / 1000).toFixed(1).replace('.', ',') + ' s'
+              + ' · chốt NGAY vì FB từ chối dứt khoát ' + (sendDiag.unavailFast || 0) + ' ca (không chờ 10 s)'
+              + (sendDiag.transientRetries
+                ? ' · thử lại tạm thời ' + sendDiag.transientRetries + ' ca (cứu ' + (sendDiag.transientRetryOk || 0) + ')'
+                : '')
             : '')
           + ((extTimeoutStats.timeout || extTimeoutStats.skipped || extTimeoutStats.found || extTimeoutStats.notFound || extTimeoutStats.unknown)
             ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy trong lịch sử ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
@@ -8983,6 +9125,13 @@
          * đúng ~+10 s bất kể số lần đọc. Không thêm request: đây chính là request mà cổng vẫn
          * phải gọi sau đó, chỉ khác thời điểm. */
         let proofP = null;
+        /* [v1.92.45] CỔNG PHẢI CHẠY SONG SONG NGAY TỪ ĐẦU — đây là gốc của "chờ 1–2 con lâu".
+         * Bản cũ khởi động `proofP` MUỘN (bên trong vòng đọc, sau lần đọc đầu) và cổng phải chờ
+         * mốc `gửi + 10 s`. Vì vậy tổng thời gian chờ = (3 s + lần đọc 1) + 2 + 4 + 6 = ~15 s
+         * rồi MỚI tới hạn 10 s của cổng ⇒ ca xấu nhất ~25–35 s. Trong khi cổng chỉ cần mốc +10 s
+         * tính từ `sentAt`: khởi động ngay tại đây thì kết quả về đúng +10 s, độc lập số lần đọc.
+         * Không thêm request nào (đó chính là request cổng vẫn sẽ gọi sau). */
+        try { proofP = proveAbsentBeforeBu(conv, text, sentAt, !!photo); } catch (eP0) { proofP = null; }
         for (let attempt = 0; attempt < maxReads; attempt++) {
           if (attempt > 0) {
             await sleepUntil(Date.now() + (attempt === 1 ? 2000 : (attempt === 2 ? 4000 : 6000))); // [v1.92.9]
@@ -9008,10 +9157,7 @@
           if (!Array.isArray(msgs)) continue;
           verdict = historyVerdict(msgs, pageId, want, photo, sentAt);
           if (verdict === 'yes') break; // có bằng chứng dương là dừng đọc ngay
-          if (attempt === 0 && !proofP) {
-            // đọc lần đầu đã không thấy ⇒ khởi động cổng chứng minh ngay (chạy nền tới mốc +10 s)
-            try { proofP = proveAbsentBeforeBu(conv, text, sentAt, !!photo); } catch (ePp) { proofP = null; }
-          }
+          // [v1.92.45] cổng đã khởi động TRƯỚC vòng đọc (xem chú thích phía trên) — không khởi động lại
           // [v1.92.29] Response đúng 25 tin + tin mới nhất đã cũ hơn 60 s ⇒ 25 tin này là ĐẦU
           // thread (HAR: 34 ca như vậy, trung vị cũ hơn 4 330 s) ⇒ đọc thêm chỉ ra đúng 25 tin
           // đó, tốn 2–3 request vô ích. Dừng và chuyển sang kiểm bằng `snippet`.
@@ -10161,6 +10307,22 @@
         unsure++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
         logFailGrouped((c.name || c.id), r.error, '🔎', c.id);
+      } else if (r.definiteFail || (r.uncertain && r.definitiveNotSent)) {
+        /* [v1.92.45] CHẮC CHẮN KHÔNG GỬI ĐƯỢC THÌ ĐỪNG BẮT NGƯỜI DÙNG CHỜ.
+         * Trước bản này, ca FB trả lời dứt khoát "khách không nhận được / ngoài cửa sổ 24h /
+         * thread do app khác giữ / 1545012 lỗi tạm thời" vẫn bị xếp vào diện "không rõ" ⇒ vào
+         * cổng chứng minh vắng mặt 10 s (+ có khi đọc lại 45 s). Lô 100 chat phát xong ~5 s mà
+         * bảng TỔNG HỢP treo thêm 10–35 s chỉ để chờ đúng những ca đã biết là không đi.
+         * Nay chốt ⚠ NGAY (vẫn KHÔNG phải ✅ nên không báo oan là đã gửi; vẫn vào danh sách gửi
+         * tay để người dùng bấm được). Chỉ đúng những ca mà FB đã nói rõ — ca mơ hồ thật
+         * (Socket mất ACK, Ext quá hạn, API timeout) vẫn đi cổng 10 s như cũ. */
+        unsure++;
+        sendDiag.unavailFast = (sendDiag.unavailFast || 0) + 1;
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+        noteManualResend(c.id);
+        logFailGrouped((c.name || c.id),
+          clip(String(r.error || 'FB không nhận tin'), 160) + ' — FB đã từ chối DỨT KHOÁT ⇒ chốt luôn, không chờ xác nhận',
+          '⚠', c.id);
       } else if (r.uncertain) {
         unsure++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
