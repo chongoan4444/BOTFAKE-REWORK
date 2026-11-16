@@ -3426,7 +3426,7 @@ danh sách ⇒ tải lại vô ích và tự chuốc 429.
 
 1.92.43: danh sách đã tải đủ, chưa quá **10 phút**, không phải tải dở ⇒ bấm ⚡ **dùng lại ngay**
 (`♻ Dùng lại danh sách đã tải (N chat, Xs trước) — KHÔNG gọi lại API`). Muốn tải mới thật:
-**giữ SHIFT** khi bấm (hoặc `window.__botfakeReloadList__` chưa có — dùng SHIFT).
+**bấm ⚡** — từ 1.92.43d bấm là tải mới toàn bộ, KHÔNG cần SHIFT (bỏ hẳn SHIFT).
 
 ### 77.5 Đã sửa: nhiều tab cùng cửa sổ tranh nhau gửi
 
@@ -3576,8 +3576,9 @@ phải tải lại?"* — đúng. `1.92.43` mới chỉ cho nút **⚡ Tải dan
 
 Ba nguyên tắc:
 
-1. **Tải danh sách = hành động của người dùng.** Chỉ nút ⚡ (và SHIFT+⚡ để buộc tải mới) phát
-   request `next_cursor`. Không đường chọn nào tự phát nữa.
+1. **Tải danh sách = hành động của người dùng.** Chỉ nút ⚡ phát request `next_cursor`, và
+   **bấm là tải mới toàn bộ** (1.92.43d bỏ SHIFT — người dùng: *"không cần shift, ấn là tải lại hết"*).
+   Không đường chọn nào tự phát nữa.
 2. **Không bao giờ gửi thiếu vì dùng lại danh sách.** `completeRange` kiểm 2 đầu chuỗi có trong
    danh sách đang giữ; thiếu ⇒ tải bổ sung (và nói rõ trong log). Vùng chọn tải dừng ở cuối chuỗi
    được đánh dấu `allRowsPartial` ⇒ "chọn tất cả" vẫn tự tải đủ.
@@ -3586,3 +3587,15 @@ Ba nguyên tắc:
 Log mới để đối chiếu: `🔗 Dùng danh sách đã tải (N chat, Xs trước) — KHÔNG gọi lại API.`
 Nếu vẫn thấy `⚡ Danh sách hiện tại chưa đủ 2 đầu chuỗi` thì đó là ca **thật sự thiếu** (chuỗi vượt
 ra ngoài vùng đã tải), không phải tải lại vô ích.
+
+### 77.13 Bỏ SHIFT: bấm ⚡ là tải lại hết
+
+| thao tác | 1.92.43c | 1.92.43d |
+|---|---|---|
+| bấm ⚡ (danh sách mới tải 10s trước) | dùng lại, đòi **SHIFT** mới tải mới | **tải mới toàn bộ** ngay |
+| bấm ⚡ khi đang tải dở | dừng lượt cũ rồi **thoát** (phải bấm lần 2) | dừng lượt cũ rồi **chạy lượt mới ngay** |
+| chọn chuỗi / ⬇ xuống cuối / Alt×2 | dùng danh sách đang giữ | không đổi (vẫn không tự tải) |
+
+`LIST_CACHE_TTL_MS`/`listCacheFresh()` giữ tên nhưng **vô hiệu** (luôn 0) — không còn nhánh "dùng lại"
+trong `scanFullList`, nên không thể có chuyện bấm ⚡ mà không tải. Tooltip nút ghi rõ: *"Bấm là tải lại
+TOÀN BỘ danh sách từ đầu (không cần giữ Shift) — các nút chọn khác không tự tải"*.

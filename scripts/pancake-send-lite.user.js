@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.43-w200.87
+// @version      1.92.43-w200.88
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.43-W200.87'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.43-W200.88'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1105,7 +1105,7 @@
         + ' trước) — KHÔNG gọi lại API.');
     } else {
       logLine('⚡ Danh sách hiện tại chưa đủ 2 đầu chuỗi — tự tải bổ sung cho chuỗi đã chọn: '
-        + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id) + '… (giữ SHIFT khi bấm ⚡ để tải mới toàn bộ)');
+        + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id) + '… (bấm ⚡ Tải danh sách nếu muốn tải mới toàn bộ)');
       render();
       await scanFullList({ forRange: true, restartIfBusy: true });
       computeMatches({ silentMissingLog: true });
@@ -2139,19 +2139,11 @@
   }
 
   // ⚡ Tải danh sách: CHỈ API next_cursor tuần tự. Không cuộn DOM / virtual list.
-  /* [v1.92.43] TẢI DANH SÁCH ĐÚNG 1 LẦN.
-   * Người dùng chọn đi chọn lại nhiều lượt trên cùng một danh sách; mỗi lần bấm ⚡ là một chuỗi
-   * request next_cursor (hàng chục–hàng trăm request, và 429 chỉ rơi đúng vào endpoint DANH SÁCH —
-   * §29: 73/73 lần 429). Danh sách vừa tải mà chưa quá 10 phút thì dùng lại, không gọi API.
-   * Muốn tải mới thật: giữ SHIFT khi bấm ⚡ (hoặc window.__botfakeReloadList__()). */
-  const LIST_CACHE_TTL_MS = 10 * 60 * 1000;
-  function listCacheFresh() {
-    const n = (state.allRows && state.allRows.size) || 0;
-    if (!n || state.allRowsPartial || state.listIncomplete) return 0;
-    const at = state.listLoadedAt || 0;
-    if (!at || (Date.now() - at) > LIST_CACHE_TTL_MS) return 0;
-    return n;
-  }
+  /* [v1.92.43d] BẤM ⚡ = TẢI MỚI TOÀN BỘ, không cần SHIFT.
+   * Người dùng chốt: "không cần shift, ấn là tải lại hết". Bỏ hẳn cache-theo-thời-gian của nút ⚡.
+   * Nguyên tắc còn lại chỉ là: **chỉ nút ⚡ mới phát request danh sách** — mọi đường chọn (chọn
+   * chuỗi, chọn xuống cuối…) dùng danh sách đang giữ, không tự tải. */
+  const LIST_CACHE_TTL_MS = 0; // không còn dùng để chặn nút ⚡; giữ tên cho code cũ
   async function scanFullList(opts) {
     if (state.sendListFrozen) {
       // [v1.92.43c] Lô đang gửi ⇒ danh sách đang có vẫn dùng được làm vùng khớp (miễn không quá cũ).
@@ -2167,17 +2159,8 @@
       return;
     }
     const scanOpts = opts || {};
-    if (!scanOpts.force && !scanOpts.forRange && !scanOpts.restartIfBusy && !scanOpts.skipIfBusy) {
-      const cached = listCacheFresh();
-      if (cached) {
-        logLine('♻ Dùng lại danh sách đã tải (' + cached + ' chat, '
-          + Math.round((Date.now() - state.listLoadedAt) / 1000) + 's trước) — KHÔNG gọi lại API.'
-          + ' Muốn tải mới: giữ SHIFT khi bấm ⚡ Tải danh sách.');
-        computeMatches();
-        render();
-        return;
-      }
-    }
+    /* [v1.92.43d] KHÔNG còn nhánh "dùng lại danh sách" ở đây: vào được hàm này = có lệnh tải thật
+     * (chỉ nút ⚡ phát ra). Bấm ⚡ luôn tải mới toàn bộ. */
     if (state.scanning) {
       if (scanOpts.skipIfBusy) {
         // [v1.92.43c] Lượt quét CHỈ do người dùng bấm mới được phép chạy; lệnh tự động gặp lượt
@@ -2189,9 +2172,11 @@
         state.scanStopRequested = true;
         await waitCond(() => !state.scanning, 'scan-done', 4000); // [v1.92.9] thức NGAY khi lượt quét cũ kết thúc
       } else {
+        /* [v1.92.43d] Bấm ⚡ trong lúc đang tải = "tải lại từ đầu": dừng lượt cũ rồi CHẠY LƯỢT MỚI
+         * ngay (trước đây chỉ dừng rồi thoát, phải bấm lần 2). */
         state.scanStopRequested = true;
-        logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
-        return;
+        logLine('🔁 Đang tải dở — dừng lượt cũ và tải lại từ đầu theo yêu cầu…');
+        await waitCond(() => !state.scanning, 'scan-done', 4000);
       }
     }
     const btn = shadow && shadow.getElementById('ssb-scan');
@@ -10833,7 +10818,7 @@
             </div>
           </div>
           <div class="row" style="margin:2px 0 4px;align-items:center">
-            <button class="b b-gray" id="ssb-scan">⚡ Tải danh sách</button>
+            <button class="b b-gray" id="ssb-scan" title="Bấm là tải lại TOÀN BỘ danh sách từ đầu (không cần giữ Shift) — các nút chọn khác không tự tải">⚡ Tải danh sách</button>
             <span class="hint">đã chọn: <span class="count" id="ssb-count">0</span></span>
           </div>
           <div class="prog scan"><i id="ssb-scanbar"></i></div>
@@ -11440,8 +11425,8 @@
         applyScanButtons();
         return;
       }
-      // [v1.92.43] SHIFT + bấm = buộc tải mới (bỏ qua cache danh sách)
-      await scanFullList({ full: true, force: !!(e && e.shiftKey) });
+      // [v1.92.43d] Bấm ⚡ = TẢI MỚI (không cần SHIFT). Không còn nhánh "dùng lại danh sách" ở đây.
+      await scanFullList({ full: true, force: true });
       render();
     });
     // Nhóm chat của lượt gửi gần nhất — chọn lại tại chỗ, không quét lại danh sách
