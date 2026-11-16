@@ -7605,7 +7605,12 @@
   // có p50 = 43ms, p90 = 132ms (không phải ~900ms như giả định cũ). Kiểm chứng lịch sử vì thế
   // rất rẻ, trong khi ca no-ACK thật ~5 % (1/14 và 1/27 HAR) sẽ được chốt nhanh hơn nhiều.
   // Đây chỉ là ĐỌC lịch sử để nâng ⚠→✅ — không bao giờ gửi lại, không thêm tải lên đường gửi.
-  const SOCK_VERIFY_PARALLEL = 32;
+  /* [v1.92.43b] 32 → 96. Số đo 2 lô lớn: no-ACK/phải kiểm chứng 1 266 ca (lô A) và 1 881 ca
+   * (lô B); mỗi ca giữ vòng kiểm chứng ~10 s (chờ mốc chứng minh vắng mặt BU_PROOF_WAIT_MS) ⇒
+   * 1 266 ÷ 32 × 10 s ≈ 396 s đuôi. Đường này CHỈ ĐỌC lịch sử (GET …/messages, p50 43 ms theo
+   * §29.5), không gửi, không chiếm ghế làn gửi ⇒ nâng 32 → 96 rút đuôi còn ~1/3.
+   * Trần 96 = đúng trần làn ctx đang dùng, không tạo thêm tải mới. */
+  const SOCK_VERIFY_PARALLEL = 96;
   let sockVerifyRunning = 0;
   const sockVerifyQueue = [];
   function pumpSockVerify() {
@@ -8539,7 +8544,7 @@
   const BU_PROOF_WAIT_MS = 10000;   // phải chờ đủ mốc này kể từ lúc gửi rồi mới dám kết luận "vắng mặt"
   const BU_PROOF_STALE_MS = 30000;  // hội thoại phải im ≥ 30 s trước lúc gửi (dư sức vượt độ trễ 10 s)
   const buProofCache = new Map();   // convId|mốc → { at, promise } — 1 chat chỉ chứng minh 1 lần
-  const buProbeLane = makeLane(32); // làn riêng: không bao giờ chiếm ghế của làn gửi
+  const buProbeLane = makeLane(96); // [v1.92.43b] 32 → 96: cùng lý do trên, đọc lịch sử rất rẻ
 
   function absenceVerdict(convs, convId, pageId, psid, want, sentAt, late) {
     if (!Array.isArray(convs) || !convs.length) return 'unknown';
@@ -9242,15 +9247,31 @@
     });
     return n;
   }
+  /* [v1.92.43b] KHÔNG CHIA ĐỀU NỮA — chia đều làm CẢ HAI tab chậm đi (96+96) đúng như người dùng
+   * phàn nàn "chạy 1 cái thì nhanh mà song song là lag". Nay: **tab đang xem giữ nguyên 192**,
+   * **tab bị ẩn nhường** (128) — vì tab ẩn không ai nhìn, còn tab đang xem phải nhanh.
+   *   peers = 0            → 192
+   *   peers = 1, đang xem  → 192   (tổng 320 = 1,67× một tab ⇒ song song VẪN NHANH HƠN)
+   *   peers = 1, đang ẩn   → 128
+   *   peers ≥ 2, đang xem  → 144   (3 tab: 144+112+112 = 368)
+   *   peers ≥ 2, đang ẩn   → 112
+   * Phần lag còn lại xử lý bằng cách BỎ việc vẽ/log vô ích ở tab ẩn (xem renderThrottled/logLine),
+   * chứ không cắt tốc độ gửi. */
   function computeMainSlotCap(baseCap) {
     if (mainCapOverride) return mainCapOverride;
     const peers = peerSendingCount();
+    let hidden = false;
+    try { hidden = !!(document && document.hidden); } catch (e) { hidden = false; }
+    /* [v1.92.43b] 3 mức ưu tiên, không phải 2: TAB ĐANG GÕ (có focus) > tab hiện nhưng không
+     * focus (2 cửa sổ cạnh nhau) > tab ẩn. Nếu chỉ xét `document.hidden` thì 2 cửa sổ cạnh nhau
+     * đều "không ẩn" ⇒ mỗi tab 192, tổng 384 — đúng cấu hình gây lag. */
+    let focused = true;
+    try { focused = !!(document && document.hasFocus && document.hasFocus()); } catch (e) { focused = true; }
     let cap = baseCap;
-    if (peers > 0) cap = Math.round(baseCap / (peers + 1));
-    let hiddenTrim = false;
-    try { if (peers > 0 && document && document.hidden) { cap = Math.round(cap * 0.75); hiddenTrim = true; } } catch (e) { /* ignore */ }
+    if (peers === 1) cap = hidden ? 128 : (focused ? baseCap : 144);
+    else if (peers >= 2) cap = hidden ? 112 : (focused ? 144 : 128);
     cap = Math.max(48, Math.min(baseCap, cap));
-    return { cap, peers, hiddenTrim };
+    return { cap, peers, hiddenTrim: hidden && peers > 0, focused };
   }
   let sendLockPending = false; // chặn bấm đúp TRONG 150 ms chờ kiểm khoá (state.sending chưa bật)
   async function sendToAll() {
@@ -9934,8 +9955,9 @@
       if (info.peers > 0 && info.cap !== lastLoggedMainCap) {
         lastLoggedMainCap = info.cap;
         logLine('🧩 Có ' + info.peers + ' tab khác đang gửi (page khác) — tab này dùng ' + info.cap
-          + '/' + WAVE_MAIN_TOTAL_CAP + ' slot main' + (info.hiddenTrim ? ' (tab đang ẩn, nhường thêm 25 %)' : '')
-          + ' ⇒ tổng tải không tăng dù chạy nhiều tab.');
+          + '/' + WAVE_MAIN_TOTAL_CAP + ' slot main'
+          + (info.hiddenTrim ? ' (tab đang ẨN ⇒ nhường)' : (info.focused ? ' (tab đang gõ ⇒ ưu tiên)' : ' (tab hiện nhưng không focus ⇒ nhường)'))
+          + ' ⇒ chạy song song vẫn nhanh hơn chạy một tab mà không dồn CPU.');
       } else if (info.peers === 0 && lastLoggedMainCap) {
         lastLoggedMainCap = 0;
         logLine('🧩 Không còn tab nào khác gửi — tab này trở lại ' + WAVE_MAIN_TOTAL_CAP + ' slot main.');
@@ -11906,7 +11928,11 @@
     // Khi chạy lô lớn (>200 chat): chỉ cập nhật DOM log 1 lần/giây;
     // nhịp gửi/counters không bị chặn, chỉ phần trình bày log được gộp.
     if (state.sending && batchStats.total > 200) {
-      if (!logFlushTimer) logFlushTimer = setTimeout(flushLogUI, 1000);
+      /* [v1.92.43b] Tab đang ẨN mà có tab khác chạy: không ai nhìn panel này ⇒ gộp log 2,5 s/lần
+       * thay vì 1 s. Cắt CPU vẽ chữ của tab ẩn để tab đang xem không bị khựng. Số liệu gửi và
+       * logAll (để copy) KHÔNG đổi — chỉ nhịp vẽ DOM thưa hơn. */
+      const hiddenHeavy = !!(document && document.hidden) && peerSendingCount() > 0;
+      if (!logFlushTimer) logFlushTimer = setTimeout(flushLogUI, hiddenHeavy ? 2500 : 1000);
       return;
     }
     if (logFlushTimer) { clearTimeout(logFlushTimer); logFlushTimer = null; }

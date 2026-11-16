@@ -3521,3 +3521,41 @@ chung localStorage):
 **Đánh đổi phải nói rõ:** chia slot **không** làm tổng nhanh hơn 1 tab — nó giữ tổng tải bằng 1
 tab để máy hết lag. Nếu máy còn dư CPU và bạn muốn 2 tab chạy hết công suất thì đặt
 `window.__botfakeMainSlotCap__(192)` ở cả hai tab (chấp nhận lag).
+
+### 77.10 Sửa lại §77.9 — chia ĐỀU là sai: tab đang xem phải giữ nguyên tốc độ
+
+Người dùng phản hồi đúng chỗ: *"chạy 1 cái thì nhanh mà song song là lag"*. Chia 96+96 ở §77.9 giữ
+tổng tải = 1 tab, tức **làm cả hai tab chậm đi một nửa** — không phải điều họ cần. Nay 3 mức ưu
+tiên (không phải 2):
+
+| tình huống tab này | slot main |
+|---|---|
+| chỉ một tab | 192 |
+| 2 tab, tab có focus (đang gõ) | **192** |
+| 2 tab, tab hiện nhưng không focus (2 cửa sổ cạnh nhau) | 144 |
+| 2 tab, tab bị ẩn | 128 |
+| ≥3 tab: focus / không focus / ẩn | 144 / 128 / 112 |
+
+⇒ 2 tab điển hình = **192 + 128 = 320 slot (1,67× một tab)**, tức **song song vẫn nhanh hơn chạy
+một tab** mà không dồn 384 slot như trước. Cần đúng như cũ: `window.__botfakeMainSlotCap__(192)`
+ở cả hai tab.
+
+Phần **giật** khi 2 tab còn được cắt thêm ở chỗ khác (không cắt tốc độ gửi): log DOM của tab ẩn
+gộp **2,5 s/lần** thay vì 1 s (số liệu gửi và `logAll` để copy **không đổi**).
+
+### 77.11 Đuôi bù + xác nhận: nút thắt là SỐ VÒNG SONG SONG, không phải 10 s chờ
+
+Mỗi ca phải kiểm chứng giữ ~10 s (chờ mốc `BU_PROOF_WAIT_MS`), mà làn kiểm chứng chỉ **32 vòng**
+song song:
+
+| lô | ca cần kiểm chứng (no-ACK + rejected) | @32 vòng | @96 vòng |
+|---|---|---|---|
+| 7 073 | 1 266 | ≈ 396 s | **≈ 132 s** |
+| 13 204 | 1 881 | ≈ 588 s | **≈ 196 s** |
+
+`SOCK_VERIFY_PARALLEL` 32 → **96** và `buProbeLane` 32 → **96**. Đường này **chỉ đọc** lịch sử
+(GET `…/messages`, p50 **43 ms** — §29.5), không gửi lại, không chiếm ghế làn gửi; 96 cũng đúng
+bằng trần làn ctx đang dùng nên **không tạo thêm tải mới**.
+
+**Không cắt** các mốc an toàn: 10 s chứng minh vắng mặt trước khi bù, 20 s kiểm chứng Ext, 45 s
+dò lại — đây là sàn chống gửi trùng/gửi thiếu, không phải chờ mù.
