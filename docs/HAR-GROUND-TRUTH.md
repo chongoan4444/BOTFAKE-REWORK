@@ -3027,3 +3027,40 @@ Nay ở lô lớn: `GID_NOGID_SHORT_WAIT_MS = 1 500` cho nhóm này (vẫn đủ
 Cửa gate Ext thread-only được giữ nguyên hệ quả đã đo — `(extFinderRespondedNoGid || shortNoGidWait)` —
 để nhóm này **vẫn không** gửi Ext thread-only (chỉ trả `1545041`). Số ca in ở 🧭:
 `chờ dò ngắn (server nói không có gid) N ca`. Tắt nhanh: `GID_NOGID_SHORT_WAIT_MS = 0`.
+
+## §70 — "GỬI 3 CON MÀ XÁC NHẬN MÃI": CHỐT LƯỢT KHÔNG ĐỢI KIỂM CHỨNG NỀN (1.92.36)
+
+Hai lô thật đo được cùng một bệnh:
+
+| Lô | Phát lệnh | Chốt lượt | Kẹt ở đâu |
+|---|---|---|---|
+| 15:48 · **3 chat** | 0,6 s | **13 s** | 1 chat bị bắn thử Socket (page đang bị đánh dấu ACK chết) → chờ ACK **8 s**; rồi 3 lượt đọc lại lịch sử **5 s** |
+| 15:44 · **90 chat** | 0,6 s | **31,4 s** | 5 chat Socket no-ACK (5 s) + **cổng chứng minh 10 s** + bù lại rơi Socket (5 s) + **13 s đọc lại lịch sử** |
+
+Điểm chung: **mọi chat đã có kết luận từ lâu**, nhưng bảng `📊 TỔNG HỢP` chỉ in khi `pending == 0`,
+mà `pending` **cộng cả số ca đang kiểm chứng nền** — thứ chỉ có thể nâng ⚠ → ✅, **không bao giờ
+gửi thêm tin**. Với lô lớn phần này chạy song song trong lúc phát lệnh nên không lộ; lô nhỏ thì lộ ra
+thành "chờ".
+
+### 70.1 Sửa
+
+1. **`pendingSend`** (mới) = `total − (✅ + ❌ + ⚠ + bỏ qua)` — số chat **chưa có kết luận**. Đây là
+   con số quyết định `isDoneAll`, `markSendIdleIfSettled`, và nhãn `⏳ Đang xử lý`.
+   `pending` giữ nghĩa cũ (gồm kiểm chứng) và chỉ dùng để hiện `🔎 kiểm chứng nền: M`.
+2. **Dòng cập nhật sau chốt**: nếu kiểm chứng nền lật kết quả sau khi đã in TỔNG HỢP ⇒ in **một**
+   dòng `🔎 Cập nhật sau khi chốt lượt (kiểm chứng nền — KHÔNG gửi lại tin nào): ✅ 2 → 3 …`,
+   tối đa **1 dòng / 15 s** và luôn in lần cuối khi sạch kiểm chứng (lô lớn có thể có cả trăm ca).
+3. **Lô ≤ 20 chat: không dò lại kênh ACK chết.** Lô 3 chat ở trên mất 8 s đúng vì tới hạn dò nên
+   vẫn bắn thử Socket. Dò chỉ đáng khi còn nhiều chat hưởng lợi; lô nhỏ đi thẳng Ext/API.
+4. **Bù không chọn Socket khi page đang ACK chết (còn Extension)** — ca `Nguyễn Quỳnh` mất 5 s
+   chờ hạn ACK rồi vẫn "không rõ"; đi Ext có câu trả lời dứt khoát trong 1–3 s. **Không đổi số lệnh gửi.**
+
+### 70.2 Kết quả dự kiến
+
+| Lô | Trước | Sau |
+|---|---|---|
+| 3 chat | 13 s | **~2–4 s** (chốt khi chat cuối có kết luận) |
+| 90 chat | 31,4 s | **~19 s** (− cổng 10 s vẫn giữ: đây là thứ chống gửi lặp) |
+
+Cái **không** đụng: `BU_PROOF_WAIT_MS` 10 s (cổng chứng minh vắng mặt) và hạn chờ ACK —
+hai thứ đó chính là thứ chặn gửi 2 tin cho cùng một khách.

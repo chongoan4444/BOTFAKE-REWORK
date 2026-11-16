@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.35-w200.78
+// @version      1.92.36-w200.79
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.35-W200.78'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.36-W200.79'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6360,11 +6360,17 @@
     // Chỉ đổi thứ tự làn (bỏ 'socket'), Extension/API vẫn là đường gửi thật như cũ.
     if (pageId && isPageAckDead(pageId)) {
       // [v1.92.13] Dò lại định kỳ thay vì né Socket mù 10 phút (xem chú thích ở PAGE_ACK_DEAD_TTL_MS).
+      // [v1.92.36] LÔ TÍ HON (≤ 20 chat) KHÔNG DÒ LẠI KÊNH ACK CHẾT.
+      // Lô 3 chat 15:48: page đã bị đánh dấu ACK chết từ lượt trước, nhưng vì tới hạn dò nên
+      // 1 chat vẫn được bắn thử Socket ⇒ chờ ACK 8 s rồi mới chốt ⚠, kéo cả lượt 3 tin lên 13 s.
+      // Dò chỉ đáng giá khi còn nhiều chat để hưởng lợi; lô nhỏ thì đi thẳng Ext/API cho dứt điểm.
+      const tinyBatchNoProbe = !!(batchStats && batchStats.total > 0 && batchStats.total <= 20);
       const sinceProbe = socketPickDiag.deadSkip - socketPickDiag.deadSkipAtProbe;
       // [v1.92.34] 50 → 20 ca: lô 13:38 né Socket 1 697 lần nhưng chỉ dò lại 34 lần (≈5 s/lần
       // thì đúng ra phải ~85) và 0 lần hồi. Dò dày hơn = biết sớm hơn làn nào còn sống,
       // giá mỗi lần dò chỉ 1 tin đi Socket (nếu ACK chết thì mất đúng hạn chờ của 1 tin).
-      if (sinceProbe >= 20 || Date.now() - (pageAckDeadProbeAt[pageId] || 0) >= SOCK_DEAD_PROBE_MS) {
+      if (!tinyBatchNoProbe
+          && (sinceProbe >= 20 || Date.now() - (pageAckDeadProbeAt[pageId] || 0) >= SOCK_DEAD_PROBE_MS)) {
         pageAckDeadProbeAt[pageId] = Date.now();
         socketPickDiag.deadSkipAtProbe = socketPickDiag.deadSkip;
         if (seq.indexOf('socket') > -1) {
@@ -7570,13 +7576,20 @@
     const verifyPendingNow = Object.keys(sockVerifyPending).filter((id) => sockVerifyPending[id] === runSeq).length;
     const extVerifyPendingNow = Object.keys(extVerifyPending).filter((id) => extVerifyPending[id] === runSeq).length;
     const uncertainVerifyPendingNow = Object.keys(uncertainVerifyPending).filter((id) => uncertainVerifyPending[id] === runSeq).length;
-    const pending = Math.max(0, (batchStats.total || 0) - settled) + verifyPendingNow + extVerifyPendingNow + uncertainVerifyPendingNow;
+    /* [v1.92.36] CHỐT LƯỢT KHÔNG ĐỢI KIỂM CHỨNG NỀN.
+     * Lô 3 chat (15:48): phát lệnh 0,6 s nhưng bảng TỔNG HỢP chỉ in sau 13 s; lô 90 chat (15:44):
+     * 0,6 s phát, 31,4 s chờ. Mọi chat đã có kết luận từ lâu, phần chờ là 3 lượt ĐỌC LẠI lịch sử
+     * (chỉ có thể nâng ⚠ → ✅, không bao giờ gửi thêm). Nay `pendingSend` = số chat CHƯA có kết luận
+     * (dùng để chốt lượt), `pending` giữ nguyên nghĩa cũ (dùng để hiện "đang kiểm chứng nền").
+     * Kiểm chứng xong mà có lật ⚠ → ✅ thì in thêm 1 dòng cập nhật, không mở lại cả bảng. */
+    const pendingSend = Math.max(0, (batchStats.total || 0) - settled);
+    const pending = pendingSend + verifyPendingNow + extVerifyPendingNow + uncertainVerifyPendingNow;
     return {
       total: batchStats.total || 0,
       okTotal, okApi, okExt, okSocket,
       failTotal, unsureTotal,
       skipTotal: (batchStats.skippedPre || 0) + skipLateTotal,
-      settled, pending,
+      settled, pending, pendingSend,
     };
   }
 
@@ -7615,10 +7628,11 @@
       if (c.okExt) byCh.push('Ext: ' + c.okExt);
       if (c.okSocket) byCh.push('Socket: ' + c.okSocket);
       const chStr = byCh.length ? ' [' + byCh.join(' · ') + ']' : '';
-      const isDoneAll = batchStats.loopFinished && (c.pending === 0 || state.stopRequested);
+      const isDoneAll = batchStats.loopFinished && (c.pendingSend === 0 || state.stopRequested);
       const html = (isDoneAll ? '🏁 <b>TỔNG HỢP:</b> ' : '📊 <b>Đang gửi:</b> ')
         + '<span style="color:#4ade80;font-weight:700">✅ Thành công: ' + c.okTotal + '/' + c.total + ' (' + pct + '%)' + chStr + '</span>'
-        + (c.pending > 0 && !state.stopRequested ? ' · <span style="color:#38bdf8">⏳ Đang xử lý: ' + c.pending + '</span>' : '')
+        + (c.pendingSend > 0 && !state.stopRequested ? ' · <span style="color:#38bdf8">⏳ Đang xử lý: ' + c.pendingSend + '</span>' : '')
+        + (c.pending > c.pendingSend ? ' · <span style="color:#a78bfa">🔎 kiểm chứng nền: ' + (c.pending - c.pendingSend) + '</span>' : '')
         + (c.failTotal > 0 ? ' · <span style="color:#f87171">❌ Lỗi: ' + c.failTotal + '</span>' : (isDoneAll ? ' · ❌ Lỗi: 0' : ''))
         + (c.unsureTotal > 0 ? ' · <span style="color:#fbbf24">⚠ Không rõ: ' + c.unsureTotal + '</span>' : '')
         + (c.skipTotal > 0 ? ' · <span style="color:#94a3b8">🧹 Bỏ qua: ' + c.skipTotal + '</span>' : '')
@@ -7633,8 +7647,30 @@
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
       }
       if (isDoneAll) markSendIdleIfSettled();
+      // [v1.92.36] Đã in TỔNG HỢP mà kiểm chứng nền sau đó lật ⚠ → ✅ (hoặc ngược lại) ⇒ in ĐÚNG
+      // MỘT dòng cập nhật, không mở lại cả bảng. Đây là hệ quả của việc chốt lượt không đợi
+      // kiểm chứng — số trong bảng vẫn luôn là số ĐÃ TỚI NƠI thật, chỉ là in sớm hơn.
+      if (isDoneAll && batchStats.finalLogged && batchStats.lastLoggedCounts) {
+        const pv = batchStats.lastLoggedCounts;
+        const changed = pv.ok !== c.okTotal || pv.unsure !== c.unsureTotal || pv.fail !== c.failTotal;
+        const verifyLeft = Math.max(0, c.pending - c.pendingSend);
+        const nowT = Date.now();
+        // Lô lớn có thể có cả trăm ca kiểm chứng nền ⇒ KHÔNG in mỗi lần lật (sẽ thành 100 dòng,
+        // quay lại đúng lỗi log cũ). Chỉ in: khi đã sạch kiểm chứng, hoặc 15 s/lần.
+        const dueByTime = nowT - (batchStats.lastDeltaLogAt || 0) >= 15000;
+        if (changed && (verifyLeft === 0 || dueByTime)) {
+          logLine('🔎 Cập nhật sau khi chốt lượt (kiểm chứng nền — KHÔNG gửi lại tin nào): ✅ '
+            + pv.ok + ' → ' + c.okTotal
+            + (pv.unsure !== c.unsureTotal ? ' · ⚠ ' + pv.unsure + ' → ' + c.unsureTotal : '')
+            + (pv.fail !== c.failTotal ? ' · ❌ ' + pv.fail + ' → ' + c.failTotal : '')
+            + (verifyLeft ? ' · còn ' + verifyLeft + ' ca đang kiểm chứng' : ''));
+          batchStats.lastLoggedCounts = { ok: c.okTotal, unsure: c.unsureTotal, fail: c.failTotal };
+          batchStats.lastDeltaLogAt = nowT;
+        }
+      }
       if (isDoneAll && !batchStats.finalLogged && c.total > 0) {
         batchStats.finalLogged = true;
+        batchStats.lastLoggedCounts = { ok: c.okTotal, unsure: c.unsureTotal, fail: c.failTotal };
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
         logLine('🫥 CHẠY NỀN: ' + bgClock.describe());
         logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total
@@ -7673,7 +7709,8 @@
           + sendDiag.recipientUnavailable + (sendDiag.sockRetryBudgetSkipped
             ? ' + bỏ thử lần 2 ' + sendDiag.sockRetryBudgetSkipped + ' (cùng nhóm, đã đo 0 cứu được)' : '')
           + ') → mục tiêu còn ' + eligibleAfterUnavailable + ', thành công '
-          + c.okTotal + '/' + eligibleAfterUnavailable + ' (' + eligibleSuccessPct.toFixed(1) + '%) · đang chờ ' + c.pending
+          + c.okTotal + '/' + eligibleAfterUnavailable + ' (' + eligibleSuccessPct.toFixed(1) + '%) · đang chờ ' + c.pendingSend
+          + (c.pending > c.pendingSend ? ' · kiểm chứng nền ' + (c.pending - c.pendingSend) : '')
           + ' · lỗi ' + c.failTotal + ' · không rõ ' + c.unsureTotal + ' · bỏ qua ' + c.skipTotal
           + (sendDiag.extOverloadSkips
             ? ' · ⏸ Ext tự nghẽn chặn trước khi bắn (tính lỗi oan): ' + sendDiag.extOverloadSkips
@@ -7750,7 +7787,7 @@
       return;
     }
     const c = getBatchSummaryCounts();
-    const isDoneAll = batchStats.loopFinished && (c.pending === 0 || state.stopRequested);
+    const isDoneAll = batchStats.loopFinished && (c.pendingSend === 0 || state.stopRequested);
     // Khi lô lớn còn ACK/bù nền, chỉ dựng lại tổng hợp 1 lần/giây; chốt cuối vẫn flush ngay.
     if (!isDoneAll && c.total > 200) {
       if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 1000);
@@ -7920,9 +7957,18 @@
     const triedCh = (tried || []).slice();
     const done = buRetryDone[conv.id] || (buRetryDone[conv.id] = []); // kênh ĐÃ bù trong lượt
     const hasExt = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
-    const baseCandidates = (conv.type === 'comment')
+    let baseCandidates = (conv.type === 'comment')
       ? ['ext']
       : (hasExt ? ['ext', 'socket'] : ['socket']);
+    // [v1.92.36] Page đang bị đánh dấu ACK CHẾT mà vẫn còn Extension ⇒ bù bằng Ext (có câu trả lời
+    // dứt khoát trong 1–3 s) thay vì bắn Socket rồi chờ hết hạn ACK ~5 s để rồi vẫn "không rõ".
+    // Lô 90 chat 15:44: ca Nguyễn Quỳnh mất 5 s đúng vì lý do này. Không đổi số lệnh gửi.
+    try {
+      const buPid = conv.pageId || String(conv.id || '').split('_')[0];
+      if (hasExt && buPid && isPageAckDead(buPid)) {
+        baseCandidates = baseCandidates.filter((x) => x !== 'socket');
+      }
+    } catch (eBs) { /* ignore */ }
     const remaining = baseCandidates.filter((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0);
     if (!remaining.length) {
       const seen = {};
@@ -11390,7 +11436,7 @@
       return;
     }
     let pending = 0;
-    try { pending = getBatchSummaryCounts().pending; } catch (e) { pending = 0; }
+    try { pending = getBatchSummaryCounts().pendingSend; } catch (e) { pending = 0; }
     if (pending > 0) {
       applyRunStopButtons();
       return;
