@@ -38,6 +38,11 @@ tools/build.mjs        đồng bộ version + kiểm tra đường dẫn + đón
   phải nói rõ phần nào chưa xác định được thay vì bịa ra.
 - Khi viết JavaScript/Tampermonkey, ưu tiên script ổn định trước những thay đổi nhỏ
   của giao diện.
+- **BẢN ỔN ĐỊNH (`scripts/pancake-send-stable.user.js`) CHỈ SINH LẠI KHI NGƯỜI DÙNG YÊU CẦU.**
+  Mặc định: sửa `scripts/pancake-send-lite.user.js` → `npm test` → `npm run build` → `npm run check`
+  (đã bỏ `make-stable` khỏi `check`) rồi commit. **Đừng** chạy `npm run stable` / `npm run check:stable`
+  sau mỗi lần sửa; chỉ chạy khi được nói rõ ("sửa bản stable", "cập nhật stable").
+  Hệ quả chấp nhận: file stable trong repo tạm lệch bản gốc — bình thường, không phải lỗi.
 - Không sửa hoặc xóa source reference hiện có trừ khi người dùng yêu cầu.
 - Khi trả về script, giải thích ngắn gọn script đang dựa vào phần nào của source.
 - Không commit khoá ký (`*.pem`), token, cookie hay `dist/`.
