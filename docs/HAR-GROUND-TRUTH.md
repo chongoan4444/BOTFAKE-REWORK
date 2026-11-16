@@ -3599,3 +3599,41 @@ ra ngoài vùng đã tải), không phải tải lại vô ích.
 `LIST_CACHE_TTL_MS`/`listCacheFresh()` giữ tên nhưng **vô hiệu** (luôn 0) — không còn nhánh "dùng lại"
 trong `scanFullList`, nên không thể có chuyện bấm ⚡ mà không tải. Tooltip nút ghi rõ: *"Bấm là tải lại
 TOÀN BỘ danh sách từ đầu (không cần giữ Shift) — các nút chọn khác không tự tải"*.
+
+### 77.14 Lag khi Alt chọn chuỗi — 4 nguyên nhân đo được trong code, không phải đoán
+
+Người dùng hỏi *"có lí do gì gây ra tình trạng lag khi ấn alt chọn chuỗi không"*. Đọc code (không
+sửa gì trước) thì thấy 4 chỗ cộng dồn, **tất cả đều nằm trên đường Alt/Ctrl-chọn**, không liên quan
+đến gửi tin:
+
+**1. Vòng lặp tự kích (nặng nhất).** `watchList()` gắn `MutationObserver` lên `#conversationList`
+với `attributes: ['class','style']`. `highlightRows()` lại **đổi class** (`ssb-m-match` /
+`ssb-m-target`) trên chính các dòng đó ⇒ observer nổ ⇒ `scheduleHighlight()` ⇒ `highlightRows()` …
+`hlScheduled` chỉ gộp trong **1 animation frame**, nên sau mỗi lần đổi lựa chọn nó chạy liên tục
+theo nhịp 60 fps. Mỗi vòng là `querySelectorAll` toàn danh sách + `rowInfo()` từng dòng (mỗi
+`rowInfo` = 5 lần `querySelector`). Với danh sách 7 000 chat thì đây là hàng trăm nghìn phép đọc DOM
+mỗi giây, đúng lúc đang thao tác.
+
+**2. Không có "nghỉ" khi đang rê chọn.** Trong lúc giữ Alt / ở chế độ 2 nhấp, mỗi `pointerdown`,
+`click`, `computeMatches` đều gọi `render()` → `scheduleHighlight()` (và `render()` còn dựng lại
+danh sách kiểm chứng nếu `listKey` đổi).
+
+**3. `computeMatches` cắt chuỗi bằng `rows.forEach(r => idxOf(r.id))`** — với nguồn `allRows`
+(Map + sort theo `order`) là O(n log n) **mỗi lần** đổi đầu/cuối chuỗi, dù chỉ cần lấy dải
+`[lo..hi]`.
+
+**4. App tự cuộn danh sách.** Virtual list của Pancake tháo/gắn dòng theo `scrollTop`; mỗi lần
+đổi điểm cuối, app nhảy cuộn ⇒ render lại cả dải dòng ⇒ giật. Script không chặn việc này.
+
+**Đã sửa (1.92.43-W200.89):**
+
+| chỗ | trước | sau |
+|---|---|---|
+| observer ↔ tô màu | tự kích 60 fps | chỉ nghe `childList`; thay đổi `class` **do chính script gây ra** bị bỏ qua (so với bản đã biết) |
+| lưới an toàn | `setInterval(…, 400)` | `setInterval(…, 1500)` |
+| đang rê chọn | vẫn tô mỗi frame | **hoãn tô màu** cho tới khi thả Alt / nhấp xong (tô lại đúng 1 lần) |
+| cắt chuỗi | O(n) gọi `idxOf` từng dòng | cắt mảng `[lo..hi]`, có kiểm 2 đầu trước khi cắt |
+| app tự cuộn | không chặn | ghim `scrollTop` trong ~700 ms sau cú chọn (công tắc **"Giữ nguyên vị trí danh sách khi chọn chuỗi"**, mặc định BẬT) |
+
+**Không đụng** logic chọn (Alt 2 nhấp, Ctrl chọn cùng snippet, "2 nhấp" pickMode) và **không đụng**
+đường gửi tin.
