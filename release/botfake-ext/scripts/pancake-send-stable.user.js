@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.37-stable
+// @version      1.92.38-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -72,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.37-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.38-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -7509,6 +7509,33 @@
     const k = String(cid);
     for (let i = manualResendList.length - 1; i >= 0; i--) if (manualResendList[i].id === k) manualResendList.splice(i, 1);
   }
+  /* [v1.92.38] "ĐANG CỨU" ≠ "CẦN GỬI TAY".
+   * Ca ⚠ vào danh sách gửi tay NGAY lúc hết hạn ACK (~5 s), nhưng cổng chứng minh vắng mặt phải
+   * chờ tới mốc 10 s mới dám kết luận ⇒ có ~6 s chat vừa nằm trong danh sách vừa đang được cứu.
+   * Nếu người dùng bấm 💾 .txt đúng lúc đó rồi gửi tay thì tin đi 2 lần. Vì vậy tách riêng:
+   * chat đang cứu in ở mục ⏳ "ĐANG CỨU — ĐỪNG gửi tay", quá 60 s không có kết luận mới trả về
+   * danh sách gửi tay (an toàn: thà chậm 1 phút còn hơn gửi đôi). */
+  const rescueInFlight = {}; // convId → thời điểm bắt đầu cứu
+  const RESCUE_INFLIGHT_STALE_MS = 60000;
+  function isRescuing(cid, now) {
+    const k = String(cid);
+    const at = rescueInFlight[k];
+    if (!at) return false;
+    if ((now || Date.now()) - at > RESCUE_INFLIGHT_STALE_MS) { delete rescueInFlight[k]; return false; }
+    return true;
+  }
+  function countRescuing() {
+    const now = Date.now();
+    let n = 0;
+    for (let i = 0; i < manualResendList.length; i++) if (isRescuing(manualResendList[i].id, now)) n++;
+    return n;
+  }
+  function countManualResendWait() {
+    const now = Date.now();
+    let n = 0;
+    for (let i = 0; i < manualResendList.length; i++) if (!isRescuing(manualResendList[i].id, now)) n++;
+    return n;
+  }
   const extVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng sau khi Ext timeout
   // [v1.91.79] Ca ĐỌC LẠI nhịp giãn: KHÔNG được tính vào "đang chờ" của bảng TỔNG HỢP.
   // Log 19:01→19:04 (10672 tin): phát lệnh xong 19:01:29 nhưng mãi 19:04:25 mới chốt vì
@@ -7707,7 +7734,8 @@
           + ' tin (' + pct + '%)' + chStr
           + ' | ❌ Lỗi: ' + c.failTotal
           + (c.unsureTotal ? ' | ⚠ Không rõ: ' + c.unsureTotal : '')
-          + (manualResendList.length ? ' | 🖐 CẦN GỬI TAY: ' + manualResendList.length + ' chat (xem 💾 .txt)' : '')
+          + (countRescuing() ? ' | ⏳ ĐANG CỨU tự động: ' + countRescuing() + ' chat (Extension, ~10–13 s)' : '')
+          + (countManualResendWait() ? ' | 🖐 CẦN GỬI TAY: ' + countManualResendWait() + ' chat (xem 💾 .txt)' : '')
           + (c.skipTotal ? ' | 🧹 Bỏ qua: ' + c.skipTotal : '')
           + ((buStats.ok || buStats.cancelled)
             ? ' | 🔁 Bù OK: ' + buStats.ok + ' (' + Object.keys(buStats.byWhy).map((k) => k + ': ' + buStats.byWhy[k]).join(' · ') + ') · hủy bù tránh trùng: ' + buStats.cancelled
@@ -7867,6 +7895,7 @@
     if (uncertainIds[convId]) { delete uncertainIds[convId]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
     deliveredIds[convId] = ch;
     dropManualResend(convId); // đã xác nhận tới nơi ⇒ khỏi danh sách gửi tay
+    delete rescueInFlight[convId]; // hết "đang cứu" — đã có kết luận
     softNotify('delivered'); // [v1.92.9] chỗ chờ "đã giao" thức ngay, khỏi chờ mù 220 ms
     // Lượt đã kết thúc bình thường (không bấm Dừng) thì sentIds đã được dọn ở cuối sendToAll —
     // ACK trễ KHÔNG được nạp lại, nếu không lượt sau bỏ qua oan gần hết chat (mất tin im lặng)
@@ -7887,6 +7916,7 @@
       // đã từng bị watchdog chốt ⚠ mà sau đó bù chốt lỗi hẳn → chuyển nhóm, không đếm 2 lần
       if (uncertainIds[convId]) { delete uncertainIds[convId]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
       dropManualResend(convId); // đã chốt ❌ (khách không nhận) ⇒ không còn là "cần gửi tay"
+      delete rescueInFlight[convId];
 
       if (!finalFailedIds[convId]) { finalFailedIds[convId] = true; summaryCounters.fail++; }
     } else if (kind === 'uncertain') {
@@ -7970,6 +8000,10 @@
     // [v1.92.30] `opts.ambiguous` = phán quyết lỗi là SUY LUẬN (không phải bằng chứng) ⇒ phải
     // chứng minh vắng mặt trước khi bắn lần 2. `opts.sentAt` = mốc bắt đầu lần gửi đầu.
     const buGated = !!(opts && opts.ambiguous);
+    // [v1.92.38] `opts.fromUncertain` = cứu ca ⚠ ĐÃ CÓ BẰNG CHỨNG vắng mặt (socket no-ACK).
+    // Chat vẫn nằm trong sổ ⚠ để lượt không bị mở lại (xem chú thích ở scheduleSocketVerify),
+    // nên phải cho đi qua cửa chặn "đã chốt ⚠ thì không bù" — nhưng CHỈ khi có cờ này.
+    const buFromUncertain = !!(opts && opts.fromUncertain);
     const buSentAt = (opts && Number(opts.sentAt)) || Date.now();
     const buVia = (opts && opts.via) || 'socket';
     if (buRetryTimer[conv.id]) return; // đã có chuỗi bù đang chờ — không chạy song song (chống gửi 2 lần)
@@ -7983,7 +8017,7 @@
       logLine('✓ ' + name + ' — tin đã đến nơi (xác nhận) — không bù.');
       return;
     }
-    if (finalFailedIds[conv.id] || (uncertainIds[conv.id] && !buGated)) {
+    if (finalFailedIds[conv.id] || (uncertainIds[conv.id] && !buGated && !buFromUncertain)) {
       // Đã có nơi chốt cuối cho chat này (watchdog chốt ⚠ quá hạn / đã chốt ❌) — chốt đó là
       // TUYỆT ĐỐI theo luật chống trùng: kết quả Socket về muộn không được kích bù nữa,
       // nếu không sẽ bắn lần 2 lên tin có thể đã đến nơi (lặp ít, chủ yếu tin ảnh chốt chậm)
@@ -8035,7 +8069,7 @@
         return;
       }
       if (deliveredIds[conv.id]) return; // trong lúc chờ, tin đã đến nơi qua đường khác — thôi
-      if (finalFailedIds[conv.id] || (uncertainIds[conv.id] && !buGated)) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2
+      if (finalFailedIds[conv.id] || (uncertainIds[conv.id] && !buGated && !buFromUncertain)) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2 (trừ ca cứu có bằng chứng)
       const buCtx = { gidForceFind: hadDirectFail, isBuRetry: true, apiRejected551: isApi551 };
       const actuallySendBu = () => busEnqueue(async () => {
         // Kiểm tra LẠI ngay trước khi bắn: trong lúc xếp hàng chờ lane (có thể cả phút ở
@@ -8046,7 +8080,7 @@
           logFailGrouped(name, 'tin đã đến nơi trong lúc chờ bù — hủy bù (tránh trùng)', '✓', conv.id);
           return { ch: null, delivered: true };
         }
-        if (finalFailedIds[conv.id] || (uncertainIds[conv.id] && !buGated)) {
+        if (finalFailedIds[conv.id] || (uncertainIds[conv.id] && !buGated && !buFromUncertain)) {
           buStats.cancelled++;
           logFailGrouped(name, 'đã chốt trạng thái cuối trong lúc chờ bù — hủy bù (tránh trùng)', '✓', conv.id);
           return { ch: null, delivered: true };
@@ -8500,6 +8534,12 @@
         // ⚠ → ✅ (không còn bắn cứu) nên đọc thêm không thể gây trùng, chỉ giúp cứu thêm ca
         // ACK trễ thật. Mọi page đọc cùng số lần.
         const maxReads = (batchStats && batchStats.total > 50) ? 4 : 3;
+        /* [v1.92.38] Chạy CỔNG CHỨNG MINH VẮNG MẶT song song với các lần đọc lịch sử.
+         * Trước đây cổng chỉ được gọi SAU khi đọc xong (lô >50: đọc 4 lần tới mốc +15 s ⇒ cứu
+         * xong ~+19 s). Cổng bắt buộc phải chờ mốc gửi +10 s nên chạy song song thì kết quả về
+         * đúng ~+10 s bất kể số lần đọc. Không thêm request: đây chính là request mà cổng vẫn
+         * phải gọi sau đó, chỉ khác thời điểm. */
+        let proofP = null;
         for (let attempt = 0; attempt < maxReads; attempt++) {
           if (attempt > 0) {
             await sleepUntil(Date.now() + (attempt === 1 ? 2000 : (attempt === 2 ? 4000 : 6000))); // [v1.92.9]
@@ -8525,6 +8565,10 @@
           if (!Array.isArray(msgs)) continue;
           verdict = historyVerdict(msgs, pageId, want, photo, sentAt);
           if (verdict === 'yes') break; // có bằng chứng dương là dừng đọc ngay
+          if (attempt === 0 && !proofP) {
+            // đọc lần đầu đã không thấy ⇒ khởi động cổng chứng minh ngay (chạy nền tới mốc +10 s)
+            try { proofP = proveAbsentBeforeBu(conv, text, sentAt); } catch (ePp) { proofP = null; }
+          }
           // [v1.92.29] Response đúng 25 tin + tin mới nhất đã cũ hơn 60 s ⇒ 25 tin này là ĐẦU
           // thread (HAR: 34 ca như vậy, trung vị cũ hơn 4 330 s) ⇒ đọc thêm chỉ ra đúng 25 tin
           // đó, tốn 2–3 request vô ích. Dừng và chuyển sang kiểm bằng `snippet`.
@@ -8561,7 +8605,7 @@
          * qua kênh KHÁC (Extension), rồi khoá `sockVerifyFired` để không cứu vòng 2.
          * Không chứng minh được ⇒ vẫn giữ ⚠ và đưa vào DANH SÁCH GỬI TAY (không im lặng nữa). */
         let socksProof = 'unknown';
-        try { socksProof = await proveAbsentBeforeBu(conv, text, sentAt); } catch (ePv) { socksProof = 'unknown'; }
+        try { socksProof = await (proofP || proveAbsentBeforeBu(conv, text, sentAt)); } catch (ePv) { socksProof = 'unknown'; }
         // Chỉ cứu được khi CÒN kênh khác: bù của script chỉ đi Extension/Socket, mà Socket vừa
         // thất bại ⇒ cần Extension. Không có Extension thì giữ ⚠ (vào danh sách gửi tay),
         // KHÔNG chốt ❌ oan — người dùng vẫn gửi tay được.
@@ -8572,12 +8616,19 @@
         if (socksProof === 'absent' && hasExtNow && myRun === runSeq && !state.stopRequested
             && !deliveredIds[conv.id] && !finalFailedIds[conv.id]) {
           sockVerifyFired[conv.id] = runSeq; // khoá: mỗi chat chỉ được cứu 1 lần / lượt
-          reopenUncertain(conv.id);          // có BẰNG CHỨNG "chưa đi" ⇒ nhả khỏi sổ ⚠
+          /* [v1.92.38] KHÔNG gọi reopenUncertain() nữa. Bản 1.92.37 mở lại sổ ⚠ ⇒
+           * summaryCounters.unsure-- ⇒ pendingSend = 1 ⇒ bảng TỔNG HỢP bị CHẶN thêm ~11–14 s
+           * chỉ để chờ một ca cứu — đúng cái chậm mà 1.92.36 vừa bỏ. Chat này đã CÓ kết luận
+           * (⚠) nên cứ để lượt chốt; khi cứu xong thì markDelivered/trackStatus tự chuyển
+           * ⚠ → ✅/❌ (cả hai hàm đều trừ unsure trước khi cộng nhóm mới). */
+          rescueInFlight[conv.id] = Date.now();
           sockRescueStats.tried++;
-          logFailGrouped(nm, 'kiểm chứng: hội thoại KHÔNG có tin (đã chứng minh vắng mặt) ⇒ GỬI CỨU 1 lần qua Extension', '🛟', conv.id);
+          logFailGrouped(nm, 'kiểm chứng: hội thoại KHÔNG có tin (đã chứng minh vắng mặt sau '
+            + ((Math.max(0, Date.now() - sentAt)) / 1000).toFixed(1).replace('.', ',')
+            + ' s) ⇒ GỬI CỨU 1 lần qua Extension', '🛟', conv.id);
           scheduleBuRetry(conv, text, photo, nm,
             'Socket không có ACK + đã chứng minh hội thoại không có tin', ['socket'],
-            { ambiguous: false, via: 'socket', sentAt: sentAt });
+            { ambiguous: false, fromUncertain: true, via: 'socket', sentAt: sentAt });
           return;
         }
         // [v1.92.25] Không có bằng chứng dương sau các lần đọc ⇒ GIỮ ⚠. Đây là đường duy nhất
@@ -9122,7 +9173,10 @@
     sendDiag.buProofUnknown = 0; sendDiag.buProofCached = 0; sendDiag.buProofCancelled = 0;
     try { buProofCache.clear(); } catch (eBp) { /* ignore */ }
     verifyStats.found = 0; verifyStats.held = 0; verifyStats.unknown = 0;
-    try { manualResendList.length = 0; sockRescueStats.tried = 0; } catch (eMr) { /* ignore */ }
+    try {
+      manualResendList.length = 0; sockRescueStats.tried = 0;
+      Object.keys(rescueInFlight).forEach((k) => delete rescueInFlight[k]);
+    } catch (eMr) { /* ignore */ }
     extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
     extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
     extSendCtl.probeInFlight = false; // lượt mới không được kẹt bởi thăm dò của lượt cũ đã dừng
@@ -11236,16 +11290,28 @@
     }
     // [v1.92.37] DANH SÁCH GỬI TAY — để không bao giờ im lặng mất tin.
     out.push('');
-    out.push('=== 🖐 CẦN GỬI TAY (' + manualResendList.length + ' chat) — máy KHÔNG xác nhận được đã gửi ===');
-    if (!manualResendList.length) {
+    const _mz = { wait: [], rescuing: [] };
+    const _nowMr = Date.now();
+    manualResendList.forEach((m) => { (isRescuing(m.id, _nowMr) ? _mz.rescuing : _mz.wait).push(m); });
+    out.push('=== 🖐 CẦN GỬI TAY (' + _mz.wait.length + ' chat) — máy KHÔNG xác nhận được đã gửi ===');
+    if (!_mz.wait.length) {
       out.push('(không có — mọi chat đều có kết quả chắc chắn: ✅ đã tới nơi hoặc ❌ khách không nhận)');
     } else {
       out.push('Các chat dưới đây kết thúc ở ⚠ "không rõ". Mở đúng hội thoại: CHƯA thấy tin thì gửi tay,');
       out.push('ĐÃ thấy tin thì bỏ qua (đừng gửi lại — sẽ thành 2 tin cho khách).');
-      manualResendList.slice(0, 2000).forEach((m) => {
+      _mz.wait.slice(0, 2000).forEach((m) => {
         out.push('   ' + m.id + ' · ' + (m.name || nameById[m.id] || '?') + ' · ' + fmtClock(m.t));
       });
-      if (manualResendList.length > 2000) out.push('   … còn ' + (manualResendList.length - 2000) + ' chat');
+      if (_mz.wait.length > 2000) out.push('   … còn ' + (_mz.wait.length - 2000) + ' chat');
+    }
+    if (_mz.rescuing.length) {
+      out.push('');
+      out.push('=== ⏳ ĐANG CỨU (' + _mz.rescuing.length + ' chat) — ĐỪNG GỬI TAY ===');
+      out.push('Script đã chứng minh hội thoại KHÔNG có tin và đang gửi cứu qua Extension (~10–13 s).');
+      out.push('Chờ dòng "🛟 … GỬI CỨU" / "🔎 Cập nhật sau khi chốt lượt" rồi hẵn quyết.');
+      _mz.rescuing.slice(0, 500).forEach((m) => {
+        out.push('   ' + m.id + ' · ' + (m.name || nameById[m.id] || '?') + ' · ' + fmtClock(m.t));
+      });
     }
     const dup = [];
     deliverHits.forEach((hits, id) => { if (hits && hits.length > 1) dup.push({ id: id, hits: hits }); });

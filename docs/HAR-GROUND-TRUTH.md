@@ -3112,3 +3112,41 @@ Chat được xác nhận tới nơi (hoặc bị chốt ❌ khách không nhậ
 `R > 0` = số tin đã được cứu khỏi mất im lặng. Rủi ro lặp còn lại đúng bằng số ca mà hội thoại
 **không đổi trong 10 s nhưng tin thật ra đã đi** — theo §64.2 đó là trần đã đo (trễ ACK tối đa
 10,0 s) và là mức đánh đổi người dùng chọn: **không để mất tin**, sai thì gửi tay kiểm lại.
+
+## §72 — TỐC ĐỘ: CỨU TIN KHÔNG ĐƯỢC LÀM CHẬM BẢNG TỔNG HỢP (1.92.38)
+
+### 72.1 Lỗi tốc độ do chính 1.92.37 gây ra
+
+1.92.37 gọi `reopenUncertain()` trước khi cứu. Hàm đó trừ `summaryCounters.unsure` ⇒
+`pendingSend = total − settled` tăng lên 1 ⇒ `markSendIdleIfSettled()` **không cho chốt lượt**
+cho tới khi ca cứu xong. Cổng chứng minh vắng mặt bắt buộc chờ mốc gửi **+10 s**, nên bảng
+TỔNG HỢP của lô 3 chat bị đẩy từ ~2–4 s lên **~11–14 s** — đúng cái chậm mà 1.92.36 vừa bỏ.
+Lô 100 chat có 6 ca ⚠ ⇒ chậm thêm chừng ấy giây, và nếu ca ⚠ nằm cuối hàng đợi thì cả bảng
+chờ theo nó.
+
+### 72.2 Sửa
+
+| # | Việc | Tác dụng |
+|---|---|---|
+| 1 | **Bỏ `reopenUncertain`** trong nhánh cứu; chat vẫn giữ kết luận ⚠ nên lượt chốt ngay | bảng TỔNG HỢP không chờ ca cứu nữa; `markDelivered`/`trackStatus` vẫn tự trừ ⚠ rồi cộng ✅/❌ nên số cuối vẫn đúng |
+| 2 | `scheduleBuRetry(..., { fromUncertain: true })` — cờ cho qua 3 cửa chặn "đã chốt ⚠ thì không bù" (lúc đăng ký, lúc timer nổ, lúc vào lane) | cứu vẫn bắn được dù chat đang ở sổ ⚠ |
+| 3 | **Cổng chứng minh chạy SONG SONG** với các lần đọc lịch sử (khởi động ngay sau lần đọc đầu không thấy tin) | kết quả cổng về đúng ~+10 s thay vì ~+15…19 s ở lô >50; **không thêm request** |
+| 4 | `rescueInFlight` + tách mục **⏳ ĐANG CỨU — ĐỪNG GỬI TAY** trong `💾 .txt`; dòng TỔNG HỢP in `⏳ ĐANG CỨU tự động: N` | không còn cảnh chat vừa nằm trong "cần gửi tay" vừa đang được cứu ⇒ người dùng gửi tay ⇒ khách nhận 2 tin |
+
+### 72.3 Đường thời gian sau khi sửa (lô ≤ 50 chat, 1 ca phải cứu)
+
+| Mốc (giây tính từ lúc bấm Chạy) | Việc |
+|---|---|
+| 0,6 | phát xong toàn bộ lệnh |
+| ~5,5 | ca no-ACK hết hạn ACK ⇒ chốt ⚠ (đã "settled") ⇒ **bảng TỔNG HỢP in được ngay** |
+| ~6 | cổng chứng minh trả `absent` ⇒ in `🛟 … GỬI CỨU 1 lần qua Extension` ⇒ bắn |
+| ~7–8 | Extension trả kết quả ⇒ `✅ N → N+1`, ⚠ giảm 1, in `🔎 Cập nhật sau khi chốt lượt` |
+
+Tức: **bảng vẫn ~6 s**, phần cứu chỉ thêm 1 dòng cập nhật — không kéo dài lượt. Ca không cứu
+được (hội thoại vừa động, hoặc không có Extension) thì nằm nguyên trong `🖐 CẦN GỬI TAY`.
+
+### 72.4 Bất biến giữ nguyên
+
+`BU_PROOF_WAIT_MS` 10 s, hạn chờ ACK 5 s, `BU_PROOF_STALE_MS` 30 s, số làn, ngưỡng gửi,
+cửa chống trùng 10 s / 5 s — **không đổi một số nào**. Mỗi chat tối đa **1 lần cứu/lượt**
+(`sockVerifyFired`), chỉ qua kênh CHƯA thử (`['socket']` đã thử ⇒ còn `ext`).
