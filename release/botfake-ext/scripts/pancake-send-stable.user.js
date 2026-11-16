@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.36-stable
+// @version      1.92.37-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -72,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.36-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.37-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -7493,6 +7493,22 @@
     pumpSockVerify();
   }
   const verifyStats = { found: 0, held: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP (held = giữ ⚠, không bắn lại)
+  const sockRescueStats = { tried: 0 }; // [v1.92.37] số ca đã chứng minh vắng mặt ⇒ gửi cứu 1 lần
+  /* [v1.92.37] DANH SÁCH GỬI TAY — mọi chat kết thúc ở ⚠ ("không rõ"): máy KHÔNG dám nói đã gửi.
+   * Trước đây những ca này chỉ nằm im trong sổ ⚠, người dùng không biết chat nào cần bấm tay.
+   * Nay gom lại, in ở 💾 .txt và đếm ở dòng TỔNG HỢP. Không gửi gì thêm — chỉ để người đọc. */
+  const manualResendList = [];
+  function noteManualResend(cid) {
+    if (!cid) return;
+    for (let i = 0; i < manualResendList.length; i++) if (manualResendList[i].id === String(cid)) return;
+    manualResendList.push({ id: String(cid), name: nameById[cid] || '', t: Date.now(), reason: '' });
+    if (manualResendList.length > 5000) manualResendList.shift();
+  }
+  function dropManualResend(cid) {
+    if (!cid) return;
+    const k = String(cid);
+    for (let i = manualResendList.length - 1; i >= 0; i--) if (manualResendList[i].id === k) manualResendList.splice(i, 1);
+  }
   const extVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng sau khi Ext timeout
   // [v1.91.79] Ca ĐỌC LẠI nhịp giãn: KHÔNG được tính vào "đang chờ" của bảng TỔNG HỢP.
   // Log 19:01→19:04 (10672 tin): phát lệnh xong 19:01:29 nhưng mãi 19:04:25 mới chốt vì
@@ -7691,12 +7707,15 @@
           + ' tin (' + pct + '%)' + chStr
           + ' | ❌ Lỗi: ' + c.failTotal
           + (c.unsureTotal ? ' | ⚠ Không rõ: ' + c.unsureTotal : '')
+          + (manualResendList.length ? ' | 🖐 CẦN GỬI TAY: ' + manualResendList.length + ' chat (xem 💾 .txt)' : '')
           + (c.skipTotal ? ' | 🧹 Bỏ qua: ' + c.skipTotal : '')
           + ((buStats.ok || buStats.cancelled)
             ? ' | 🔁 Bù OK: ' + buStats.ok + ' (' + Object.keys(buStats.byWhy).map((k) => k + ': ' + buStats.byWhy[k]).join(' · ') + ') · hủy bù tránh trùng: ' + buStats.cancelled
             : '')
-          + ((verifyStats.found || verifyStats.held || verifyStats.unknown)
-            ? ' | 🔎 Kiểm chứng ACK: đã đến nơi ' + verifyStats.found + ' · giữ ⚠ (không bắn lại) ' + verifyStats.held + ' · không kiểm chứng được ' + verifyStats.unknown
+          + ((verifyStats.found || verifyStats.held || verifyStats.unknown || sockRescueStats.tried)
+            ? ' | 🔎 Kiểm chứng ACK: đã đến nơi ' + verifyStats.found + ' · giữ ⚠ (không bắn lại) ' + verifyStats.held
+              + ' · không kiểm chứng được ' + verifyStats.unknown
+              + (sockRescueStats.tried ? ' · 🛟 chứng minh vắng mặt ⇒ gửi cứu 1 lần ' + sockRescueStats.tried : '')
             : '')
           + ((sendDiag.buProofGated || sendDiag.buProofPresent || sendDiag.buProofCancelled)
             ? ' | 🛡 Cổng chống lặp: chặn bù mù ' + sendDiag.buProofGated + ' ca · tin ĐÃ tới (hủy bù) ' + sendDiag.buProofCancelled
@@ -7847,6 +7866,7 @@
     if (finalFailedIds[convId]) { delete finalFailedIds[convId]; summaryCounters.fail = Math.max(0, summaryCounters.fail - 1); }
     if (uncertainIds[convId]) { delete uncertainIds[convId]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
     deliveredIds[convId] = ch;
+    dropManualResend(convId); // đã xác nhận tới nơi ⇒ khỏi danh sách gửi tay
     softNotify('delivered'); // [v1.92.9] chỗ chờ "đã giao" thức ngay, khỏi chờ mù 220 ms
     // Lượt đã kết thúc bình thường (không bấm Dừng) thì sentIds đã được dọn ở cuối sendToAll —
     // ACK trễ KHÔNG được nạp lại, nếu không lượt sau bỏ qua oan gần hết chat (mất tin im lặng)
@@ -7866,9 +7886,12 @@
     if (kind === 'fail') {
       // đã từng bị watchdog chốt ⚠ mà sau đó bù chốt lỗi hẳn → chuyển nhóm, không đếm 2 lần
       if (uncertainIds[convId]) { delete uncertainIds[convId]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
+      dropManualResend(convId); // đã chốt ❌ (khách không nhận) ⇒ không còn là "cần gửi tay"
+
       if (!finalFailedIds[convId]) { finalFailedIds[convId] = true; summaryCounters.fail++; }
     } else if (kind === 'uncertain') {
       if (!uncertainIds[convId] && !finalFailedIds[convId]) { uncertainIds[convId] = true; summaryCounters.unsure++; }
+      noteManualResend(convId); // ⚠ = máy không chắc đã gửi ⇒ vào danh sách gửi tay
     } else if (kind === 'skip') {
       if (!skippedLateIds[convId]) { skippedLateIds[convId] = true; summaryCounters.skipLate++; }
     }
@@ -8529,6 +8552,34 @@
           logFailGrouped(nm, 'kiểm chứng: tin ĐÃ đến nơi (Socket chỉ mất ACK) — tính ✅ Socket', '🔎', conv.id);
           return;
         }
+        /* [v1.92.37] KHÔNG ĐƯỢC IM LẶNG ĐỂ MẤT TIN — ca Đinh Thị Loan (lô 3 chat 15:48):
+         * Socket bắn → không có ACK → đọc lịch sử 3 lần không thấy → theo luật 1.92.24/25 thì
+         * GIỮ ⚠ vĩnh viễn: khách không nhận được gì, script cũng không cứu, người dùng phải
+         * gửi tay. Nay đọc thêm **CỔNG CHỨNG MINH VẮNG MẶT** — đúng cổng đang dùng trước mỗi lần
+         * bù: dò MUỘN (≥ BU_PROOF_WAIT_MS = 10 s sau lúc gửi) + hội thoại phải IM ≥ 30 s và
+         * không đổi so với lúc gửi. Chỉ khi đó mới dám kết luận "tin chưa đi" ⇒ GỬI CỨU 1 LẦN
+         * qua kênh KHÁC (Extension), rồi khoá `sockVerifyFired` để không cứu vòng 2.
+         * Không chứng minh được ⇒ vẫn giữ ⚠ và đưa vào DANH SÁCH GỬI TAY (không im lặng nữa). */
+        let socksProof = 'unknown';
+        try { socksProof = await proveAbsentBeforeBu(conv, text, sentAt); } catch (ePv) { socksProof = 'unknown'; }
+        // Chỉ cứu được khi CÒN kênh khác: bù của script chỉ đi Extension/Socket, mà Socket vừa
+        // thất bại ⇒ cần Extension. Không có Extension thì giữ ⚠ (vào danh sách gửi tay),
+        // KHÔNG chốt ❌ oan — người dùng vẫn gửi tay được.
+        const hasExtNow = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+        if (socksProof === 'absent' && !hasExtNow) {
+          logFailGrouped(nm, 'kiểm chứng: hội thoại KHÔNG có tin nhưng KHÔNG còn kênh gửi (Extension chưa nối) — GIỮ ⚠, vào danh sách gửi tay', '🔎', conv.id);
+        }
+        if (socksProof === 'absent' && hasExtNow && myRun === runSeq && !state.stopRequested
+            && !deliveredIds[conv.id] && !finalFailedIds[conv.id]) {
+          sockVerifyFired[conv.id] = runSeq; // khoá: mỗi chat chỉ được cứu 1 lần / lượt
+          reopenUncertain(conv.id);          // có BẰNG CHỨNG "chưa đi" ⇒ nhả khỏi sổ ⚠
+          sockRescueStats.tried++;
+          logFailGrouped(nm, 'kiểm chứng: hội thoại KHÔNG có tin (đã chứng minh vắng mặt) ⇒ GỬI CỨU 1 lần qua Extension', '🛟', conv.id);
+          scheduleBuRetry(conv, text, photo, nm,
+            'Socket không có ACK + đã chứng minh hội thoại không có tin', ['socket'],
+            { ambiguous: false, via: 'socket', sentAt: sentAt });
+          return;
+        }
         // [v1.92.25] Không có bằng chứng dương sau các lần đọc ⇒ GIỮ ⚠. Đây là đường duy nhất
         // còn lại sau khi bỏ 'no' + bỏ "bắn cứu": không bao giờ gửi lại từ kiểm chứng.
         // [v1.92.28] Chỉ tính "giữ ⚠" — trước đây tăng CẢ unknown lẫn held cho cùng một ca
@@ -9071,6 +9122,7 @@
     sendDiag.buProofUnknown = 0; sendDiag.buProofCached = 0; sendDiag.buProofCancelled = 0;
     try { buProofCache.clear(); } catch (eBp) { /* ignore */ }
     verifyStats.found = 0; verifyStats.held = 0; verifyStats.unknown = 0;
+    try { manualResendList.length = 0; sockRescueStats.tried = 0; } catch (eMr) { /* ignore */ }
     extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
     extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
     extSendCtl.probeInFlight = false; // lượt mới không được kẹt bởi thăm dò của lượt cũ đã dừng
@@ -11181,6 +11233,19 @@
     if (!auditRows.length) {
       out.push('⚠ SỔ ĐANG TRỐNG: sổ kiểm chứng nằm trong RAM, tải lại trang (F5) là mất. File .txt');
       out.push('   xuất NGAY sau khi lượt gửi chốt (hoặc trước khi F5) mới có chi tiết từng chat.');
+    }
+    // [v1.92.37] DANH SÁCH GỬI TAY — để không bao giờ im lặng mất tin.
+    out.push('');
+    out.push('=== 🖐 CẦN GỬI TAY (' + manualResendList.length + ' chat) — máy KHÔNG xác nhận được đã gửi ===');
+    if (!manualResendList.length) {
+      out.push('(không có — mọi chat đều có kết quả chắc chắn: ✅ đã tới nơi hoặc ❌ khách không nhận)');
+    } else {
+      out.push('Các chat dưới đây kết thúc ở ⚠ "không rõ". Mở đúng hội thoại: CHƯA thấy tin thì gửi tay,');
+      out.push('ĐÃ thấy tin thì bỏ qua (đừng gửi lại — sẽ thành 2 tin cho khách).');
+      manualResendList.slice(0, 2000).forEach((m) => {
+        out.push('   ' + m.id + ' · ' + (m.name || nameById[m.id] || '?') + ' · ' + fmtClock(m.t));
+      });
+      if (manualResendList.length > 2000) out.push('   … còn ' + (manualResendList.length - 2000) + ' chat');
     }
     const dup = [];
     deliverHits.forEach((hits, id) => { if (hits && hits.length > 1) dup.push({ id: id, hits: hits }); });

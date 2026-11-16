@@ -3064,3 +3064,51 @@ thành "chờ".
 
 Cái **không** đụng: `BU_PROOF_WAIT_MS` 10 s (cổng chứng minh vắng mặt) và hạn chờ ACK —
 hai thứ đó chính là thứ chặn gửi 2 tin cho cùng một khách.
+
+## §71 — "GỬI TAY ĐƯỢC MÀ MÁY BÁO KHÔNG GỬI": CỨU TIN BẰNG BẰNG CHỨNG (1.92.37)
+
+### 71.1 Ca thật (Đinh Thị Loan, lô 3 chat 15:48)
+
+| Mốc | Việc |
+|---|---|
+| 15:48:23 | phát lệnh; 1 ca đi **Socket** (đây là ca **dò lại** kênh ACK đã bị đánh dấu chết từ 15:44) |
+| 15:48:31 | không có ACK ⇒ `⚠ Socket không rõ kết quả` |
+| 15:48:38 | kiểm chứng đọc **3 lần** không thấy tin ⇒ theo luật 1.92.24/25: **GIỮ ⚠, KHÔNG bắn lại** |
+
+Kết quả: khách **không nhận được gì**, script cũng **không cứu**, người dùng phải gửi tay. Đây là
+cái giá của luật "thà mất tin còn hơn gửi đôi" ban hành ở 1.92.24 (khi đó kiểm chứng chỉ có
+`historyVerdict`, đọc 1 lần rồi kết luận `no` ⇒ đúng là nguồn gây lặp).
+
+### 71.2 Sửa: hai lớp, không lớp nào là "bắn mò"
+
+**Lớp 1 — CỨU BẰNG BẰNG CHỨNG.** Sau khi đọc lịch sử không thấy tin, chạy thêm đúng cổng đang
+dùng trước mỗi lần bù — `proveAbsentBeforeBu()`:
+
+| cổng trả | điều kiện | hành động |
+|---|---|---|
+| `absent` | dò **muộn** (≥ `BU_PROOF_WAIT_MS` = 10 s sau lúc gửi) **và** `updated_at` của hội thoại **im ≥ 30 s**, không đổi so với lúc gửi | **GỬI CỨU 1 LẦN** qua kênh khác (Extension), rồi khoá `sockVerifyFired` — mỗi chat tối đa 1 lần cứu/lượt |
+| `yes` | snippet = tin vừa gửi | ✅ như cũ |
+| `unknown` | dò sớm / hội thoại vừa động / thiếu `updated_at` / lỗi request | **giữ ⚠**, không gửi |
+
+Khác biệt then chốt so với bản bị bỏ ở 1.92.24: bản cũ kết luận bằng **"đọc không thấy"**, bản này
+kết luận bằng **"hội thoại không hề đổi sau 10 s"** — đúng chuẩn đã dùng cho mọi ca bù từ 1.92.30.
+
+**Lớp 2 — DANH SÁCH GỬI TAY.** Mọi chat kết thúc ở ⚠ được gom vào `manualResendList`, in ở đầu
+file `💾 .txt`:
+
+```
+=== 🖐 CẦN GỬI TAY (6 chat) — máy KHÔNG xác nhận được đã gửi ===
+   694078980461601_xxxxx · Đinh Thị Loan · 15:48:23
+```
+
+và đếm ngay trong dòng TỔNG HỢP: `| 🖐 CẦN GỬI TAY: 6 chat (xem 💾 .txt)`.
+Chat được xác nhận tới nơi (hoặc bị chốt ❌ khách không nhận) thì tự rời danh sách.
+
+### 71.3 Số đo mới
+
+`| 🔎 Kiểm chứng ACK: đã đến nơi N · giữ ⚠ (không bắn lại) M · không kiểm chứng được K ·
+🛟 chứng minh vắng mặt ⇒ gửi cứu 1 lần R`
+
+`R > 0` = số tin đã được cứu khỏi mất im lặng. Rủi ro lặp còn lại đúng bằng số ca mà hội thoại
+**không đổi trong 10 s nhưng tin thật ra đã đi** — theo §64.2 đó là trần đã đo (trễ ACK tối đa
+10,0 s) và là mức đánh đổi người dùng chọn: **không để mất tin**, sai thì gửi tay kiểm lại.
