@@ -2881,3 +2881,49 @@ chuyện gì đang xảy ra và **copy ra ngoài bị cắt**.
 Không đổi một số làn, một ngưỡng, một nhánh chốt ✅/⚠/❌, không đổi cơ chế bù/cổng chứng minh
 vắng mặt. Chỉ thay **cách in**: `logLine` → `logFailGrouped` ở các dòng lặp, cộng CSS/thêm nút.
 Sổ tên chat đầy đủ vẫn nằm trong `state`/`uncertainIds` và trong file `.txt`.
+
+## §67 — GỘP LOG THEO TỪNG SỔ + SỔ KIỂM CHỨNG TỪNG CHAT (1.92.33)
+
+Đo trên log thật 13:23:56–13:24:17 (**2 251 chat, 1.92.32**): **133 dòng**, nhưng **86 dòng dồn
+vào 3 giây cuối** (13:24:11: 48 dòng, :12: 16, :13: 22). Nguyên nhân do chính bộ gộp của 1.92.32:
+
+1. **Chỉ có MỘT khe chờ.** Hai lý do xen kẽ nhau (`FB từ chối nhận tin (xác nhận nền)` ↔
+   `KHÔNG thử lần 2`) đẩy nhau ra liên tục ⇒ **93 dòng lỗi** mà đáng lẽ là 2 nhóm lớn:
+   `FB từ chối nhận tin` in **27 dòng** lẻ, `KHÔNG thử lần 2` in **44 dòng** (toàn ×2, ×3, ×4).
+2. **Khoá nhóm chứa số thay đổi**: `(đã thử 40 ca …)` → `41`, `42`, `43`, `44` ⇒ mỗi lần số nhảy
+   là một nhóm mới (5 giá trị trong 3 giây).
+3. **Nới lane từng nấc +8**: 16 dòng `⚡ tăng lane … lên 264…384` trong 2 giây.
+
+### 67.1 Đã sửa (vẫn chỉ phần hiển thị)
+
+1. **Mỗi lý do một sổ riêng** (`Map` khoá theo `tag + lý do đã nén`), in tối đa **1 dòng / 2 giây /
+   lý do**; xen kẽ bao nhiêu lý do cũng không chẻ nhóm. Trần 200 sổ, quá thì đóng sổ cũ nhất.
+2. **Chuẩn hoá số khi tạo khoá** (`đã thử \d+ ca`, `từ chối gần đây \d+%`, `(muộn \d+s)`,
+   `đọc \d+ lần`, `sau \d+ ms` → `N`) — **chỉ để gộp**; nội dung in ra lấy **bản mới nhất**
+   nên vẫn thấy "đã thử 44 ca".
+3. **Nới lane gộp**: 1 dòng sau khi nấc cuối đứng yên 2,5 s —
+   `⚡ … nới lane page <pid>: 256 → 384 (16 nấc)`.
+4. Dựng lại đúng **977 sự kiện** từ log trên rồi chạy bộ gộp mới: **15 dòng** (thay vì 93).
+
+### 67.2 SỔ KIỂM CHỨNG TỪNG CHAT — để truy ca xác nhận sai gây LẶP
+
+Yêu cầu: log phải gọn **nhưng vẫn đủ dấu vết** để tìm hướng xử lý khi có gửi lặp. Nên tách hẳn:
+
+* `auditRows` — **mọi** kết quả từng chat, **không gộp, không cắt theo cửa sổ hiển thị**
+  (`auditPush` được gọi trong `logFailGrouped`, kèm **id chat** ở 35 điểm gọi, và trong
+  `markDelivered`).
+* `deliverHits` — **mọi lần** `markDelivered` (kể cả lần trùng kênh trước khi hàm return sớm).
+  Chat bị đánh dấu "đã tới nơi" **≥ 2 lần** = dấu hiệu xác nhận sai/gửi lặp.
+* Nút **`💾 .txt`** xuất: mục 1 log gọn, mục 2 **SỔ KIỂM CHỨNG** gồm
+  (a) `⚠ NGHI GỬI LẶP: N chat` + từng lần đánh dấu kèm giờ/kênh,
+  (b) **dòng thời gian** `HH:MM:SS.mmm · tag · id · tên · lý do` cho mọi kết quả,
+  (c) **tổng theo chat**: `id · tên · #đã tới nơi · #không rõ · #lỗi · kênh · từ lúc → đến lúc`.
+* `📋 Copy log` vẫn chỉ copy log gọn (dán nhanh), có ghi chú chỉ sang file `.txt` khi cần truy lặp.
+
+Với lô 2 251 chat ở trên: sổ kiểm chứng ≈ **1 800 dòng** (1 324 ✅ có id + 977 kết quả lỗi/kiểm
+chứng) — nằm trong **file**, không làm nặng bảng log trên màn hình.
+
+### 67.3 Không đụng đường gửi
+
+Không đổi một số làn, một ngưỡng, một nhánh chốt ✅/⚠/❌. `markDelivered` chỉ **thêm** một dòng
+ghi nhận (trước `return` cũ), `logFailGrouped` chỉ **thêm** tham số id để ghi sổ.

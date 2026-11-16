@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.32-stable
+// @version      1.92.33-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -72,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.32-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.33-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4761,7 +4761,7 @@
           if (res && (res.uncertain || res.sent === 'maybe')) {
             if (res.noAck) scheduleSocketVerify(conv, text, photo, res.publishedAt || (Date.now() - 15000));
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-            logFailGrouped(nm, '' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)', '⚠');
+            logFailGrouped(nm, '' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)', '⚠', conv.id);
             return;
           }
           if (res && res.deferredToSocketRetry && myRun === runSeq && !state.stopRequested) {
@@ -4778,13 +4778,13 @@
               logFailGrouped(nm, 'Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử '
                 + sockRetryBudgetState.tried + ' ca, cứu được 0, từ chối gần đây '
                 + (sockRetryBudgetState.closePct >= 0 ? sockRetryBudgetState.closePct + '%' : '—')
-                + ' ⇒ thử nữa chỉ tốn lệnh)', '❌');
+                + ' ⇒ thử nữa chỉ tốn lệnh)', '❌', conv.id);
               return;
             }
             if (sockRetryBudgetState.closed) sockRetryBudgetNote(sockRetryBudgetState, 'probe', rejectPctBg);
             sockRetryBudgetNote(sockRetryBudgetState, 'tried', rejectPctBg);
             sendDiag.sockWaveRetry = (sendDiag.sockWaveRetry || 0) + 1;
-            logFailGrouped(nm, 'Socket bị từ chối lần 1 — bắn lại 1 lần qua Socket (thoát burst-reject)…', '🔁');
+            logFailGrouped(nm, 'Socket bị từ chối lần 1 — bắn lại 1 lần qua Socket (thoát burst-reject)…', '🔁', conv.id);
             const ctx2 = Object.assign({}, res.deferredCtx || {}, {
               isSocketRetryPass: true, socketRetriedOnce: true,
               wave200Mode: false, sockFired: true, prioritySocket: true, fastOnly: false,
@@ -4796,7 +4796,7 @@
           if (res && !res.recipientUnavailable && res.sent === false && (res.error || '') !== 'Đã dừng') {
             // Frame CHƯA HỀ được bắn lên FB (ví dụ Socket không kết nối hoặc lỗi xin fbId ảnh khi retry)
             // và khách KHÔNG phải nick khóa → chuyển bù qua Extension để không bao giờ sót khách sống!
-            logFailGrouped(nm, (res.error || 'Socket không kết nối') + ' (xác nhận nền) — chuyển bù qua Extension', '⚠');
+            logFailGrouped(nm, (res.error || 'Socket không kết nối') + ' (xác nhận nền) — chuyển bù qua Extension', '⚠', conv.id);
             scheduleBuRetry(conv, text, photo, nm, res.error || 'Socket không kết nối', ['socket']);
           } else {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
@@ -4805,7 +4805,7 @@
             // lượt sau vẫn gửi tiếp vào đúng những chat chết đó, và trong lượt vẫn retry vô ích.
             // Log thực tế 10k: 3744 lỗi, retry 3302 lần cứu được 0, unavailable ghi nhận 0.
             if (res && res.recipientUnavailable) sendDiag.recipientUnavailable++;
-            logFailGrouped(nm, ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)', '❌');
+            logFailGrouped(nm, ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)', '❌', conv.id);
           }
         };
         const settleAndFinalize = (rawKind) => {
@@ -5809,7 +5809,8 @@
         if (pid) { delete pageAckTimeoutRun[pid]; if (pageAckDeadAt[pid]) { socketPickDiag.probeOk++; delete pageAckDeadProbeAt[pid]; } delete pageAckDeadAt[pid]; }
         if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX) {
           ctl.fastOk = 0;
-          const next = lane.setLimit(lane.getLimit() + 8);
+          const prevLimit = lane.getLimit();
+          const next = lane.setLimit(prevLimit + 8);
           // [v1.92.14] SÀN BỊ CẦU DAO HẠ THÌ KHÔNG BAO GIỜ HỒI — hạ là vĩnh viễn tới khi F5.
           // Log lô 15:54 cho thấy Socket/page cap in ra "64–384" nhưng limit cuối [64×1]; còn
           // mỗi lần cầu dao nổ (25 no-ACK liên tiếp) lại hạ sàn 64→32→16 và GIỮ tới hết phiên.
@@ -5819,7 +5820,7 @@
             socketLaneFloor = Math.min(SOCKET_LANE_MIN, socketLaneFloor + 8);
             logLine('🔧 ACK hồi ổn định — nâng lại sàn Socket/page ' + socketLaneFloor + '/' + SOCKET_LANE_MIN + '.');
           }
-          logLine('⚡ Socket ACK nhanh ổn định — tăng lane page ' + pid + ' lên ' + next + '.');
+          logLaneRamp(pid, prevLimit, next); // [v1.92.33] 16 nấc +8 ⇒ 1 dòng
         }
       } else if (kind === 'noack') {
         ctl.fastOk = 0;
@@ -6129,7 +6130,7 @@
         try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
         try {
           logFailGrouped((conv.name || conv.id),
-            'Extension trả lời SAU mốc quá hạn (' + (Math.round(lateMs / 100) / 10) + 's), tin ĐÃ đi — tính ✅ Ext, không gửi lại', '✅');
+            'Extension trả lời SAU mốc quá hạn (' + (Math.round(lateMs / 100) / 10) + 's), tin ĐÃ đi — tính ✅ Ext, không gửi lại', '✅', conv.id);
         } catch (e) { /* ignore */ }
         try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
       }).catch(() => { extLateStats.fail++; });
@@ -6466,7 +6467,7 @@
             markDelivered(conv.id, r.sendBy || 'ext');
             postSendSideEffects(conv);
             logFailGrouped(nm2, 'gửi THÀNH CÔNG qua '
-              + (r.sendBy === 'socket' ? 'Socket' : r.sendBy === 'extension' ? 'Extension' : 'API'), '✅');
+              + (r.sendBy === 'socket' ? 'Socket' : r.sendBy === 'extension' ? 'Extension' : 'API'), '✅', conv.id);
             return;
           }
           // [v1.91.83] CỨU CA KHÔNG CÓ global_id — chỗ rò 57 tin/lô (0,53%).
@@ -6481,17 +6482,17 @@
               && (r.gidUnknown || /globalId/i.test(String(r.error || '')))) {
             try {
               sendDiag.apiNoGidFallback = (sendDiag.apiNoGidFallback || 0) + 1;
-              logFailGrouped(nm2, 'không có global_id (Ext/Socket đều bất khả) — chuyển làn API', '🛟');
+              logFailGrouped(nm2, 'không có global_id (Ext/Socket đều bất khả) — chuyển làn API', '🛟', conv.id);
               fireApiAndWatch(conv, text, photo);
               return;
             } catch (e0) { /* rơi xuống xử lý cũ */ }
           }
           if (r.uncertain) {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-            logFailGrouped(nm2, '' + r.error + ' (không rõ — không gửi thêm)', '⚠');
+            logFailGrouped(nm2, '' + r.error + ' (không rõ — không gửi thêm)', '⚠', conv.id);
           } else {
             if (r.windowClosed) windowBlocked++;
-            logFailGrouped(nm2, '' + r.error, '❌');
+            logFailGrouped(nm2, '' + r.error, '❌', conv.id);
           }
           // cửa sổ 24h VẪN bù kênh khác (Thanh Binh); khách khóa nick (recipientUnavailable) hoặc hết kênh → tự bỏ
           if (!r.ok && !r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
@@ -6633,7 +6634,7 @@
               ctx.apiNoGidDone = true; // [v1.92.28] đã xử lý ⇒ không chạy lại khối cứu bên dưới (tránh 2 dòng 🛟/ca)
               logFailGrouped((conv.name || conv.id),
                 'server/Batch/WS/Ext đều không có global_id ⇒ chuyển làn API bằng conversation_id'
-                + ' (HAR: lệnh gửi API không cần global_id)', '🛟');
+                + ' (HAR: lệnh gửi API không cần global_id)', '🛟', conv.id);
             } else {
               return {
                 ok: false, sent: false, gidUnknown: true, noGidGate: true,
@@ -6656,7 +6657,7 @@
             if (canApiRescue) seq.push('api');
             logFailGrouped((conv.name || conv.id),
               'chưa dò được global_id; chưa kết luận khách khóa nick, sẽ thử Extension theo thread_id'
-              + (canApiRescue ? ' và API theo conversation_id như đường gửi tay' : ''), '🛟');
+              + (canApiRescue ? ' và API theo conversation_id như đường gửi tay' : ''), '🛟', conv.id);
           }
         }
       }
@@ -7716,6 +7717,21 @@
     if (!convId) return;
     clearBgPending(convId);
     const ch = (via === 'ext' || via === 'extension') ? 'ext' : (via === 'socket' ? 'socket' : 'api');
+    // [v1.92.33] SỔ KIỂM CHỨNG: ghi MỌI lần đánh dấu "đã tới nơi" (kể cả lần trùng kênh ở dưới).
+    // 1 chat bị đánh dấu ≥ 2 lần ⇒ dấu hiệu xác nhận sai / gửi lặp ⇒ file .txt liệt kê riêng.
+    try {
+      let hist = deliverHits.get(convId);
+      if (!hist) { hist = []; deliverHits.set(convId, hist); }
+      const tNow = Date.now();
+      const last = hist[hist.length - 1];
+      // GỘP các lần gọi lặp CÙNG kênh trong 2 s (watchdog/ACK gọi lại — KHÔNG phải gửi lặp).
+      // Còn khác kênh, hoặc cách nhau > 2 s ⇒ ghi thành lần riêng: đó mới là dấu hiệu gửi lặp.
+      if (!last || last.by !== ch || (tNow - last.t) > 2000) {
+        hist.push({ t: tNow, by: ch });
+        if (hist.length > 20) hist.shift();
+        auditPush('✅', convId, '', 'đánh dấu ĐÃ TỚI NƠI qua ' + ch);
+      }
+    } catch (e0) { /* ignore */ }
     const prev = deliveredIds[convId];
     if (prev === ch) { updateBatchSummaryUI(); return; }
     if (prev === 'ext') summaryCounters.okExt = Math.max(0, summaryCounters.okExt - 1);
@@ -7858,7 +7874,7 @@
       if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
       logFailGrouped(name, 'đã thử hết kênh (' + (names.join(', ') || 'không rõ') + ')'
         + (conv.type === 'comment' ? ' — bình luận chỉ API/Extension gửi được (Socket không hỗ trợ)' : '')
-        + ' — không bù nữa (mỗi kênh đúng 1 lần)', '❌');
+        + ' — không bù nữa (mỗi kênh đúng 1 lần)', '❌', conv.id);
       return;
     }
     const myRun = runSeq;
@@ -7911,7 +7927,7 @@
         if (!out || !out.ch) {
           // bước chuẩn bị bù văng lỗi (lane trả {ok:false}) — phải chốt, không im lặng kẹt pending
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          logFailGrouped(name, 'bù lỗi: ' + clip((out && out.error) || 'không rõ', 90), '❌');
+          logFailGrouped(name, 'bù lỗi: ' + clip((out && out.error) || 'không rõ', 90), '❌', conv.id);
           return;
         }
         const ch = out.ch;
@@ -7923,10 +7939,10 @@
           markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
           buStats.ok++;
           buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
-          logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅');
+          logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅', conv.id);
         } else if (r && r.sent === 'maybe') {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-          logFailGrouped(name, 'bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)', '⚠');
+          logFailGrouped(name, 'bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)', '⚠', conv.id);
         } else if (r && r.recipientUnavailable && !hasMoreAfterSocket) {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
           // ĐÂY là nơi tín hiệu "khách không nhận được" xuất hiện nhiều nhất (Extension trả
@@ -7934,17 +7950,17 @@
           // KHÔNG lưu gì, KHÔNG lọc gì ở các lượt sau (cơ chế nhớ đã bị xoá ở v1.92.21).
           sendDiag.recipientUnavailable++;
           logFailGrouped(name, 'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
-            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)', '❌');
+            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)', '❌', conv.id);
         } else {
           logFailGrouped(name, 'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
-            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — sang kênh kế nếu còn', '❌');
+            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — sang kênh kế nếu còn', '❌', conv.id);
           // CHUỖI BÙ: kênh kế CHƯA thử (mỗi kênh đúng 1 lần — không lặp kênh vừa thua)
           scheduleBuRetry(conv, text, photo, name,
             'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được', triedCh.concat([ch]));
         }
       }).catch((e) => {
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-        logFailGrouped(name, 'bù lỗi: ' + (e && e.message || e), '❌');
+        logFailGrouped(name, 'bù lỗi: ' + (e && e.message || e), '❌', conv.id);
       });
       /* [v1.92.30] CỔNG CHỨNG MINH VẮNG MẶT — chỉ cho phán quyết SUY LUẬN.
        * Phán quyết là BẰNG CHỨNG (socket chết trước publish, lỗi trước khi bắn) đi thẳng:
@@ -7958,12 +7974,12 @@
           buStats.cancelled++;
           sendDiag.buProofCancelled++;
           markDelivered(conv.id, buVia);
-          logFailGrouped(name, 'hội thoại ĐÃ CÓ tin vừa gửi ⇒ tin đã tới nơi, HỦY bù — KHÔNG gửi lần 2 (chặn lặp)', '✅');
+          logFailGrouped(name, 'hội thoại ĐÃ CÓ tin vừa gửi ⇒ tin đã tới nơi, HỦY bù — KHÔNG gửi lần 2 (chặn lặp)', '✅', conv.id);
           updateBatchSummaryUI();
           return;
         }
-        if (v === 'absent') logFailGrouped(name, 'chứng minh VẮNG MẶT (hội thoại không đổi sau lúc gửi) ⇒ bù an toàn', '🔎');
-        else logFailGrouped(name, 'chưa chứng minh được vắng mặt ⇒ bù như cũ (ưu tiên không sót)', '🔎');
+        if (v === 'absent') logFailGrouped(name, 'chứng minh VẮNG MẶT (hội thoại không đổi sau lúc gửi) ⇒ bù an toàn', '🔎', conv.id);
+        else logFailGrouped(name, 'chưa chứng minh được vắng mặt ⇒ bù như cũ (ưu tiên không sót)', '🔎', conv.id);
         actuallySendBu();
       };
       proveAbsentBeforeBu(conv, text, buSentAt).then(afterProof).catch(() => { actuallySendBu(); });
@@ -8354,7 +8370,7 @@
           try { res = await ctxFetchLane(() => fetchJson(url, 2)); } catch (e) { res = null; }
           if (!res || !res.ok || !res.data || res.data.success === false) {
             if (attempt === 0) {
-              logFailGrouped(nm, 'chưa đọc được lịch sử (' + ((res && res.error) || 'lỗi') + ') — thử lại…', '🔎');
+              logFailGrouped(nm, 'chưa đọc được lịch sử (' + ((res && res.error) || 'lỗi') + ') — thử lại…', '🔎', conv.id);
             }
             continue;
           }
@@ -8385,7 +8401,7 @@
             verifyStats.found++;
             markDelivered(conv.id, 'socket');
             try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
-            logFailGrouped(nm, 'kiểm chứng bằng HỘI THOẠI: snippet = tin vừa gửi, do chính page này gửi — tính ✅ Socket', '🔎');
+            logFailGrouped(nm, 'kiểm chứng bằng HỘI THOẠI: snippet = tin vừa gửi, do chính page này gửi — tính ✅ Socket', '🔎', conv.id);
             return;
           }
         }
@@ -8393,7 +8409,7 @@
           verifyStats.found++;
           markDelivered(conv.id, 'socket');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
-          logFailGrouped(nm, 'kiểm chứng: tin ĐÃ đến nơi (Socket chỉ mất ACK) — tính ✅ Socket', '🔎');
+          logFailGrouped(nm, 'kiểm chứng: tin ĐÃ đến nơi (Socket chỉ mất ACK) — tính ✅ Socket', '🔎', conv.id);
           return;
         }
         // [v1.92.25] Không có bằng chứng dương sau các lần đọc ⇒ GIỮ ⚠. Đây là đường duy nhất
@@ -8403,10 +8419,10 @@
         verifyStats.held = (verifyStats.held || 0) + 1;
         logFailGrouped(nm, 'kiểm chứng: ' + (histTruncatedOld
           ? 'lịch sử chỉ trả 25 tin CŨ NHẤT (thread dài) và hội thoại chưa hiện tin này'
-          : 'đọc ' + maxReads + ' lần chưa thấy tin') + ' — GIỮ ⚠, KHÔNG bắn lại (chống trùng)', '🔎');
+          : 'đọc ' + maxReads + ' lần chưa thấy tin') + ' — GIỮ ⚠, KHÔNG bắn lại (chống trùng)', '🔎', conv.id);
       } catch (e) {
         verifyStats.unknown++;
-        logFailGrouped(nm, 'kiểm chứng lỗi (' + (e && e.message || e) + ') — giữ ⚠ như cũ, không gửi lại', '🔎');
+        logFailGrouped(nm, 'kiểm chứng lỗi (' + (e && e.message || e) + ') — giữ ⚠ như cũ, không gửi lại', '🔎', conv.id);
       } finally {
         delete sockVerifyPending[conv.id]; // nhả sổ chờ ở mọi lối ra — lượt chỉ được kết thúc sau khi kiểm chứng chốt xong
         // Dù kiểm chứng thấy/không thấy/lỗi cũng phải tính lại pending và
@@ -8487,7 +8503,7 @@
           extTimeoutStats.found++;
           markDelivered(conv.id, 'ext');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
-          logFailGrouped(nm, 'kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi — tính ✅ Ext', '🔎');
+          logFailGrouped(nm, 'kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi — tính ✅ Ext', '🔎', conv.id);
           return;
         }
         if (!isRecheck) extTimeoutStats.notFound++;
@@ -8580,12 +8596,12 @@
         if (verdict === 'yes') {
           markDelivered(conv.id, 'api');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
-          logFailGrouped(nm, 'kiểm chứng: tin ĐÃ tới (API chỉ trả lời trễ) — tính ✅ API', '🔎');
+          logFailGrouped(nm, 'kiểm chứng: tin ĐÃ tới (API chỉ trả lời trễ) — tính ✅ API', '🔎', conv.id);
           return;
         }
         // [v1.92.25] Không có bằng chứng dương ⇒ GIỮ ⚠, không bao giờ gửi lại từ kiểm chứng.
         verifyStats.held = (verifyStats.held || 0) + 1; // [v1.92.28] không đếm đôi (xem scheduleSocketVerify)
-        logFailGrouped(nm, 'kiểm chứng KHÔNG kết luận được (' + clip(why || 'không rõ', 60) + ') — giữ ⚠, KHÔNG bắn lại (chống trùng)', '🔎');
+        logFailGrouped(nm, 'kiểm chứng KHÔNG kết luận được (' + clip(why || 'không rõ', 60) + ') — giữ ⚠, KHÔNG bắn lại (chống trùng)', '🔎', conv.id);
       } catch (e) {
         // kiểm chứng lỗi → giữ nguyên ⚠
       } finally {
@@ -8763,6 +8779,7 @@
     // [v1.92.32] mỗi lượt gửi có sổ log riêng ⇒ "Copy log/.txt" chỉ ra đúng lượt này
     logAllReset();
     logGroupReset();
+    auditReset(); // [v1.92.33] sổ kiểm chứng từng chat cũng tính lại từ đầu mỗi lượt
     if (preloadSelectedTimer) { clearTimeout(preloadSelectedTimer); preloadSelectedTimer = null; }
     preloadSelectedSeq++;
     applyRunStopButtons();
@@ -9154,15 +9171,15 @@
         // xuyên qua chốt đó vì nó dựa trên BẰNG CHỨNG, không phải phán đoán.
         unsure++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
-        logFailGrouped((c.name || c.id), r.error, '🔎');
+        logFailGrouped((c.name || c.id), r.error, '🔎', c.id);
       } else if (r.uncertain) {
         unsure++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
-        logFailGrouped((c.name || c.id), r.error + ' — không rõ tin đã đi chưa (không gửi thêm để tránh trùng)', '⚠');
+        logFailGrouped((c.name || c.id), r.error + ' — không rõ tin đã đi chưa (không gửi thêm để tránh trùng)', '⚠', c.id);
       } else {
         fail++;
         if (r.windowClosed) windowBlocked++;
-        logFailGrouped((c.name || c.id), r.error, '❌');
+        logFailGrouped((c.name || c.id), r.error, '❌', c.id);
         // cửa sổ 24h VẪN bù kênh khác (Thanh Binh); kênh đã thử hết → scheduleBuRetry tự bỏ
         if (!r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
           const p2 = c.pageId || String(c.id).split('_')[0];
@@ -9320,7 +9337,7 @@
             'Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử ' + sockRetryBudgetState.tried
               + ' ca, cứu được 0, từ chối gần đây '
               + (sockRetryBudgetState.closePct >= 0 ? sockRetryBudgetState.closePct + '%' : '—')
-              + ' ⇒ thử nữa chỉ tốn lệnh)', '❌');
+              + ' ⇒ thử nữa chỉ tốn lệnh)', '❌', item.c.id);
           updateBatchSummaryUI();
           checkWakeAllWaiters();
           return;
@@ -9404,7 +9421,7 @@
                 done++; ok++;
                 sendDiag.buProofCancelled++;
                 logFailGrouped((item.c.name || item.c.id),
-                  'FB báo "không gửi được" nhưng hội thoại ĐÃ CÓ tin ⇒ tin đã đi, KHÔNG bắn lần 2 (chặn lặp)', '✅');
+                  'FB báo "không gửi được" nhưng hội thoại ĐÃ CÓ tin ⇒ tin đã đi, KHÔNG bắn lần 2 (chặn lặp)', '✅', item.c.id);
                 updateBatchSummaryUI();
                 checkWakeAllWaiters();
                 continue;
@@ -10042,7 +10059,7 @@
             <span class="label">LOG <span id="ssb-logcount" style="color:#64748b;font-weight:400;text-transform:none;letter-spacing:0">0 dòng</span></span>
             <span style="display:flex;gap:4px;align-items:center">
               <button class="minibtn" id="ssb-logcopy" title="Copy TOÀN BỘ log của lượt này (không chỉ phần đang thấy)">📋 Copy log</button>
-              <button class="minibtn" id="ssb-logsave" title="Tải toàn bộ log ra file .txt — dùng khi log rất dài">💾 .txt</button>
+              <button class="minibtn" id="ssb-logsave" title="Tải file .txt: log gọn + SỔ KIỂM CHỨNG TỪNG CHAT (id, tên, mọi kết quả, giờ) — dùng để truy ca xác nhận sai gây gửi lặp">💾 .txt</button>
               <button class="minibtn" id="ssb-logzoom" title="Phóng to / thu nhỏ bảng log — kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ">⛶ Phóng to</button>
             </span>
           </div>
@@ -10113,7 +10130,8 @@
     };
     on('ssb-logcopy', 'click', () => {
       flushErrGroup(); // [v1.92.32] in nốt dòng gộp đang chờ 2 giây để bản copy không thiếu dòng cuối
-      const txt = (logAll.length ? logAll : state.log).join('\n');
+      const txt = (logAll.length ? logAll : state.log).join('\n')
+        + '\n\n(Sổ kiểm chứng TỪNG CHAT — dùng khi nghi gửi lặp — nằm trong file "💾 .txt")';
       copyTextToClipboard(txt).then((ok) => {
         logLine(ok ? ('📋 Đã copy ' + logAll.length + ' dòng log vào clipboard')
           : '⛔ Trình duyệt chặn clipboard — bấm "💾 .txt" để tải file thay thế');
@@ -10122,7 +10140,15 @@
     on('ssb-logsave', 'click', () => {
       try {
         flushErrGroup();
-        const txt = (logAll.length ? logAll : state.log).join('\n');
+        // [v1.92.33] File .txt = log gọn + SỔ KIỂM CHỨNG TỪNG CHAT (không gộp). Đây là bản đủ để
+        // truy khi có ca xác nhận sai gây lặp: mỗi chat có id, tên, mọi kết quả và thời điểm.
+        const head = ['BOTFAKE ' + APP_VERSION + ' · log lượt gửi',
+          'Xuất lúc ' + fmtClock(Date.now()) + ' · ' + logAll.length + ' dòng log gọn · '
+          + auditRows.length + ' dòng sổ kiểm chứng',
+          'Mục 1: LOG GỌN (đúng như bảng log trên màn hình).',
+          'Mục 2: SỔ KIỂM CHỨNG TỪNG CHAT — không gộp, để tra ca xác nhận sai gây gửi lặp.',
+          ''].join('\n');
+        const txt = head + (logAll.length ? logAll : state.log).join('\n') + '\n\n' + buildAuditText() + '\n';
         const d = new Date();
         const stamp = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0')
           + '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0') + String(d.getSeconds()).padStart(2, '0');
@@ -10133,7 +10159,8 @@
         document.body.appendChild(a);
         a.click();
         setTimeout(() => { try { URL.revokeObjectURL(a.href); a.remove(); } catch (e2) { /* ignore */ } }, 1000);
-        logLine('💾 Đã tải ' + logAll.length + ' dòng log ra file botfake-log-' + stamp + '.txt');
+        logLine('💾 Đã tải log ra file botfake-log-' + stamp + '.txt · ' + logAll.length + ' dòng log gọn + '
+          + auditRows.length + ' dòng sổ kiểm chứng từng chat');
       } catch (e) { logLine('⛔ Không tạo được file log: ' + (e && e.message || e)); }
     });
     // phóng to bảng LOG / bảng LIST → cửa sổ nổi kéo thả + đổi cỡ (xem toggleFloat)
@@ -10863,45 +10890,157 @@
     t = t.replace(/\s*\|\s*/g, ' | ').trim(); // chuỗi bị nén hay dính khoảng trắng quanh "|"
     return clip(t, 140);
   };
-  /* [v1.92.32] GỘP CÁC DÒNG CÙNG LÝ DO thành 1 dòng đếm (tối đa 1 dòng / 2 giây).
-   * Trước: 3 559 dòng ❌ gần giống hệt nhau trong 4 giây của một lô lớn; ~600 dòng 🛟 và
-   * ~600 dòng ❌ [d/t] api(#551)… nữa ⇒ copy ra hàng nghìn dòng.
-   * Sau:  mỗi lý do 1 dòng, kèm "[done/total]", số chat cùng lỗi, 4 tên ví dụ.
-   * Sổ tên chat đầy đủ vẫn nằm trong state và trong "💾 .txt" — chỉ phần HIỂN THỊ bị gộp. */
-  let logGroupCtx = null; // runSend gán = () => done + '/' + totalAll
-  const errGroup = { key: '', n: 0, names: [], tag: '❌', at: 0, start: 0 };
-  let errGroupTimer = null;
-  function flushErrGroup() {
-    if (errGroupTimer) { clearTimeout(errGroupTimer); errGroupTimer = null; }
-    if (!errGroup.n) return;
-    const g = errGroup;
-    const head = (logGroupCtx ? '[' + logGroupCtx() + '] ' : '');
-    const GROUP_LABEL = { '❌': 'cùng lỗi', '⚠': 'cùng lỗi', '🔎': 'cùng tình huống', '🛟': 'cùng tình huống', '🔁': 'cùng tình huống', '✅': 'cùng kết quả', '🛡': 'cùng tình huống' };
-    const what = GROUP_LABEL[g.tag] || 'cùng lỗi';
-    logLine((g.tag || '❌') + ' ' + head + (g.n > 1
-      ? '×' + g.n + ' chat ' + what + ' — ' + g.key + ' · vd: ' + g.names.join(', ')
-      : g.names[0] + ' — ' + g.key));
-    g.n = 0; g.names = []; g.key = ''; g.at = 0; g.start = 0;
+  /* ================== SỔ KIỂM CHỨNG TỪNG CHAT (audit) ==================
+   * Yêu cầu: bảng log phải GỌN, NHƯNG khi có ca xác nhận sai gây GỬI LẶP thì phải còn đủ dấu vết
+   * để truy. Nên tách làm hai:
+   *   • Màn hình  = dòng gộp (1 dòng / 2 giây / lý do) — để nhìn.
+   *   • auditRows = MỌI kết quả từng chat, KHÔNG gộp, KHÔNG cắt theo cửa sổ hiển thị — xuất ra
+   *                 file "💾 .txt" (mục SỔ KIỂM CHỨNG) để truy ca lặp.
+   * Ghi ở đây chỉ là GHI NHẬN, không đổi kết quả gửi. */
+  const auditRows = [];
+  const AUDIT_MAX = 60000;
+  const nameById = Object.create(null);
+  const deliverHits = new Map();          // id chat → [{t, by}] mọi lần markDelivered
+  const pad2 = (n) => (n < 10 ? '0' + n : '' + n);
+  function fmtClock(ts) {
+    const d = new Date(ts);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) + '.' + String(d.getMilliseconds()).padStart(3, '0');
   }
-  function logFailGrouped(name, reason, tag) {
-    tag = tag || '❌';
-    const key = compressErr(reason);
-    const now = Date.now();
-    const same = (key === errGroup.key) && (tag === errGroup.tag) && (now - errGroup.start < 60000);
-    if (!same) {
-      flushErrGroup();                       // in nhóm cũ trước khi đổi lý do
-      errGroup.key = key;
-      errGroup.tag = tag;
-      errGroup.start = now;
-      errGroup.n = 0;
-      errGroup.names = [];
+  function auditPush(tag, cid, name, reason) {
+    try {
+      if (cid && name && String(name) !== String(cid)) nameById[cid] = name;
+      auditRows.push({ t: Date.now(), tag: tag, id: cid ? String(cid) : '', name: name ? String(name) : '', reason: String(reason == null ? '' : reason) });
+      if (auditRows.length > AUDIT_MAX) auditRows.shift();
+    } catch (e) { /* ghi nhận lỗi không được làm hỏng luồng gửi */ }
+  }
+  function auditReset() { auditRows.length = 0; deliverHits.clear(); }
+  /* Xuất sổ kiểm chứng: (1) chat nghi gửi lặp, (2) dòng thời gian từng chat, (3) tổng theo chat. */
+  function buildAuditText() {
+    const out = [];
+    out.push('=== SỔ KIỂM CHỨNG TỪNG CHAT (' + auditRows.length + ' dòng, KHÔNG gộp, KHÔNG cắt) ===');
+    out.push('Dùng khi nghi XÁC NHẬN SAI gây gửi lặp: tra id/tên chat ở đây sẽ thấy đủ mọi kết quả');
+    out.push('(✅ tới nơi · ⚠ không rõ · ❌ lỗi · 🔎 kiểm chứng · 🔁 bắn lại · 🛟 chuyển làn) kèm giờ.');
+    const dup = [];
+    deliverHits.forEach((hits, id) => { if (hits && hits.length > 1) dup.push({ id: id, hits: hits }); });
+    out.push('');
+    out.push('(chat bị đánh dấu "đã tới nơi" ≥2 lần KHÁC kênh hoặc cách nhau >2 s = dấu hiệu gửi lặp)');
+    out.push('⚠ NGHI GỬI LẶP: ' + dup.length + ' chat'
+      + (dup.length ? ' — chat bị đánh dấu "đã tới nơi" từ 2 lần trở lên:' : ' (không có — mỗi chat chỉ được đánh dấu "đã tới nơi" 1 lần)'));
+    dup.slice(0, 300).forEach((d) => {
+      out.push('   ' + d.id + ' · ' + (nameById[d.id] || '?') + ' · ' + d.hits.length + ' lần: '
+        + d.hits.map((h) => fmtClock(h.t) + ' qua ' + h.by).join(' ; '));
+    });
+    if (dup.length > 300) out.push('   … còn ' + (dup.length - 300) + ' chat (xem mục tổng theo chat)');
+    out.push('');
+    out.push('--- DÒNG THỜI GIAN (mỗi dòng = 1 kết quả của 1 chat) ---');
+    for (let i = 0; i < auditRows.length; i++) {
+      const r = auditRows[i];
+      out.push(fmtClock(r.t) + '  ' + r.tag + '  ' + (r.id || '-') + '  ' + (r.name || '-') + '  ' + r.reason);
     }
-    errGroup.at = now;
-    errGroup.n++;
-    if (errGroup.names.length < 4 && errGroup.names.indexOf(name) < 0) errGroup.names.push(name);
-    if (!errGroupTimer) errGroupTimer = setTimeout(flushErrGroup, 2000);
+    // tổng theo chat: số lần đã tới nơi / không rõ / lỗi + kênh
+    const per = new Map();
+    for (let i = 0; i < auditRows.length; i++) {
+      const r = auditRows[i];
+      const k = r.id || ('?' + r.name);
+      let a = per.get(k);
+      if (!a) { a = { id: r.id, name: r.name, ok: 0, unsure: 0, fail: 0, other: 0, by: '', first: r.t, last: r.t }; per.set(k, a); }
+      if (r.tag === '✅') a.ok++; else if (r.tag === '⚠' || r.tag === '🔎') a.unsure++;
+      else if (r.tag === '❌') a.fail++; else a.other++;
+      if (!a.name && r.name) a.name = r.name;
+      a.last = r.t;
+    }
+    out.push('');
+    out.push('--- TỔNG THEO CHAT (' + per.size + ' chat có dấu vết) ---');
+    out.push('id · tên · #đã tới nơi · #không rõ/kiểm chứng · #lỗi · #khác · từ lúc → đến lúc');
+    const lastBy = new Map();
+    deliverHits.forEach((hits, id) => { if (hits && hits.length) lastBy.set(String(id), hits[hits.length - 1].by); });
+    per.forEach((a) => {
+      const by = lastBy.get(String(a.id)) || '';
+      out.push(a.id + ' · ' + (a.name || nameById[a.id] || '?') + ' · ' + a.ok + ' · ' + a.unsure + ' · ' + a.fail + ' · ' + a.other
+        + ' · ' + (by ? ('kênh ' + by + ' · ') : '') + fmtClock(a.first) + ' → ' + fmtClock(a.last));
+    });
+    return out.join('\n');
   }
-  function logGroupReset() { if (errGroupTimer) { clearTimeout(errGroupTimer); errGroupTimer = null; } errGroup.n = 0; errGroup.names = []; errGroup.key = ''; errGroup.start = 0; }
+
+  /* [v1.92.33] GỘP DÒNG TRÊN MÀN HÌNH — MỖI LÝ DO MỘT SỔ RIÊNG.
+   * Bản 1.92.32 chỉ có MỘT khe chờ: hai lý do xen kẽ nhau (vd "FB từ chối nhận tin" ↔ "KHÔNG
+   * thử lần 2") đẩy nhau ra liên tục ⇒ 93 dòng lỗi cho lô 2 251 chat. Nay mỗi lý do có sổ riêng
+   * nên xen kẽ kiểu gì cũng chỉ 1 dòng / 2 giây / lý do. */
+  let logGroupCtx = null; // runSend gán = () => done + '/' + totalAll
+  const errGroups = new Map();
+  const GROUP_FLUSH_MS = 2000;
+  const GROUP_MAX = 200;
+  const GROUP_LABEL = { '❌': 'cùng lỗi', '⚠': 'cùng lỗi', '🔎': 'cùng tình huống', '🛟': 'cùng tình huống', '🔁': 'cùng tình huống', '✅': 'cùng kết quả', '🛡': 'cùng tình huống' };
+  /* Khoá nhóm: bỏ các con số ĐỔI THEO THỜI GIAN (đã thử 40→44 ca…) để không chẻ nhóm.
+   * Chỉ dùng cho việc GỘP; nội dung in ra vẫn lấy bản mới nhất (nên vẫn thấy "đã thử 44 ca"). */
+  const VOLATILE_NUM = [
+    [/đã thử \d+ ca/g, 'đã thử N ca'],
+    [/từ chối gần đây \d+%/g, 'từ chối gần đây N%'],
+    [/\(muộn \d+(?:[.,]\d+)?s\)/g, '(muộn Ns)'],
+    [/đọc \d+ lần/g, 'đọc N lần'],
+    [/sau \d+ ?ms/gi, 'sau N ms'],
+  ];
+  const groupKeyOf = (tag, t) => {
+    let k = t;
+    for (let i = 0; i < VOLATILE_NUM.length; i++) k = k.replace(VOLATILE_NUM[i][0], VOLATILE_NUM[i][1]);
+    return tag + '\u0001' + k;
+  };
+  function flushGroup(g) {
+    if (!g) return;
+    if (g.timer) { clearTimeout(g.timer); g.timer = null; }
+    if (!g.n) return;
+    if (errGroups.get(g.key) === g) errGroups.delete(g.key);
+    const head = (logGroupCtx ? '[' + logGroupCtx() + '] ' : '');
+    const what = GROUP_LABEL[g.tag] || 'cùng lỗi';
+    const names = g.names.length ? ' · vd: ' + g.names.join(', ') : '';
+    logLine(g.tag + ' ' + head + (g.n > 1
+      ? '×' + g.n + ' chat ' + what + ' — ' + g.display + names
+      : (g.names[0] ? g.names[0] + ' — ' : '') + g.display));
+    g.n = 0; g.names = [];
+  }
+  function flushErrGroup() {
+    const list = Array.from(errGroups.values());
+    for (let i = 0; i < list.length; i++) flushGroup(list[i]);
+  }
+  function logFailGrouped(name, reason, tag, cid) {
+    tag = tag || '❌';
+    const display = compressErr(reason);
+    auditPush(tag, cid, name, display);   // sổ kiểm chứng: KHÔNG gộp, ghi trước khi gộp màn hình
+    const k = groupKeyOf(tag, display);
+    const now = Date.now();
+    let g = errGroups.get(k);
+    if (!g) {
+      if (errGroups.size >= GROUP_MAX) flushGroup(errGroups.values().next().value);
+      g = { key: k, tag: tag, n: 0, names: [], display: display, timer: null };
+      errGroups.set(k, g);
+    }
+    g.n++;
+    g.display = display;                                   // hiện số liệu MỚI NHẤT
+    if (name && g.names.length < 4 && g.names.indexOf(name) < 0) g.names.push(name);
+    void now;
+    if (!g.timer) g.timer = setTimeout(() => flushGroup(g), GROUP_FLUSH_MS);
+  }
+  function logGroupReset() {
+    errGroups.forEach((g) => { if (g && g.timer) clearTimeout(g.timer); });
+    errGroups.clear();
+  }
+  /* [v1.92.33] Nới lane đi từng nấc +8 ⇒ lô 2 251 chat in 16 dòng liền nhau. Gom lại: chỉ in
+   * MỘT dòng sau khi nấc cuối đứng yên 2,5 s, kèm khoảng nới và số nấc. */
+  const laneRamp = new Map(); // pid → {from, to, steps, timer}
+  function logLaneRamp(pid, from, to) {
+    const key = String(pid || '');
+    let r = laneRamp.get(key);
+    if (!r) { r = { from: from, to: to, steps: 0, timer: null }; laneRamp.set(key, r); }
+    r.to = to; r.steps++;
+    if (r.timer) clearTimeout(r.timer);
+    r.timer = setTimeout(() => {
+      laneRamp.delete(key);
+      try {
+        logLine('⚡ Socket ACK nhanh ổn định — nới lane page ' + key + ': ' + r.from + ' → ' + r.to
+          + ' (' + r.steps + ' nấc)');
+      } catch (e) { /* ignore */ }
+    }, 2500);
+  }
 
   function flushLogUI(forceBottom) {
     logFlushTimer = null;
