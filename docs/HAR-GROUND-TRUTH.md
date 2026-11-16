@@ -3559,3 +3559,30 @@ bằng trần làn ctx đang dùng nên **không tạo thêm tải mới**.
 
 **Không cắt** các mốc an toàn: 10 s chứng minh vắng mặt trước khi bù, 20 s kiểm chứng Ext, 45 s
 dò lại — đây là sàn chống gửi trùng/gửi thiếu, không phải chờ mù.
+
+### 77.12 Danh sách chỉ tải khi NGƯỜI DÙNG bấm — sửa 5 đường tự tải ngầm
+
+Người dùng: *"tôi nói chỉ tải danh sách khi tôi ấn cơ mà, tại sao chọn khoảng và chọn chuỗi vẫn
+phải tải lại?"* — đúng. `1.92.43` mới chỉ cho nút **⚡ Tải danh sách** dùng cache 10 phút; các
+đường chọn khác vẫn gọi API **vô điều kiện**:
+
+| đường | trước 1.92.43c | sau |
+|---|---|---|
+| Chọn chuỗi (nhấp 2 lần / Alt+click 2 dòng) | `scanFullList({forRange:true})` **luôn chạy** | dùng danh sách đã có nếu **đủ 2 đầu chuỗi**; chỉ tải bổ sung khi thật thiếu |
+| Chọn từ đây xuống cuối (nút ⤓) | `scanFullList({full:true})` **luôn chạy** | dùng danh sách đã có |
+| Alt+click 1 dòng 2 lần = xuống cuối | **luôn chạy** | dùng danh sách đã có |
+| ▶ Chạy gặp danh sách hỏng | `restartIfBusy` ⇒ **giết** lượt quét đang chạy | `skipIfBusy`: nhường, không dừng lượt của người dùng |
+| Bấm ⤓ / ▶ trong lúc lô đang gửi (`sendListFrozen`) | `return` **im lặng** | ghi rõ đang dùng danh sách giữ sẵn, vẫn khớp được |
+
+Ba nguyên tắc:
+
+1. **Tải danh sách = hành động của người dùng.** Chỉ nút ⚡ (và SHIFT+⚡ để buộc tải mới) phát
+   request `next_cursor`. Không đường chọn nào tự phát nữa.
+2. **Không bao giờ gửi thiếu vì dùng lại danh sách.** `completeRange` kiểm 2 đầu chuỗi có trong
+   danh sách đang giữ; thiếu ⇒ tải bổ sung (và nói rõ trong log). Vùng chọn tải dừng ở cuối chuỗi
+   được đánh dấu `allRowsPartial` ⇒ "chọn tất cả" vẫn tự tải đủ.
+3. **Lượt quét đang chạy không bị lệnh tự động giết.** `skipIfBusy` nhường thay vì `stopRequested`.
+
+Log mới để đối chiếu: `🔗 Dùng danh sách đã tải (N chat, Xs trước) — KHÔNG gọi lại API.`
+Nếu vẫn thấy `⚡ Danh sách hiện tại chưa đủ 2 đầu chuỗi` thì đó là ca **thật sự thiếu** (chuỗi vượt
+ra ngoài vùng đã tải), không phải tải lại vô ích.

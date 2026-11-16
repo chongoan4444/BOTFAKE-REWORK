@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.43-w200.86
+// @version      1.92.43-w200.87
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.43-W200.86'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.43-W200.87'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1095,10 +1095,21 @@
     // Hiển thị tạm ngay từ dữ liệu sẵn có trên màn hình/Redux để UI phản hồi tức thì,
     // sau đó LUÔN tự động gọi API tải mới danh sách cho đúng chuỗi vừa chọn (kể cả khi trước đó đã có danh sách)!
     computeMatches({ silentMissingLog: true });
-    logLine('⚡ Đang tự tải danh sách cho chuỗi đã chọn: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id) + '…');
-    render();
-    await scanFullList({ forRange: true, restartIfBusy: true });
-    computeMatches({ silentMissingLog: true });
+    const endsCovered = () => {
+      const ids = new Set((state.matches || []).map((m) => m.id));
+      return ids.has(start.id) && ids.has(endInfo.id);
+    };
+    if (normalizeListForReuse() && endsCovered()) {
+      // Đã có danh sách + đủ 2 đầu chuỗi ⇒ KHÔNG gọi API. Người dùng chỉ tải khi họ bấm.
+      logLine('🔗 Dùng danh sách đã tải (' + state.allRows.size + ' chat, ' + listAgeText()
+        + ' trước) — KHÔNG gọi lại API.');
+    } else {
+      logLine('⚡ Danh sách hiện tại chưa đủ 2 đầu chuỗi — tự tải bổ sung cho chuỗi đã chọn: '
+        + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id) + '… (giữ SHIFT khi bấm ⚡ để tải mới toàn bộ)');
+      render();
+      await scanFullList({ forRange: true, restartIfBusy: true });
+      computeMatches({ silentMissingLog: true });
+    }
     const chainAlive = state.mode === 'range' && state.rangeStart
       && String(state.rangeStart.id) === String(start.id);
     const hasStart = state.matches.some((m) => m.id === start.id);
@@ -2106,6 +2117,27 @@
       || $('.conversation-list');
   }
 
+  /* [v1.92.43c] DÙNG LẠI DANH SÁCH ĐÃ TẢI — mọi đường "cần danh sách mới" đều phải hỏi ý người
+   * dùng trước. Người dùng nói rõ: "tôi nói chỉ tải danh sách khi tôi ấn". Trước đây chọn chuỗi
+   * (completeRange) và chọn từ đây xuống cuối (⤓) LUÔN gọi API tải mới, kể cả khi danh sách vừa
+   * tải vài giây trước — tốn hàng chục–hàng trăm request next_cursor và dính 429. */
+  function normalizeListForReuse() {
+    if (!state.allRows || !state.allRows.size) return false;
+    if (state.listIncomplete) return false; // danh sách hỏng thì phải tải lại thật
+    if (state.allRowsPartial) {
+      // Danh sách đang là "tải tới đúng đoạn chọn rồi dừng" ⇒ đánh dấu đầy đủ để dùng cho cả
+      // chuỗi dài. Có LỐI THOÁT: nếu 2 đầu chuỗi mới không nằm trong đó, completeRange tự tải lại.
+      state.allRowsPartial = false;
+      state.listIncomplete = false;
+    }
+    if (!state.listLoadedAt) state.listLoadedAt = Date.now();
+    return true;
+  }
+  function listAgeText() {
+    const sec = Math.max(0, Math.round((Date.now() - (state.listLoadedAt || 0)) / 1000));
+    return sec < 90 ? (sec + 's') : (Math.round(sec / 60) + ' phút');
+  }
+
   // ⚡ Tải danh sách: CHỈ API next_cursor tuần tự. Không cuộn DOM / virtual list.
   /* [v1.92.43] TẢI DANH SÁCH ĐÚNG 1 LẦN.
    * Người dùng chọn đi chọn lại nhiều lượt trên cùng một danh sách; mỗi lần bấm ⚡ là một chuỗi
@@ -2121,9 +2153,21 @@
     return n;
   }
   async function scanFullList(opts) {
-    if (state.sendListFrozen) return;
+    if (state.sendListFrozen) {
+      // [v1.92.43c] Lô đang gửi ⇒ danh sách đang có vẫn dùng được làm vùng khớp (miễn không quá cũ).
+      if (state.allRows && state.allRows.size && !state.listIncomplete) {
+        state.listLoadedAt = state.listLoadedAt || Date.now();
+        logLine('🔒 Đang gửi nên KHÔNG tải danh sách — dùng danh sách đang giữ ('
+          + state.allRows.size + ' chat, ' + listAgeText() + ' trước).');
+      } else {
+        logLine('🔒 Đang gửi nên KHÔNG tải danh sách — lượt chọn này chỉ khớp trên danh sách đang hiện.');
+      }
+      computeMatches();
+      render();
+      return;
+    }
     const scanOpts = opts || {};
-    if (!scanOpts.force && !scanOpts.forRange && !scanOpts.restartIfBusy) {
+    if (!scanOpts.force && !scanOpts.forRange && !scanOpts.restartIfBusy && !scanOpts.skipIfBusy) {
       const cached = listCacheFresh();
       if (cached) {
         logLine('♻ Dùng lại danh sách đã tải (' + cached + ' chat, '
@@ -2135,6 +2179,12 @@
       }
     }
     if (state.scanning) {
+      if (scanOpts.skipIfBusy) {
+        // [v1.92.43c] Lượt quét CHỈ do người dùng bấm mới được phép chạy; lệnh tự động gặp lượt
+        // đang chạy thì nhường, KHÔNG dừng lượt của người dùng.
+        logLine('⏳ Đang tải danh sách — nhường lượt đang chạy (không dừng).');
+        return;
+      }
       if (scanOpts.restartIfBusy) {
         state.scanStopRequested = true;
         await waitCond(() => !state.scanning, 'scan-done', 4000); // [v1.92.9] thức NGAY khi lượt quét cũ kết thúc
@@ -2258,7 +2308,10 @@
       found.forEach((v) => { v.order = ord++; });
       state.allRows = found;
       state.listLoadedAt = Date.now(); // [v1.92.43] mốc để dùng lại danh sách (không tải lại)
-      state.allRowsPartial = !!(api && api.rangePartial) && (!prevAllRows || prevAllRowsPartial);
+      /* [v1.92.43c] Vùng chọn dừng ở cuối chuỗi ⇒ danh sách KHÔNG phải toàn bộ. Dùng lại được cho
+       * chuỗi nằm trong vùng này, nhưng KHÔNG được coi là đầy đủ cho "chọn tất cả" hay chuỗi khác
+       * vượt ra ngoài — những đường đó tự kiểm 2 đầu và tải bổ sung. */
+      state.allRowsPartial = !!(api && api.rangePartial);
       state.listIncomplete = false;
       setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
       setScanProgress(api.rows.length, 100);
@@ -11310,7 +11363,7 @@
       if (state.sendListFrozen) return;
       if (!state.allRows || !state.allRows.size || state.allRowsPartial) {
         logLine('⚡ Chưa tải đủ danh sách — tự tải toàn bộ rồi chọn tất cả…');
-        await scanFullList({ full: true, restartIfBusy: true });
+        await scanFullList({ full: true, restartIfBusy: true, skipIfBusy: true });
       }
       const rows = sourceRows();
       if (!rows.length) {
@@ -11340,8 +11393,13 @@
       const btn = root.getElementById('ssb-to-end');
       if (btn) btn.disabled = true;
       try {
-        logLine('⚡ Đang tự tải danh sách qua API để lấy từ ' + (info.name || info.id) + ' tới cuối…');
-        await scanFullList({ full: true, restartIfBusy: true });
+        if (normalizeListForReuse()) {
+          logLine('⬇ Dùng danh sách đã tải (' + state.allRows.size + ' chat, ' + listAgeText()
+            + ' trước) để lấy từ ' + (info.name || info.id) + ' tới cuối — KHÔNG gọi lại API.');
+        } else {
+          logLine('⚡ Chưa có danh sách — tải một lần để lấy từ ' + (info.name || info.id) + ' tới cuối…');
+          await scanFullList({ full: true, restartIfBusy: true });
+        }
         const rows = sourceRows();
         const idx = rows.findIndex((r) => r.id === info.id);
         if (idx < 0) {
@@ -12337,8 +12395,13 @@
       state.lastAltClickId = null;
       state.lastAltClickTime = 0;
       (async () => {
-        logLine('⚡ Đang tự tải danh sách qua API để lấy từ ' + (info.name || info.id) + ' xuống cuối…');
-        await scanFullList({ full: true, restartIfBusy: true });
+        if (normalizeListForReuse()) {
+          logLine('⬇ Dùng danh sách đã tải (' + state.allRows.size + ' chat, ' + listAgeText()
+            + ' trước) để lấy từ ' + (info.name || info.id) + ' xuống cuối — KHÔNG gọi lại API.');
+        } else {
+          logLine('⚡ Chưa có danh sách — tải một lần để lấy từ ' + (info.name || info.id) + ' xuống cuối…');
+          await scanFullList({ full: true, restartIfBusy: true });
+        }
         state.mode = 'range';
         state.target = null;
         state.rangeStart = enrichRowWithRedux(info);
