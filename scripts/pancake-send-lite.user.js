@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.34-w200.77
+// @version      1.92.35-w200.78
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.34-W200.77'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.35-W200.78'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2294,6 +2294,7 @@
     cacheHit: 0, httpHit: 0, httpNoGid: 0, httpFail: 0, http429: 0,
     wsHit: 0, extHit: 0, extUnknown: 0, unknown: 0, batchMappings: 0,
     batchReturned: 0, batchFail: 0, extRespondedNoGid: 0, gateSkip: 0,
+    shortNoGidWait: 0,
   };
   function resetGidStats() {
     Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
@@ -3678,8 +3679,20 @@
       }
     };
 
-    const extWaitMs = 10000;
-    const wsWaitMs = hasExtFinder ? extWaitMs : 6000;
+    /* [v1.92.35] ĐUÔI LÔ — CA SERVER ĐÃ NÓI "KHÔNG CÓ global_id" (lô 14:28, 8 851 chat):
+     * 287 ca rơi vào nhóm này. HTTP GET /messages đã trả LỜI RÕ là hội thoại không có gid,
+     * nhưng code vẫn giữ chúng chờ trọn 10 s cho WebSocket + Extension dò lại ⇒ `wave 14`
+     * đứng 23 449 ms với `main bay 0 · Socket/page active 0/0`, đuôi lô ~10 chat/s.
+     * Bằng chứng: đúng nhóm này Extension trả "không có gid" 287/287 lần ⇒ 10 s đó là chờ suông.
+     * Nay ở lô lớn: chỉ cho 1,5 s (đủ cho `peekFastGlobalId` 60 ms + Ext phản hồi nhanh); không ra
+     * thì đi tiếp y như cũ (gidUnknown → làn API bằng conversation_id). Lô nhỏ giữ nguyên 10 s
+     * để dò kỹ. Tắt nhanh: GID_NOGID_SHORT_WAIT_MS = 0. */
+    const GID_NOGID_SHORT_WAIT_MS = 1500;
+    const serverSaysNoGid = !!(ctx && (ctx.httpState === 'ok-no-gid' || ctx.gidDiscoveryState === 'server-no-gid'));
+    const shortNoGidWait = !!(isLargeBatch && serverSaysNoGid && GID_NOGID_SHORT_WAIT_MS > 0);
+    if (shortNoGidWait) gidStats.shortNoGidWait++;
+    const extWaitMs = shortNoGidWait ? GID_NOGID_SHORT_WAIT_MS : 10000;
+    const wsWaitMs = hasExtFinder ? extWaitMs : (shortNoGidWait ? GID_NOGID_SHORT_WAIT_MS : 6000);
     const extStartDelayMs = discoveryPass === 2 ? 0 : 80;
     const raceTasks = [];
 
@@ -4004,7 +4017,11 @@
       const httpOkNoGid = !!((ctx.httpState === 'ok-no-gid' || ctx.gidDiscoveryState === 'server-no-gid')
         || (ccEntry && ccEntry.fetched && !ccEntry.gid));
       const batchSettled = !!(pageId && !batchGidPromises[pageId]);
-      if (isLargeBatch && httpOkNoGid && batchSettled && extFinderRespondedNoGid) {
+      // [v1.92.35] `|| shortNoGidWait`: khi ta CHỦ ĐỘNG rút ngắn thời gian dò (server đã trả lời
+      // "không có gid"), thì không đòi thêm bằng chứng "Ext cũng trả lời không có gid" — chính ta
+      // đã không cho Ext đủ thời gian trả lời. Giữ nguyên hệ quả đã đo ở lô 14:28: nhóm này KHÔNG
+      // gửi Ext thread-only (vô ích, chỉ trả 1545041) mà đi thẳng làn API.
+      if (isLargeBatch && httpOkNoGid && batchSettled && (extFinderRespondedNoGid || shortNoGidWait)) {
         ctx.noGidConfirmedByExt = true;
         ctx.gidGateSkipExt = true;
         ctx.gidDiscoveryState = 'ext-responded-no-gid';
@@ -7709,6 +7726,7 @@
           + ' · bỏ nới lane (p50 > ' + SOCK_RAMP_P50_MAX_MS + 'ms) ' + sockRampSkipped + ' lần'
           + ' · can_inbox=false ' + ((sendDiag && sendDiag.canInboxFalse) || 0) + '/' + ((sendDiag && sendDiag.canInboxSeen) || 0)
            + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
+           + ' · chờ dò ngắn (server nói không có gid) ' + (gidStats.shortNoGidWait || 0) + ' ca'
            + ' · chọn kênh: Ext-trước(socket chưa sync) ' + socketPickDiag.notReady
            + ' / thiếu gid ' + socketPickDiag.noGid
            + ' / Socket bị né (ACK chết) ' + socketPickDiag.deadSkip
@@ -7742,6 +7760,15 @@
     flushBatchSummaryUI();
   }
 
+  /* [v1.92.35] SỐ "THÀNH CÔNG" PHẢI LÀ SỐ ĐÃ TỚI NƠI THẬT.
+   * Lô 14:28 (8 851 chat): dòng tiến độ in `thành công 8564/8851` (96,8 %) lúc 14:30:02,
+   * 3 giây sau TỔNG HỢP chốt 5 095 (57,6 %). Nguyên nhân: chế độ wave trả `{ok:true, fired:true}`
+   * NGAY KHI BẮN (chưa có ACK) nên biến `ok` trong vòng lặp cộng luôn; 3 411 ca ACK `rejected`
+   * về sau chỉ chốt ❌ ở nền mà không trừ `ok`. Nay tiến độ đọc `summaryCounters.ok*` — chỉ tăng
+   * khi `markDelivered()` thật sự chạy (ACK OK / API 200 / Ext trả success) và tự giảm khi lật lại. */
+  function confirmedOkCount() {
+    return summaryCounters.okApi + summaryCounters.okExt + summaryCounters.okSocket;
+  }
   function markDelivered(convId, via) {
     if (!convId) return;
     clearBgPending(convId);
@@ -8905,6 +8932,33 @@
       });
     } catch (eNm) { /* ignore */ }
     try { deadRecheckQueue.length = 0; } catch (eDq) { /* ignore */ }
+    // [v1.92.35] LÀN SOCKET KHÔNG ĐƯỢC MANG TRẦN CỦA LÔ TRƯỚC.
+    // Lô 14:23 kết thúc ở [384×1]; lô 14:28 mở màn đã `lane 384×1` dù ACK p50 của lô trước là
+    // 2 449 ms. Vì limit đã bằng trần nên điều kiện `getLimit() < SOCKET_LANE_MAX` sai ngay từ
+    // đầu ⇒ C2 (`rampAllowed`) chưa từng được gọi — dòng "bỏ nới lane 0 lần" là 0 vô nghĩa.
+    // Nay mỗi lô tự đánh giá lại: p50 lô trước (ackLatRing giữ qua các lô) chưa đủ mẫu hoặc
+    // > 1 800 ms ⇒ hạ mọi làn page về BUS_PARALLEL_SOCKET (256) — đúng mức thiết kế; ACK nhanh
+    // thì trong lô làn tự leo lại 384. Muốn tắt: đặt LANE_CARRY_CLAMP = false.
+    try {
+      const LANE_CARRY_CLAMP = true;
+      if (LANE_CARRY_CLAMP) {
+        const p50Prev = sockAckP50();
+        const capStart = (!p50Prev || p50Prev > SOCK_RAMP_P50_MAX_MS) ? BUS_PARALLEL_SOCKET : SOCKET_LANE_MAX;
+        const clamped = [];
+        Object.keys(pageSocketLanes).forEach((pid) => {
+          const lane = pageSocketLanes[pid];
+          if (!lane || typeof lane.setLimit !== 'function') return;
+          const before = lane.getLimit();
+          if (before > capStart) { lane.setLimit(capStart); clamped.push(pid + ' ' + before + '→' + capStart); }
+        });
+        if (clamped.length) {
+          logLine('🐢 Làn Socket mang từ lô trước bị hạ về ' + capStart + ': ' + clamped.join(' · ')
+            + ' — ' + (p50Prev ? ('ACK p50 lô trước ' + p50Prev + 'ms > ' + SOCK_RAMP_P50_MAX_MS + 'ms')
+              : 'chưa đủ mẫu ACK')
+            + ' ⇒ lô mới khởi động ở mức an toàn, ACK nhanh thì lane tự leo lại.');
+        }
+      }
+    } catch (eLane) { /* ignore */ }
     if (preloadSelectedTimer) { clearTimeout(preloadSelectedTimer); preloadSelectedTimer = null; }
     preloadSelectedSeq++;
     applyRunStopButtons();
@@ -9289,7 +9343,9 @@
         if (!r.fired) { markDelivered(c.id, r.sendBy || 'api'); postSendSideEffects(c); }
         if (r.fired) { firedN++; noteBgPending(c, r.sendBy); } // vào sổ watchdog — quá 90s tự chốt, không kẹt
         // [v1.92.31] KHÔNG in từng dòng "đã gửi" nữa — chỉ in mốc tiến độ (xem logProgress).
-        logProgress(done, totalAll, ok, unsure, fail);
+        // [v1.92.35] `ok` ở đây là "đã phát" (ca fired chưa có ACK) ⇒ KHÔNG dùng để báo thành công.
+        const cOkNow = confirmedOkCount();
+        logProgress(done, totalAll, cOkNow, unsure, fail, Math.max(0, done - cOkNow - unsure - fail));
       } else if (r.gated) {
         // [v1.92.30] Phán đoán sai (không phải bằng chứng) ⇒ cổng chứng minh vắng mặt đang chạy
         // ở làn riêng. Vẫn tính ⚠ (để sổ sách đúng) và vẫn ghi uncertainIds — cổng có quyền đi
@@ -9323,11 +9379,15 @@
         lastSpeedLogAt = Date.now();
         const elapsedS = Math.max(1, (Date.now() - batchStats.startedAt) / 1000);
         const rate = done / elapsedS; // chat đã xử lý/giây từ đầu lượt
-        const successRate = ok / elapsedS;
+        // [v1.92.35] thành công = ĐÃ TỚI NƠI (không phải "đã phát"), phần còn lại là đang bay.
+        const cOkSpeed = confirmedOkCount();
+        const pendingSpeed = Math.max(0, done - cOkSpeed - unsure - fail);
+        const successRate = cOkSpeed / elapsedS;
         const remainS = rate > 0 ? Math.round((totalAll - done) / rate) : 0;
         const fmtDur = (sec) => sec >= 3600 ? (sec / 3600).toFixed(1) + ' giờ' : Math.max(1, Math.round(sec / 60)) + ' phút';
         logLine('📊 Đã xử lý ' + done + '/' + totalAll + ' · tốc độ xử lý ' + (rate * 60).toFixed(0) + '/phút'
-          + ' · thành công ' + ok + '/' + totalAll + ' (' + (successRate * 60).toFixed(0) + ' tin/phút)'
+          + ' · thành công ' + cOkSpeed + '/' + totalAll + ' (' + (successRate * 60).toFixed(0) + ' tin/phút)'
+          + (pendingSpeed ? ' · chờ xác nhận ' + pendingSpeed : '')
           + ' · dự kiến còn ~' + fmtDur(remainS) + ' nữa');
       }
       return r;
@@ -11226,7 +11286,7 @@
    * khỏi tầm mắt và log phải cuộn hàng nghìn dòng. Nay chỉ in mốc: lô > 500 chat in mỗi 10%,
    * lô nhỏ in mỗi 25% (vẫn thấy tiến độ, không mất thông tin vì TỔNG HỢP cuối có số chính xác). */
   const logProgressMark = { pct: 0 };
-  function logProgress(done, total, ok, unsure, fail) {
+  function logProgress(done, total, ok, unsure, fail, inflight) {
     const t = Number(total) || 0;
     if (!t) return;
     const d = Number(done) || 0;
@@ -11235,6 +11295,7 @@
     if (pct < logProgressMark.pct + step || pct >= 100) return;
     logProgressMark.pct = pct - (pct % step);
     logLine('🟢 Đang gửi ' + d + '/' + t + ' (' + pct + '%) · ✅ ' + (ok || 0)
+      + (inflight ? ' · ⏳ chờ xác nhận ' + inflight : '')
       + (fail ? ' · ❌ ' + fail : '') + (unsure ? ' · ⚠ ' + unsure : ''));
   }
 

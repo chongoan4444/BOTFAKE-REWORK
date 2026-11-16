@@ -2979,3 +2979,51 @@ từ **làn Socket/API** (cùng endpoint ở 68.1). Lỗi Ext thật chỉ là: 
 
 **Còn mở:** làn **API** (chỉ cần `conversation_id`) gửi được **4/33** ca trong nhóm "thiếu gid" của
 lô 13:38 ⇒ có thể là đường cứu cho chính nhóm `1545041` (chưa làm vì người dùng chốt "chốt ❌ ngay").
+
+## §69 — BA SỐ LIỆU SAI ĐỌC RA TỪ LÔ 14:28 (8 851 chat) VÀ CÁCH SỬA (1.92.35)
+
+Lô 14:28: **94 s**, phát 95,13 lệnh/s (5 708/phút) · ✅ 5 095 (Socket 5 092 + API 3) · ❌ 3 755
+(3 411 bỏ thử lần 2 + 60 khách không nhận + 284 API từ chối) · ⚠ 1. Sổ sách khớp tuyệt đối
+(`5 095 + 3 755 + 1 = 8 851`; `🛟 287 = API 290 − 3`), nhưng **ba con số đọc ra đều gây hiểu sai**.
+
+### 69.1 Dòng tiến độ báo "thành công" bằng số ĐÃ PHÁT (sai 57 %) — C1
+
+| Mốc | Log cũ in | Thực tế |
+|---|---|---|
+| 14:30:02 | `thành công 8564/8851` (96,8 %) | **5 095 (57,6 %)** |
+
+Nguyên nhân: chế độ wave trả `{ok:true, fired:true}` **ngay khi bắn** ⇒ biến `ok` trong vòng lặp
+cộng luôn; 3 411 ca ACK `rejected` về sau chỉ chốt ❌ ở `finalizeSockBg` mà **không trừ `ok`**.
+
+Nay: `logProgress()` và dòng 📊 tốc độ đọc `confirmedOkCount()` = `summaryCounters.okApi +
+okExt + okSocket` — chỉ tăng khi `markDelivered()` chạy thật, tự giảm khi lật lại — và in thêm
+`⏳ chờ xác nhận` = `done − đã tới nơi − ❌ − ⚠`:
+
+```
+🟢 Đang gửi 8844/8851 (99%) · ✅ 5095 · ⏳ chờ xác nhận 3469 · ❌ 280
+```
+
+### 69.2 Làn Socket mang trần 384 từ lô trước — C2
+
+Lô 14:23 kết thúc `[384×1]`; lô 14:28 **mở màn đã `lane 384×1`** (`pageSocketLanes` không reset
+giữa các lượt). Vì limit đã bằng trần, `getLimit() < SOCKET_LANE_MAX` sai ngay từ đầu ⇒
+`rampAllowed()` **chưa từng được gọi** ⇒ dòng `bỏ nới lane (p50 > 1800ms) 0 lần` là **0 vô nghĩa**
+dù p50 lô đó là 2 449 ms.
+
+Nay đầu mỗi lô: p50 lô trước (ackLatRing giữ qua các lô) chưa đủ mẫu **hoặc** > 1 800 ms ⇒ hạ mọi
+làn page về `BUS_PARALLEL_SOCKET` (256) + in 1 dòng `🐢 Làn Socket mang từ lô trước bị hạ về 256: …`.
+Tắt nhanh: `LANE_CARRY_CLAMP = false`.
+
+### 69.3 Đuôi lô: ca "server nói không có gid" bị giữ chờ 10 s — C3
+
+`Wave 14/18 — qua cổng 500/500 sau 23 449ms` với `main bay 0 · Socket/page active 0/0 ·
+Ext queue/active 0/96` — làn Socket **rỗng** vì 287 ca còn lại không có gid, và **mỗi ca chờ tới
+10 s** (`wsWaitMs = extWaitMs = 10 000` cho WebSocket + Extension dò lại) dù HTTP `GET /messages`
+đã trả lời rõ "hội thoại này không có gid". Đúng nhóm này Extension trả "không có gid" **287/287**
+⇒ 10 s đó là **chờ suông**.
+
+Nay ở lô lớn: `GID_NOGID_SHORT_WAIT_MS = 1 500` cho nhóm này (vẫn đủ cho `peekFastGlobalId`
+60 ms và Ext phản hồi nhanh). Không ra thì đi tiếp y như cũ (`gidUnknown` → làn API).
+Cửa gate Ext thread-only được giữ nguyên hệ quả đã đo — `(extFinderRespondedNoGid || shortNoGidWait)` —
+để nhóm này **vẫn không** gửi Ext thread-only (chỉ trả `1545041`). Số ca in ở 🧭:
+`chờ dò ngắn (server nói không có gid) N ca`. Tắt nhanh: `GID_NOGID_SHORT_WAIT_MS = 0`.
