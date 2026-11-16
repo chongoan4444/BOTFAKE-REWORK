@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.38-w200.81
+// @version      1.92.39-w200.82
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.38-W200.81'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.39-W200.82'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6346,9 +6346,34 @@
     return ctx;
   }
 
+  /* [v1.92.39] "CƠ CHẾ API + EXT" CHO LÔ VỪA — ĐO RỒI MỚI DÁM TẮT SOCKET.
+   * Số đo đã có trong repo, không phải cảm tính:
+   *   • API  : 64 request/giây, 647 request trong 10,1 s toàn HTTP 200, 0 lần 429 (§29.6).
+   *   • Ext  : bị TUẦN TỰ HOÁ bên trong Extension — 128 làn "active" mà chỉ 10,65 tin/giây (§18),
+   *            trần thực tế 15–21 tin/s ở p90 3,2 s (§45).
+   *   • Socket: 125,30 lệnh/giây (§45, lô có Socket) nhưng ACK không đáng tin.
+   * Lô 9 455 chat "toàn Ext" (§45) là bằng chứng ngược: 7 124 tin đi Ext, 342 s, hàng đợi Ext
+   * dâng 468, bộ ngắt quá tải chặn 1 526 chat TRƯỚC KHI BẮN mà không còn kênh nào để rơi xuống
+   * ⇒ 1 526 ca bị tính ❌ oan. Vì vậy KHÔNG thể "toàn bộ qua Ext" cho lô lớn.
+   * Nhưng lô ≤ 300 chat thì Ext kham được (300 ÷ ~18 tin/s ≈ 17 s, và chỉ những chat API không
+   * gửi được mới phải đi Ext): tắt Socket ⇒ hết hẳn nguồn ⚠ "Socket không rõ kết quả".
+   * Điều kiện an toàn: CHỈ tắt khi Extension đã nối (nếu không thì Socket là kênh duy nhất còn lại). */
+  const NO_SOCKET_MAX_CHATS = 300;
+  function noSocketForThisBatch() {
+    try {
+      const total = (batchStats && batchStats.total) || 0;
+      if (!total || total > NO_SOCKET_MAX_CHATS) return false;
+      return !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+    } catch (e) { return false; }
+  }
   function pickBestDirectOrder(conv, pageId, ctx, baseSeq) {
     const seq = (baseSeq || ['ext', 'socket', 'api']).slice();
     if (!conv || conv.type === 'comment') return seq;
+    // [v1.92.39] Lô ≤ 300 chat + có Extension: bỏ Socket khỏi kế hoạch (API → Ext, Ext là chốt).
+    if (noSocketForThisBatch() && seq.indexOf('socket') > -1) {
+      const noSock = seq.filter((x) => x !== 'socket');
+      if (noSock.length) return noSock;
+    }
     // [v1.91.89] Chế độ "toàn bộ qua Extension": Ext trước, API dự phòng, KHÔNG dùng Socket.
     if (forceExtMode) {
       // [v1.91.90] Cùng endpoint HTTP, nhưng làn API có 76–96 luồng còn Ext chỉ 48 ⇒ lô toàn
@@ -7720,6 +7745,7 @@
           + ' tin (' + pct + '%)' + chStr
           + ' | ❌ Lỗi: ' + c.failTotal
           + (c.unsureTotal ? ' | ⚠ Không rõ: ' + c.unsureTotal : '')
+          + (noSocketForThisBatch() ? ' | 🚫 Socket TẮT cho lô này (≤' + NO_SOCKET_MAX_CHATS + ' chat ⇒ API + Ext)' : '')
           + (countRescuing() ? ' | ⏳ ĐANG CỨU tự động: ' + countRescuing() + ' chat (Extension, ~10–13 s)' : '')
           + (countManualResendWait() ? ' | 🖐 CẦN GỬI TAY: ' + countManualResendWait() + ' chat (xem 💾 .txt)' : '')
           + (c.skipTotal ? ' | 🧹 Bỏ qua: ' + c.skipTotal : '')
@@ -8025,6 +8051,8 @@
       if (hasExt && buPid && isPageAckDead(buPid)) {
         baseCandidates = baseCandidates.filter((x) => x !== 'socket');
       }
+      // [v1.92.39] Lô vừa: bù cũng chỉ API/Ext — không để một ca lọt qua Socket rồi thành ⚠.
+      if (noSocketForThisBatch()) baseCandidates = baseCandidates.filter((x) => x !== 'socket');
     } catch (eBs) { /* ignore */ }
     const remaining = baseCandidates.filter((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0);
     if (!remaining.length) {

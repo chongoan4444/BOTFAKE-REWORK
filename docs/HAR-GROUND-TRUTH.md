@@ -3150,3 +3150,44 @@ Tức: **bảng vẫn ~6 s**, phần cứu chỉ thêm 1 dòng cập nhật — 
 `BU_PROOF_WAIT_MS` 10 s, hạn chờ ACK 5 s, `BU_PROOF_STALE_MS` 30 s, số làn, ngưỡng gửi,
 cửa chống trùng 10 s / 5 s — **không đổi một số nào**. Mỗi chat tối đa **1 lần cứu/lượt**
 (`sockVerifyFired`), chỉ qua kênh CHƯA thử (`['socket']` đã thử ⇒ còn `ext`).
+
+## §73 — "GỬI TOÀN BỘ QUA API + EXT NHANH NHƯ SOCKET ĐƯỢC KHÔNG?" (1.92.39)
+
+### 73.1 Ba số đo đã có sẵn trong repo (không suy đoán)
+
+| Kênh | Thông lượng ĐO ĐƯỢC | Nguồn | Vì sao |
+|---|---|---|---|
+| **API** | **64 request/giây** · 647 request trong 10,1 s · **HTTP 200 × 647, 0 lần 429** | §29.6 | 1 request HTTP độc lập, 76–96 làn song song; 429 chỉ rơi vào endpoint DANH SÁCH, **0 lần** vào `POST /messages` |
+| **Ext** | **10,65 tin/giây** (128 làn "active" mà chỉ được vậy) · trần thực tế **15–21 tin/s** ở p90 3,2 s | §18, §45 | Extension **tuần tự hoá bên trong nó** (mỗi tab một hàng đợi). Tăng làn chỉ làm hàng đợi dài thêm, không tăng tốc |
+| **Socket** | **125,30 lệnh/giây** khi phát lô 1 958 chat | §45 | bắn-nhả PubSub, không chờ phản hồi ⇒ nhanh, nhưng ACK không đáng tin |
+
+### 73.2 Bằng chứng ngược: lô 9 455 chat "toàn bộ API + Ext" ĐÃ chạy rồi (§45)
+
+| | Số |
+|---|---|
+| ✅ | 7 185 · **API 61 · Ext 7 124 · Socket 0** |
+| ⚠ | 216 · ❌ 2 054 |
+| ⏱ | **342 s** (21,01 tin/giây) |
+| Hàng đợi Ext | **dâng tới 468** · quá hạn 633 · bộ ngắt quá tải **chặn 1 526 chat TRƯỚC KHI BẮN** |
+| Hậu quả | 1 526 ca bị tính ❌ **oan** — không phải khách từ chối, mà vì Ext nghẽn và không còn kênh nào để rơi xuống |
+
+⇒ "Gửi toàn bộ qua Ext" cho lô lớn **không phải nhanh hơn mà là chậm 6× và mất tin**. Đây là lý do
+ô bật/tắt "Toàn bộ qua Ext" bị **xoá khỏi panel từ 1.92.0** (vẫn còn `__botfakeForceExt__(true)`
+trong console cho lần đo đối chứng).
+
+### 73.3 Vậy làm gì cho đúng — ngưỡng 300 chat (1.92.39)
+
+| Cỡ lô | Kế hoạch | Lý do |
+|---|---|---|
+| **≤ 300 chat** (và Extension đã nối) | **API → Ext, TẮT Socket** | Ext kham được: 300 ÷ ~18 tin/s ≈ 17 s, mà chỉ những chat API không gửi được mới phải đi Ext. Không còn ca ⚠ "Socket không rõ kết quả" nào |
+| **> 300 chat**, hoặc không có Extension | giữ nguyên API/Ext/Socket | trên 300 chat, trần 15–21 tin/s của Ext biến thành hàng đợi + bộ ngắt quá tải ⇒ chậm và mất tin như §45 |
+
+Cờ được in ngay trên dòng TỔNG HỢP: `🚫 Socket TẮT cho lô này (≤300 chat ⇒ API + Ext)` để không
+bao giờ đổi cơ chế một cách âm thầm. Điều kiện `Extension đã nối` là bắt buộc: không có Extension
+thì Socket là kênh duy nhất còn lại cho chat ngoài 24 h.
+
+### 73.4 Điều KHÔNG hứa
+
+API cũng không phải "chuẩn 100 %": chat ngoài cửa sổ 24 h mà FB trả `(#551)`/`(#10)` thì API từ chối
+thật (đã có bằng chứng HAR), và API thỉnh thoảng trả "không rõ kết quả" (timeout/5xx) ⇒ ca đó vẫn
+phải kiểm chứng + Ext. Nên thứ tự đúng luôn là **API trước (nhanh, rẻ) → Ext (chốt chắc, chậm)**.

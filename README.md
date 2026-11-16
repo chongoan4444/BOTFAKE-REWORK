@@ -79,7 +79,7 @@ Cả hai folder **sinh tự động** từ mã nguồn: đừng sửa trực ti�
 | kiểm chứng sau gửi | **chỉ nâng cấp** ⚠→✅ (đọc lại lịch sử) · không tìm thấy tin ⇒ **giữ ⚠, không bao giờ bắn lại** (1.92.25) | cùng code |
 | khách không nhận được (`1545041`) | chốt ❌ **ngay** kể cả khi đã có `global_id` (HAR §68: Ext gửi đúng thread, FB trả `e_code 551`), rồi **hậu kiểm sau lô**: đọc lại lịch sử, thấy tin ⇒ lật ✅ — **chỉ đọc, không gửi lại** (1.92.34) | cùng code |
 | cầu dao lane Socket | sàn **cứng 16** (trước đây `min` chụp `socketLaneFloor` lúc tạo lane ⇒ hạ sàn vô hiệu) · chỉ nới lane khi ACK p50 ≤ 1 800 ms (1.92.34) | cùng code |
-| version hiển thị | `1.92.38-W200.81` | `1.92.38-STABLE` |
+| version hiển thị | `1.92.39-W200.82` | `1.92.39-STABLE` |
 
 `scripts/pancake-send-stable.user.js` được sinh từ bản gốc bằng một loạt thay đổi có đánh dấu
 `[STABLE]` — muốn sửa logic gửi thì **sửa bản gốc rồi sinh lại bản ổn định**, đừng sửa tay hai nơi.
@@ -101,7 +101,7 @@ Hai tiện ích nói chuyện với userscript trên **kênh riêng** (`__botfak
 Dù vậy vẫn nên **cài một bản** cho gọn.
 
 Muốn biết đang chạy bản nào: nhìn dòng version trên tiêu đề panel —
-`1.92.38-W200.81` = bản gốc, `1.92.38-STABLE` = bản ổn định. Dấu `[STABLE]` cũng được in vào
+`1.92.39-W200.82` = bản gốc, `1.92.39-STABLE` = bản ổn định. Dấu `[STABLE]` cũng được in vào
 `<html data-botfake-active="…">` trong DOM để kiểm tra bằng DevTools.
 
 ## Build & phát hành
