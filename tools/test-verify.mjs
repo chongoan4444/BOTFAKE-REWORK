@@ -435,6 +435,39 @@ check('đóng ngân sách ghi lại % để in vào log',
   check('cổng: danh sách rỗng ⇒ unknown', A.absenceVerdict([], CID, P, PSID, sendTxt, t0, true), 'unknown');
 }
 
+// 21) [v1.92.44] photoMovedVerdict — cổng "hội thoại vừa động" cho ca gửi ẢNH kèm chữ ngắn.
+//     Cửa sổ PHẢI bất đối xứng: chỉ nới 15 s về trước; nới 60 s sẽ nuốt tin của LƯỢT TRƯỚC
+//     (cách 50 s) ⇒ "chứng minh" tin đã tới cho ca vừa gửi HỎNG ⇒ chốt ✅ oan.
+{
+  const code3 = [
+    extractFn('msgTimeMs'),
+    extractFn('photoMovedVerdict'),
+    'return { photoMovedVerdict };',
+  ].join('\n\n');
+  const A = new Function('serverSkewMs', code3)(0);
+  const P = PAGE;
+  const PSID = '39224298167184827';
+  const CID = P + '_' + PSID;
+  const t0 = T0;
+  const conv = (o) => Object.assign({
+    id: CID, page_id: P, from_psid: PSID,
+    updated_at: new Date(t0).toISOString(), last_sent_by: { id: P },
+  }, o);
+  check('ảnh: hội thoại động ngay sau lúc gửi ⇒ yes',
+    A.photoMovedVerdict([conv({ updated_at: new Date(t0 + 1500).toISOString() })], CID, P, PSID, t0), 'yes');
+  check('ảnh: tin của LƯỢT TRƯỚC (cách 50 s) KHÔNG được kết luận đã tới',
+    A.photoMovedVerdict([conv({ updated_at: new Date(t0 - 50000).toISOString() })], CID, P, PSID, t0), 'unknown');
+  check('ảnh: server cập nhật MUỘN 10 s vẫn nhận ra tin vừa gửi (không chặn phía sau)',
+    A.photoMovedVerdict([conv({ updated_at: new Date(t0 + 10000).toISOString() })], CID, P, PSID, t0), 'yes');
+  check('ảnh: hội thoại do KHÁCH động (last_sent_by = khách) ⇒ unknown',
+    A.photoMovedVerdict([conv({ updated_at: new Date(t0 + 1500).toISOString(), last_sent_by: { id: 'khach' } })], CID, P, PSID, t0), 'unknown');
+  check('ảnh: hội thoại page khác ⇒ unknown',
+    A.photoMovedVerdict([conv({ id: '1_2', page_id: '1', updated_at: new Date(t0 + 1500).toISOString() })], CID, P, PSID, t0), 'unknown');
+  check('ảnh: thiếu updated_at ⇒ unknown',
+    A.photoMovedVerdict([conv({ updated_at: '' })], CID, P, PSID, t0), 'unknown');
+  check('ảnh: danh sách rỗng ⇒ unknown', A.photoMovedVerdict([], CID, P, PSID, t0), 'unknown');
+}
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.43-w200.89
+// @version      1.92.44-w200.90
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.43-W200.89'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.44-W200.90'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1773,10 +1773,23 @@
     // GIẢM MỘT NỬA (10→5→2→1→0, cuối cùng chỉ còn luồng gốc đi một mình đúng nhịp server nhả).
     // LITE: KHÔNG luồng phụ cursor giả — nhảy thời gian dễ hở chat (88 → 73 khi cuộn).
     // Chỉ đi next_cursor thật tuần tự cho đủ danh sách.
-    const rl = { pauseUntil: 0, hits: 0, helperBudget: 0, logged: false };
+    /* [v1.92.44] NGÂN SÁCH LUỒNG PHỤ CURSOR GIẢ = 0, VÀ NAY LÀ TƯỜNG MINH.
+     * Bản cũ (kể cả LITE 1.91.55) khai `helperBudget: 0` rồi chỉ CHIA ĐÔI khi 429
+     * (Math.floor(0/2) = 0), không có chỗ nào tăng ⇒ `if (rl.helperBudget > 0) spawnHelper()`
+     * KHÔNG BAO GIỜ chạy, `for (s = alive; s < Math.min(STRIDES.length, 0))` cũng không, và
+     * `rl.hits > 0 && seg.ord >= rl.helperBudget` đúng ngay từ helper đầu. Toàn bộ ~60 dòng
+     * "10 luồng phụ độc lập" là CODE CHẾT ⇒ đọc code tưởng có 11 luồng tải song song, thực tế
+     * chỉ 1 cursor tuần tự (đường dễ dính 429 nhất). Nay ghi rõ đây là quyết định có chủ đích:
+     * luồng phụ dựng cursor Erlang GIẢ bằng cách lùi mốc thời gian nên có thể NHẢY QUA chat
+     * (đo được 88 → 73 chat khi cuộn) — tức đánh đổi lấy tốc độ bằng nguy cơ HỞ DANH SÁCH,
+     * đúng thứ không được phép. Giữ 0; mọi cải thiện tốc độ tải phải đến từ đi đúng
+     * next_cursor + thử lại page lỗi (xem retry riêng từng page bên dưới). */
+    const RL_HELPER_BUDGET_START = 0;
+    const rl = { pauseUntil: 0, hits: 0, helperBudget: RL_HELPER_BUDGET_START, logged: false };
     const rlNote429 = () => {
       rl.hits++;
       rl.pauseUntil = Date.now() + 2500;
+      // 429 ⇒ giảm nửa số luồng phụ ĐANG được phép sống (6→3→1→0), cuối cùng chỉ còn tuyến gốc.
       rl.helperBudget = Math.max(0, Math.floor(rl.helperBudget / 2));
       if (!rl.logged) {
         rl.logged = true;
@@ -1864,9 +1877,31 @@
         const seg = { items: [], set: new Set(), cursor: null, pageCount: {}, started: false };
         perPage.set(pid, seg.items);
         let guard = 0;
+        /* [v1.92.44] LỖI 1 REQUEST KHÔNG ĐƯỢC LÀM MẤT CẢ PAGE.
+         * Bản cũ: request lỗi (kể cả 1 lần 429/timeout lẻ) ⇒ `incompletePages.add(pid)` + return
+         * ⇒ mất TOÀN BỘ trang đã tải của page đó. Hệ quả dây chuyền: `scanFullList` thấy
+         * incomplete ⇒ xoá sạch `allRows` đã tải và chạy lại TỪ ĐẦU, lần 2 vẫn lỗi ⇒ chặn gửi.
+         * Nay: giữ nguyên `seg.cursor` (đúng chỗ đang đứng) và thử lại tối đa 3 lần, nghỉ
+         * 1,2 s/2,4 s. Chỉ khi hỏng thật mới đánh dấu page thiếu — và khi đó vẫn giữ phần
+         * `seg.items` đã lấy được thay vì vứt đi (xử lý ở nhánh gộp bên dưới). */
+        let pageRetry = 0;
         while (guard++ < 1500 && !stopAll && !stopped()) {
           const res = await fetchPage({}, seg.cursor, seg.items.length, { singlePageId: pid, tries: seg.started ? 2 : 3, timeoutMs: 12000 });
-          if (!res.ok) { if (!seg.started) firstPageErrors++; else midErrors++; incompletePages.add(pid); return; }
+          if (!res.ok) {
+            if (stopped()) return;
+            if (pageRetry < 3) {
+              pageRetry++;
+              await sleepUntil(Date.now() + 1200 * pageRetry, 'list-page-retry');
+              guard--; // lần thử lại không tính vào trần 1500 trang
+              continue;
+            }
+            if (!seg.started) firstPageErrors++; else midErrors++;
+            incompletePages.add(pid);
+            if (seg.items.length) logLine('⚠ Page ' + pid + ': lỗi ở trang ' + (seg.items.length ? 'giữa chuỗi' : 'đầu')
+              + ' sau 4 lần thử (' + (res.error || '?') + ') — GIỮ ' + seg.items.length + ' chat đã tải được.');
+            return;
+          }
+          pageRetry = 0;
           seg.started = true;
           const j = res.data || {};
           const convs = j.conversations || [];
@@ -1899,9 +1934,54 @@
       await Promise.all(workers);
       // CHỈ CẦN 1 page tải lỗi/thiếu là danh sách KHÔNG còn đầy đủ → tải lại toàn bộ bằng
       // đường đa luồng chung (tuyệt đối không dùng danh sách mất nguyên 1 page để gửi)
-      if (!stopAll && !stopped() && (incompletePages.size || !total || firstPageErrors >= Math.ceil(probeIds.length / 2) || midErrors > 0)) {
-        logLine('⚠ ' + (incompletePages.size ? incompletePages.size + ' page tải chưa hết (' + Array.from(incompletePages).slice(0, 5).join(', ') + (incompletePages.size > 5 ? '…' : '') + ')' : 'Tải song song theo page không khả thi') + ' — tải lại toàn bộ bằng đường đa luồng chung để đảm bảo đủ danh sách…');
-        return loadSequentialOrStitch();
+      /* [v1.92.44] PHÂN BIỆT "THIẾU 1 PHẦN" VỚI "MẤT CẢ DANH SÁCH".
+       * Bản cũ: BẤT KỲ page nào lỗi/thiếu ⇒ bỏ toàn bộ kết quả vừa tải (hàng nghìn chat)
+       * và chạy lại từ đầu bằng đường khác; đường đó lỗi tiếp là `scanFullList` xoá sạch
+       * `allRows` và CHẶN GỬI. Người dùng thấy "chạy tới 90% rồi quay về 0".
+       * Nay vẫn ưu tiên danh sách ĐẦY ĐỦ (thử lại đường chung 1 lần), nhưng nếu đường đó
+       * cũng không xong thì vẫn dùng được phần đã tải — kèm cờ `partial` để nơi gọi biết
+       * CHÍNH XÁC page nào thiếu và không bao giờ coi là "đủ cho chọn tất cả". */
+      const fatalList = !total || firstPageErrors >= Math.ceil(probeIds.length / 2);
+      if (!stopAll && !stopped() && (incompletePages.size || fatalList || midErrors > 0)) {
+        const why = incompletePages.size
+          ? (incompletePages.size + ' page tải chưa hết (' + Array.from(incompletePages).slice(0, 5).join(', ') + (incompletePages.size > 5 ? '…' : '') + ')')
+          : 'Tải song song theo page không khả thi';
+        logLine('⚠ ' + why + ' — thử lại toàn bộ bằng đường tuần tự để có danh sách ĐẦY ĐỦ…');
+        const retryAll = await loadSequentialOrStitch();
+        // Đường chung xong đủ ⇒ dùng luôn (tốt nhất).
+        if (retryAll && retryAll.ok && !retryAll.incomplete && Array.isArray(retryAll.rows) && retryAll.rows.length) {
+          return retryAll;
+        }
+        // Đường chung cũng thiếu ⇒ KHÔNG vứt phần đã tải: gộp những gì có, đánh dấu thiếu.
+        const keptRows = [];
+        perPage.forEach((arr) => { arr.forEach((r) => keptRows.push(r)); });
+        const retryRows = (retryAll && Array.isArray(retryAll.rows)) ? retryAll.rows : [];
+        if (retryRows.length) {
+          // gộp theo id, ưu tiên bản từ đường chung (mới hơn), giữ nguyên order sau khi sort
+          const seenK = new Set();
+          retryRows.forEach((r) => { if (r && r.id && !seenK.has(r.id)) { seenK.add(r.id); keptRows.push(r); } });
+        }
+        if (!keptRows.length) {
+          logLine('⛔ Cả 2 đường đều không lấy được chat nào — không dùng danh sách rỗng.');
+          return { ok: false, error: 'Không tải được danh sách' };
+        }
+        logLine('🟡 Giữ được ' + keptRows.length + ' chat đã tải (KHÔNG vứt đi). Page còn thiếu: '
+          + (incompletePages.size ? Array.from(incompletePages).slice(0, 5).join(', ') + (incompletePages.size > 5 ? '…' : '') : '(không rõ)')
+          + ' ⇒ danh sách được đánh dấu CHƯA ĐẦY ĐỦ: chọn chuỗi trong phần đã có vẫn gửi được, "chọn tất cả" thì không.');
+        const mergedRows = keptRows.slice();
+        mergedRows.sort((a, b) => {
+          if (!!a.isPinned !== !!b.isPinned) return a.isPinned ? -1 : 1;
+          if (unreadFirst && !!a.seen !== !!b.seen) return a.seen ? 1 : -1;
+          return (b.updatedTs || 0) - (a.updatedTs || 0);
+        });
+        mergedRows.forEach((r, i) => { r.order = i; });
+        return {
+          ok: true,
+          rows: mergedRows,
+          incomplete: true,                       // còn page thiếu ⇒ KHÔNG phải danh sách đầy đủ
+          incompletePages: Array.from(incompletePages),
+          rowsKept: true,                         // nơi gọi biết đây là danh sách MỘT PHẦN dùng được
+        };
       }
       const rows = [];
       perPage.forEach((arr) => { arr.forEach((r) => rows.push(r)); });
@@ -2327,13 +2407,37 @@
         const api2 = await loadListViaApi(apiProgress, scanOpts);
         if (api2 && api2.ok) api = api2;
       }
+      /* [v1.92.44] TẢI THIẾU KHÔNG ĐƯỢC ĐỒNG NGHĨA VỚI "KHÔNG DÙNG ĐƯỢC GÌ".
+       * Bản cũ: sau 2 lượt vẫn thiếu ⇒ `state.allRows = prevAllRows || null` (thường là null
+       * vì đầu lượt đã xoá) + `listIncomplete = true` ⇒ `sendToAll` CHẶN TOÀN BỘ, kể cả những
+       * chat đã tải ĐÚNG. Người dùng buộc phải bấm ⚡ lại cho tới khi hết lỗi mới gửi được.
+       * Nay: vẫn giữ nguyên danh sách vừa tải (đúng phần đã lấy), chỉ đánh dấu CHƯA ĐẦY ĐỦ
+       * ⇒ `sendToAll` vẫn cho gửi phần đã chọn, còn "chọn tất cả" thì bị chặn vì có thể sót.
+       * Tin nhắn không bao giờ bị mất: phần thiếu thì KHÔNG nằm trong lựa chọn. */
       if (api && api.ok && api.incomplete && !api.stopped) {
-        state.listIncomplete = true;
+        const rowsPartial = (api.rows || []).slice();
+        state.listIncomplete = true;             // CHƯA ĐẦY ĐỦ (chặn "chọn tất cả"), không chặn gửi
+        if (rowsPartial.length) {
+          const partialMap = new Map(rowsPartial.map((r) => [r.id, { ...r }]));
+          let oP = 0;
+          partialMap.forEach((v) => { v.order = oP++; });
+          state.allRows = partialMap;
+          state.allRowsPartial = true;
+          logLine('🟡 Tải 2 lần vẫn thiếu' + (api.incompletePages && api.incompletePages.length
+            ? ' (' + api.incompletePages.slice(0, 5).join(', ') + ')' : '')
+            + ' — GIỮ ' + partialMap.size + ' chat đã tải được. Gửi phần này vẫn được; '
+            + '"chọn tất cả" bị chặn cho tới khi tải đủ (bấm ⚡ lại).');
+          setBtn('⚡ Tải danh sách (' + partialMap.size + ' chat · còn thiếu)');
+          setScanProgress(partialMap.size, null);
+          computeMatches();
+          render();
+          return;
+        }
         state.allRows = prevAllRows || null;
         state.allRowsPartial = prevAllRowsPartial;
-        logLine('⛔ Tải 2 lần vẫn chưa hết cursor (' + api.rows.length + ' chat) — không dùng list thiếu. Bấm ⚡ lại.');
+        logLine('⛔ Tải 2 lần vẫn chưa hết cursor (0 chat lấy được) — bấm ⚡ lại.');
         setBtn('⚠ Tải chưa đủ — bấm tải lại');
-        setScanProgress(api.rows.length, null);
+        setScanProgress(0, null);
         return;
       }
       if (!(api && api.ok && api.rows.length)) {
@@ -7573,6 +7677,8 @@
     // và bao nhiêu ca dùng lại kết quả đã dò (không tốn thêm request).
     buProofPresent: 0, buProofAbsent: 0, buProofUnknown: 0, buProofCached: 0,
     buProofGated: 0, buProofCancelled: 0,
+    // [v1.92.44] số ca bị khoá chống trùng chặn lại (KHÔNG phải lệnh gửi thật)
+    dupBlocked: 0,
   };
   const waveDiag = {
     waveSize: 0, configuredGapMs: 0, quickEnabled: false, plannedWaves: 0, wavesStarted: 0,
@@ -7995,6 +8101,9 @@
             ? ' | 🛡 Cổng chống lặp: chặn bù mù ' + sendDiag.buProofGated + ' ca · tin ĐÃ tới (hủy bù) ' + sendDiag.buProofCancelled
               + ' · chứng minh vắng mặt ' + sendDiag.buProofAbsent + ' · không chứng minh được ' + sendDiag.buProofUnknown
               + ' · dùng lại kết quả ' + sendDiag.buProofCached
+            : '')
+          + (sendDiag.dupBlocked
+            ? ' | 🛡 Chặn trùng: ' + sendDiag.dupBlocked + ' ca đã có lệnh bay nên KHÔNG bắn thêm (không tính là đã gửi)'
             : '')
           + ((extTimeoutStats.timeout || extTimeoutStats.skipped || extTimeoutStats.found || extTimeoutStats.notFound || extTimeoutStats.unknown)
             ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy trong lịch sử ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
@@ -8445,7 +8554,8 @@
         else logFailGrouped(name, 'chưa chứng minh được vắng mặt ⇒ bù như cũ (ưu tiên không sót)', '🔎', conv.id);
         actuallySendBu();
       };
-      proveAbsentBeforeBu(conv, text, buSentAt).then(afterProof).catch(() => { actuallySendBu(); });
+      // [v1.92.44] truyền photo: ca có ảnh được dò bằng "hội thoại vừa động" thay vì so chữ
+      proveAbsentBeforeBu(conv, text, buSentAt, !!photo).then(afterProof).catch(() => { actuallySendBu(); });
     });
   }
 
@@ -8588,6 +8698,43 @@
   function snippetText(s) {
     return normalizeMsgText(s).replace(/[.\u2026\s]+$/, '').trim();
   }
+  /* [v1.92.44] CỔNG CHỨNG MINH VẮNG MẶT KHI TIN CÓ KÈM ẢNH.
+   * Bản cũ chỉ so `want = text`; ca gửi ảnh kèm chữ (text + photo) mà phía gọi truyền text
+   * rỗng hoặc phía nhận chỉ lưu mô tả ảnh ⇒ `normalizeMsgText(want).length < 12`
+   * ⇒ `proveAbsentBeforeBu` trả 'unknown' NGAY, không dò gì ⇒ bù mù, gửi lặp.
+   * Nay: ca có ảnh được phép dò, và được coi là "đã tới" khi hội thoại vừa động đúng lúc
+   * gửi (không so chữ). An toàn: chữ < 12 ký tự vẫn không dùng để kết luận 'yes'. */
+  function photoMovedVerdict(convs, convId, pageId, psid, sentAt) {
+    if (!Array.isArray(convs) || !convs.length) return 'unknown';
+    const at = Number(sentAt) || 0;
+    if (!at) return 'unknown';
+    const skew = (typeof serverSkewMs === 'number') ? serverSkewMs : 0;
+    for (let i = 0; i < convs.length; i++) {
+      const c = convs[i];
+      if (!c) continue;
+      const cid = String(c.id || '');
+      const pid = String(c.page_id || (cid.indexOf('_') > 0 ? cid.slice(0, cid.indexOf('_')) : ''));
+      if (pageId && pid && pid !== String(pageId)) continue;
+      const fromPsid = String(c.from_psid || (c.customers && c.customers[0] && c.customers[0].fb_id) || '');
+      const isThis = (cid && convId && cid === String(convId))
+        || (fromPsid && psid && fromPsid === String(psid) && (!pageId || pid === String(pageId)));
+      if (!isThis) continue;
+      const t = msgTimeMs(c.updated_at);
+      if (!t || isNaN(t)) continue;
+      const by = c.last_sent_by && (c.last_sent_by.id || c.last_sent_by.uid);
+      if (by && pageId && String(by) !== String(pageId)) continue;
+      /* Hội thoại động ĐÚNG quanh lúc gửi ⇒ tin vừa gửi đã tới.
+       * BẤT ĐỐI XỨNG có chủ đích: chỉ nới về TRƯỚC 15 s (đủ bù việc đồng hồ máy lệch và mốc
+       * `sentAt` được lấy sớm hơn thời điểm server nhận), còn về SAU thì không giới hạn vì tin
+       * gửi xong luôn có `updated_at` MUỘN hơn `sentAt` — chặn cả phía sau sẽ làm cổng vô dụng.
+       * Bản nháp đầu tiên dùng ±60 s: SAI, vì tin của LƯỢT GỬI TRƯỚC (cách 50 s) vẫn lọt vào
+       * cửa sổ ⇒ cửa sổ này "chứng minh" tin đã tới cho một ca vừa gửi HỎNG ⇒ chốt ✅ oan,
+       * đúng bệnh mất tin mà script phải tránh. 15 s hẹp hơn nhịp gửi thật (≥1,2 s/chat nhưng
+       * cách nhau hàng chục giây giữa 2 lượt) nên không còn nuốt tin của lượt trước. */
+      if (t >= at + skew - 15000) return 'yes';
+    }
+    return 'unknown';
+  }
   function snippetVerdict(convs, convId, pageId, psid, want, sentAt) {
     if (!Array.isArray(convs) || !convs.length) return 'unknown';
     const w = normalizeMsgText(want);
@@ -8679,7 +8826,7 @@
     return 'absent';
   }
 
-  async function probeBuVerdict(conv, pageId, convId, want, sentAtMs, late) {
+  async function probeBuVerdict(conv, pageId, convId, want, sentAtMs, late, hasPhoto) {
     try {
       const psid = psidOf(conv, peekConv(conv) || conv);
       if (!psid || !pageId) return 'unknown';
@@ -8688,15 +8835,22 @@
       const res = await buProbeLane(() => fetchJson(url, 1, { timeoutMs: 8000 }));
       if (!res || !res.ok || !res.data || res.data.success === false) return 'unknown';
       const convs = res.data.conversations || (res.data.data && res.data.data.conversations) || [];
-      return absenceVerdict(convs, convId, pageId, psid, want, sentAtMs, late);
+      const v = absenceVerdict(convs, convId, pageId, psid, want, sentAtMs, late);
+      if (v === 'yes') return v;
+      // [v1.92.44] ca có ảnh: chữ ngắn/không khớp được vẫn kết luận được nếu hội thoại vừa động
+      if (hasPhoto && photoMovedVerdict(convs, convId, pageId, psid, sentAtMs) === 'yes') return 'yes';
+      return v;
     } catch (e) { return 'unknown'; }
   }
 
-  function proveAbsentBeforeBu(conv, text, sentAtMs) {
+  function proveAbsentBeforeBu(conv, text, sentAtMs, hasPhoto) {
     if (!conv || !conv.id) return Promise.resolve('unknown');
     const want = String(text || '');
-    // Text < 12 ký tự ("Dạ", "Ok") khớp bừa rất dễ ⇒ không dùng snippet để kết luận.
-    if (normalizeMsgText(want).length < 12) return Promise.resolve('unknown');
+    /* [v1.92.44] Text < 12 ký tự ("Dạ", "Ok") khớp bừa rất dễ ⇒ không dùng SNIPPET để kết
+     * luận. Nhưng trước đây luật này chặn LUÔN cả ca CÓ ẢNH, dù ảnh là bằng chứng độc lập
+     * (hội thoại vừa động đúng lúc gửi + do chính page này gửi) ⇒ cổng chống lặp bị vô hiệu
+     * ở đúng nhóm tin dễ lặp nhất (gửi ảnh + câu ngắn). Nay ca có ảnh vẫn được dò. */
+    if (normalizeMsgText(want).length < 12 && !hasPhoto) return Promise.resolve('unknown');
     const at = Number(sentAtMs) || Date.now();
     const key = conv.id + '|' + Math.round(at / 20000);
     const cached = buProofCache.get(key);
@@ -8707,11 +8861,11 @@
         const fullC = peekConv(conv) || conv;
         const pageId = (fullC && (fullC.page_id || fullC.pageId)) || conv.pageId || String(conv.id).split('_')[0];
         if (!pageId) return 'unknown';
-        const v1 = await probeBuVerdict(conv, pageId, conv.id, want, at, false);
+        const v1 = await probeBuVerdict(conv, pageId, conv.id, want, at, false, hasPhoto);
         if (v1 === 'yes') { sendDiag.buProofPresent++; return 'yes'; } // chặn được 1 lần lặp
         const target = at + BU_PROOF_WAIT_MS;
         if (Date.now() < target) await sleepUntil(target, 'bu-proof');
-        const v2 = await probeBuVerdict(conv, pageId, conv.id, want, at, true);
+        const v2 = await probeBuVerdict(conv, pageId, conv.id, want, at, true, hasPhoto);
         if (v2 === 'yes') sendDiag.buProofPresent++;
         else if (v2 === 'absent') sendDiag.buProofAbsent++;
         else sendDiag.buProofUnknown++;
@@ -8856,7 +9010,7 @@
           if (verdict === 'yes') break; // có bằng chứng dương là dừng đọc ngay
           if (attempt === 0 && !proofP) {
             // đọc lần đầu đã không thấy ⇒ khởi động cổng chứng minh ngay (chạy nền tới mốc +10 s)
-            try { proofP = proveAbsentBeforeBu(conv, text, sentAt); } catch (ePp) { proofP = null; }
+            try { proofP = proveAbsentBeforeBu(conv, text, sentAt, !!photo); } catch (ePp) { proofP = null; }
           }
           // [v1.92.29] Response đúng 25 tin + tin mới nhất đã cũ hơn 60 s ⇒ 25 tin này là ĐẦU
           // thread (HAR: 34 ca như vậy, trung vị cũ hơn 4 330 s) ⇒ đọc thêm chỉ ra đúng 25 tin
@@ -8894,7 +9048,7 @@
          * qua kênh KHÁC (Extension), rồi khoá `sockVerifyFired` để không cứu vòng 2.
          * Không chứng minh được ⇒ vẫn giữ ⚠ và đưa vào DANH SÁCH GỬI TAY (không im lặng nữa). */
         let socksProof = 'unknown';
-        try { socksProof = await (proofP || proveAbsentBeforeBu(conv, text, sentAt)); } catch (ePv) { socksProof = 'unknown'; }
+        try { socksProof = await (proofP || proveAbsentBeforeBu(conv, text, sentAt, !!photo)); } catch (ePv) { socksProof = 'unknown'; }
         // Chỉ cứu được khi CÒN kênh khác: bù của script chỉ đi Extension/Socket, mà Socket vừa
         // thất bại ⇒ cần Extension. Không có Extension thì giữ ⚠ (vào danh sách gửi tay),
         // KHÔNG chốt ❌ oan — người dùng vẫn gửi tay được.
@@ -9414,10 +9568,31 @@
       logLine('▶ Danh sách đã tải xong — dùng đúng lựa chọn sau khi tải để gửi.');
       render();
     }
+    /* [v1.92.44] DANH SÁCH THIẾU MỘT PHẦN ⇒ VẪN CHO GỬI PHẦN ĐÃ CHỌN.
+     * Bản cũ chặn TOÀN BỘ ở đây: chỉ cần 1 page lỗi là không gửi được chat nào, buộc phải
+     * tải lại tới khi hết lỗi. Nhưng "danh sách thiếu" chỉ có nghĩa là CÓ THỂ SÓT chat —
+     * nó không làm cho những chat ĐANG ĐƯỢC CHỌN trở nên sai. Người dùng đã nhìn thấy tên
+     * và tick từng chat trước khi bấm Chạy.
+     * Nguy hiểm thật chỉ nằm ở "chọn tất cả": chọn theo danh sách thiếu ⇒ gửi thiếu người
+     * mà tưởng là đủ. Chặn đúng chỗ đó (mode === 'all'), cảnh báo với chuỗi/chat lẻ.
+     * Tin không mất: chat nằm ngoài danh sách đã tải thì cũng không nằm trong lựa chọn. */
     if (state.listIncomplete) {
-      alert('Danh sách tải CHƯA ĐẦY ĐỦ nên chưa thể gửi.\nHãy bấm “⚡ Tải danh sách” để tải lại cho đủ rồi mới gửi.');
-      logLine('⛔ Chặn gửi: danh sách tải chưa đầy đủ — bấm ⚡ Tải danh sách để tải lại.');
-      return;
+      if (state.mode === 'all') {
+        alert('Đang CHỌN TẤT CẢ trên danh sách tải CHƯA ĐẦY ĐỦ nên có thể sót chat.\n'
+          + 'Hãy bấm “⚡ Tải danh sách” để tải lại cho đủ, hoặc thu hẹp lựa chọn (Alt+Click chọn chuỗi/từng chat).');
+        logLine('⛔ Chặn "chọn tất cả" vì danh sách tải chưa đầy đủ — chọn chuỗi/từng chat thì vẫn gửi được.');
+        return;
+      }
+      const nSel = state.matches.filter((m) => m && m.checked).length;
+      const okGo = confirm('Danh sách tải CHƯA ĐẦY ĐỦ (còn page lỗi).\n\n'
+        + 'Vẫn gửi ' + nSel + ' chat ĐANG CHỌN?\n'
+        + '• Những chat đã chọn vẫn gửi bình thường.\n'
+        + '• Chỉ những chat KHÔNG nằm trong danh sách đã tải là không được gửi (không mất tin, chỉ thiếu người).');
+      if (!okGo) {
+        logLine('⏸ Người dùng hủy gửi vì danh sách chưa đầy đủ.');
+        return;
+      }
+      logLine('🟡 Vẫn gửi ' + nSel + ' chat đã chọn dù danh sách chưa đầy đủ (người dùng đã xác nhận).');
     }
     state.confirmingSend = true;
     // Chốt lần cuối ngay trước hộp xác nhận: kể cả checklist cũ/stale vẫn không đưa ID đã nhớ vào snapshot gửi.
@@ -9948,6 +10123,20 @@
       if (r && (r.deferredToExt || r.deferredToSocketRetry)) {
         return r;
       }
+      /* [v1.92.44] "ĐÃ BỊ CHẶN VÌ TRÙNG" KHÔNG PHẢI "ĐÃ GỬI".
+       * `dupBlockedResult()` trả `{ ok:true, sent:true, fired:true, dupBlocked:true }` (đúng:
+       * nó KHÔNG bắn gì, chỉ báo "chat này đã có lệnh bay rồi"). Nhưng sendOneAndLog chỉ nhìn
+       * `r.ok` ⇒ tăng `ok++`, `firedN++`, gọi `noteBgPending()` và đẩy vào bảng TỔNG HỢP như
+       * một lệnh gửi thật. Ca bị chặn vì trùng (2 worker cùng chat sau khi mở khoá outbound,
+       * hoặc bù chồng lên ca đang bay) vì thế bị đếm "đã phát" ⇒ số liệu lệch và dòng
+       * "đã gửi" có thể hiện cho chat CHƯA hề được bắn ở lượt này. Nay đếm riêng. */
+      if (r && r.dupBlocked) {
+        sendDiag.dupBlocked = (sendDiag.dupBlocked || 0) + 1;
+        done++;
+        logFailGrouped((c.name || c.id),
+          'đã có lệnh gửi bay cho chat này trong lượt — KHÔNG bắn thêm (chống trùng)', '✓', c.id);
+        return r;
+      }
       if (r && r.recipientUnavailable) sendDiag.recipientUnavailable++;
       if (itemOpts && (itemOpts.isSocketRetryPass || itemOpts.isExtBacklogPass)) clearBgPending(c.id);
       const via = r.ok ? (r.sendBy === 'direct' ? ' — gửi thẳng Socket/Ext'
@@ -10212,7 +10401,7 @@
         if (!item.proof) {
           try {
             const pAt = (item.deferredCtx && item.deferredCtx.firstRejectedAt) || Date.now();
-            item.proof = proveAbsentBeforeBu(item.c, gtext, pAt);
+            item.proof = proveAbsentBeforeBu(item.c, gtext, pAt, !!photo);
           } catch (e0) { item.proof = Promise.resolve('unknown'); }
         }
         noteBgPending(item.c, 'wave200-socket-retry');

@@ -3637,3 +3637,36 @@ danh sách kiểm chứng nếu `listKey` đổi).
 
 **Không đụng** logic chọn (Alt 2 nhấp, Ctrl chọn cùng snippet, "2 nhấp" pickMode) và **không đụng**
 đường gửi tin.
+
+### 77.15 Bảy chỗ "mất tin trong im lặng" còn nằm trong bản 1.92.43 — đã vá ở 1.92.44-W200.90
+
+Đối chiếu bản LITE người dùng đang chạy (1.91.55, 164 hàm) với bản trong repo (1.92.43-W200.89,
+279 hàm) thì **LITE không có hàm nào HEAD thiếu** — ngược lại HEAD có **115 hàm LITE không có**
+(vì thế phần lớn cơ chế chống mất tin đã có sẵn). Nhưng soi kỹ 3 nhóm lỗi thì thấy **cả hai bản
+cùng mắc**, và đó mới là thứ đáng vá:
+
+| # | chỗ | bản 1.92.43 làm gì | hậu quả thật | 1.92.44 |
+|---|---|---|---|---|
+| 1 | `rl.helperBudget` | khai `0`, chỉ **chia đôi** khi 429 ⇒ không bao giờ tăng; `if (rl.helperBudget > 0) spawnHelper()` và `for (s < Math.min(STRIDES, 0))` **không bao giờ chạy** | ~60 dòng "10 luồng phụ" là **code chết**; đọc code tưởng tải 11 luồng song song, thực tế 1 cursor tuần tự — đường dễ dính 429 nhất | ghi tường minh `RL_HELPER_BUDGET_START = 0` + chú thích: luồng phụ dựng cursor Erlang **giả** bằng lùi mốc thời gian ⇒ **hở chat** (đo được 88 → 73), nên **cố ý** không dùng |
+| 2 | `loadListViaApi`, 1 request lỗi | `incompletePages.add(pid)` rồi `return` ngay | **mất toàn bộ** phần đã tải của page đó | giữ `seg.cursor`, thử lại **3 lần** (nghỉ 1,2 s / 2,4 s), lần thử lại không tính vào trần 1500 trang; log `⚠ Page … GIỮ N chat đã tải được.` |
+| 3 | tải thiếu 1 page | **vứt cả danh sách** vừa tải rồi chạy lại từ đầu bằng đường khác | "chạy tới 90% rồi quay về 0" | thử đường chung **1 lần**; vẫn thiếu thì **gộp** phần đã có + phần đường chung (dedupe theo id, sort lại), trả `{ ok:true, incomplete:true, incompletePages, rowsKept:true }`; chỉ `{ ok:false }` khi **0 chat** |
+| 4 | `scanFullList` nhánh thiếu | `state.allRows = prevAllRows || null` (thường `null`) | danh sách về rỗng | giữ danh sách một phần + `allRowsPartial = true`, log `🟡 Tải 2 lần vẫn thiếu … GIỮ N chat` |
+| 5 | `sendToAll` | `state.listIncomplete` ⇒ **chặn mọi lựa chọn** | không gửi được chat nào dù đã tick đúng | vẫn chặn **"chọn tất cả"** (chọn theo danh sách thiếu = gửi thiếu người); chuỗi/chat lẻ thì `confirm()` rồi cho gửi |
+| 6 | `dupBlockedResult` | trả `{ ok:true, sent:true, fired:true }` ⇒ `sendOneAndLog` tăng `ok++`/`firedN++` | ca **bị chặn vì trùng** bị đếm là **đã gửi** ⇒ số liệu lệch, dòng "đã gửi" hiện cho chat chưa hề bắn | nhánh riêng: `sendDiag.dupBlocked++`, log `✓ … KHÔNG bắn thêm (chống trùng)`, thêm dòng `🛡 Chặn trùng: N ca` vào TỔNG HỢP |
+| 7 | gửi **ảnh + câu ngắn** | `proveAbsentBeforeBu` trả `unknown` ngay khi chữ **< 12 ký tự** ⇒ cổng chống lặp bị **vô hiệu** đúng ở nhóm dễ lặp nhất | gửi lặp ảnh không ai phát hiện | thêm `photoMovedVerdict()`: ca **có ảnh** được dò, kết luận "đã tới" khi hội thoại động quanh lúc gửi **và** `last_sent_by` là chính page |
+
+**Cửa sổ của `photoMovedVerdict` là BẤT ĐỐI XỨNG −15 s / +∞, không phải ±60 s.** Bản nháp đầu
+tiên dùng ±60 s và **sai**: tin của *lượt gửi trước* (cách 50 s cùng chat) vẫn lọt cửa sổ ⇒ cửa sổ
+"chứng minh" tin đã tới cho một ca **vừa gửi hỏng** ⇒ chốt ✅ oan, đúng bệnh mất tin cần tránh.
+Nới 15 s về trước chỉ để bù việc `sentAt` lấy sớm hơn lúc server nhận; phía sau không chặn vì tin
+gửi xong luôn có `updated_at` muộn hơn `sentAt`.
+
+**Test (65 kịch bản, `npm test`)** — 7 ca mới cho `photoMovedVerdict`: động ngay sau khi gửi ⇒
+`yes`; **tin lượt trước cách 50 s ⇒ `unknown`** (ca chống hồi quy cho lỗi ±60 s ở trên); server cập
+nhật muộn 10 s ⇒ `yes`; khách tự nhắn ⇒ `unknown`; page khác ⇒ `unknown`; thiếu `updated_at` ⇒
+`unknown`; danh sách rỗng ⇒ `unknown`.
+
+**Nguyên tắc rút ra (giữ cho các bản sau):**
+1. **Thiếu danh sách ≠ danh sách sai.** Chỉ chặn đúng thao tác nguy hiểm (chọn tất cả), đừng chặn cả lượt gửi.
+2. **"Bị chặn vì trùng" không phải "đã gửi".** Mọi kết quả `ok:true` mà **không bắn gì** phải được đếm riêng.
+3. **Cờ 0 mà không có chú thích = bom chờ.** `helperBudget: 0` từng bị hiểu là "có 11 luồng tải".
