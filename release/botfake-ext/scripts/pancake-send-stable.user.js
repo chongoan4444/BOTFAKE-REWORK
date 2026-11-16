@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.30-stable
+// @version      1.92.31-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -72,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.30-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.31-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -7381,6 +7381,9 @@
   const buRetryDone = {}; // convId → đã bù trong lượt này
   const ctx7Retried = {}; // convId → đã gửi lại 1 lần kèm cờ ctx-7-days trong lượt này (chống lặp vô hạn)
   let buRetrySeq = 0;
+  // [v1.92.31] đếm số dòng ❌ "bỏ thử lần 2" đã in ĐỦ LÝ DO (20 dòng đầu) — sau đó in bản gọn
+  // để 5 178 dòng trùng nhau không nhấn chìm log.
+  let buQuietBudgetNote = 0;
   let runSeq = 0; // mỗi lượt gửi 1 số — bù của lượt cũ tự hủy khi có lượt mới (chống gửi lẫn/lặp)
   const deliveredIds = {}; // convId → ĐÃ có kênh báo thành công trong lượt này ('api'|'ext'|'socket') — tuyệt đối không gửi lại
   const claimedSendIds = {}; // convId → đã nhận quyền bắn trong lượt này (chống 2 worker / 2 câu cùng 1 chat)
@@ -8801,6 +8804,8 @@
     batchStats.loopFinished = false;
     batchStats.dispatchEndedAt = 0;
     buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
+    logProgressMark.pct = 0; // [v1.92.31] mốc tiến độ tính lại từ đầu mỗi lượt
+    buQuietBudgetNote = 0;
     // [v1.92.30] cổng chống lặp: reset sổ mỗi lượt (cache chứng minh cũng xoá để không dùng
     // kết quả của lượt trước).
     sendDiag.buProofGated = 0; sendDiag.buProofPresent = 0; sendDiag.buProofAbsent = 0;
@@ -9135,8 +9140,8 @@
         // Chỉ đánh dấu khi kênh XÁC NHẬN thành công thật (kể cả xác nhận nền — fireApiAndWatch).
         if (!r.fired) { markDelivered(c.id, r.sendBy || 'api'); postSendSideEffects(c); }
         if (r.fired) { firedN++; noteBgPending(c, r.sendBy); } // vào sổ watchdog — quá 90s tự chốt, không kẹt
-        logLine('✅ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — đã gửi' + via
-          + (r.fired ? ' (đang xác nhận nền)' : ''));
+        // [v1.92.31] KHÔNG in từng dòng "đã gửi" nữa — chỉ in mốc tiến độ (xem logProgress).
+        logProgress(done, totalAll, ok, unsure, fail);
       } else if (r.gated) {
         // [v1.92.30] Phán đoán sai (không phải bằng chứng) ⇒ cổng chứng minh vắng mặt đang chạy
         // ở làn riêng. Vẫn tính ⚠ (để sổ sách đúng) và vẫn ghi uncertainIds — cổng có quyền đi
@@ -9302,11 +9307,17 @@
           releaseOutbound(item.c.id);
           done++; fail++;
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(item.c.id, 'fail');
+          // [v1.92.31] Lô 20 259 chat in 5 178 dòng y hệt nhau. 20 dòng đầu giữ đủ lý do
+          // (để còn truy nguyên), sau đó in bản ngắn — vẫn đủ tên chat bị lỗi để copy ra.
+          buQuietBudgetNote++;
           logLine('❌ [' + done + '/' + totalAll + '] ' + (item.c.name || item.c.id)
-            + ' — Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử ' + sockRetryBudgetState.tried
-            + ' ca, cứu được 0, từ chối gần đây '
-            + (sockRetryBudgetState.closePct >= 0 ? sockRetryBudgetState.closePct + '%' : '—')
-            + ' ⇒ thử nữa chỉ tốn lệnh)');
+            + (buQuietBudgetNote <= 20
+              ? (' — Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử ' + sockRetryBudgetState.tried
+                + ' ca, cứu được 0, từ chối gần đây '
+                + (sockRetryBudgetState.closePct >= 0 ? sockRetryBudgetState.closePct + '%' : '—')
+                + ' ⇒ thử nữa chỉ tốn lệnh)')
+              : ' — Socket: FB từ chối lần 1 (bỏ thử lần 2 — ngân sách đã đóng)')
+            + (buQuietBudgetNote === 21 ? '  ← các dòng sau in gọn (cùng một lý do)' : ''));
           updateBatchSummaryUI();
           checkWakeAllWaiters();
           return;
@@ -9721,6 +9732,8 @@
       existing.win.remove();
       delete floatWins[key];
       if (btnEl) btnEl.textContent = openLabel;
+      // [v1.92.31] thu nhỏ về panel ⇒ log vẫn ở cuối
+      try { requestAnimationFrame(() => logScrollToBottom()); } catch (e) { /* ignore */ }
       return false;
     }
     if (!contentEl || !contentEl.parentNode) return false;
@@ -9750,6 +9763,14 @@
     win.appendChild(bodyEl);
     win.appendChild(rsEl);
     shadow.appendChild(win);
+    // [v1.92.31] phóng to bảng log ⇒ đặt điểm nhìn ở cuối ngay khi mở
+    if (contentEl && contentEl.id === 'ssb-log') {
+      try {
+        flushLogUI(true);
+        requestAnimationFrame(() => logScrollToBottom(contentEl));
+        setTimeout(() => logScrollToBottom(contentEl), 120);
+      } catch (e) { /* ignore */ }
+    }
 
     // vị trí/cỡ: đã chỉnh thì giữ qua F5, chưa thì mặc định (lúc mở mới tính theo màn hình)
     let geo = null;
@@ -9883,9 +9904,11 @@
         .prog-stat.scan { color: #7dd3fc; }
         .summary-box { background: #132033; border: 1px solid #334155; border-radius: 8px; padding: 6px 8px;
                        font-size: 11px; line-height: 1.45; color: #e2e8f0; display: none; word-break: break-word; }
-        .log { background: #0b1220; border: 1px solid #334155; border-radius: 8px; padding: 8px;
-               max-height: 150px; overflow: auto; font-size: 10.5px; line-height: 1.55; color: #cbd5e1;
-               white-space: pre-wrap; word-break: break-word; }
+        /* [v1.92.31] 150 → 340px: đủ nhìn ~20 dòng một lúc và copy được đoạn dài.
+           Đệm dưới để dòng cuối không dính sát mép khi tự cuộn xuống. */
+        .log { background: #0b1220; border: 1px solid #334155; border-radius: 8px; padding: 8px 8px 14px;
+               min-height: 120px; max-height: min(340px, 42vh); overflow: auto; font-size: 10.5px; line-height: 1.55; color: #cbd5e1;
+               white-space: pre-wrap; word-break: break-word; overscroll-behavior: contain; }
         /* ===== cửa sổ PHÓNG TO (list/log): kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ ===== */
         .floatwin { position: fixed; z-index: 2147483647; background: #0f172a; color: #e2e8f0;
                     border: 1px solid #334155; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.55);
@@ -10755,16 +10778,46 @@
     // Log giữ tối đa 300 dòng; không ghi toàn bộ JSON vào localStorage mỗi 80ms khi chạy lô lớn.
     logPersistTimer = setTimeout(persistLogStorage, 1000);
   }
-  function flushLogUI() {
+  // Người dùng có đang ở sát đáy không? (nếu họ đã cuộn lên xem lỗi thì KHÔNG kéo họ xuống)
+  function logNearBottom(el) {
+    try { return (el.scrollHeight - el.scrollTop - el.clientHeight) <= 48; } catch (e) { return true; }
+  }
+  function logScrollToBottom(el) {
+    const e = el || (shadow && shadow.getElementById('ssb-log'));
+    if (!e) return;
+    try { e.scrollTop = e.scrollHeight; } catch (e2) { /* ignore */ }
+  }
+  function flushLogUI(forceBottom) {
     logFlushTimer = null;
     scheduleLogStorageSave();
     const el = shadow && shadow.getElementById('ssb-log');
     if (el) {
+      const stick = forceBottom || logNearBottom(el);
+      const prevTop = el.scrollTop;
       el.textContent = state.log.join('\n');
-      el.scrollTop = el.scrollHeight;
+      // [v1.92.31] Bám đáy như cũ ở chế độ bình thường; nếu người dùng đã cuộn lên đọc lỗi
+      // thì giữ nguyên vị trí thay vì giật xuống mỗi giây.
+      el.scrollTop = stick ? el.scrollHeight : prevTop;
     }
   }
   try { window.addEventListener('pagehide', persistLogStorage); } catch (e) { /* ignore */ }
+
+  /* [v1.92.31] Tiến độ thay cho từng dòng "✅ đã gửi".
+   * Lô 20 259 chat sinh 14 167 dòng "đã gửi" gần như trùng nhau ⇒ lỗi/mốc quan trọng bị đẩy
+   * khỏi tầm mắt và log phải cuộn hàng nghìn dòng. Nay chỉ in mốc: lô > 500 chat in mỗi 10%,
+   * lô nhỏ in mỗi 25% (vẫn thấy tiến độ, không mất thông tin vì TỔNG HỢP cuối có số chính xác). */
+  const logProgressMark = { pct: 0 };
+  function logProgress(done, total, ok, unsure, fail) {
+    const t = Number(total) || 0;
+    if (!t) return;
+    const d = Number(done) || 0;
+    const pct = Math.min(100, Math.floor((d * 100) / t));
+    const step = t > 500 ? 10 : 25;
+    if (pct < logProgressMark.pct + step || pct >= 100) return;
+    logProgressMark.pct = pct - (pct % step);
+    logLine('🟢 Đang gửi ' + d + '/' + t + ' (' + pct + '%) · ✅ ' + (ok || 0)
+      + (fail ? ' · ❌ ' + fail : '') + (unsure ? ' · ⚠ ' + unsure : ''));
+  }
 
   // [STABLE] Chỉ in dòng tổng kết + tiến trình. Các dòng chẩn đoán dài (SOCKET/API/WAVE/globalId)
   // đi qua logDiag() và bị tắt ở bản này để log cuối gọn, người dùng thường không cần đọc.
@@ -10775,7 +10828,8 @@
     const hh = String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0')
       + ':' + String(t.getSeconds()).padStart(2, '0');
     state.log.push('[' + hh + '] ' + s);
-    if (state.log.length > 300) state.log.shift();
+    // [v1.92.31] 300 → 1500 dòng: đủ giữ cả một lượt lớn để copy ra ngoài.
+    if (state.log.length > 1500) state.log.shift();
     const el = shadow && shadow.getElementById('ssb-log');
     if (!el) {
       try { localStorage.setItem(LOG_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
@@ -11406,6 +11460,13 @@
       if (wrapEl) wrapEl.style.display = '';
       if (bubble) bubble.style.display = 'none';
     }
+    // [v1.92.31] Mở bảng log ⇒ đặt điểm nhìn ở CUỐI (chỗ log đang chạy), không phải đầu.
+    // Element vừa được hiện lại nên scrollHeight chỉ đúng sau 1 nhịp vẽ.
+    try {
+      flushLogUI(true);
+      requestAnimationFrame(() => logScrollToBottom());
+      setTimeout(() => logScrollToBottom(), 120);
+    } catch (e) { /* ignore */ }
   }
 
   extListen((m, _s, sendResponse) => {

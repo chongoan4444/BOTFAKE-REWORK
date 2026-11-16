@@ -2809,3 +2809,32 @@ không chứng minh được Z · dùng lại kết quả C`
 `npm test`: 51 → **58 kịch bản**, thêm 7 ca cho `absenceVerdict` (trong đó 2 ca then chốt:
 *dò sớm thấy hội thoại chưa đổi ⇒ phải `unknown`, không được `absent`*; *hội thoại vừa động mà
 snippet khác ⇒ `unknown`, không được bù*).
+
+## §65 — BẢNG LOG: BÁM ĐÁY + BỎ DÒNG "ĐÃ GỬI" + CAO HƠN (1.92.31)
+
+Đo trên lô thật 12:53 (**20 259 chat, 1.92.29**): log sinh **14 167** dòng `✅ [n/m] … đã gửi`
++ **5 178** dòng `❌ … KHÔNG thử lần 2 (đã thử 80 ca, cứu được 0, từ chối gần đây 15% …)`
+⇒ ~19 300/20 000 dòng là **một trong hai câu gần như y hệt nhau**, đẩy dòng TỔNG HỢP và các
+dòng lỗi thật ra khỏi tầm mắt; bảng log chỉ hiện 150 px nên càng không thấy gì.
+
+### 65.1 Đã sửa
+
+1. **Tự đặt điểm nhìn ở CUỐI** khi mở panel (`showBotfakePanel`), khi phóng to/thu nhỏ cửa sổ log
+   (`toggleFloat`) — gọi `flushLogUI(true)` + `logScrollToBottom()` sau 1 nhịp vẽ
+   (`requestAnimationFrame` + 120 ms) vì element vừa được hiện lại thì `scrollHeight` mới đúng.
+2. **Bám đáy thông minh**: `flushLogUI` chỉ kéo xuống đáy khi người dùng đang ở sát đáy (≤ 48 px);
+   nếu họ đã cuộn lên đọc lỗi thì **giữ nguyên vị trí** thay vì giật xuống mỗi giây.
+3. **Bỏ dòng "đã gửi" từng chat**, thay bằng **mốc tiến độ**: `🟢 Đang gửi d/t (n%) · ✅ · ❌ · ⚠`
+   — lô > 500 chat in mỗi **10 %**, lô nhỏ in mỗi **25 %**. Số chính xác vẫn nằm ở dòng TỔNG HỢP
+   cuối lượt nên không mất thông tin.
+4. **Nén câu lỗi lặp**: 20 dòng `❌ … KHÔNG thử lần 2` đầu giữ **đủ lý do** (còn truy nguyên),
+   từ dòng 21 in gọn `❌ Tên — Socket: FB từ chối lần 1 (bỏ thử lần 2 — ngân sách đã đóng)`.
+   Vẫn đủ **tên từng chat bị lỗi** để copy ra ngoài.
+5. **Bảng log cao hơn**: `max-height` 150 px → `min(340px, 42vh)` (thêm 120 px đệm dưới giúp dòng
+   cuối không dính mép + `overscroll-behavior: contain`), và bộ đệm log **300 → 1 500 dòng**
+   ⇒ copy được cả một lượt lớn.
+
+### 65.2 Không đụng gì tới đường gửi
+
+Chỉ sửa trình bày: `logLine`/`flushLogUI`/CSS/`logProgress`. Không đổi một số làn, một ngưỡng,
+một nhánh chốt ✅/⚠/❌ nào — nhịp gửi và số liệu TỔNG HỢP giữ nguyên.
