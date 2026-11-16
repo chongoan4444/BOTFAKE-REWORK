@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.31-w200.73
+// @version      1.92.32-w200.74
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.31-W200.73'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.32-W200.74'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4747,7 +4747,7 @@
           if (res && (res.uncertain || res.sent === 'maybe')) {
             if (res.noAck) scheduleSocketVerify(conv, text, photo, res.publishedAt || (Date.now() - 15000));
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-            logLine('⚠ ' + nm + ' — ' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)');
+            logFailGrouped(nm, '' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)', '⚠');
             return;
           }
           if (res && res.deferredToSocketRetry && myRun === runSeq && !state.stopRequested) {
@@ -4761,16 +4761,16 @@
               sockRetryBudgetNote(sockRetryBudgetState, 'skipped', rejectPctBg);
               sendDiag.sockRetryBudgetSkipped++;
               if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-              logLine('❌ ' + nm + ' — Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử '
+              logFailGrouped(nm, 'Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử '
                 + sockRetryBudgetState.tried + ' ca, cứu được 0, từ chối gần đây '
                 + (sockRetryBudgetState.closePct >= 0 ? sockRetryBudgetState.closePct + '%' : '—')
-                + ' ⇒ thử nữa chỉ tốn lệnh)');
+                + ' ⇒ thử nữa chỉ tốn lệnh)', '❌');
               return;
             }
             if (sockRetryBudgetState.closed) sockRetryBudgetNote(sockRetryBudgetState, 'probe', rejectPctBg);
             sockRetryBudgetNote(sockRetryBudgetState, 'tried', rejectPctBg);
             sendDiag.sockWaveRetry = (sendDiag.sockWaveRetry || 0) + 1;
-            logLine('🔁 ' + nm + ' — Socket bị từ chối lần 1 — bắn lại 1 lần qua Socket (thoát burst-reject)…');
+            logFailGrouped(nm, 'Socket bị từ chối lần 1 — bắn lại 1 lần qua Socket (thoát burst-reject)…', '🔁');
             const ctx2 = Object.assign({}, res.deferredCtx || {}, {
               isSocketRetryPass: true, socketRetriedOnce: true,
               wave200Mode: false, sockFired: true, prioritySocket: true, fastOnly: false,
@@ -4782,7 +4782,7 @@
           if (res && !res.recipientUnavailable && res.sent === false && (res.error || '') !== 'Đã dừng') {
             // Frame CHƯA HỀ được bắn lên FB (ví dụ Socket không kết nối hoặc lỗi xin fbId ảnh khi retry)
             // và khách KHÔNG phải nick khóa → chuyển bù qua Extension để không bao giờ sót khách sống!
-            logLine('⚠ ' + nm + ' — ' + (res.error || 'Socket không kết nối') + ' (xác nhận nền) — chuyển bù qua Extension');
+            logFailGrouped(nm, (res.error || 'Socket không kết nối') + ' (xác nhận nền) — chuyển bù qua Extension', '⚠');
             scheduleBuRetry(conv, text, photo, nm, res.error || 'Socket không kết nối', ['socket']);
           } else {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
@@ -4791,7 +4791,7 @@
             // lượt sau vẫn gửi tiếp vào đúng những chat chết đó, và trong lượt vẫn retry vô ích.
             // Log thực tế 10k: 3744 lỗi, retry 3302 lần cứu được 0, unavailable ghi nhận 0.
             if (res && res.recipientUnavailable) sendDiag.recipientUnavailable++;
-            logLine('❌ ' + nm + ' — ' + ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)');
+            logFailGrouped(nm, ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)', '❌');
           }
         };
         const settleAndFinalize = (rawKind) => {
@@ -6114,8 +6114,8 @@
         try { markDelivered(conv.id, 'ext'); } catch (e) { /* ignore */ }
         try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
         try {
-          logLine('✅ (muộn ' + (Math.round(lateMs / 100) / 10) + 's) ' + (conv.name || conv.id)
-            + ' — Extension trả lời SAU mốc quá hạn, tin ĐÃ đi — tính ✅ Ext, không gửi lại, không tốn lượt đọc lịch sử');
+          logFailGrouped((conv.name || conv.id),
+            'Extension trả lời SAU mốc quá hạn (' + (Math.round(lateMs / 100) / 10) + 's), tin ĐÃ đi — tính ✅ Ext, không gửi lại', '✅');
         } catch (e) { /* ignore */ }
         try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
       }).catch(() => { extLateStats.fail++; });
@@ -6451,8 +6451,8 @@
             if (r.fired) return; // bắn-nhả: xác nhận nền tự ghi nhận khi ACK về — không chốt sớm
             markDelivered(conv.id, r.sendBy || 'ext');
             postSendSideEffects(conv);
-            logLine('✅ ' + nm2 + ' — gửi THÀNH CÔNG qua '
-              + (r.sendBy === 'socket' ? 'Socket' : r.sendBy === 'extension' ? 'Extension' : 'API'));
+            logFailGrouped(nm2, 'gửi THÀNH CÔNG qua '
+              + (r.sendBy === 'socket' ? 'Socket' : r.sendBy === 'extension' ? 'Extension' : 'API'), '✅');
             return;
           }
           // [v1.91.83] CỨU CA KHÔNG CÓ global_id — chỗ rò 57 tin/lô (0,53%).
@@ -6467,17 +6467,17 @@
               && (r.gidUnknown || /globalId/i.test(String(r.error || '')))) {
             try {
               sendDiag.apiNoGidFallback = (sendDiag.apiNoGidFallback || 0) + 1;
-              logLine('🛟 ' + nm2 + ' — không có global_id (Ext/Socket đều bất khả) — chuyển làn API');
+              logFailGrouped(nm2, 'không có global_id (Ext/Socket đều bất khả) — chuyển làn API', '🛟');
               fireApiAndWatch(conv, text, photo);
               return;
             } catch (e0) { /* rơi xuống xử lý cũ */ }
           }
           if (r.uncertain) {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-            logLine('⚠ ' + nm2 + ' — ' + r.error + ' (không rõ — không gửi thêm)');
+            logFailGrouped(nm2, '' + r.error + ' (không rõ — không gửi thêm)', '⚠');
           } else {
             if (r.windowClosed) windowBlocked++;
-            logLine('❌ ' + nm2 + ' — ' + r.error);
+            logFailGrouped(nm2, '' + r.error, '❌');
           }
           // cửa sổ 24h VẪN bù kênh khác (Thanh Binh); khách khóa nick (recipientUnavailable) hoặc hết kênh → tự bỏ
           if (!r.ok && !r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
@@ -6617,9 +6617,9 @@
               ctx.gidResolved = true;
               sendDiag.apiNoGidFallback++;
               ctx.apiNoGidDone = true; // [v1.92.28] đã xử lý ⇒ không chạy lại khối cứu bên dưới (tránh 2 dòng 🛟/ca)
-              logLine('🛟 ' + (conv.name || conv.id)
-                + ' — server/Batch/WS/Ext đều không có global_id ⇒ chuyển làn API bằng conversation_id'
-                + ' (HAR: lệnh gửi API không cần global_id)');
+              logFailGrouped((conv.name || conv.id),
+                'server/Batch/WS/Ext đều không có global_id ⇒ chuyển làn API bằng conversation_id'
+                + ' (HAR: lệnh gửi API không cần global_id)', '🛟');
             } else {
               return {
                 ok: false, sent: false, gidUnknown: true, noGidGate: true,
@@ -6640,9 +6640,9 @@
             ctx.gidResolved = true;
             const canApiRescue = !batchSkipApi && seq.indexOf('api') < 0 && !(photo && !photo.fbId);
             if (canApiRescue) seq.push('api');
-            logLine('🛟 ' + (conv.name || conv.id)
-              + ' — chưa dò được global_id; chưa kết luận khách khóa nick, sẽ thử Extension theo thread_id'
-              + (canApiRescue ? ' và API theo conversation_id như đường gửi tay' : ''));
+            logFailGrouped((conv.name || conv.id),
+              'chưa dò được global_id; chưa kết luận khách khóa nick, sẽ thử Extension theo thread_id'
+              + (canApiRescue ? ' và API theo conversation_id như đường gửi tay' : ''), '🛟');
           }
         }
       }
@@ -7842,9 +7842,9 @@
       const seen = {};
       const names = triedCh.concat(done).filter((x) => (seen[x] ? false : (seen[x] = true)));
       if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-      logLine('❌ ' + name + ' — đã thử hết kênh (' + (names.join(', ') || 'không rõ') + ')'
+      logFailGrouped(name, 'đã thử hết kênh (' + (names.join(', ') || 'không rõ') + ')'
         + (conv.type === 'comment' ? ' — bình luận chỉ API/Extension gửi được (Socket không hỗ trợ)' : '')
-        + ' — không bù nữa (mỗi kênh đúng 1 lần)');
+        + ' — không bù nữa (mỗi kênh đúng 1 lần)', '❌');
       return;
     }
     const myRun = runSeq;
@@ -7897,7 +7897,7 @@
         if (!out || !out.ch) {
           // bước chuẩn bị bù văng lỗi (lane trả {ok:false}) — phải chốt, không im lặng kẹt pending
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          logLine('❌ ' + name + ' — bù lỗi: ' + clip((out && out.error) || 'không rõ', 90));
+          logFailGrouped(name, 'bù lỗi: ' + clip((out && out.error) || 'không rõ', 90), '❌');
           return;
         }
         const ch = out.ch;
@@ -7909,28 +7909,28 @@
           markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
           buStats.ok++;
           buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
-          logLine('✅ ' + name + ' — bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'));
+          logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅');
         } else if (r && r.sent === 'maybe') {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-          logLine('⚠ ' + name + ' — bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
+          logFailGrouped(name, 'bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)', '⚠');
         } else if (r && r.recipientUnavailable && !hasMoreAfterSocket) {
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
           // ĐÂY là nơi tín hiệu "khách không nhận được" xuất hiện nhiều nhất (Extension trả
           // {"errorDescription":"Người này hiện không có mặt."}). Chỉ ĐẾM cho dòng chẩn đoán —
           // KHÔNG lưu gì, KHÔNG lọc gì ở các lượt sau (cơ chế nhớ đã bị xoá ở v1.92.21).
           sendDiag.recipientUnavailable++;
-          logLine('❌ ' + name + ' — bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
-            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)');
+          logFailGrouped(name, 'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
+            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)', '❌');
         } else {
-          logLine('❌ ' + name + ' — bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
-            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — sang kênh kế nếu còn');
+          logFailGrouped(name, 'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
+            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — sang kênh kế nếu còn', '❌');
           // CHUỖI BÙ: kênh kế CHƯA thử (mỗi kênh đúng 1 lần — không lặp kênh vừa thua)
           scheduleBuRetry(conv, text, photo, name,
             'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được', triedCh.concat([ch]));
         }
       }).catch((e) => {
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-        logLine('❌ ' + name + ' — bù lỗi: ' + (e && e.message || e));
+        logFailGrouped(name, 'bù lỗi: ' + (e && e.message || e), '❌');
       });
       /* [v1.92.30] CỔNG CHỨNG MINH VẮNG MẶT — chỉ cho phán quyết SUY LUẬN.
        * Phán quyết là BẰNG CHỨNG (socket chết trước publish, lỗi trước khi bắn) đi thẳng:
@@ -7944,12 +7944,12 @@
           buStats.cancelled++;
           sendDiag.buProofCancelled++;
           markDelivered(conv.id, buVia);
-          logLine('✅ ' + name + ' — hội thoại ĐÃ CÓ tin vừa gửi ⇒ tin đã tới nơi, HỦY bù — KHÔNG gửi lần 2 (chặn lặp)');
+          logFailGrouped(name, 'hội thoại ĐÃ CÓ tin vừa gửi ⇒ tin đã tới nơi, HỦY bù — KHÔNG gửi lần 2 (chặn lặp)', '✅');
           updateBatchSummaryUI();
           return;
         }
-        if (v === 'absent') logLine('🔎 ' + name + ' — chứng minh VẮNG MẶT (hội thoại không đổi sau lúc gửi) ⇒ bù an toàn');
-        else logLine('🔎 ' + name + ' — chưa chứng minh được vắng mặt ⇒ bù như cũ (ưu tiên không sót)');
+        if (v === 'absent') logFailGrouped(name, 'chứng minh VẮNG MẶT (hội thoại không đổi sau lúc gửi) ⇒ bù an toàn', '🔎');
+        else logFailGrouped(name, 'chưa chứng minh được vắng mặt ⇒ bù như cũ (ưu tiên không sót)', '🔎');
         actuallySendBu();
       };
       proveAbsentBeforeBu(conv, text, buSentAt).then(afterProof).catch(() => { actuallySendBu(); });
@@ -8340,7 +8340,7 @@
           try { res = await ctxFetchLane(() => fetchJson(url, 2)); } catch (e) { res = null; }
           if (!res || !res.ok || !res.data || res.data.success === false) {
             if (attempt === 0) {
-              logLine('🔎 ' + nm + ' — chưa đọc được lịch sử (' + ((res && res.error) || 'lỗi') + ') — thử lại…');
+              logFailGrouped(nm, 'chưa đọc được lịch sử (' + ((res && res.error) || 'lỗi') + ') — thử lại…', '🔎');
             }
             continue;
           }
@@ -8371,7 +8371,7 @@
             verifyStats.found++;
             markDelivered(conv.id, 'socket');
             try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
-            logLine('🔎 ' + nm + ' — kiểm chứng bằng HỘI THOẠI: snippet = tin vừa gửi, do chính page này gửi — tính ✅ Socket');
+            logFailGrouped(nm, 'kiểm chứng bằng HỘI THOẠI: snippet = tin vừa gửi, do chính page này gửi — tính ✅ Socket', '🔎');
             return;
           }
         }
@@ -8379,7 +8379,7 @@
           verifyStats.found++;
           markDelivered(conv.id, 'socket');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
-          logLine('🔎 ' + nm + ' — kiểm chứng: tin ĐÃ đến nơi (Socket chỉ mất ACK) — tính ✅ Socket');
+          logFailGrouped(nm, 'kiểm chứng: tin ĐÃ đến nơi (Socket chỉ mất ACK) — tính ✅ Socket', '🔎');
           return;
         }
         // [v1.92.25] Không có bằng chứng dương sau các lần đọc ⇒ GIỮ ⚠. Đây là đường duy nhất
@@ -8387,12 +8387,12 @@
         // [v1.92.28] Chỉ tính "giữ ⚠" — trước đây tăng CẢ unknown lẫn held cho cùng một ca
         // nên dòng tổng kết in "giữ ⚠ 5 · không kiểm chứng được 5" trong khi chỉ có 5 ca.
         verifyStats.held = (verifyStats.held || 0) + 1;
-        logLine('🔎 ' + nm + ' — kiểm chứng: ' + (histTruncatedOld
+        logFailGrouped(nm, 'kiểm chứng: ' + (histTruncatedOld
           ? 'lịch sử chỉ trả 25 tin CŨ NHẤT (thread dài) và hội thoại chưa hiện tin này'
-          : 'đọc ' + maxReads + ' lần chưa thấy tin') + ' — GIỮ ⚠, KHÔNG bắn lại (chống trùng)');
+          : 'đọc ' + maxReads + ' lần chưa thấy tin') + ' — GIỮ ⚠, KHÔNG bắn lại (chống trùng)', '🔎');
       } catch (e) {
         verifyStats.unknown++;
-        logLine('🔎 ' + nm + ' — kiểm chứng lỗi (' + (e && e.message || e) + ') — giữ ⚠ như cũ, không gửi lại');
+        logFailGrouped(nm, 'kiểm chứng lỗi (' + (e && e.message || e) + ') — giữ ⚠ như cũ, không gửi lại', '🔎');
       } finally {
         delete sockVerifyPending[conv.id]; // nhả sổ chờ ở mọi lối ra — lượt chỉ được kết thúc sau khi kiểm chứng chốt xong
         // Dù kiểm chứng thấy/không thấy/lỗi cũng phải tính lại pending và
@@ -8473,7 +8473,7 @@
           extTimeoutStats.found++;
           markDelivered(conv.id, 'ext');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
-          logLine('🔎 ' + nm + ' — kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi — tính ✅ Ext');
+          logFailGrouped(nm, 'kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi — tính ✅ Ext', '🔎');
           return;
         }
         if (!isRecheck) extTimeoutStats.notFound++;
@@ -8566,12 +8566,12 @@
         if (verdict === 'yes') {
           markDelivered(conv.id, 'api');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
-          logLine('🔎 ' + nm + ' — kiểm chứng: tin ĐÃ tới (API chỉ trả lời trễ) — tính ✅ API');
+          logFailGrouped(nm, 'kiểm chứng: tin ĐÃ tới (API chỉ trả lời trễ) — tính ✅ API', '🔎');
           return;
         }
         // [v1.92.25] Không có bằng chứng dương ⇒ GIỮ ⚠, không bao giờ gửi lại từ kiểm chứng.
         verifyStats.held = (verifyStats.held || 0) + 1; // [v1.92.28] không đếm đôi (xem scheduleSocketVerify)
-        logLine('🔎 ' + nm + ' — kiểm chứng KHÔNG kết luận được (' + clip(why || 'không rõ', 60) + ') — giữ ⚠, KHÔNG bắn lại (chống trùng)');
+        logFailGrouped(nm, 'kiểm chứng KHÔNG kết luận được (' + clip(why || 'không rõ', 60) + ') — giữ ⚠, KHÔNG bắn lại (chống trùng)', '🔎');
       } catch (e) {
         // kiểm chứng lỗi → giữ nguyên ⚠
       } finally {
@@ -8746,6 +8746,9 @@
     // không chặn đúp ở đây thì bấm lần 2 chạy song song lần 1 (log hiện 2 dòng lọc)
     state.sending = true;
     state.stopRequested = false;
+    // [v1.92.32] mỗi lượt gửi có sổ log riêng ⇒ "Copy log/.txt" chỉ ra đúng lượt này
+    logAllReset();
+    logGroupReset();
     if (preloadSelectedTimer) { clearTimeout(preloadSelectedTimer); preloadSelectedTimer = null; }
     preloadSelectedSeq++;
     applyRunStopButtons();
@@ -8978,6 +8981,9 @@
 
     let ok = 0, fail = 0, done = 0, unsure = 0, firedN = 0;
     let lastSpeedLogAt = Date.now();
+    // [v1.92.32] cho dòng gộp biết tiến độ hiện tại (chỉ để IN log)
+    logGroupCtx = () => (done + '/' + totalAll);
+    logGroupReset();
     const quickEl0 = shadow && shadow.getElementById('ssb-quick');
     const quickOn = !!(quickEl0 && quickEl0.checked);
     waveDiag.quickEnabled = quickOn;
@@ -9134,16 +9140,15 @@
         // xuyên qua chốt đó vì nó dựa trên BẰNG CHỨNG, không phải phán đoán.
         unsure++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
-        logLine('🔎 [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error);
+        logFailGrouped((c.name || c.id), r.error, '🔎');
       } else if (r.uncertain) {
         unsure++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
-        logLine('⚠ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error
-          + ' — không rõ tin đã đi chưa (không gửi thêm để tránh trùng)');
+        logFailGrouped((c.name || c.id), r.error + ' — không rõ tin đã đi chưa (không gửi thêm để tránh trùng)', '⚠');
       } else {
         fail++;
         if (r.windowClosed) windowBlocked++;
-        logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error);
+        logFailGrouped((c.name || c.id), r.error, '❌');
         // cửa sổ 24h VẪN bù kênh khác (Thanh Binh); kênh đã thử hết → scheduleBuRetry tự bỏ
         if (!r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
           const p2 = c.pageId || String(c.id).split('_')[0];
@@ -9293,17 +9298,15 @@
           releaseOutbound(item.c.id);
           done++; fail++;
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(item.c.id, 'fail');
-          // [v1.92.31] Lô 20 259 chat in 5 178 dòng y hệt nhau. 20 dòng đầu giữ đủ lý do
-          // (để còn truy nguyên), sau đó in bản ngắn — vẫn đủ tên chat bị lỗi để copy ra.
+          // [v1.92.32] Lô 20 259 chat từng in 5 178 dòng y hệt nhau (chỉ khác tên chat) ⇒ đây là
+          // nguồn phình log lớn nhất. Nay GỘP: cùng lý do ⇒ 1 dòng đếm / 2 giây, kèm [done/total],
+          // số chat và 4 tên ví dụ. Lý do đầy đủ in ở dòng đầu tiên của nhóm (buQuietBudgetNote === 1).
           buQuietBudgetNote++;
-          logLine('❌ [' + done + '/' + totalAll + '] ' + (item.c.name || item.c.id)
-            + (buQuietBudgetNote <= 20
-              ? (' — Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử ' + sockRetryBudgetState.tried
-                + ' ca, cứu được 0, từ chối gần đây '
-                + (sockRetryBudgetState.closePct >= 0 ? sockRetryBudgetState.closePct + '%' : '—')
-                + ' ⇒ thử nữa chỉ tốn lệnh)')
-              : ' — Socket: FB từ chối lần 1 (bỏ thử lần 2 — ngân sách đã đóng)')
-            + (buQuietBudgetNote === 21 ? '  ← các dòng sau in gọn (cùng một lý do)' : ''));
+          logFailGrouped(item.c.name || item.c.id,
+            'Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử ' + sockRetryBudgetState.tried
+              + ' ca, cứu được 0, từ chối gần đây '
+              + (sockRetryBudgetState.closePct >= 0 ? sockRetryBudgetState.closePct + '%' : '—')
+              + ' ⇒ thử nữa chỉ tốn lệnh)', '❌');
           updateBatchSummaryUI();
           checkWakeAllWaiters();
           return;
@@ -9386,8 +9389,8 @@
                 markDelivered(item.c.id, 'socket');
                 done++; ok++;
                 sendDiag.buProofCancelled++;
-                logLine('✅ [' + done + '/' + totalAll + '] ' + (item.c.name || item.c.id)
-                  + ' — FB báo "không gửi được" nhưng hội thoại ĐÃ CÓ tin ⇒ tin đã đi, KHÔNG bắn lần 2 (chặn lặp)');
+                logFailGrouped((item.c.name || item.c.id),
+                  'FB báo "không gửi được" nhưng hội thoại ĐÃ CÓ tin ⇒ tin đã đi, KHÔNG bắn lần 2 (chặn lặp)', '✅');
                 updateBatchSummaryUI();
                 checkWakeAllWaiters();
                 continue;
@@ -9674,6 +9677,7 @@
         });
       } catch (e) { /* ignore */ }
       const sumNow = getBatchSummaryCounts();
+      flushErrGroup(); // [v1.92.32] in nốt dòng gộp còn đang gom trước mốc 🏁
       logLine('🏁 Hoàn tất vòng phát lệnh: đã xác nhận ' + sumNow.okTotal + '/' + totalAll + ' thành công'
         + (sumNow.pending > 0 ? ' (còn ' + sumNow.pending + ' tin đang xác nhận/bù nền — bảng TỔNG HỢP sẽ tự chốt khi xong hết)' : '')
         + ', ' + sumNow.failTotal + ' lỗi.'
@@ -10021,8 +10025,12 @@
             </div>
           </div>
           <div class="row" style="align-items:center;justify-content:space-between">
-            <span class="label">LOG</span>
-            <button class="minibtn" id="ssb-logzoom" title="Phóng to / thu nhỏ bảng log — kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ">⛶ Phóng to log</button>
+            <span class="label">LOG <span id="ssb-logcount" style="color:#64748b;font-weight:400;text-transform:none;letter-spacing:0">0 dòng</span></span>
+            <span style="display:flex;gap:4px;align-items:center">
+              <button class="minibtn" id="ssb-logcopy" title="Copy TOÀN BỘ log của lượt này (không chỉ phần đang thấy)">📋 Copy log</button>
+              <button class="minibtn" id="ssb-logsave" title="Tải toàn bộ log ra file .txt — dùng khi log rất dài">💾 .txt</button>
+              <button class="minibtn" id="ssb-logzoom" title="Phóng to / thu nhỏ bảng log — kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ">⛶ Phóng to</button>
+            </span>
           </div>
           <div class="summary-box" id="ssb-summary"></div>
           <div class="log" id="ssb-log"></div>
@@ -10070,6 +10078,49 @@
       const bubble = root.getElementById('ssb-bubble');
       if (wrapEl) wrapEl.style.display = '';
       if (bubble) bubble.style.display = 'none';
+    });
+    // [v1.92.32] COPY / TẢI TOÀN BỘ LOG của lượt (đọc từ logAll, không phải phần đang thấy)
+    const copyTextToClipboard = (txt) => {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          return navigator.clipboard.writeText(txt).then(() => true).catch(() => false);
+        }
+      } catch (e) { /* rơi xuống cách cũ */ }
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = txt;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+        document.body.appendChild(ta);
+        ta.focus(); ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return Promise.resolve(!!ok);
+      } catch (e2) { return Promise.resolve(false); }
+    };
+    on('ssb-logcopy', 'click', () => {
+      flushErrGroup(); // [v1.92.32] in nốt dòng gộp đang chờ 2 giây để bản copy không thiếu dòng cuối
+      const txt = (logAll.length ? logAll : state.log).join('\n');
+      copyTextToClipboard(txt).then((ok) => {
+        logLine(ok ? ('📋 Đã copy ' + logAll.length + ' dòng log vào clipboard')
+          : '⛔ Trình duyệt chặn clipboard — bấm "💾 .txt" để tải file thay thế');
+      });
+    });
+    on('ssb-logsave', 'click', () => {
+      try {
+        flushErrGroup();
+        const txt = (logAll.length ? logAll : state.log).join('\n');
+        const d = new Date();
+        const stamp = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0')
+          + '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0') + String(d.getSeconds()).padStart(2, '0');
+        const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'botfake-log-' + stamp + '.txt';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { try { URL.revokeObjectURL(a.href); a.remove(); } catch (e2) { /* ignore */ } }, 1000);
+        logLine('💾 Đã tải ' + logAll.length + ' dòng log ra file botfake-log-' + stamp + '.txt');
+      } catch (e) { logLine('⛔ Không tạo được file log: ' + (e && e.message || e)); }
     });
     // phóng to bảng LOG / bảng LIST → cửa sổ nổi kéo thả + đổi cỡ (xem toggleFloat)
     on('ssb-logzoom', 'click', () => {
@@ -10540,9 +10591,14 @@
       }
       const oldLog = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
       if (Array.isArray(oldLog) && oldLog.length) {
-        state.log = oldLog.slice(-300);
+        state.log = oldLog.slice(-1500);
+        // [v1.92.32] sau F5 vẫn copy/tải được cả phần log đã khôi phục
+        logAll.length = 0;
+        for (let li = 0; li < state.log.length; li++) logAll.push(state.log[li]);
         const elLog = root.getElementById('ssb-log');
         if (elLog) elLog.textContent = state.log.join('\n');
+        const cntEl = root.getElementById('ssb-logcount');
+        if (cntEl) cntEl.textContent = logAll.length + ' dòng';
       }
       const oldSum = localStorage.getItem(SUMMARY_LS_KEY) || '';
       if (oldSum) {
@@ -10773,9 +10829,71 @@
     if (!e) return;
     try { e.scrollTop = e.scrollHeight; } catch (e2) { /* ignore */ }
   }
+  /* [v1.92.32] NÉN LÝ DO LỖI LẶP — log mẫu cho thấy ~95 % khối lượng log là 3 câu lặp:
+   *   "Ext: Không tìm được global_id để gửi — bỏ qua Ext thread-only cho nhanh"
+   *   "socket: Không tìm thấy globalId thật cho Socket"
+   *   "api: (#10) Tin nhắn này được gửi ngoài khoảng thời gian cho phép. ... policy-overview"
+   * Chỉ ĐỔI CÁCH IN, không đổi kết quả và không bỏ thông tin: vẫn đủ mã lỗi (vd #10/#551).
+   * Đặt ở phạm vi module để cả sendOne (làn gửi) lẫn wave đều dùng được; KHÔNG đụng logic gửi. */
+  const ERR_ABBR = [
+    [/Ext: Không tìm được global_id để gửi[^|]*/g, 'Ext: không gid'],
+    [/Ext: Không tìm được globalId[^|]*/g, 'Ext: không gid'],
+    [/socket: Không tìm thấy globalId thật cho Socket/g, 'socket: không gid'],
+    [/\(#10\) Tin nhắn này được gửi ngoài khoảng thời gian[^|]*/g, '(#10) ngoài 24h'],
+    [/\(#551\) Người này hiện không có mặt\.?/g, '(#551) không có mặt'],
+    [/Trang này hiện không khả dụng[^|]*/g, 'trang không khả dụng'],
+  ];
+  const compressErr = (str) => {
+    let t = String(str == null ? '' : str);
+    for (let i = 0; i < ERR_ABBR.length; i++) { t = t.replace(ERR_ABBR[i][0], ERR_ABBR[i][1]); }
+    t = t.replace(/\s*\|\s*/g, ' | ').trim(); // chuỗi bị nén hay dính khoảng trắng quanh "|"
+    return clip(t, 140);
+  };
+  /* [v1.92.32] GỘP CÁC DÒNG CÙNG LÝ DO thành 1 dòng đếm (tối đa 1 dòng / 2 giây).
+   * Trước: 3 559 dòng ❌ gần giống hệt nhau trong 4 giây của một lô lớn; ~600 dòng 🛟 và
+   * ~600 dòng ❌ [d/t] api(#551)… nữa ⇒ copy ra hàng nghìn dòng.
+   * Sau:  mỗi lý do 1 dòng, kèm "[done/total]", số chat cùng lỗi, 4 tên ví dụ.
+   * Sổ tên chat đầy đủ vẫn nằm trong state và trong "💾 .txt" — chỉ phần HIỂN THỊ bị gộp. */
+  let logGroupCtx = null; // runSend gán = () => done + '/' + totalAll
+  const errGroup = { key: '', n: 0, names: [], tag: '❌', at: 0, start: 0 };
+  let errGroupTimer = null;
+  function flushErrGroup() {
+    if (errGroupTimer) { clearTimeout(errGroupTimer); errGroupTimer = null; }
+    if (!errGroup.n) return;
+    const g = errGroup;
+    const head = (logGroupCtx ? '[' + logGroupCtx() + '] ' : '');
+    const GROUP_LABEL = { '❌': 'cùng lỗi', '⚠': 'cùng lỗi', '🔎': 'cùng tình huống', '🛟': 'cùng tình huống', '🔁': 'cùng tình huống', '✅': 'cùng kết quả', '🛡': 'cùng tình huống' };
+    const what = GROUP_LABEL[g.tag] || 'cùng lỗi';
+    logLine((g.tag || '❌') + ' ' + head + (g.n > 1
+      ? '×' + g.n + ' chat ' + what + ' — ' + g.key + ' · vd: ' + g.names.join(', ')
+      : g.names[0] + ' — ' + g.key));
+    g.n = 0; g.names = []; g.key = ''; g.at = 0; g.start = 0;
+  }
+  function logFailGrouped(name, reason, tag) {
+    tag = tag || '❌';
+    const key = compressErr(reason);
+    const now = Date.now();
+    const same = (key === errGroup.key) && (tag === errGroup.tag) && (now - errGroup.start < 60000);
+    if (!same) {
+      flushErrGroup();                       // in nhóm cũ trước khi đổi lý do
+      errGroup.key = key;
+      errGroup.tag = tag;
+      errGroup.start = now;
+      errGroup.n = 0;
+      errGroup.names = [];
+    }
+    errGroup.at = now;
+    errGroup.n++;
+    if (errGroup.names.length < 4 && errGroup.names.indexOf(name) < 0) errGroup.names.push(name);
+    if (!errGroupTimer) errGroupTimer = setTimeout(flushErrGroup, 2000);
+  }
+  function logGroupReset() { if (errGroupTimer) { clearTimeout(errGroupTimer); errGroupTimer = null; } errGroup.n = 0; errGroup.names = []; errGroup.key = ''; errGroup.start = 0; }
+
   function flushLogUI(forceBottom) {
     logFlushTimer = null;
     scheduleLogStorageSave();
+    const cnt = shadow && shadow.getElementById('ssb-logcount');
+    if (cnt) cnt.textContent = logAll.length + ' dòng';
     const el = shadow && shadow.getElementById('ssb-log');
     if (el) {
       const stick = forceBottom || logNearBottom(el);
@@ -10805,11 +10923,24 @@
       + (fail ? ' · ❌ ' + fail : '') + (unsure ? ' · ⚠ ' + unsure : ''));
   }
 
+  /* [v1.92.32] HAI SỔ SONG SONG:
+   *   • state.log  = cửa sổ hiển thị (1 500 dòng) — dựng lại DOM mỗi giây nên phải nhỏ.
+   *   • logAll     = TOÀN BỘ log của lượt (trần 60 000 dòng) — nút "📋 Copy log" / "💾 .txt"
+   *                  đọc từ đây, nên KHÔNG bao giờ bị cắt như copy phần đang nhìn thấy.
+   * Lý do: lô 9 335 chat sinh ~4 500 dòng; lô 20 259 chat sinh ~20 000 dòng ⇒ cửa sổ 1 500
+   * dòng luôn thiếu phần đầu. */
+  const logAll = [];
+  const LOG_ALL_MAX = 60000;
+  function logAllReset() { logAll.length = 0; }
+
   function logLine(s) {
     const t = new Date();
     const hh = String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0')
       + ':' + String(t.getSeconds()).padStart(2, '0');
-    state.log.push('[' + hh + '] ' + s);
+    const full = '[' + hh + '] ' + s;
+    logAll.push(full);
+    if (logAll.length > LOG_ALL_MAX) logAll.shift();
+    state.log.push(full);
     // [v1.92.31] 300 → 1500 dòng: đủ giữ cả một lượt lớn để copy ra ngoài.
     if (state.log.length > 1500) state.log.shift();
     const el = shadow && shadow.getElementById('ssb-log');

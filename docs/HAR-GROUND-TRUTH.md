@@ -2838,3 +2838,46 @@ dòng lỗi thật ra khỏi tầm mắt; bảng log chỉ hiện 150 px nên c�
 
 Chỉ sửa trình bày: `logLine`/`flushLogUI`/CSS/`logProgress`. Không đổi một số làn, một ngưỡng,
 một nhánh chốt ✅/⚠/❌ nào — nhịp gửi và số liệu TỔNG HỢP giữ nguyên.
+
+## §66 — LOG GỌN ĐỂ COPY ĐƯỢC TRỌN: GỘP DÒNG THEO LÝ DO + NÚT COPY/TẢI (1.92.32)
+
+Yêu cầu của người dùng: *"bảng log không chứa hết được, bản này đỡ một chút nhưng copy cũng
+không hết nổi"*. Tức vấn đề không phải tốc độ gửi mà là **số dòng quá lớn** ⇒ không nhìn ra
+chuyện gì đang xảy ra và **copy ra ngoài bị cắt**.
+
+### 66.1 Vì sao trước đây copy không hết
+
+1. Khung log chỉ giữ **1 500 dòng** (`state.log`, `shift()` khi vượt) — lô lớn sinh **hàng chục
+   nghìn dòng** nên phần đầu mất hẳn.
+2. Copy bằng bôi đen chỉ lấy được phần đang nằm trong vùng cuộn ⇒ **không bao giờ** đủ.
+3. ~95 % số dòng là **cùng một câu, chỉ khác tên chat**:
+   `❌ … Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (…)` (3 559 dòng/4 giây ở log 13:13),
+   `🛟 … server/Batch/WS/Ext đều không có global_id …` (~600 dòng),
+   `❌ [d/t] … api: (#551) … | Ext: Không tìm được global_id … | socket: Không tìm thấy globalId thật`
+   (~600 dòng).
+
+### 66.2 Đã sửa (chỉ phần hiển thị)
+
+1. **Gộp dòng theo lý do** — `logFailGrouped(name, reason, tag)` ở phạm vi module (dùng được cả
+   trong `sendOne` lẫn wave). Cùng `tag` + cùng `reason` (sau khi nén) ⇒ gom tối đa **2 giây**,
+   in **một** dòng: `❌ [done/total] ×120 chat cùng lỗi — <lý do> · vd: A, B, C, D`.
+   Tag đang gộp: `❌ ⚠ 🔎 🛟 🔁 ✅` (nhãn chữ đổi theo tag: *cùng lỗi / cùng tình huống / cùng kết quả*).
+   Đo bằng mô phỏng 30 giây của lô lớn: **4 800 dòng → 90 dòng** (giảm ~53 lần) mà **không mất
+   mã lỗi nào** (`#10`, `#551`, `không gid` vẫn còn).
+2. **Nén lý do** — `compressErr` + bảng `ERR_ABBR`: câu dài của FB/HAR rút còn `(#10) ngoài 24h`,
+   `(#551) không có mặt`, `socket: không gid`, `Ext: không gid`, … (giữ mã lỗi, bỏ phần văn bản
+   pháp lý/URL dài), trần 140 ký tự.
+3. **Hai sổ log** — `logAll` (trần **60 000** dòng, đủ cả lượt) dùng cho copy/tải; `state.log`
+   vẫn là cửa sổ **1 500** dòng để dựng DOM. `logAllReset()` đầu mỗi lượt; sau F5 khôi phục lại
+   từ `state.log` đã lưu.
+4. **Nút `📋 Copy log`** (copy **toàn bộ** log của lượt, không cần bôi đen; có đường lui
+   `execCommand` khi trình duyệt chặn `navigator.clipboard`) và **`💾 .txt`** (tải
+   `botfake-log-YYYYMMDD-HHMMSS.txt`). Cả hai **flush dòng gộp đang chờ** trước khi xuất nên
+   không thiếu dòng cuối.
+5. **Đếm dòng** ở tiêu đề bảng log (`LOG · N dòng`) để biết ngay lượt này sinh bao nhiêu dòng.
+
+### 66.3 Không đụng gì tới đường gửi
+
+Không đổi một số làn, một ngưỡng, một nhánh chốt ✅/⚠/❌, không đổi cơ chế bù/cổng chứng minh
+vắng mặt. Chỉ thay **cách in**: `logLine` → `logFailGrouped` ở các dòng lặp, cộng CSS/thêm nút.
+Sổ tên chat đầy đủ vẫn nằm trong `state`/`uncertainIds` và trong file `.txt`.
