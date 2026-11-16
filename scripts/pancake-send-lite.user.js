@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.43-w200.88
+// @version      1.92.43-w200.89
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.43-W200.88'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.43-W200.89'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -99,6 +99,8 @@
     target: null,           // { id, name, snippet, time } — snippet người dùng đã chọn (mode snippet)
     rangeStart: null,       // đầu chuỗi (mode range — Alt+Click lần 1)
     rangeEnd: null,         // cuối chuỗi (mode range — Alt+Click lần 2)
+    keepListOnSelect: true, // [v1.92.43e] không cho app tự cuộn danh sách khi Alt/Ctrl chọn chuỗi
+    lastSelectAt: 0,        // [v1.92.43e] mốc lựa chọn vừa đổi (chỉ ghim cuộn ~700ms sau đó)
     allRows: null,          // Map id → dòng (+ order trên→dưới) từ "Quét toàn bộ danh sách"
     scanning: false,        // đang tải danh sách
     scanStopRequested: false, // bấm nút Tải lần nữa để dừng & dùng ngay số chat đã tải
@@ -964,6 +966,7 @@
   }
 
   function computeMatches(opts) {
+    state.lastSelectAt = Date.now();
     state.loadedName = null;
     renderSavedLists();
     const before = new Map(state.matches.map((m) => [m.id, m]));
@@ -1026,11 +1029,21 @@
           logLine('⚠ Không tìm thấy 1 trong 2 đầu chuỗi trong danh sách — đang tự tải bổ sung…');
         }
       } else {
+        /* [v1.92.43e] Chuỗi hàng nghìn dòng: TRƯỚC ĐÂY mỗi dòng lại gọi idxOf(r.id) ⇒ mỗi lần đổi
+         * lựa chọn là một lượt quét toàn bộ + Map/tìm kiếm. Nay chỉ cắt đúng khoảng [lo..hi].
+         * Kiểm 2 đầu trước cho chắc: nếu chỉ số không trỏ đúng dòng thì quay lại đường cũ
+         * (không bao giờ cắt sai chuỗi). */
         const lo = Math.min(ia, ib), hi = Math.max(ia, ib);
-        rows.forEach((r) => {
-          const i = idxOf(r.id);
-          if (i >= lo && i <= hi) push(r); // rows đang theo thứ tự trên→dưới
-        });
+        const fastOk = rows[ia] && rows[ib]
+          && String(rows[ia].id) === String(aId) && String(rows[ib].id) === String(bId);
+        if (fastOk) {
+          for (let i = lo; i <= hi && i < rows.length; i++) push(rows[i]);
+        } else {
+          rows.forEach((r) => {
+            const i = idxOf(r.id);
+            if (i >= lo && i <= hi) push(r); // rows đang theo thứ tự trên→dưới
+          });
+        }
       }
     }
     state.matches = list;
@@ -1211,6 +1224,7 @@
         if (has !== want) {
           el.classList.remove('ssb-m-target', 'ssb-m-match');
           if (want) el.classList.add(want);
+          hlClassSeen.set(el, el.className || ''); // để observer bỏ qua thay đổi do chính ta gây ra
         }
       };
       paint(item);
@@ -1220,12 +1234,26 @@
 
   // Tô lại màu mỗi khi virtual list render lại dòng (cuộn, bấm chọn chat, app cập nhật…)
   let hlScheduled = false;
+  let hlObserver = null;
+  let hlDeferredBySelect = false;
+  const hlClassSeen = new WeakMap(); // class đã thấy của từng dòng — để bỏ qua thay đổi do CHÍNH TA gây ra
+  /* [v1.92.43e] Trong lúc người dùng đang RÊ chọn chuỗi (Alt/Ctrl/pickMode) ta tạm NGƯNG tô màu:
+   * mỗi lần đổi lựa chọn là một lượt query + đọc DOM toàn danh sách, cộng hưởng với observer thành
+   * vòng lặp nặng đúng lúc đang thao tác. Chọn xong (thả phím / nhấp xong) sẽ tô lại 1 lần. */
+  function userSelectingNow() {
+    if (state.deselectMode || state.pickMode) return true;
+    return !!(modState.altAt && Date.now() - modState.altAt < MOD_FRESH_MS)
+      || !!(modState.ctrlAt && Date.now() - modState.ctrlAt < MOD_FRESH_MS);
+  }
   function scheduleHighlight() {
     if (state.sendListFrozen || hlScheduled) return;
     hlScheduled = true;
     requestAnimationFrame(() => {
       hlScheduled = false;
-      try { highlightRows(); } catch (e) { /* ignore */ }
+      try {
+        if (userSelectingNow()) { hlDeferredBySelect = true; return; } // tô lại sau khi thao tác xong
+        highlightRows();
+      } catch (e) { /* ignore */ }
     });
   }
 
@@ -1239,6 +1267,29 @@
     } catch (e) { /* ignore */ }
   }
 
+  /* [v1.92.43e] APP TỰ CUỘN DANH SÁCH → LAG KHI CHỌN CHUỖI.
+   * Mỗi lần Alt/Ctrl nhấp đổi điểm cuối, app render lại dòng đang chọn và (tuỳ bản) cuộn danh sách
+   * về gần đầu; danh sách là virtual list nên mỗi cú cuộn = tháo/gắn hàng chục dòng React + tính
+   * lại vị trí ⇒ giật, nhất là khi danh sách đã tải hàng nghìn chat. Ta chỉ CHẶN cuộn khi đang
+   * giữ Alt/Ctrl hoặc đang ở chế độ 2 nhấp — cuộn tay của người dùng không bị ảnh hưởng.
+   * Bỏ tick ô "Giữ nguyên vị trí danh sách khi chọn chuỗi" nếu cần hành vi cũ. */
+  try {
+    window.addEventListener('scroll', (e) => {
+      if (!state.keepListOnSelect) return;
+      if (!userSelectingNow()) return;
+      // chỉ ghim trong ~700ms ngay sau khi lựa chọn đổi; cuộn tay (Alt+lăn chuột) không bị cướp
+      if (Date.now() - (state.lastSelectAt || 0) > 700) return;
+      const t = e && e.target;
+      if (!t || t === document || t === window) return;
+      const el = t.nodeType === 1 ? t : null;
+      if (!el || !el.closest) return;
+      if (!el.closest('#conversationList, .conversation-list, .rc-virtual-list-holder')) return;
+      // hoãn về đúng vị trí cũ (app vừa đổi scrollTop) — rẻ hơn nhiều so với render lại cả dải
+      const keep = el.scrollTop;
+      requestAnimationFrame(() => { try { if (el.scrollTop !== keep) el.scrollTop = keep; } catch (e2) { /* ignore */ } });
+    }, true);
+  } catch (e) { /* ignore */ }
+
   function watchList() {
     const list = $('#conversationList');
     if (!list) {
@@ -1246,18 +1297,36 @@
       setTimeout(() => { if (!state.destroyed) watchList(); }, 2000);
       return;
     }
-    // 1) React thay DOM/class của dòng → tô lại
+    /* [v1.92.43e] VÒNG LẶP TỰ KÍCH: ta gắn MutationObserver lên cả class, rồi mỗi lần
+     * highlightRows() ĐỔI class (thêm ssb-m-match / ssb-m-target) thì observer lại nổ ⇒
+     * scheduleHighlight ⇒ highlightRows... Chỉ dừng vì hlScheduled gộp trong 1 animation frame,
+     * nên nó chạy LUÔN TAY ở 60 fps khi có dòng được tô — đúng lúc người dùng chọn chuỗi.
+     * Nay: chỉ nghe childList (dòng được render lại); class do CHÍNH TA đổi thì bỏ qua. */
     try {
-      const mut = new MutationObserver(() => scheduleHighlight());
+      const mut = new MutationObserver((recs) => {
+        for (let i = 0; i < recs.length; i++) {
+          const r = recs[i];
+          if (r.type === 'childList') { scheduleHighlight(); return; }
+          if (r.type === 'attributes') {
+            const el = r.target;
+            if (el && el.classList) {
+              const now = el.className || '';
+              if (now !== hlClassSeen.get(el)) { hlClassSeen.set(el, now); scheduleHighlight(); return; }
+            }
+          }
+        }
+      });
       mut.observe(list, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
+      hlObserver = mut;
     } catch (e) { /* ignore */ }
     // 2) cuộn danh sách → tô lại
     try {
       const scroller = getScroller();
       if (scroller) scroller.addEventListener('scroll', () => scheduleHighlight(), { passive: true });
     } catch (e) { /* ignore */ }
-    // 3) lưới an toàn: nếu vì lý do gì 1&2 hụt (list bị render lại toàn bộ) thì vẫn tự sửa sau ~0.4s
-    setInterval(() => scheduleHighlight(), 400);
+    // 3) lưới an toàn: nếu vì lý do gì 1&2 hụt (list bị render lại toàn bộ) thì vẫn tự sửa sau ~1.5s
+    //    (400ms cũ: mỗi nhịp là 1 lượt query toàn danh sách + đọc DOM từng dòng.)
+    setInterval(() => scheduleHighlight(), 1500);
   }
 
   function clip(s, n) {
@@ -10855,6 +10924,11 @@
                 <input type="checkbox" id="ssb-quick" checked style="accent-color:#22c55e;margin:0"> ⚡ Gửi nhanh
               </label>
             </div>
+            <div class="row" style="align-items:center">
+              <label class="hint" style="display:flex;align-items:center;gap:4px;cursor:pointer" title="Khi Alt/Ctrl nhấp chọn chuỗi: KHÔNG cho app tự cuộn danh sách về đầu mỗi lần đổi điểm cuối. Bỏ tick nếu thấy cần hành vi cũ.">
+                <input type="checkbox" id="ssb-noscroll" checked style="accent-color:#22c55e;margin:0"> Giữ nguyên vị trí danh sách khi chọn chuỗi
+              </label>
+            </div>
           </div>
           <div class="row" style="align-items:center;justify-content:space-between">
             <span class="label">LOG <span id="ssb-logcount" style="color:#64748b;font-weight:400;text-transform:none;letter-spacing:0">0 dòng</span></span>
@@ -11514,6 +11588,7 @@
       const waveEl = root.getElementById('ssb-wave');
       const gapEl = root.getElementById('ssb-gap');
       const quickEl = root.getElementById('ssb-quick');
+      const noScrollEl = root.getElementById('ssb-noscroll');
       try {
         const w = localStorage.getItem('ssb_wave_size_w200_v1');
         if (w && waveEl) waveEl.value = w;
@@ -11521,7 +11596,17 @@
         if (g !== null && g !== '' && gapEl) gapEl.value = g;
         const q = localStorage.getItem('ssb_quick');
         if (q !== null && q !== '' && quickEl) quickEl.checked = q !== '0';
+        const ns = localStorage.getItem('ssb_keep_list_on_select');
+        if (ns !== null && ns !== '' && noScrollEl) noScrollEl.checked = ns !== '0';
+        if (noScrollEl) state.keepListOnSelect = noScrollEl.checked;
       } catch (e) { /* ignore */ }
+      if (noScrollEl) noScrollEl.addEventListener('change', () => {
+        state.keepListOnSelect = noScrollEl.checked;
+        try { localStorage.setItem('ssb_keep_list_on_select', noScrollEl.checked ? '1' : '0'); } catch (e) { /* ignore */ }
+        logLine(noScrollEl.checked
+          ? '🔒 Chọn chuỗi: giữ nguyên vị trí danh sách (app không tự cuộn).'
+          : '↕ Chọn chuỗi: để app tự cuộn danh sách như mặc định.');
+      });
       if (waveEl) waveEl.addEventListener('change', () => {
         try { localStorage.setItem('ssb_wave_size_w200_v1', String(waveEl.value)); } catch (e) { /* ignore */ }
       });
@@ -12592,6 +12677,18 @@
     else if (e.key === 'Control' || e.key === 'Meta') modState.ctrlAt = 0;
   }, true);
   window.addEventListener('blur', () => { modState.altAt = 0; modState.ctrlAt = 0; });
+  /* [v1.92.43e] Nhả Alt/Ctrl hoặc chọn xong ⇒ tô lại ĐÚNG MỘT lần (trước đó đã tạm hoãn để không
+   * vẽ giữa lúc rê chọn chuỗi). */
+  const flushDeferredHighlight = () => {
+    if (!hlDeferredBySelect) return;
+    hlDeferredBySelect = false;
+    scheduleHighlight();
+  };
+  window.addEventListener('keyup', (e) => {
+    if (e && (e.key === 'Alt' || e.key === 'Control' || e.key === 'Meta')) flushDeferredHighlight();
+  }, true);
+  document.addEventListener('pointerup', flushDeferredHighlight, true);
+  document.addEventListener('click', flushDeferredHighlight, true);
 
   function showBotfakePanel() {
     buildPanel();
