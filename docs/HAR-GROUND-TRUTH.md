@@ -3484,3 +3484,40 @@ một kênh.
 Kèm chốt `sendLockPending` cho 150 ms đó: bấm đúp trong **cùng một tab** cũng không tạo 2 lượt.
 Lượt xong (hoặc bấm ⏹) ⇒ nhả khoá ngay, tab kia bấm là chạy được. Heartbeat 2 s chỉ để tab còn
 sống giữ khoá; tab đóng giữa lô thì khoá tự hết hạn sau 6 s.
+
+### 77.9 Hai page / hai tab: chia ngân sách slot thay vì cộng dồn
+
+Người dùng **luôn chạy 2 page khác nhau trên 2 tab**. Khoá ở §77.8 không chặn trường hợp này
+(khác page ⇒ không tranh ACK), nhưng **tải máy thì vẫn cộng dồn**: 2 tab × 192 slot main = 384
+chuỗi promise/fetch cùng lúc, chưa kể 384/page + 128 Ext mỗi tab ⇒ main thread quá tải (đúng
+`🫥 tab ẩn bị bóp … trễ 10 840 lần · +15 288 s` của lô 16:11).
+
+1.92.43: mỗi tab ghi presence `ssb_peers_v2` (heartbeat 2 s · TTL 8 s) và **tự chia** trần slot main:
+
+| số tab đang gửi | slot main mỗi tab | tổng |
+|---|---|---|
+| 1 | 192 | 192 |
+| 2 | 96 | **192** (không nặng hơn 1 tab) |
+| 3 | 64 | 192 |
+
+Tab **đang bị ẩn** nhường thêm 25 % (2 tab: tab ẩn 72 · tab đang xem 96). Tính lại ở **đầu mỗi
+wave** nên bật/tắt tab giữa lô vẫn ăn ngay. Log khi đổi:
+
+```
+🧩 Có 1 tab khác đang gửi (page khác) — tab này dùng 96/192 slot main ⇒ tổng tải không tăng dù chạy nhiều tab.
+🧩 Không còn tab nào khác gửi — tab này trở lại 192 slot main.
+```
+
+Đổi tay: `window.__botfakeMainSlotCap__(n)` (`0` = tự động). Đã mô phỏng đúng hàm chia (2 tab,
+chung localStorage):
+
+| tình huống | cap A / cap B | tổng |
+|---|---|---|
+| chỉ A chạy | 192 | 192 |
+| B bấm chạy (khác page) | 96 / 96 (B ẩn: 72) | **192** |
+| thêm tab C | 64 / 64 | 192 |
+| B chết 9 s (quá TTL) | A về lại 192 | 192 |
+
+**Đánh đổi phải nói rõ:** chia slot **không** làm tổng nhanh hơn 1 tab — nó giữ tổng tải bằng 1
+tab để máy hết lag. Nếu máy còn dư CPU và bạn muốn 2 tab chạy hết công suất thì đặt
+`window.__botfakeMainSlotCap__(192)` ở cả hai tab (chấp nhận lag).

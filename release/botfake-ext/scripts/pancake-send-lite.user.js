@@ -9185,18 +9185,73 @@
       return false;
     }
     if (sendLockTimer) clearInterval(sendLockTimer);
+    writePeerPresence(true);
     sendLockTimer = setInterval(() => {
       if (!state.sending) { releaseSendLock(); return; }
       writeSendLock();
+      writePeerPresence(true);
     }, 2000);
     return true;
   }
   function releaseSendLock() {
     if (sendLockTimer) { clearInterval(sendLockTimer); sendLockTimer = null; }
+    try { writePeerPresence(false); } catch (eP) { /* ignore */ }
     const cur = readSendLock();
     if (cur && cur.tab === TAB_ID) { try { localStorage.removeItem(sendLockKey()); } catch (e) { /* ignore */ } }
   }
   try { window.__botfakeReleaseTabLock__ = releaseSendLock; } catch (eRl) { /* ignore */ }
+  /* [v1.92.43] CHIA NGÂN SÁCH SLOT GIỮA CÁC TAB ĐANG GỬI (khác page ⇒ KHÔNG chặn nhau, chỉ chia tải).
+   * Người dùng luôn chạy 2 page trên 2 tab. Hai tab không tranh ACK (mỗi page một client Socket),
+   * nhưng tranh CPU/network của CÙNG một máy: mỗi tab 192 slot main + 384/page + 128 Ext ⇒ tổng
+   * 384 slot main, mỗi slot là một chuỗi promise + fetch + logLine ⇒ main thread quá tải, callback
+   * trễ (đúng dòng '🫥 tab ẩn bị bóp … trễ 10 840 lần' của lô 16:11).
+   * Nay: tab tự đếm đồng nghiệp đang gửi (presence TTL 8 s) rồi chia đôi/ba ngân sách slot main:
+   *   1 tab  → 192 slot   (như cũ)
+   *   2 tab  →  96 mỗi tab ⇒ TỔNG vẫn 192, không nặng hơn chạy 1 tab
+   *   ≥3 tab →  64 mỗi tab
+   * Tab đang bị ẩn (không nhìn thấy) nhường thêm 25 % CPU cho tab đang xem. Đổi tay:
+   *   window.__botfakeMainSlotCap__(n)  (0 = tự động). */
+  try {
+    document.addEventListener('visibilitychange', () => { writePeerPresence(!!state.sending); }, false);
+  } catch (eVis) { /* ignore */ }
+  const PEERS_KEY = 'ssb_peers_v2';
+  const PEER_TTL_MS = 8000;
+  let mainCapOverride = 0;
+  try { window.__botfakeMainSlotCap__ = (n) => { mainCapOverride = Math.max(0, Number(n) || 0); return mainCapOverride || 'auto'; }; } catch (eCap) { /* ignore */ }
+  function readPeerMap() {
+    try { return JSON.parse(localStorage.getItem(PEERS_KEY) || '{}') || {}; } catch (e) { return {}; }
+  }
+  function writePeerPresence(running) {
+    try {
+      const m = readPeerMap();
+      const now = Date.now();
+      Object.keys(m).forEach((k) => { if (!m[k] || now - (m[k].at || 0) > PEER_TTL_MS) delete m[k]; });
+      if (running) m[TAB_ID] = { at: now, pid: (typeof pageIdFromLocation === 'function' ? pageIdFromLocation() : ''), running: true };
+      else delete m[TAB_ID];
+      localStorage.setItem(PEERS_KEY, JSON.stringify(m));
+    } catch (e) { /* ignore */ }
+  }
+  function peerSendingCount() {
+    const m = readPeerMap();
+    const now = Date.now();
+    let n = 0;
+    Object.keys(m).forEach((k) => {
+      const v = m[k];
+      if (k === TAB_ID || !v) return;
+      if (v.running && now - (v.at || 0) < PEER_TTL_MS) n++;
+    });
+    return n;
+  }
+  function computeMainSlotCap(baseCap) {
+    if (mainCapOverride) return mainCapOverride;
+    const peers = peerSendingCount();
+    let cap = baseCap;
+    if (peers > 0) cap = Math.round(baseCap / (peers + 1));
+    let hiddenTrim = false;
+    try { if (peers > 0 && document && document.hidden) { cap = Math.round(cap * 0.75); hiddenTrim = true; } } catch (e) { /* ignore */ }
+    cap = Math.max(48, Math.min(baseCap, cap));
+    return { cap, peers, hiddenTrim };
+  }
   let sendLockPending = false; // chặn bấm đúp TRONG 150 ms chờ kiểm khoá (state.sending chưa bật)
   async function sendToAll() {
     try { markSendIdleIfSettled(); } catch (e0) { /* ignore */ }
@@ -9870,6 +9925,25 @@
     const WAVE_MAIN_LANES = 4;
     const WAVE_PER_LANE = 48;
     const WAVE_MAIN_TOTAL_CAP = 192;
+    /* [v1.92.43] Trần slot main của TAB NÀY — tính lại ở đầu mỗi wave theo số tab đang gửi. */
+    let mainCap = WAVE_MAIN_TOTAL_CAP;
+    let lastLoggedMainCap = 0;
+    const refreshMainCap = () => {
+      const info = computeMainSlotCap(WAVE_MAIN_TOTAL_CAP);
+      mainCap = info.cap;
+      if (info.peers > 0 && info.cap !== lastLoggedMainCap) {
+        lastLoggedMainCap = info.cap;
+        logLine('🧩 Có ' + info.peers + ' tab khác đang gửi (page khác) — tab này dùng ' + info.cap
+          + '/' + WAVE_MAIN_TOTAL_CAP + ' slot main' + (info.hiddenTrim ? ' (tab đang ẩn, nhường thêm 25 %)' : '')
+          + ' ⇒ tổng tải không tăng dù chạy nhiều tab.');
+      } else if (info.peers === 0 && lastLoggedMainCap) {
+        lastLoggedMainCap = 0;
+        logLine('🧩 Không còn tab nào khác gửi — tab này trở lại ' + WAVE_MAIN_TOTAL_CAP + ' slot main.');
+      }
+      waveDiag.mainCapMinObserved = waveDiag.mainCapMinObserved
+        ? Math.min(waveDiag.mainCapMinObserved, mainCap) : mainCap;
+      return info;
+    };
     const WAVE_SOCKET_RETRY_WORKERS = 96;
     const WAVE_EXT_WORKERS = 128;
     const WAVE_EXT_BACKLOG_HIGH_WATER = 96;
@@ -9926,7 +10000,7 @@
       // Fixed main semaphore: retain the tested 96-flight ceiling; only telemetry/UI work is throttled.
       const acquireMainSlot = () => {
         if (state.stopRequested) return Promise.resolve(false);
-        if (inFlightMainCount < WAVE_MAIN_TOTAL_CAP) {
+        if (inFlightMainCount < mainCap) {
           inFlightMainCount++;
           recordWavePressure();
           return Promise.resolve(true);
@@ -10159,8 +10233,8 @@
         const retryLoad = socketRetryQueue.length + activeSocketRetryWorkers + pendingSocketCoolCount;
         const extLoad = extBacklogQueue.length + activeExtWorkers;
         // 🔥 [FIX-TỐC-ĐỘ] Chỉ chờ khi có tải thật sự: lane bù API/Ext/Socket đều nhẹ → gap 0.
-        if (inFlightMainCount <= WAVE_MAIN_TOTAL_CAP * 0.6 && retryLoad <= 60 && extLoad <= 100) return 0;
-        if (inFlightMainCount <= WAVE_MAIN_TOTAL_CAP * 0.8 && retryLoad <= 100) return Math.min(WAVE_GAP, 30);
+        if (inFlightMainCount <= mainCap * 0.6 && retryLoad <= 60 && extLoad <= 100) return 0;
+        if (inFlightMainCount <= mainCap * 0.8 && retryLoad <= 100) return Math.min(WAVE_GAP, 30);
         return Math.min(Math.max(WAVE_GAP, 60), 120);
       };
       const totalWaves = Math.max(1, Math.ceil(fullList.length / WAVE_SIZE));
@@ -10170,6 +10244,7 @@
           const waveNo = Math.floor(waveStart / WAVE_SIZE) + 1;
           const waveStartedAt = Date.now();
           waveDiag.wavesStarted++;
+          refreshMainCap(); // [v1.92.43] mỗi wave chia lại slot theo số tab đang gửi
           // [v1.92.11] BỎ CHIA KHÚC TĨNH. Bản cũ chia wave thành WAVE_MAIN_LANES khúc cố định, mỗi
           // khúc một pool riêng ⇒ khúc nào nhiều ca chậm (FB từ chối → chờ ACK lâu) thì 48 làn của
           // khúc đó ùn, còn 144 làn của 3 khúc kia HẾT VIỆC rồi ngồi không, wave chỉ kết thúc khi
@@ -10199,9 +10274,9 @@
             const apiBacklog = apiSendLane.waitingCount();
             // Gate theo phần trăm cap hiện tại để bộ điều tiết vẫn gối wave đúng khi tự hạ luồng.
             // 🔥 [FIX-TỐC-ĐỘ] Cho phép ~92% cap trước khi chặn (thay vì 65%) — tận dụng hết slot.
-            const gateActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.92);
-            const fastActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.75);
-            const softActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.85);
+            const gateActiveLimit = Math.floor(mainCap * 0.92);
+            const fastActiveLimit = Math.floor(mainCap * 0.75);
+            const softActiveLimit = Math.floor(mainCap * 0.85);
             // Có backpressure: không mở wave mới khi lane bù hoặc hàng đợi API đã quá sâu.
             if (inFlightMainCount > gateActiveLimit || retryBacklog > 80
                 || extBacklog > GATE_EXT_BACKLOG_LIMIT
@@ -10255,7 +10330,7 @@
           };
 
           // Một pool duy nhất: runPool đã rút việc động bằng biến next chung (không chia khúc).
-          const wavePromise = runPool(waveSlice, runMainItem, WAVE_MAIN_TOTAL_CAP);
+          const wavePromise = runPool(waveSlice, runMainItem, mainCap);
           allMainPromises.push(wavePromise);
           if (waveStart + WAVE_SIZE < fullList.length) {
             prefetchNextWaveGids(fullList.slice(waveStart + WAVE_SIZE, waveStart + 2 * WAVE_SIZE));
@@ -10315,7 +10390,7 @@
             }
           }
         }
-        waveDiag.mainCapFinal = WAVE_MAIN_TOTAL_CAP;
+        waveDiag.mainCapFinal = mainCap;
         checkWakeAllWaiters();
       }
 
