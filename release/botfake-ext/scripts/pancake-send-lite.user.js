@@ -9136,30 +9136,54 @@
    * Nay: tab nào bấm Chạy trước thì giữ khoá (heartbeat 2 s, TTL 6 s); tab khác bị chặn kèm lời
    * nhắn rõ. Bỏ chặn khi thật sự muốn: window.__botfakeAllowMultiTab__(true). */
   const TAB_ID = 'tab_' + Math.random().toString(36).slice(2) + '_' + Date.now().toString(36);
-  const SEND_LOCK_KEY = 'ssb_send_tab_lock_v1';
+  /* [v1.92.43] Khoá TÍNH THEO PAGE: tranh chấp thật nằm ở ACK/làn của TỪNG page. Hai tab mở hai
+   * page khác nhau thì KHÔNG đụng nhau (mỗi tab một Socket client, một hạn mức ACK riêng) ⇒ vẫn
+   * cho chạy song song. Chỉ chặn khi hai tab cùng một page — đó mới là cảnh 2× làn trên 1 kênh. */
+  const SEND_LOCK_KEY_BASE = 'ssb_send_tab_lock_v2';
   const SEND_LOCK_TTL_MS = 6000;
   let sendLockTimer = null;
   let allowMultiTab = false;
   try { window.__botfakeAllowMultiTab__ = (v) => { allowMultiTab = !!v; return allowMultiTab; }; } catch (eMt) { /* ignore */ }
+  function sendLockKey() {
+    let pid = '';
+    try { pid = pageIdFromLocation ? pageIdFromLocation() : ''; } catch (e0) { pid = ''; }
+    return SEND_LOCK_KEY_BASE + (pid ? ':' + pid : '');
+  }
   function readSendLock() {
-    try { return JSON.parse(localStorage.getItem(SEND_LOCK_KEY) || 'null'); } catch (e) { return null; }
+    try { return JSON.parse(localStorage.getItem(sendLockKey()) || 'null'); } catch (e) { return null; }
   }
   function writeSendLock() {
     try {
-      localStorage.setItem(SEND_LOCK_KEY, JSON.stringify({ tab: TAB_ID, at: Date.now(), total: (batchStats && batchStats.total) || 0 }));
+      localStorage.setItem(sendLockKey(), JSON.stringify({
+        tab: TAB_ID, at: Date.now(), total: (batchStats && batchStats.total) || 0,
+        href: String(location.href || '').slice(0, 120),
+      }));
     } catch (e) { /* ignore */ }
   }
-  function acquireSendLock() {
+  const sleepMs = (ms) => new Promise((res) => setTimeout(res, ms));
+  async function acquireSendLock() {
     if (allowMultiTab) return true;
     const cur = readSendLock();
     if (cur && cur.tab !== TAB_ID && (Date.now() - (cur.at || 0)) < SEND_LOCK_TTL_MS) {
-      logLine('🛑 TAB KHÁC ĐANG GỬI (bắt đầu ' + Math.round((Date.now() - (cur.at || 0)) / 1000)
+      logLine('🛑 TAB KHÁC ĐANG GỬI CÙNG PAGE NÀY (bắt đầu ' + Math.round((Date.now() - (cur.at || 0)) / 1000)
         + 's trước, ' + (cur.total || 0) + ' chat) — không chạy song song: hai tab sẽ tranh cùng '
         + 'một kênh Socket/ACK ⇒ cả hai chậm và dễ nhiễu. Chờ tab kia xong, hoặc '
         + 'window.__botfakeAllowMultiTab__(true) nếu bạn thật sự muốn.');
       return false;
     }
+    /* Chống bấm gần như đồng thời ở 2 tab: localStorage KHÔNG có phép "ghi nếu chưa có" (CAS),
+     * nên cả hai tab đều ghi được. Cách chắc chắn: ghi → chờ 150 ms → ĐỌC LẠI. Tab nào thấy
+     * khoá mang ID của chính mình thì thắng; tab còn lại thấy ID người khác ⇒ nhường. Chỉ một
+     * tab chạy được, kể cả khi bấm cách nhau vài mili-giây. */
     writeSendLock();
+    await sleepMs(150);
+    const chk = readSendLock();
+    if (!chk || chk.tab !== TAB_ID) {
+      const who = chk && chk.at ? Math.round((Date.now() - chk.at) / 1000) : 0;
+      logLine('🛑 Một tab KHÁC vừa giành quyền gửi page này cùng lúc (' + who
+        + 's trước) — tab này nhường để không tranh làn. Bấm lại khi tab kia xong.');
+      return false;
+    }
     if (sendLockTimer) clearInterval(sendLockTimer);
     sendLockTimer = setInterval(() => {
       if (!state.sending) { releaseSendLock(); return; }
@@ -9170,13 +9194,19 @@
   function releaseSendLock() {
     if (sendLockTimer) { clearInterval(sendLockTimer); sendLockTimer = null; }
     const cur = readSendLock();
-    if (cur && cur.tab === TAB_ID) { try { localStorage.removeItem(SEND_LOCK_KEY); } catch (e) { /* ignore */ } }
+    if (cur && cur.tab === TAB_ID) { try { localStorage.removeItem(sendLockKey()); } catch (e) { /* ignore */ } }
   }
   try { window.__botfakeReleaseTabLock__ = releaseSendLock; } catch (eRl) { /* ignore */ }
+  let sendLockPending = false; // chặn bấm đúp TRONG 150 ms chờ kiểm khoá (state.sending chưa bật)
   async function sendToAll() {
     try { markSendIdleIfSettled(); } catch (e0) { /* ignore */ }
-    if (state.sending || state.confirmingSend) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
-    if (!acquireSendLock()) return;
+    if (state.sending || state.confirmingSend || sendLockPending) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
+    sendLockPending = true;
+    try {
+      if (!(await acquireSendLock())) return;
+    } finally {
+      sendLockPending = false;
+    }
     if (state.sendListFrozen) {
       logLine('⏳ Danh sách đang được xử lý — chờ lượt gửi/cập nhật hiện tại hoàn tất rồi chạy lượt mới.');
       return;

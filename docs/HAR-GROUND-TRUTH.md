@@ -3462,3 +3462,25 @@ Dòng 🌊/WAVE nay in thêm:
 
 Chỉ khi có 3 số này mới được sửa tiếp phần gửi — §76.4 (2) (`tab ẩn bị bóp`, callback trễ
 ~1,4 s) vẫn là nghi phạm chưa có phép đo tách bạch.
+
+### 77.8 Hai tab thì bây giờ ra sao (khoá tính theo PAGE)
+
+Khoá `ssb_send_tab_lock_v2:<pageId>` — **theo từng page**, không phải toàn bộ trình duyệt:
+hai tab mở **hai page khác nhau** vẫn chạy song song được (mỗi tab một Socket client, một hạn
+mức ACK riêng, không tranh nhau); chỉ chặn khi **cùng một page** — đó mới là cảnh 2× làn trên
+một kênh.
+
+`localStorage` không có phép "ghi nếu chưa có", nên chống bấm đồng thời bằng: **ghi → chờ 150 ms
+→ đọc lại**; tab nào đọc thấy khoá mang ID của chính mình thì thắng, tab kia nhường. Đã mô phỏng
+đúng thuật toán đó (2 tab, chung localStorage) và kiểm 4 tình huống:
+
+| tình huống | kết quả |
+|---|---|
+| tab A chạy trước, tab B bấm sau 1 s | B bị chặn · **1 tab chạy** |
+| hai tab bấm gần như đồng thời (5 ms) | B bị chặn ở bước kiểm đầu · **1 tab chạy** |
+| **đua thật**: cả hai cùng qua bước kiểm rồi cùng ghi | B thua ở bước đọc lại 150 ms · **1 tab chạy** |
+| tab A chết (đóng tab) không nhả khoá | B chiếm lại sau **6 s** (TTL) |
+
+Kèm chốt `sendLockPending` cho 150 ms đó: bấm đúp trong **cùng một tab** cũng không tạo 2 lượt.
+Lượt xong (hoặc bấm ⏹) ⇒ nhả khoá ngay, tab kia bấm là chạy được. Heartbeat 2 s chỉ để tab còn
+sống giữ khoá; tab đóng giữa lô thì khoá tự hết hạn sau 6 s.
