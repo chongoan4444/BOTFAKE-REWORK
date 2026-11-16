@@ -3191,3 +3191,73 @@ thì Socket là kênh duy nhất còn lại cho chat ngoài 24 h.
 API cũng không phải "chuẩn 100 %": chat ngoài cửa sổ 24 h mà FB trả `(#551)`/`(#10)` thì API từ chối
 thật (đã có bằng chứng HAR), và API thỉnh thoảng trả "không rõ kết quả" (timeout/5xx) ⇒ ca đó vẫn
 phải kiểm chứng + Ext. Nên thứ tự đúng luôn là **API trước (nhanh, rẻ) → Ext (chốt chắc, chậm)**.
+
+## §74 — ĐỊNH TUYẾN THEO BẰNG CHỨNG GIAO HÀNG (1.92.40) — bỏ ngưỡng cỡ lô
+
+### 74.1 Bản 1.92.39 SAI: ngưỡng "≤300 chat" không giải quyết gì
+
+Nó chỉ đổi hành vi cho lô nhỏ, còn lô thật (4 573 chat lô 13:38, 9 455 chat lô 15:54) vẫn chạy
+nguyên cơ chế cũ. Người dùng nói đúng: **vô dụng**. Đã gỡ bỏ hoàn toàn.
+
+### 74.2 Lỗi gốc: "no-ACK" bị dùng như "kênh chết"
+
+`no-ACK` chỉ nói **ACK không về**, không nói **tin có tới hay không**. Bản cũ suy diễn
+`no-ACK ⇒ page chết ⇒ gỡ Socket 10 phút`. Suy diễn này sai cả hai chiều:
+
+| Chiều sai | Bằng chứng trong repo | Thiệt hại |
+|---|---|---|
+| Dương tính giả (ACK mất, tin VẪN tới) | nhiều ca kiểm chứng lật ⚠ → ✅ bằng lịch sử | gỡ Socket oan ⇒ 100 % dồn Ext 15–21 tin/s ⇒ lô 9 455 chat **342 s** (§45), 1 526 ca ❌ |
+| Âm tính giả (Socket gửi mà KHÔNG tới) | ca Đinh Thị Loan: 3 lần đọc + cổng = vắng mặt | vẫn thử tiếp ⇒ mỗi lần mất 1 tin + 5 s chờ ACK |
+
+### 74.3 Luật mới — đo đúng thứ cần đo, áp cho MỌI cỡ lô
+
+Sổ theo page: `sockRoute[pageId] = { sent, dlv, lost }`
+
+- `dlv`  = số ca **xác nhận tin ĐÃ tới** qua Socket (ACK OK **hoặc** kiểm chứng lịch sử thấy tin)
+- `lost` = số ca **chứng minh hội thoại KHÔNG có tin** sau khi bắn Socket (cổng `absent`, §71)
+
+| Điều kiện | Kết luận |
+|---|---|
+| chưa có số liệu | **cho thử Socket** (đã có cổng cứu 1 lần ở §71 làm lưới) |
+| `dlv ≥ 1` | Socket của page **dùng được** — một lần giao được thì xoá sạch `lost` (tự hồi, không cần TTL) |
+| `lost ≥ 2` (không có lần nào tới) | **gỡ Socket** khỏi kế hoạch page này |
+| `lost ≥ 1` **và** ACK chết | **gỡ Socket** — mất tin + mất ACK thì đừng đốt thêm tin |
+| đang bị gỡ | vẫn dò lại 1 ca/20 chat bị né **và chỉ khi Extension đã nối** (để cứu được nếu mất) |
+
+### 74.4 Vá lỗi ❌ OAN do bộ ngắt quá tải của Extension
+
+§45: **1 526 chat bị tính ❌ mà CHƯA HỀ ĐƯỢC BẮN** — bộ ngắt Ext chặn trước khi bắn, kế hoạch
+không còn kênh nào ⇒ chốt ❌. Bộ ngắt chỉ nghỉ **8–15 s** rồi tự đóng. Nay:
+
+1. `sendViaExtension` đánh dấu `conv.__extSkippedOverload = true` khi bị bộ ngắt chặn.
+2. Chỗ chốt "đã thử hết kênh": nếu có dấu đó ⇒ **KHÔNG chốt ❌**, đặt ⚠ "chưa gửi" và **hẹn bắn
+   lại qua Ext sau 9 s** (tối đa 2 lần, cùng lượt, có kiểm tra `runSeq`/Dừng).
+3. Bắn lại thành công ⇒ ⚠ tự chuyển ✅; thất bại thật ⇒ mới tính ❌ và chat nằm trong danh sách
+   gửi tay.
+
+`sendDiag.extOverloadSkips` trước đây **khai báo nhưng không ai tăng** — nay đếm đúng chỗ, để log
+nói được "bộ ngắt đã chặn bao nhiêu ca".
+
+### 74.5 Kỳ vọng số (lô 4 573 chat, giả định 24 % chat ngoài cửa sổ 24 h)
+
+| Kênh | Trần đo được | Thời gian cho 3 484 chat trong cửa sổ | cho 1 089 chat ngoài cửa sổ |
+|---|---|---|---|
+| API | 64 req/s | ~55 s | — (FB từ chối #551/#10) |
+| Socket | ~100 lệnh/s | dự phòng | **~11 s** (thay vì 54 s nếu dồn Ext) |
+| Ext | 15–21 tin/s | — | 54 s + hàng đợi dâng ⇒ bộ ngắt ⇒ ❌ oan |
+
+⇒ Với 74.4, "dồn Ext" chỉ còn là phương án cuối chứ không còn là án tử.
+
+### 74.6 Chỗ ❌ oan thứ hai — và nó ở ĐƯỜNG CHÍNH, không phải đường bù
+
+`sendOne` đã tính sẵn cờ `extOverloaded` (true khi có ca bị bộ ngắt Ext chặn mà chat chưa
+được xác nhận)... nhưng **không ai đọc cờ đó**. `grep extOverloaded` trước 1.92.40 chỉ ra đúng
+**một** dòng: chỗ tính. Vì vậy chat bị bộ ngắt chặn — chưa hề gửi lệnh nào — rơi thẳng vào
+nhánh `fail++` và bị in `❌`. Đây chính là 1 526 ca của lô 15:54.
+
+Nay nhánh chốt cuối đọc cờ: `extOverloaded` + còn Extension + chưa hẹn lại quá 2 lần ⇒
+**đặt ⚠ "chưa gửi", hẹn bắn lại qua Ext sau 9 s** thay vì `❌`. Chỉ áp cho tin chữ (ca ảnh phải
+dựng lại ảnh, không đáng đổi rủi ro). Chat vẫn vào danh sách gửi tay để người dùng thấy.
+
+`sendDiag.extOverloadSkips` cũng được đếm đúng MỘT lần (ngay chỗ bộ ngắt chặn), trước đây vừa
+không được tăng ở đâu, vừa có nguy cơ đếm đôi ở vòng lặp kênh.

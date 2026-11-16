@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
 // @namespace    salescript-stable
-// @version      1.92.39-stable
+// @version      1.92.40-stable
 // @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -72,7 +72,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.92.39-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const APP_VERSION = '1.92.40-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4761,6 +4761,10 @@
         }
         if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
         sockFiredPending.add(conv.id);
+        try {
+          const _st = sockRouteOf((conv.pageId || String(conv.id || '').split('_')[0]));
+          if (_st) _st.sent++;
+        } catch (eSt) { /* ignore */ }
         ctx.ownsOutbound = true; // Ext bù ảnh trong settleSocketResult dùng chung khóa này
         const myRun = runSeq;
         const finalizeSockBg = (res) => {
@@ -4920,6 +4924,10 @@
     // chưa hề bắn lệnh Ext nào nên chuyển Socket/API là an toàn, không trùng.
     if (isExtBreakerOpen()) {
       extTimeoutStats.skipped++;
+      sendDiag.extOverloadSkips++; // [v1.92.40] đếm đúng chỗ (trước đây chỉ khai báo, không ai tăng)
+      // [v1.92.40] Ghi dấu lên chat: nó CHƯA hề được gửi qua Ext, chỉ bị bộ ngắt chặn. Nếu không
+      // còn kênh nào khác, chỗ chốt ❌ sẽ dựa vào dấu này để HẸN THỬ LẠI thay vì chốt oan.
+      try { conv.__extSkippedOverload = true; } catch (eSk) { /* ignore */ }
       return {
         ok: false, sent: false, skipExt: true, extBreakerOpen: true,
         error: 'Extension đang quá tải (đang nghỉ hồi sức) — tạm bỏ qua Ext để thử kênh khác',
@@ -5620,6 +5628,33 @@
    * của nó (10 phút) DÀI HƠN cả lượt chạy ⇒ một lần no-ACK ở lượt trước đủ bóp cả lô 9 455
    * chat vào làn chậm nhất. Nay: vẫn né Socket, nhưng cứ SOCK_DEAD_PROBE_MS cho đúng MỘT ca
    * đi Socket để dò; ACK về là cờ được xoá ngay (noteSocketPageLaneOutcome 'ok') ⇒ tự hồi. */
+  /* [v1.92.40] ĐỊNH TUYẾN SOCKET THEO BẰNG CHỨNG GIAO HÀNG — thay cho ngưỡng cỡ lô.
+   * Vấn đề thật: "no-ACK" chỉ nói ACK không về, KHÔNG nói tin có tới hay không. Bản cũ suy
+   * diễn: no-ACK ⇒ coi như kênh chết ⇒ gỡ Socket khỏi kế hoạch 10 phút (và từ 1.92.13 dò lại
+   * thưa). Hậu quả hai chiều:
+   *   • Dương tính giả: page chỉ mất ACK nhưng tin VẪN tới (đã gặp: kiểm chứng lật ⚠→✅ nhiều ca)
+   *     ⇒ gỡ Socket oan, dồn 100% sang Ext ~15–21 tin/s ⇒ lô 9 455 chat mất 342 s (§45).
+   *   • Âm tính giả: page Socket gửi mà KHÔNG tới (ca Đinh Thị Loan) ⇒ vẫn thử tiếp, mỗi lần
+   *     mất một tin + 5 s chờ ACK.
+   * Nay đo ĐÚNG thứ cần đo: tỉ lệ GIAO ĐƯỢC của Socket trên từng page.
+   *   st.dlv  = số ca kiểm chứng/xác nhận thấy tin ĐÃ tới qua Socket
+   *   st.lost = số ca chứng minh được hội thoại KHÔNG có tin sau khi bắn Socket
+   * Luật (tự hồi, không cần TTL): một lần giao được ⇒ xoá sạch lost. Ban chỉ khi lost ≥ 2 liên
+   * tiếp mà không có lần nào tới, hoặc (ACK chết + đã có ≥1 lần chứng minh mất tin). */
+  const sockRoute = {}; // pageId → { sent, dlv, lost, probeAt }
+  function sockRouteOf(pid) {
+    const k = String(pid || '');
+    if (!k) return null;
+    if (!sockRoute[k]) sockRoute[k] = { sent: 0, dlv: 0, lost: 0, probeAt: 0 };
+    return sockRoute[k];
+  }
+  function pageSocketUsable(pid) {
+    const st = sockRoute[String(pid || '')];
+    if (!st) return true;                 // chưa có bằng chứng gì ⇒ cho thử (đã có cổng cứu 1.92.37)
+    if (st.lost >= 2) return false;       // 2 lần chứng minh mất tin, 0 lần tới ⇒ Socket vô dụng
+    if (st.lost >= 1 && isPageAckDead(pid)) return false; // mất tin + mất ACK ⇒ đừng đốt thêm tin
+    return true;
+  }
   const pageAckDeadProbeAt = {};
   const SOCK_DEAD_PROBE_MS = 20000;
   // [v1.92.16] Lô 19:52: cờ "ACK chết" bật 5 lần, mỗi lần chỉ được dò lại sau tối đa 20 s ⇒
@@ -6360,34 +6395,9 @@
     return ctx;
   }
 
-  /* [v1.92.39] "CƠ CHẾ API + EXT" CHO LÔ VỪA — ĐO RỒI MỚI DÁM TẮT SOCKET.
-   * Số đo đã có trong repo, không phải cảm tính:
-   *   • API  : 64 request/giây, 647 request trong 10,1 s toàn HTTP 200, 0 lần 429 (§29.6).
-   *   • Ext  : bị TUẦN TỰ HOÁ bên trong Extension — 128 làn "active" mà chỉ 10,65 tin/giây (§18),
-   *            trần thực tế 15–21 tin/s ở p90 3,2 s (§45).
-   *   • Socket: 125,30 lệnh/giây (§45, lô có Socket) nhưng ACK không đáng tin.
-   * Lô 9 455 chat "toàn Ext" (§45) là bằng chứng ngược: 7 124 tin đi Ext, 342 s, hàng đợi Ext
-   * dâng 468, bộ ngắt quá tải chặn 1 526 chat TRƯỚC KHI BẮN mà không còn kênh nào để rơi xuống
-   * ⇒ 1 526 ca bị tính ❌ oan. Vì vậy KHÔNG thể "toàn bộ qua Ext" cho lô lớn.
-   * Nhưng lô ≤ 300 chat thì Ext kham được (300 ÷ ~18 tin/s ≈ 17 s, và chỉ những chat API không
-   * gửi được mới phải đi Ext): tắt Socket ⇒ hết hẳn nguồn ⚠ "Socket không rõ kết quả".
-   * Điều kiện an toàn: CHỈ tắt khi Extension đã nối (nếu không thì Socket là kênh duy nhất còn lại). */
-  const NO_SOCKET_MAX_CHATS = 300;
-  function noSocketForThisBatch() {
-    try {
-      const total = (batchStats && batchStats.total) || 0;
-      if (!total || total > NO_SOCKET_MAX_CHATS) return false;
-      return !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
-    } catch (e) { return false; }
-  }
   function pickBestDirectOrder(conv, pageId, ctx, baseSeq) {
     const seq = (baseSeq || ['ext', 'socket', 'api']).slice();
     if (!conv || conv.type === 'comment') return seq;
-    // [v1.92.39] Lô ≤ 300 chat + có Extension: bỏ Socket khỏi kế hoạch (API → Ext, Ext là chốt).
-    if (noSocketForThisBatch() && seq.indexOf('socket') > -1) {
-      const noSock = seq.filter((x) => x !== 'socket');
-      if (noSock.length) return noSock;
-    }
     // [v1.91.89] Chế độ "toàn bộ qua Extension": Ext trước, API dự phòng, KHÔNG dùng Socket.
     if (forceExtMode) {
       // [v1.91.90] Cùng endpoint HTTP, nhưng làn API có 76–96 luồng còn Ext chỉ 48 ⇒ lô toàn
@@ -6395,9 +6405,10 @@
       const httpPlan = ['api', 'ext'].concat(seq.filter((x) => x !== 'api' && x !== 'ext' && x !== 'socket'));
       if (httpPlan.length) return httpPlan;
     }
-    // [v1.91.86] Kênh ACK của page đã chết ⇒ đừng bắn Socket để rồi chờ hết hạn 8–20s.
+    // [v1.91.86] Né Socket khi page chứng minh là gửi không tới.
+    // [v1.92.40] Điều kiện đổi từ "ACK chết" (suy diễn) sang "bằng chứng giao hàng" (pageSocketUsable).
     // Chỉ đổi thứ tự làn (bỏ 'socket'), Extension/API vẫn là đường gửi thật như cũ.
-    if (pageId && isPageAckDead(pageId)) {
+    if (pageId && !pageSocketUsable(pageId)) {
       // [v1.92.13] Dò lại định kỳ thay vì né Socket mù 10 phút (xem chú thích ở PAGE_ACK_DEAD_TTL_MS).
       // [v1.92.36] LÔ TÍ HON (≤ 20 chat) KHÔNG DÒ LẠI KÊNH ACK CHẾT.
       // Lô 3 chat 15:48: page đã bị đánh dấu ACK chết từ lượt trước, nhưng vì tới hạn dò nên
@@ -6408,7 +6419,8 @@
       // [v1.92.34] 50 → 20 ca: lô 13:38 né Socket 1 697 lần nhưng chỉ dò lại 34 lần (≈5 s/lần
       // thì đúng ra phải ~85) và 0 lần hồi. Dò dày hơn = biết sớm hơn làn nào còn sống,
       // giá mỗi lần dò chỉ 1 tin đi Socket (nếu ACK chết thì mất đúng hạn chờ của 1 tin).
-      if (!tinyBatchNoProbe
+      const hasExtNet = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+      if (hasExtNet && !tinyBatchNoProbe
           && (sinceProbe >= 20 || Date.now() - (pageAckDeadProbeAt[pageId] || 0) >= SOCK_DEAD_PROBE_MS)) {
         pageAckDeadProbeAt[pageId] = Date.now();
         socketPickDiag.deadSkipAtProbe = socketPickDiag.deadSkip;
@@ -6794,7 +6806,9 @@
       triedCh.push(ch);
       tried.push((ch === 'ext' ? 'Ext' : ch) + ': ' + (r.error || 'fail'));
       if (r.gidUnknown) sawGidUnknown = true;
-      if (r.extBreakerOpen) { sawExtOverload = true; sendDiag.extOverloadSkips++; }
+      // [v1.92.40] KHÔNG tăng extOverloadSkips ở đây nữa — đã tăng ngay chỗ bộ ngắt chặn
+      // (sendViaExtension), nếu không mỗi ca bị đếm 2 lần.
+      if (r.extBreakerOpen) sawExtOverload = true;
       // [v1.92.30] `sent:false` nhưng là PHÁN ĐOÁN (Socket bị FB từ chối / Ext trả lỗi có lý do /
       // API success:false) ⇒ KHÔNG chạy kênh kế ngay tại đây. Chuyển sang cổng "chứng minh vắng
       // mặt": nếu hội thoại ĐÃ CÓ tin thì hủy bù (chặn lặp), chứng minh được vắng mặt thì mới bắn.
@@ -7478,6 +7492,7 @@
   const claimedSendIds = {}; // convId → đã nhận quyền bắn trong lượt này (chống 2 worker / 2 câu cùng 1 chat)
   const outboundLock = {}; // convId → đang/đã bắn tin (chưa xác nhận fail) — chặn POST/publish chồng
   const buRetryTimer = {}; // convId → timeout bù đang chờ (chống 2 chuỗi bù chạy song song)
+  const buLateRetryCount = {}; // [v1.92.40] số lần hẹn thử lại vì Ext bị bộ ngắt chặn (tối đa 2)
   const finalFailedIds = {}; // convId → đã thất bại hẳn (hết kênh hoặc khách khóa nick)
   const uncertainIds = {};   // convId → không rõ kết quả ('maybe')
   const skippedLateIds = {}; // convId → bỏ qua lúc gửi (tag cấm / icon điện thoại vừa gắn)
@@ -7759,7 +7774,6 @@
           + ' tin (' + pct + '%)' + chStr
           + ' | ❌ Lỗi: ' + c.failTotal
           + (c.unsureTotal ? ' | ⚠ Không rõ: ' + c.unsureTotal : '')
-          + (noSocketForThisBatch() ? ' | 🚫 Socket TẮT cho lô này (≤' + NO_SOCKET_MAX_CHATS + ' chat ⇒ API + Ext)' : '')
           + (countRescuing() ? ' | ⏳ ĐANG CỨU tự động: ' + countRescuing() + ' chat (Extension, ~10–13 s)' : '')
           + (countManualResendWait() ? ' | 🖐 CẦN GỬI TAY: ' + countManualResendWait() + ' chat (xem 💾 .txt)' : '')
           + (c.skipTotal ? ' | 🧹 Bỏ qua: ' + c.skipTotal : '')
@@ -7922,6 +7936,13 @@
     deliveredIds[convId] = ch;
     dropManualResend(convId); // đã xác nhận tới nơi ⇒ khỏi danh sách gửi tay
     delete rescueInFlight[convId]; // hết "đang cứu" — đã có kết luận
+    // [v1.92.40] Socket giao được ⇒ xoá sạch số lần mất tin của page (tự hồi, không cần TTL)
+    if (ch === 'socket') {
+      try {
+        const _st = sockRoute[String(String(convId).split('_')[0])];
+        if (_st) { _st.dlv++; _st.lost = 0; }
+      } catch (eSt2) { /* ignore */ }
+    }
     softNotify('delivered'); // [v1.92.9] chỗ chờ "đã giao" thức ngay, khỏi chờ mù 220 ms
     // Lượt đã kết thúc bình thường (không bấm Dừng) thì sentIds đã được dọn ở cuối sendToAll —
     // ACK trễ KHÔNG được nạp lại, nếu không lượt sau bỏ qua oan gần hết chat (mất tin im lặng)
@@ -8065,11 +8086,31 @@
       if (hasExt && buPid && isPageAckDead(buPid)) {
         baseCandidates = baseCandidates.filter((x) => x !== 'socket');
       }
-      // [v1.92.39] Lô vừa: bù cũng chỉ API/Ext — không để một ca lọt qua Socket rồi thành ⚠.
-      if (noSocketForThisBatch()) baseCandidates = baseCandidates.filter((x) => x !== 'socket');
     } catch (eBs) { /* ignore */ }
     const remaining = baseCandidates.filter((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0);
     if (!remaining.length) {
+      /* [v1.92.40] ❌ OAN VÌ BỘ NGẮT QUÁ TẢI — vá đúng gốc của lô 9 455 chat (§45: "bỏ qua lúc Ext
+       * quá tải 1 526" ca, không ca nào từng được BẮN, tất cả bị tính ❌).
+       * Bộ ngắt của Ext chỉ nghỉ 8–15 s rồi tự đóng. Vậy: chat bị bộ ngắt chặn (chưa hề gửi) thì
+       * KHÔNG chốt ❌ — đặt ⚠ "chưa gửi" rồi hẹn bắn lại qua Ext sau 9 s (tối đa 2 lần). Nếu vẫn
+       * không xong thì mới tính ❌, và chat vẫn nằm trong danh sách gửi tay. */
+      const extAliveNow = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+      const lateN = buLateRetryCount[conv.id] || 0;
+      if (extAliveNow && conv.__extSkippedOverload && lateN < 2 && !state.stopRequested) {
+        buLateRetryCount[conv.id] = lateN + 1;
+        try { delete conv.__extSkippedOverload; } catch (eLo) { /* ignore */ }
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+        logFailGrouped(name, 'Extension đang nghỉ hồi sức (bộ ngắt quá tải) — chat CHƯA được gửi lần nào '
+          + '⇒ hẹn thử lại sau 9 s (lần ' + (lateN + 1) + '/2), không chốt ❌ oan', '⏳', conv.id);
+        const myLateRun = runSeq;
+        bgClock.after(9000, () => {
+          if (myLateRun !== runSeq || state.stopRequested) return;
+          if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+          scheduleBuRetry(conv, text, photo, name, 'thử lại sau khi Extension hồi sức', ['api', 'socket'],
+            { ambiguous: false, fromUncertain: true, via: 'ext', sentAt: Date.now() });
+        });
+        return;
+      }
       const seen = {};
       const names = triedCh.concat(done).filter((x) => (seen[x] ? false : (seen[x] = true)));
       if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
@@ -8638,6 +8679,14 @@
         // thất bại ⇒ cần Extension. Không có Extension thì giữ ⚠ (vào danh sách gửi tay),
         // KHÔNG chốt ❌ oan — người dùng vẫn gửi tay được.
         const hasExtNow = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+        if (socksProof === 'absent') {
+          // [v1.92.40] BẰNG CHỨNG MẤT TIN: cổng vừa chứng minh hội thoại không có tin ⇒ ghi sổ
+          // định tuyến của page. 2 lần liên tiếp như vậy ⇒ gỡ Socket khỏi kế hoạch page này.
+          try {
+            const _st = sockRouteOf(pageId);
+            if (_st) _st.lost++;
+          } catch (eSt3) { /* ignore */ }
+        }
         if (socksProof === 'absent' && !hasExtNow) {
           logFailGrouped(nm, 'kiểm chứng: hội thoại KHÔNG có tin nhưng KHÔNG còn kênh gửi (Extension chưa nối) — GIỮ ⚠, vào danh sách gửi tay', '🔎', conv.id);
         }
@@ -9555,6 +9604,30 @@
         logFailGrouped((c.name || c.id),
           r.error + (/tránh trùng/i.test(String(r.error || '')) ? '' : ' — không rõ tin đã đi chưa (không gửi thêm để tránh trùng)'),
           '⚠', c.id);
+      } else if (r && r.extOverloaded && !photo
+                 && typeof window !== 'undefined' && window.__ExtensionAdapter__
+                 && typeof window.__ExtensionAdapter__.send === 'function'
+                 && (buLateRetryCount[c.id] || 0) < 2 && !state.stopRequested) {
+        /* [v1.92.40] ❌ OAN VÌ BỘ NGẮT QUÁ TẢI (gốc của lô 9 455 chat, §45: 1 526 ca).
+         * `extOverloaded` đã được tính từ trước nhưng KHÔNG AI ĐỌC — chat bị bộ ngắt Ext chặn
+         * trước khi bắn (chưa hề gửi) vẫn bị tính ❌. Bộ ngắt chỉ nghỉ 8–15 s.
+         * Nay: đặt ⚠ "chưa gửi", hẹn bắn lại qua Ext sau 9 s (tối đa 2 lần/chat), cùng lượt.
+         * Chỉ áp cho TIN CH: gửi lại ca ảnh phải dựng lại ảnh, không đáng đổi rủi ro. */
+        const lateN0 = buLateRetryCount[c.id] || 0;
+        buLateRetryCount[c.id] = lateN0 + 1;
+        unsure++;
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+        logFailGrouped((c.name || c.id), 'Extension nghẽn (bộ ngắt quá tải) chặn TRƯỚC KHI BẮN — chat CHƯA gửi lần nào'
+          + ' ⇒ không chốt ❌ oan, hẹn thử lại sau 9 s (lần ' + (lateN0 + 1) + '/2)', '⏳', c.id);
+        const myLateRun2 = runSeq;
+        const lateC = c;
+        bgClock.after(9000, () => {
+          if (myLateRun2 !== runSeq || state.stopRequested) return;
+          if (deliveredIds[lateC.id] || finalFailedIds[lateC.id]) return;
+          scheduleBuRetry(lateC, gtext, null, (lateC.name || lateC.id),
+            'thử lại sau khi Extension hồi sức', ['api'],
+            { ambiguous: false, fromUncertain: true, via: 'ext', sentAt: Date.now() });
+        });
       } else {
         fail++;
         if (r.windowClosed) windowBlocked++;
