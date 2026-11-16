@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.41-w200.84
+// @version      1.92.42-w200.85
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.41-W200.84'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.42-W200.85'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -9740,6 +9740,16 @@
     const WAVE_SOCKET_RETRY_WORKERS = 96;
     const WAVE_EXT_WORKERS = 128;
     const WAVE_EXT_BACKLOG_HIGH_WATER = 96;
+    /* [v1.92.42] TRẦN RIÊNG CHO VIỆC *CHẶN CỔNG PHÁT LỆNH* — không dùng 96 nữa.
+     * Lô 16:07 (11 954 chat, 1.92.38): 17 wave đầu chạy êm (8 368 chat trong ~195 s ≈ 43/s,
+     * Ext queue/active 0/0). Từ wave 18, ~2 300 chat dồn sang Extension (trần thật ~18 tin/s) ⇒
+     * `extBacklogQueue.length + activeExtWorkers > 96` đúng ở MỌI lần kiểm tra (nhịp 60 ms) ⇒
+     * cổng bị giữ **6 426 lần**, wave 19–24 mất 45–91 s MỖI wave dù `main đang bay 0` và
+     * `retry 0/0/0`. 6 wave cuối = **~400 s trong tổng 652 s** chỉ để chờ một hàng đợi chạy nền.
+     * Hàng đợi Ext KHÔNG làm lệnh phát nhanh hơn khi bị chặn — nó chỉ bị đẩy lùi. Nay cổng chỉ
+     * giữ khi hàng đợi Ext vượt 1 200 ca (mức an toàn bộ nhớ), phần còn lại để Ext chạy song song.
+     * Bất biến: KHÔNG tăng số làn Ext, KHÔNG đổi tốc độ gửi — chỉ bỏ việc bắt cả lô xếp hàng sau nó. */
+    const GATE_EXT_BACKLOG_LIMIT = 1200;
     const WAVE_API_BACKLOG_HIGH_WATER = 96;
 
     const runGroupWaves200 = async (gtext, fullList) => {
@@ -10061,13 +10071,13 @@
             const softActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.85);
             // Có backpressure: không mở wave mới khi lane bù hoặc hàng đợi API đã quá sâu.
             if (inFlightMainCount > gateActiveLimit || retryBacklog > 80
-                || extBacklog > WAVE_EXT_BACKLOG_HIGH_WATER
+                || extBacklog > GATE_EXT_BACKLOG_LIMIT
                 || apiBacklog > WAVE_API_BACKLOG_HIGH_WATER) {
               // [v1.92.28] Ghi lại LÝ DO chặn (đếm trên mỗi lần kiểm tra 60ms). Lô 10:21 có
               // gate TB 6,8 s / max 22,96 s nhưng không biết ai giữ ⇒ thêm số đo thay vì đoán.
               if (inFlightMainCount > gateActiveLimit) waveDiag.gateBlockInflight++;
               else if (retryBacklog > 80) waveDiag.gateBlockRetry++;
-              else if (extBacklog > WAVE_EXT_BACKLOG_HIGH_WATER) waveDiag.gateBlockExt++;
+              else if (extBacklog > GATE_EXT_BACKLOG_LIMIT) waveDiag.gateBlockExt++;
               else waveDiag.gateBlockApi++;
               return;
             }

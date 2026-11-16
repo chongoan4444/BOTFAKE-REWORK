@@ -3323,3 +3323,48 @@ hiện tượng này từ log 09:15, §30). Đây cũng là lý do API chỉ có
 Chi phí tối đa của bước dò: 200 ca ÷ ~18 tin/s ≈ **11 s** — không đáng kể so với 131–652 s của
 một lô. Nếu Ext cứu được thì 5 525 ca có cơ hội được gửi thật; nếu không thì người dùng nhận được
 **danh sách gửi tay** thay vì một con số ❌ vô nghĩa.
+
+## §76 — "QUÁ LÂU": BÓC THỜI GIAN HAI LÔ 16:07 / 16:11 (1.92.38)
+
+### 76.1 Lô 16:07 — 11 954 chat, 652 s. Ba pha rõ rệt
+
+| Pha | Thời gian | Số chat | Tốc độ | Trạng thái làn |
+|---|---|---|---|---|
+| **1. Chạy êm** (wave 1–17) | 16:07:09 → 16:10:30 = **201 s** | 8 368 (70 %) | **42 tin/s** | socket lane 384→96 · Ext queue/active **0/0–5** |
+| **2. Kẹt cổng** (wave 18–24) | 16:10:30 → 16:17:10 = **400 s** | 3 586 (30 %) | **9 tin/s** | Ext active **pinned 96** · socket lane 16–64 · `main đang bay 0` |
+| **3. Chốt sổ** | 16:17:10 → 16:18:02 = 52 s | 0 | — | — |
+
+Câu chốt trong dòng WAVE: **`giữ cổng (bay/retry/ext/api) 20 827/0/6 426/0`** — cổng bị giữ
+**6 426 lần vì hàng đợi Extension**, không phải vì làn gửi. Và wave 19/20/22/23/24 mất
+**60 195 / 91 563 / 63 375 / 70 381 / 67 945 ms** — mỗi wave gần một phút, trong khi
+`main đang bay 0`, `retry 0/0/0`, `API chờ 0`.
+
+`wave→cổng TB/max = 24 521 / 91 563 ms` là hệ quả trực tiếp.
+
+### 76.2 Cơ chế
+
+`evaluateGate()` (nhịp 60 ms) giữ wave kế tiếp khi
+`extBacklogQueue.length + activeExtWorkers > WAVE_EXT_BACKLOG_HIGH_WATER (96)`.
+
+17 wave đầu: Ext rỗng ⇒ cổng mở, 42 tin/s. Từ wave 18, ~2 300 chat dồn sang Ext (trần thật
+**~18 tin/s**) ⇒ điều kiện đó **luôn đúng** ⇒ cổng đóng suốt 400 s, cả lô xếp hàng sau một hàng
+đợi chạy nền. Đây là **lỗi thiết kế**: cổng phát lệnh không được phụ thuộc vào một hàng đợi mà
+tốc độ của nó (18/s) nhỏ hơn tốc độ phát (45–130/s).
+
+### 76.3 Sửa (1.92.42)
+
+Thêm `GATE_EXT_BACKLOG_LIMIT = 1200` **chỉ dùng cho cổng**: cổng chỉ giữ khi hàng đợi Ext vượt
+1 200 ca (mức an toàn bộ nhớ). Hàng đợi Ext chạy song song, không chặn việc phát.
+**Không** đổi số làn, không đổi tốc độ gửi, không đổi ngưỡng nào khác.
+
+### 76.4 Hai thứ còn nợ (chưa sửa, cần log kế tiếp để chốt)
+
+1. **Socket/page lane tụt 384 → 16–64 mà không có dòng `🐢` tương ứng.** Log 16:07 chỉ có
+   `backoff chậm/no-ACK 4/2` (4 lần hạ theo ACK chậm, 2 lần no-ACK) — không đủ để đi từ 384
+   xuống 16 (mỗi lần hạ chỉ ×0,8). Có đường hạ lane khác chưa được log ⇒ **phải tìm ra đường đó
+   trước khi sửa**, nếu không sẽ lại sửa mò.
+2. **`🫥 CHẠY NỀN: tab ẩn 81 % · bị bóp 4 772 lần + trễ 10 840 lần · cộng thêm 15 288 s`**
+   (lô 16:11: 87 % · trễ 4 478 lần · +4 769 s). Đồng hồ Worker không bị bóp, nhưng callback vẫn
+   trễ trung bình ~1,4 s/lần ⇒ **main thread quá tải** (192 slot + hàng nghìn promise + fetch).
+   Đây là nghi phạm số 1 cho việc "phát 45 tin/s dù làn cho phép 265 tin/s", nhưng **chưa có
+   phép đo tách bạch** ⇒ chưa đụng.
