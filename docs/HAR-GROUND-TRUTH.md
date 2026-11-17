@@ -4754,3 +4754,30 @@ Cả hai đều thuộc loại "chống trùng mà vẫn trùng" — đúng lỗ
 
 **Giảm 3 tab → 1 tab/page.** 3 tab cùng chạy: tổng 52/s nhưng **12 672 no-ACK**.
 Một tab đơn lẻ ở lô 14:03 đạt **51/s với 1 246 no-ACK** — cùng tốc độ, **ít hơn 10× lỗi**.
+
+### 91.8 LỖI `bridge.js` — bundle cho Worker là SyntaxError (đã sửa, có test)
+
+`bridge.js` **không thể** `import` `engine.mjs`: nó chạy trong content script `world: MAIN`,
+chỉ có URL của chính nó. Nên phải **ghép engine.mjs + worker.js thành 1 script classic**
+rồi cho vào Blob. Bản đầu tôi làm thiếu 2 bước:
+
+1. **Chỉ strip `export` của `engine.mjs`, quên `worker.js`** ⇒ `export function isRejectedError`
+   và `export { boot }` nằm lại trong blob ⇒ **SyntaxError**.
+2. **Bọc trong `(function(){…})` không `async`**, trong khi `worker.js` có `await` ⇒ **SyntaxError**.
+
+**Biểu hiện ra ngoài: Worker chết ngay khi tạo, panel KHÔNG có một dòng log nào.** Đây là
+loại lỗi tệ nhất — cài xong tưởng chạy mà thực ra chưa có gì chạy.
+
+Cách phát hiện: dựng bundle bằng chính `buildWorkerCode()` rồi `new vm.Script(bundle)`.
+`node --check` file riêng lẻ **không** bắt được vì mỗi file đều hợp lệ.
+
+Đã sửa: bọc `async` · strip `export` sau khi ghép cả 2 file · thêm lưới chặn
+`if (/^\s*(export|import)\s/m.test(code)) throw` · bỏ top-level `await` trong `worker.js`
+(dùng `process.getBuiltinModule` thay `await import`).
+
+**Test mới `worker-send/test-bridge.mjs` — 24 ca (B1–B24).** Chạy `bridge.js` thật →
+bundle thật → `vm` giả lập trình duyệt (có `self`) → HTTP server thật. Mutation-test:
+- gỡ strip `export` của worker ⇒ **B1, B3 đỏ**
+- bỏ `async` ⇒ **B3, B4, B9 đỏ**
+
+Tổng test worker-send nay **85** (46 + 15 + 24). Bản 1.92.55 vẫn **201/201**, build `--check` OK.

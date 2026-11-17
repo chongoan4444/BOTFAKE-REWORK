@@ -34,6 +34,7 @@ Hạ nhịp VẼ DOM không cứu được: thủ phạm là promise/closure t�
 | `bridge.js` | main thread (userscript) | tạo Worker từ Blob, đưa token/apiBase, nhận log, trả lời RPC |
 | `test-engine.mjs` | Node | **46 test** lõi điều phối, đồng hồ giả, không cần mạng |
 | `test-worker.mjs` | Node | **15 test** chạy **worker thật** + **HTTP server thật** |
+| `test-bridge.mjs` | Node | **24 test** dựng bundle y như trình duyệt rồi chạy trong `vm` + server thật |
 
 ## 3. Điều được bảo đảm (có test khoá)
 
@@ -51,9 +52,26 @@ Hạ nhịp VẼ DOM không cứu được: thủ phạm là promise/closure t�
 ## 4. Chạy test
 
 ```bash
-node worker-send/test-engine.mjs   # 46 test, ~0,2 s, không cần mạng
-node worker-send/test-worker.mjs   # 15 test, chạy worker thật + HTTP server thật
+npm run test:worker                # cả 85 test
+node worker-send/test-engine.mjs   # 46 test — lõi điều phối
+node worker-send/test-worker.mjs   # 15 test — worker thật + HTTP server thật
+node worker-send/test-bridge.mjs   # 24 test — bundle thật chạy trong trình duyệt giả lập
 ```
+
+### Lỗi bridge.js đã mắc và đã sửa (test B1–B9 khoá lại)
+
+`bridge.js` không nạp `engine.mjs` bằng `import` được (content script không có đường dẫn
+tới nó), nên phải **ghép 2 file thành 1 script classic** rồi mới cho vào Blob. Bản đầu của
+tôi làm thiếu 2 bước:
+
+1. **Quên strip `export` của `worker.js`** (chỉ strip của `engine.mjs`) ⇒
+   `export function isRejectedError` + `export { boot }` còn trong blob ⇒ **SyntaxError**.
+2. **Bọc trong hàm không `async`** trong khi `worker.js` có `await` ⇒ cũng **SyntaxError**.
+
+Biểu hiện ra ngoài của cả hai: **Worker chết ngay khi tạo, panel không có log gì** — không
+báo lỗi. Đây là loại lỗi tệ nhất khi cài. Nay đã bọc `async` + strip cả 2 file + có lưới
+chặn `if (/^\s*(export|import)\s/m.test(code)) throw`. Đã mutation-test: gỡ từng nhát ⇒
+test đỏ tương ứng.
 
 ## 5. Còn thiếu để bật được (theo thứ tự)
 

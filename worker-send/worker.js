@@ -24,9 +24,7 @@
  * những thứ đó chỉ tồn tại ở main thread. Worker hỏi, main trả lời, worker quyết định.
  */
 
-import {
-  createWorkerSend, makeRealClock, DEFAULT_MAIN_CAP,
-} from './engine.mjs';
+import { createWorkerSend, makeRealClock, DEFAULT_MAIN_CAP } from './engine.mjs';
 
 /* ---------------------------------------------------------------------------
  * TƯƠNG THÍCH MÔI TRƯỜNG (Web Worker ⇄ Node Worker)
@@ -38,8 +36,15 @@ const IS_NODE = (typeof self === 'undefined' || typeof self.postMessage !== 'fun
 
 let nodePort = null;
 if (IS_NODE) {
-  const { parentPort } = await import('node:worker_threads');
-  nodePort = parentPort;
+  /* KHÔNG dùng `await import(...)` ở đây: nó là top-level await ⇒ khi bridge.js
+   * nhúng file này vào một Blob/IIFE (không phải module) sẽ là SyntaxError.
+   * `process.getBuiltinModule` lấy được module đồng bộ (Node >= 20.16 / 22). */
+  try {
+    const wt = (typeof process !== 'undefined' && typeof process.getBuiltinModule === 'function')
+      ? process.getBuiltinModule('node:worker_threads')
+      : null;
+    nodePort = wt ? wt.parentPort : null;
+  } catch (e) { nodePort = null; }
 }
 
 let stopResolve = null;
@@ -197,14 +202,20 @@ async function onMessage(m) {
   }
 }
 
-if (nodePort) {
-  nodePort.on('message', (m) => { void onMessage(m); });
-} else if (typeof self !== 'undefined' && typeof self.addEventListener === 'function') {
-  self.addEventListener('message', (ev) => { void onMessage(ev && ev.data); });
-} else if (typeof self !== 'undefined') {
-  self.onmessage = (ev) => { void onMessage(ev && ev.data); };
+/* Khởi động. Tách thành hàm để `bridge.js` gọi được sau khi nhúng file này vào Blob
+ * (bundle không phải module nên không tự chạy ở cấp cao nhất được). */
+function boot() {
+  if (nodePort) {
+    nodePort.on('message', (m) => { void onMessage(m); });
+  } else if (typeof self !== 'undefined' && typeof self.addEventListener === 'function') {
+    self.addEventListener('message', (ev) => { void onMessage(ev && ev.data); });
+  } else if (typeof self !== 'undefined') {
+    self.onmessage = (ev) => { void onMessage(ev && ev.data); };
+  }
+  /* Node MAIN thread (không phải worker): không đăng ký listener — file vẫn import được
+   * để kiểm cú pháp, nhưng không có nơi nào gửi message tới. */
+  post({ t: 'hello', version: 'worker-send-1' });
 }
-/* Node MAIN thread (không phải worker): không đăng ký listener — file vẫn import được
- * để kiểm cú pháp, nhưng không có nơi nào gửi message tới. */
 
-post({ t: 'hello', version: 'worker-send-1' });
+export { boot };
+boot();

@@ -11,6 +11,6 @@
     "test": "node tools/test-verify.mjs",
     "stable": "node tools/make-stable.mjs",
     "check:stable": "node tools/make-stable.mjs --check",
-    "test:worker": "node worker-send/test-engine.mjs && node worker-send/test-worker.mjs"
+    "test:worker": "node worker-send/test-engine.mjs && node worker-send/test-worker.mjs && node worker-send/test-bridge.mjs"
   }
 }

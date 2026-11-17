@@ -56,17 +56,40 @@
     SRC.worker = String(workerSrc || '');
   }
 
+  /**
+   * Ghép engine.mjs + worker.js thành MỘT đoạn script classic để chạy trong Worker.
+   *
+   * Vì sao không dùng `new Worker(url, {type:'module'})` trực tiếp trên file .mjs:
+   * trang Pancake chạy code này từ content script `world: MAIN`, mà content script
+   * chỉ có URL của chính nó — không có đường dẫn tới engine.mjs. Blob là cách duy nhất
+   * không phải sửa manifest. Đổi lại phải tự làm 3 việc, và cả 3 đều dễ sai câm:
+   *   1. bỏ `import ... from './engine.mjs'`          → engine nằm ngay trong blob
+   *   2. bỏ `export ...` ở CẢ HAI file                → script classic không có export
+   *   3. bọc trong hàm **async**                       → worker.js có `await` bên trong
+   *      (không phải top-level await nữa, nhưng vẫn cần async để await hoạt động)
+   *
+   * Đã kiểm bằng `node --check`: bản trước thiếu (2) và (3) ⇒ blob là SyntaxError,
+   * Worker chết ngay khi tạo và biểu hiện ra ngoài chỉ là "không có log gì".
+   */
+  function buildWorkerCode(engineSrc, workerSrc) {
+    var workerBody = String(workerSrc)
+      .replace(/import\s*\{[\s\S]*?\}\s*from\s*['"]\.\/engine\.mjs['"]\s*;?/m, '');
+    var joined = String(engineSrc) + '\n' + workerBody;
+    /* Strip export ở CẢ HAI (engine + worker), sau khi đã ghép. */
+    joined = joined
+      .replace(/^export\s+default\s+/gm, 'var __default__ = ')
+      .replace(/^export\s*\{[^}]*\}\s*;?\s*$/gm, '')
+      .replace(/^export\s+/gm, '');
+    return '(async function () {\n"use strict";\n' + joined + '\n})();';
+  }
+
   function buildBlobUrl() {
     if (!SRC.engine || !SRC.worker) throw new Error('worker-send: chưa có mã nguồn (gọi setSources)');
-    /* Worker kiểu module: cần import engine.mjs. Blob không có đường dẫn tương đối ⇒
-     * nối engine vào trước và bỏ `import ... from './engine.mjs'` của worker, thay bằng
-     * chính nội dung engine đã bọc trong một khối. */
-    var engineNoExport = SRC.engine
-      .replace(/^export\s+/gm, '')
-      .replace(/^export\s*\{[^}]*\}\s*;?$/gm, '');
-    var workerBody = SRC.worker
-      .replace(/import\s*\{[\s\S]*?\}\s*from\s*['"]\.\/engine\.mjs['"]\s*;?/m, '');
-    var code = '(function(){\n"use strict";\n' + engineNoExport + '\n' + workerBody + '\n})();';
+    var code = buildWorkerCode(SRC.engine, SRC.worker);
+    /* Lưới an toàn: nếu còn sót export/import thì báo NGAY, thay vì để Worker chết câm. */
+    if (/^\s*(export|import)\s/m.test(code)) {
+      throw new Error('worker-send: bundle còn export/import — worker sẽ không chạy');
+    }
     var blob = new Blob([code], { type: 'text/javascript' });
     return URL.createObjectURL(blob);
   }
