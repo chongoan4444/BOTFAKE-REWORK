@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.49-w200.95
+// @version      1.92.46-w200.92
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.49-W200.95'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.46-W200.92'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1485,8 +1485,7 @@
         }
         const txt = await r.text();
         if (!txt || !txt.trim()) return { ok: true, data: { conversations: [] } }; // body rỗng = hết dữ liệu
-        // [v1.92.47] bóc `for (;;);` / BOM / khoảng trắng đầu trước khi parse — xem stripJsonPrefix()
-        try { return { ok: true, data: JSON.parse(stripJsonPrefix(txt)) }; } catch (e) {
+        try { return { ok: true, data: JSON.parse(txt) }; } catch (e) {
           try { return { ok: true, data: JSON.parse(atob(txt)) }; } catch (e2) {
             return { ok: false, error: 'Phản hồi không phải JSON' };
           }
@@ -1722,18 +1721,6 @@
     }
   }
 
-  /* [v1.92.48] Dịch cursor sang mốc thời gian khác (dùng để NHẢY QUA trang lỗi).
-   * `deltaMs` âm = sang mốc CŨ HƠN (tức trang kế tiếp trong danh sách). Không đụng `keyStr`
-   * nếu không đổi được tsMs — trả null để nơi gọi biết là không nhích được, TUYỆT ĐỐI không
-   * bịa cursor. */
-  function shiftCursorBefore(b64, deltaMs) {
-    const p = parseErlangCursor(b64);
-    if (!p || !p.tsMs) return null;
-    const next = p.tsMs + Number(deltaMs || 0);
-    if (!isFinite(next) || next <= 0) return null;
-    return encodeErlangCursor(p.seenByte, next, p.keyStr);
-  }
-
   function estimatePageSpanMs(convs, fallbackMs) {
     if (!Array.isArray(convs) || convs.length < 2) return fallbackMs || 600000;
     const unpinned = convs.filter((c) => c && !c.is_pinned && !c.isPinned);
@@ -1762,33 +1749,11 @@
   //      hàng loạt request tuần tự. Luồng phụ nào treo cũng không chặn được luồng gốc.
   //   C) Lọc tag lúc gửi (forceTags / maxPages): tuần tự như cũ (chỉ cần 1 trang).
   //   Cả A & B đều DỪNG NGAY khi chuỗi 2 đầu (range) đã đủ 2 đầu hoặc user bấm dừng.
-  /* [v1.92.48] đổi từ `async function` sang biểu thức: phần TẢI BÙ TRANG LỖI (cuối
-   * loadSequentialOrStitch) cần gọi lại chính hàm này để tiếp tục từ đúng cursor đã lưu.
-   * Luồng gốc của lần tải bù là 1 chuỗi `next_cursor` duy nhất ⇒ tự nó đã tuần tự. */
-  let loadListCore = null;
-  /* [v1.92.48b] BỌC LẠI ĐỂ LỖI KHÔNG LÀM CHẾT IM LẶNG NỬA LƯỢT.
-   * Người dùng báo "ấn tải phát dừng luôn" — tức có ca ném lỗi giữa vòng lặp tải, không in gì.
-   * Nay mọi exception trong khâu tải trả về `{ ok:false, error }` kèm SỐ CHAT ĐÃ LẤY được
-   * (xem `__partialRows`) để `scanFullList` vẫn dùng được phần đã tải thay vì mất trắng. */
-  loadListViaApi = async function (onProgress, opts) {
-    loadListViaApi.__progress = onProgress || null;   // [v1.92.48b] để nơi gọi cứu được phần đã tải
-    try {
-      return await loadListCore(onProgress, opts);
-    } catch (e) {
-      const msg = (e && e.name ? e.name + ': ' : '') + ((e && e.message) || e);
-      try { logLine('⛔ Khâu tải danh sách ném lỗi: ' + msg + ' — giữ phần đã tải.'); } catch (e2) { /* ignore */ }
-      return { ok: false, error: 'Lỗi khâu tải: ' + msg, rows: (loadListViaApi.__partialRows || []) };
-    }
-  };
-  loadListCore = async function (onProgress, opts) {
+  async function loadListViaApi(onProgress, opts) {
     const token = getToken();
     if (!token) return { ok: false, error: 'Không lấy được access token' };
     const startedAt = Date.now();
-    /* [v1.92.48] LƯỢT TẢI BÙ (`resumeCursor`) PHẢI ĐI ĐƯỜNG THƯỜNG, KHÔNG phải nhánh lọc tag.
-     * Bản cũ: `maxPages: 40` ⇒ `plainMode === false` ⇒ rơi vào `loadSequential()` của nhánh lọc
-     * tag (đường chỉ dành cho "tải 1 trang để lọc") ⇒ mất đúng hành vi cần có. Nay `resumeCursor`
-     * luôn giữ plainMode. */
-    const plainMode = !opts || (!opts.forceTags && (!opts.maxPages || !!opts.resumeCursor));
+    const plainMode = !opts || (!opts.forceTags && !opts.maxPages);
 
     const isRangeSatisfied = (idSet) => {
       if (!plainMode || (opts && opts.full)) return false;
@@ -1820,62 +1785,16 @@
      * đúng thứ không được phép. Giữ 0; mọi cải thiện tốc độ tải phải đến từ đi đúng
      * next_cursor + thử lại page lỗi (xem retry riêng từng page bên dưới). */
     const RL_HELPER_BUDGET_START = 0;
-    const rl = { pauseUntil: 0, hits: 0, helperBudget: RL_HELPER_BUDGET_START, logged: false,
-      streak: 0,      // [v1.92.48] số 429 LIÊN TIẾP (reset khi có phản hồi thành công)
-      gapMs: 0,       // [v1.92.48] nhịp chờ giữa hai trang khi đã từng dính 429
-      waitTotalMs: 0, // [v1.92.48] tổng thời gian đã nghỉ vì 429 (in ra để đối chiếu)
-      lastWaitMs: 0,
-      pageAt: 0 };    // [v1.92.48b] mốc trang đang gặp 429 — gộp 3 lần thử của fetchJson thành 1
+    const rl = { pauseUntil: 0, hits: 0, helperBudget: RL_HELPER_BUDGET_START, logged: false };
     const rlNote429 = () => {
       rl.hits++;
-      /* [v1.92.48] NGHỈ CHUNG PHẢI DÀI DẦN KHI CƠN 429 KHÔNG DỨT.
-       * Log 09:19–09:22 (bản 1.92.44): 62 lần 429 trong 134 s. Đọc code thì thấy bản cũ nghỉ
-       * ĐÚNG 2,5 s cho MỌI lần ⇒ tổng thời gian nghỉ vì 429 ≈ 62 × 2,5 = **155 s** > cả 134,6 s
-       * của lượt tải ⇒ gần như TOÀN BỘ thời gian tải là ngồi chờ, không phải tải. Với 2,5 s cố
-       * định thì server còn bóp thì vòng lặp còn quay lại đúng nhịp đó.
-       * Nay: 2,5 s → 5 → 7,5 → 10 s (trần), rồi mỗi lần chờ thêm một nhịp 1,5 s (trần 20 s) nếu
-       * vẫn dính tiếp. Chuỗi reset khi có phản hồi THÀNH CÔNG, nên cơn ngắn không bị phạt. */
-      /* [v1.92.48b] `fetchJson` đã tự thử 3 lần cho MỘT trang; mỗi lần trong đó cũng gọi vào đây.
-       * Đếm gộp như vậy thì 1 trang lỗi ⇒ streak nhảy 3 bậc ⇒ nghỉ vọt lên 10 s ngay từ trang
-       * đầu, đúng hiện tượng "ấn tải phát dừng". Nay chỉ đếm 1 lần cho mỗi trang (cờ `rl.pageAt`). */
-      const nowTick = Date.now();
-      if (rl.pageAt && nowTick - rl.pageAt < 4000) {
-        rl.hits++;                     // vẫn đếm tổng số 429 để in ra
-        rl.pauseUntil = Math.max(rl.pauseUntil, nowTick + Math.min(4000, 400));
-        return;
-      }
-      rl.pageAt = nowTick;
-      rl.streak = (rl.streak || 0) + 1;
-      /* [v1.92.48b] 2,5 → 4 → 6 → 8 s rồi +1,5 s/lần (trần 15 s). Bản 1.92.48 nhân đôi lên
-       * 10 s sau 3 lần ⇒ với ~10 trang là mất cả phút chỉ để nghỉ. Đây là tăng DẦN nhưng không
-       * nhân đôi: đủ để server nhả, không đủ để "ấn tải phát dừng". */
-      /* BẬC NGHỈ CỐ ĐỊNH, đọc được ngay: 2,5 → 4 → 6 → 8 s, sau đó +1,5 s/lần (trần 15 s).
-       * Không dùng công thức nhân đôi: bản 1.92.48 nhân đôi nên ngay trang lỗi thứ 3 đã nghỉ
-       * 10 s ⇒ người dùng thấy như "ấn tải phát dừng". */
-      const RL_STEPS = [2500, 4000, 6000, 8000];
-      const base = RL_STEPS[Math.min(RL_STEPS.length - 1, rl.streak - 1)];
-      const extra = rl.streak > 4 ? Math.min(7000, (rl.streak - 4) * 1500) : 0;
-      const waitMs = Math.min(15000, base + extra);
-      rl.pauseUntil = Date.now() + waitMs;
-      rl.lastWaitMs = waitMs;
-      rl.waitTotalMs = (rl.waitTotalMs || 0) + waitMs;
+      rl.pauseUntil = Date.now() + 2500;
       // 429 ⇒ giảm nửa số luồng phụ ĐANG được phép sống (6→3→1→0), cuối cùng chỉ còn tuyến gốc.
       rl.helperBudget = Math.max(0, Math.floor(rl.helperBudget / 2));
-      /* Log MỖI MỐC thay vì chỉ lần đầu: 62 dòng "🧯" trùng nhau (log 09:19–09:20) không cho
-       * biết cơn 429 đang nặng lên hay đã dịu, cũng không cho biết ĐÃ NGHỈ BAO NHIÊU. */
-      if (!rl.logged || rl.hits === 5 || rl.hits % 10 === 0) {
+      if (!rl.logged) {
         rl.logged = true;
-        logLine('🧯 Server đang giới hạn tốc độ (429) — tự giảm luồng tải song song + nghỉ chung '
-          + (Math.round(waitMs / 100) / 10) + 's để qua cơn…'
-          + (rl.hits > 1 ? ' (lần ' + rl.hits + ' · đã nghỉ tổng ' + (Math.round(rl.waitTotalMs / 100) / 10) + 's)' : ''));
+        logLine('🧯 Server đang giới hạn tốc độ (429) — tự giảm luồng tải song song + nghỉ chung để qua cơn…');
       }
-    };
-    /* [v1.92.48] 429 liên tiếp → nghỉ dài; CÓ phản hồi thành công → reset chuỗi + trả nhịp 1,5 s
-     * giữa các trang (trước đây 0 ms ⇒ bắn liền tay cho tới khi dính 429). */
-    const rlNoteOk = () => {
-      if (rl.streak) logLine('✅ Server nhả rồi (sau ' + rl.streak + ' lần 429 liên tiếp) — tải tiếp bình thường.');
-      rl.streak = 0;
-      rl.gapMs = 0;
     };
 
     const fetchPage = async (pageCount, cursor, currentCount, extra) => {
@@ -1907,13 +1826,10 @@
 
     // ---------- C) TUẦN TỰ (lọc tag / giới hạn trang) ----------
     const loadSequential = async () => {
-      // [v1.92.48] `opts.resumeCursor` = tải bù ĐÚNG một trang lỗi (xem errorPages ở luồng gốc)
-      const resume = (opts && opts.resumeCursor) || null;
-      const seg = { items: [], set: new Set(), cursor: resume || null, pageCount: {}, rt: [] }; // [v1.92.48] rt = độ trễ từng trang
+      const seg = { items: [], set: new Set(), cursor: null, pageCount: {} };
       let guard = 0;
       let forceMulti = false;
       while (guard++ < 1500 && !stopped()) {
-        const pageT0 = Date.now(); // [v1.92.48]
         const res = await fetchPage(seg.pageCount, seg.cursor, seg.items.length, { forceMulti });
         if (!res.ok) {
           if (stopped() || res.error === 'stopped') {
@@ -1924,7 +1840,6 @@
         }
         const j = res.data || {};
         const convs = j.conversations || [];
-        if (pageT0) seg.rt.push(Date.now() - pageT0); // [v1.92.48] độ trễ trang THẬT (đo được)
         const added = pushConvs(seg, convs);
         if (j.pages_with_current_count) seg.pageCount = Object.assign({}, seg.pageCount, j.pages_with_current_count);
         seg.cursor = (convs.length && j.next_cursor) ? j.next_cursor : null;
@@ -2101,8 +2016,7 @@
 
       const seg0 = {
         items: [], set: new Set(),
-        // [v1.92.48] `opts.resumeCursor` ⇒ bắt đầu từ đúng trang lỗi đã ghi sổ, KHÔNG từ trang 1
-        cursor: (opts && opts.resumeCursor) || ((p1.data && p1.data.next_cursor) || null),
+        cursor: (p1.data && p1.data.next_cursor) || null,
         pageCount: Object.assign({}, (p1.data && p1.data.pages_with_current_count) || {}),
         spanMs: estimatePageSpanMs((p1.data && p1.data.conversations) || [], 600000),
       };
@@ -2246,75 +2160,23 @@
         for (let h = 0; h < STRIDES.length; h++) spawnHelper();
       }
 
-      /* Luồng gốc: đi tuần tự, khâu đoạn nào dùng đoạn đó, xong là dừng hết luồng phụ.
-       * [v1.92.48] SỔ TRANG LỖI + KHÔNG LÙI VỀ TRANG 1.
-       * Log 09:19–09:22 cho thấy cùng một sự kiện in ra 62 lần với con số TĂNG DẦN (160 → 7 440).
-       * Đối chiếu đường A (nhiều page): `while (guard++ < 1500) { guard--; continue; }` — tức lần
-       * thử lại KHÔNG tính vào trần 1500. Đường này thì mỗi lần thử lại ăn một slot `guard` ⇒
-       * 8 lần thử lại × số trang ⇒ trần 1500 trang hết trước khi cursor hết ⇒ `truncated = true`
-       * ⇒ tải lại từ đầu. Nay: trần 1500 **trang đã lấy được** + 40 lần **thử lại**, tách riêng.
-       * Trang nào thử 4 lần vẫn lỗi thì ghi vào `errorPages` (vị trí trang + cursor vào), đi tiếp
-       * trang sau, cuối lượt quay lại đúng những trang đó — KHÔNG bỏ chat nào, cũng không quay
-       * lại từ trang 1. */
+      // Luồng gốc: đi tuần tự, khâu đoạn nào dùng đoạn đó, xong là dừng hết luồng phụ
       let guard = 0;
-      let retryLeft = 40;                 // ngân sách thử lại cả lượt (không tính vào trần trang)
-      let consecFail = 0;                 // số trang LIÊN TIẾP lỗi — 3 trang ⇒ server bóp thật, dừng
-      const errorPages = [];              // { cursor, after, tries }
-      const pageT0s = [];
-      const maxPagesCap = (opts && opts.resumeCursor && opts.maxPages) ? Number(opts.maxPages) : 1500;
-      while (guard < maxPagesCap && seg0.cursor && !stopped()) {
+      while (guard++ < 1500 && seg0.cursor && !stopped()) {
         const before = seg0.items.length;
-        const pageT0 = Date.now();
         const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint, tries: 3, timeoutMs: 12000 });
-        const waited = Date.now() - pageT0;
-        if (waited <= 30000) seg0.rt.push(waited);   // [v1.92.48] độ trễ TRANG thật (chỉ ca không bị kẹt nghỉ)
         if (!res.ok) {
           if (stopped() || res.error === 'stopped') break; // người dùng bấm dừng — không phải lỗi
-          /* [v1.92.48] 429 KHÔNG ĐƯỢC ĐI TIẾP NGAY: `fetchPage` đã tự thử lại 3 lần bên trong
-           * (mỗi lần 400 ms), rồi thoát ra đây và bản cũ `continue` sau 2 s với cờ errRetry=1
-           * ⇒ lại in "⏸ … đang tự thử lại…" cho CÙNG MỘT trang. Đó là lý do 62 dòng log cho 62
-           * lần 429 / 134 s. Nay cộng thêm nhịp nghỉ chung của `rl` (dài dần, xem rlNote429). */
+          // v1.84.0: luồng gốc gặp lỗi lẻ (mạng chập chờn/server ì) thì nghỉ rồi tải tiếp ĐÚNG
+          // cursor, tối đa 8 lần — danh sách chỉ thật sự hết khi server báo hết dữ liệu.
           seg0.errRetry = (seg0.errRetry || 0) + 1;
-          consecFail++;
           if (seg0.errRetry === 1) logLine('⏸ Tải bị gián đoạn (' + (res.error || 'lỗi') + ') ở ' + seg0.items.length + ' chat — đang tự thử lại…');
-          /* [v1.92.48b] LUÔN THỬ LẠI TRANG ĐANG ĐỨNG nếu còn ngân sách — không dừng ở "3 trang
-           * liền lỗi". Người dùng báo "ấn tải phát dừng luôn": 3 lần lỗi liên tiếp là chuyện
-           * BÌNH THƯỜNG khi server bóp (fetchJson đã cố 3 lần, rồi tới đây), dừng ở đó thì lượt
-           * tải chết ngay từ đầu. Chỉ khi `retryLeft` CẠN mới thôi. */
-          if (seg0.errRetry <= 6 && retryLeft > 0) {
-            retryLeft--;
-            await sleepUntil(Date.now() + (rl.lastWaitMs || 2500));
-            continue;
-          }
-          /* Trang này hỏng thật (hoặc server bóp cả 3 trang liền nhau) ⇒ GHI SỔ rồi đi tiếp.
-           * Chat của trang này KHÔNG bị coi là đã tải (sổ còn đó để quay lại), nên không có
-           * chat nào bị bỏ im lặng. */
-          errorPages.push({ cursor: seg0.cursor, after: seg0.items.length, tries: seg0.errRetry });
-          /* MỐC CỦA TRANG KẾ: cursor của trang hỏng trỏ tới mốc `before` MÀ TA VỪA LẤY ĐƯỢC
-           * (tức trang kế đã bắt đầu ở đúng mốc đó) ⇒ phải lùi thêm ÍT NHẤT một khoảng bằng độ
-           * trải của một trang, nếu không server trả lại chính trang vừa lỗi. Dùng độ trải đo
-           * được từ các trang trước (`seg0.spanMs`, có sẵn), không đoán mốc tuyệt đối. */
-          const jump = Math.max(1000, Math.round((seg0.spanMs || 60000) * 1.2));
-          const nextCursor = shiftCursorBefore(seg0.cursor, -jump);
-          const skippedHere = { cursor: seg0.cursor, after: seg0.items.length, tries: seg0.errRetry, jumpMs: jump };
-          if (!nextCursor) {
-            errorPages.push(skippedHere);
-            logLine('⚠ Trang lỗi (' + (res.error || '?') + ') và KHÔNG dịch được cursor — dừng đường chính, '
-              + 'giữ ' + seg0.items.length + ' chat; ' + errorPages.length + ' trang vào sổ chờ tải bù.');
-            seg0.cursor = null;   // thoát vòng lặp nhưng KHÔNG đánh dấu "hết cursor"
-            break;
-          }
-          errorPages.push(skippedHere);
-          logLine('↷ Bỏ qua trang lỗi thứ ' + errorPages.length + ' (' + (res.error || '?') + '): nhích cursor thêm '
-            + (Math.round(jump / 1000)) + ' s để sang trang kế — cuối lượt quay lại đúng trang này (không quay lại từ đầu).');
-          seg0.errRetry = 0;
-          seg0.cursor = nextCursor;
-          continue;
+          if (seg0.errRetry <= 8) { await sleepUntil(Date.now() + 2000); continue; }
+          logLine('⚠ Không tải tiếp được sau 8 lần thử — danh sách CHƯA đầy đủ (' + seg0.items.length + ' chat), bấm tải lại để tiếp tục.');
+          seg0.truncated = true;
+          break;
         }
         seg0.errRetry = 0;
-        consecFail = 0;
-        guard++;                        // [v1.92.48] trần 1500 = số trang ĐÃ LẤY, không tính lần thử
-        rlNoteOk();
         const j = res.data || {};
         const convs = j.conversations || [];
         pushConvs(seg0, convs);
@@ -2339,59 +2201,12 @@
         for (let s = alive; s < Math.min(STRIDES.length, rl.helperBudget); s++) spawnHelper();
       }
       helpersDone = true;
-
-      /* [v1.92.48] TẢI BÙ ĐÚNG NHỮNG TRANG ĐÃ BỎ QUA — không quay lại từ trang 1.
-       * Trước đây một trang hỏng = `truncated` = `scanFullList` tải lại TOÀN BỘ (đốt lại hàng
-       * trăm request + lại 429). Nay mỗi trang hỏng đã được ghi `cursor` vào `errorPages`; cuối
-       * lượt chạy lại chính `loadListViaApi` với cursor đó (một chuỗi next_cursor ⇒ tuần tự,
-       * đúng ràng buộc W200.88: chỉ ⚡ phát `next_cursor`, không dựng cursor giả). Gộp theo id,
-       * nên chat trùng không sinh bản ghi thứ hai. */
-      let refilledPages = 0;
-      if (errorPages.length && !stopped()) {
-        const budgetMs = Math.min(120000, 30000 + errorPages.length * 8000);
-        const refillStart = Date.now();
-        for (let k = 0; k < errorPages.length && !stopped(); k++) {
-          if (Date.now() - refillStart > budgetMs) {
-            logLine('⏱ Hết ngân sách tải bù (' + Math.round(budgetMs / 1000) + ' s) — còn '
-              + (errorPages.length - k) + ' trang chưa bù.');
-            break;
-          }
-          const ep = errorPages[k];
-          try {
-            const part = await loadListViaApi(null, Object.assign({}, opts, { resumeCursor: ep.cursor, maxPages: 40 }));
-            if (part && part.ok && Array.isArray(part.rows) && part.rows.length) {
-              const added = pushConvs(seg0, part.rows.map((r) => r.__raw || r));
-              refilledPages++;
-              stitch();
-              if (onProgress) onProgress(seg0.items.length, seg0.items);
-              logLine('✅ Tải bù trang lỗi thứ ' + (k + 1) + ': +' + added + ' chat (tổng ' + seg0.items.length + ').');
-            } else {
-              logLine('⚠ Tải bù trang lỗi thứ ' + (k + 1) + ' vẫn không được — trang này còn thiếu.');
-            }
-          } catch (e0) { /* trang sau vẫn thử tiếp */ }
-        }
-      }
-      // Chỉ còn CHƯA ĐẦY ĐỦ khi cursor chưa hết, hoặc còn trang lỗi chưa bù xong
-      const refillIncomplete = errorPages.length > refilledPages;
       const rangeDone2 = !!(seg0.cursor && !stopped() && isRangeSatisfied(seg0.set));
       // hết vòng lặp mà cursor vẫn còn (chưa đi tới cuối) = CHƯA đầy đủ (trừ khi dừng chủ đích vì đã chạm đủ vùng chọn)
       if (seg0.cursor && !stopped() && !rangeDone2) seg0.truncated = true;
-      if (refillIncomplete && !stopped()) seg0.truncated = true;
       logLine('⚡⚡ Tải ' + (rangeDone2 ? 'đoạn chọn' : 'đa luồng 1 page') + ': ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
         + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
         + (rl.hits ? ' · 🧯 dính 429×' + rl.hits + ' (đã tự giảm luồng)' : '')
-        /* [v1.92.48] IN THỜI GIAN THẬT ĐỂ ĐỌC ĐƯỢC NÚT CỔ CHAI: số trang, p50 độ trễ một trang,
-         * và tổng thời gian đã NGỒI CHỜ vì 429. Ba số này tách được "server chậm" khỏi "ta tự
-         * làm chậm bằng cách nghỉ": log 09:19–09:22 có 134,6 s nhưng 62 lần 429 × 2,5 s = 155 s
-         * nghỉ, tức gần như toàn bộ thời gian là nghỉ chứ không phải tải. */
-        + (seg0.rt.length
-          ? ' · ' + seg0.rt.length + ' trang × p50 '
-            + Math.round(seg0.rt.slice().sort((a, b) => a - b)[Math.floor(seg0.rt.length / 2)]) + ' ms/trang'
-          : '')
-        + (rl.waitTotalMs
-          ? ' · đã nghỉ vì 429 tổng ' + (Math.round(rl.waitTotalMs / 100) / 10) + ' s'
-          : '')
-        + (errorPages.length ? ' · trang lỗi ' + errorPages.length + ' (bù được ' + refilledPages + ')' : '')
         + (seg0.truncated ? ' · ⚠ CHƯA ĐẦY ĐỦ' : ''));
       return { ok: true, rows: seg0.items, incomplete: !!seg0.truncated && !stopped(), stopped: stopped(), rangePartial: rangeDone2 };
     }
@@ -2618,20 +2433,6 @@
           render();
           return;
         }
-        /* [v1.92.48b] `api.rows` rỗng KHÔNG có nghĩa là chưa lấy được chat nào: `syncLiveRows`
-         * đã đổ dần vào `state.allRows`. Giữ lại thay vì xoá trắng. */
-        const keepN = (state.allRows && state.allRows.size) || 0;
-        if (keepN > 0) {
-          state.allRowsPartial = true;
-          state.listIncomplete = true;
-          logLine('🟡 Tải 2 lần vẫn thiếu cursor nhưng ĐÃ có ' + keepN
-            + ' chat — giữ lại, gửi phần này vẫn được ("chọn tất cả" bị chặn).');
-          setBtn('⚡ Tải danh sách (' + keepN + ' chat · còn thiếu)');
-          setScanProgress(keepN, null);
-          computeMatches();
-          render();
-          return;
-        }
         state.allRows = prevAllRows || null;
         state.allRowsPartial = prevAllRowsPartial;
         logLine('⛔ Tải 2 lần vẫn chưa hết cursor (0 chat lấy được) — bấm ⚡ lại.');
@@ -2640,32 +2441,11 @@
         return;
       }
       if (!(api && api.ok && api.rows.length)) {
-        /* [v1.92.48b] "ẤN TẢI PHÁT DỪNG LUÔN" — vá đúng chỗ này.
-         * `syncLiveRows` đã đổ dần chat vào `state.allRows` trong lúc tải. Bản cũ không đụng tới
-         * nó ở nhánh lỗi, nên nếu `loadListViaApi` ném/không trả rows thì TOÀN BỘ số đã tải bị
-         * vứt (hoặc đè bằng `prevAllRows`), người dùng chỉ thấy một dòng ⚠ rồi im.
-         * Nay: đếm số đã đồng bộ được, nếu > 0 thì GIỮ và dùng được ngay (đánh dấu CHƯA ĐẦY ĐỦ
-         * để "chọn tất cả" vẫn bị chặn như W200.88 — nhưng gửi phần đã chọn thì được). */
-        const partialN = (state.allRows && state.allRows.size) || 0;
-        if (partialN > 0) {
-          state.allRowsPartial = true;
-          state.listIncomplete = true;
-          let oKeep = 0;
-          state.allRows.forEach((v) => { v.order = oKeep++; });
-          logLine('🟡 ' + ((api && api.error) || 'Tải API lỗi') + ' — GIỮ ' + partialN
-            + ' chat đã tải được. Gửi phần này vẫn được; "chọn tất cả" bị chặn cho tới khi tải đủ.');
-          setBtn('⚡ Tải danh sách (' + partialN + ' chat · còn thiếu)');
-          setScanProgress(partialN, null);
-          computeMatches();
-          render();
-          return;
-        }
         if (prevAllRows && prevAllRows.size) {
           state.allRows = prevAllRows;
           state.allRowsPartial = prevAllRowsPartial;
         }
-        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại')
-          + ' — chưa lấy được chat nào. Kiểm tra tab Pancake còn đăng nhập + bấm ⚡ lại.');
+        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại'));
         setBtn('⚠ Tải API lỗi — bấm tải lại');
         return;
       }
@@ -2711,13 +2491,6 @@
         setBtn('⚡ Tải danh sách (' + state.allRows.size + ' chat)');
       } else if (btn) {
         setBtn('⚡ Tải danh sách');
-      }
-      /* [v1.92.48b] Lượt tải KẾT THÚC mà 0 chat + không có lỗi rõ ràng ⇒ nói thẳng ra thay vì
-       * để nút trở về trạng thái như chưa bấm gì ("ấn tải phát dừng luôn, chả chạy được tí nào"). */
-      if (!state.sending && !(state.allRows && state.allRows.size) && btn && !state.listIncomplete) {
-        logLine('⚠ Lượt tải kết thúc mà KHÔNG lấy được chat nào — kiểm tra: (1) tab Pancake đã đăng nhập, '
-          + '(2) token còn hạn (F5 trang Pancake rồi thử lại), (3) bộ lọc đang bật có thể không khớp chat nào.');
-        setBtn('⚠ Tải 0 chat — bấm tải lại');
       }
     }
   }
@@ -3921,29 +3694,6 @@
     return peekConv(conv);
   }
 
-  /* [v1.92.47] BÓC TIỀN TỐ CHỐNG-JSON-HIJACK `for (;;);` TRƯỚC KHI JSON.parse.
-   * Bằng chứng ĐO ĐƯỢC (network-log.har §78 + network-log2.har §78, hai mẻ cách nhau 12 giờ):
-   *   • 90/90 + 19/19 phản hồi `business.facebook.com/messaging/send/` bắt đầu bằng `for (;;);`
-   *     (HTTP vẫn 200) rồi mới tới `{"__ar":1,"error":…}`. JSESSION bóc prefix này trước khi parse;
-   *     JSON.parse trần thì ném `Unexpected non-whitespace character after JSON`.
-   *   • /api/graphqlbatch/ thì KHÔNG có prefix, nhưng có **khối JSON THỨ HAI** nối sau `\r\n`:
-   *     `{"__q0__":{…}}\r\n{spaces}{"successful_results":1,…}` — 47/47 phản hồi batch.
-   * Hệ quả thật của việc không bóc: `Unexpected non-whitespace character after JSON at position
-   * 40519` (log console Pancake v2) ⇒ `Cannot read properties of null (reading 'error')` ⇒
-   * `CANNOT GET GLOBAL ID` ⇒ gửi sai thread ⇒ FB trả 1545041 "Người này hiện không có mặt"
-   * hàng trăm lần. Script ta gọi `pancake.vn/api/v1` nên không tự sinh ra prefix, nhưng
-   * `fetchJson` là đường DUY NHẤT đọc mọi phản hồi Pancake — bóc ở đây là rẻ và không đổi
-   * ngữ nghĩa với JSON hợp lệ (tiền tố chỉ bị cắt khi khớp đúng chuỗi `for (;;);`). */
-  function stripJsonPrefix(txt) {
-    const s = String(txt == null ? '' : txt);
-    if (!s) return s;
-    let out = s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
-    out = out.replace(/^\s+/, '');
-    if (out.slice(0, 9) === 'for (;;);') out = out.slice(9).replace(/^\s+/, '');
-    else if (out.slice(0, 8) === 'for(;;);') out = out.slice(8).replace(/^\s+/, '');
-    return out.trim() ? out : s;
-  }
-
   // Lấy conversation 1 lần cho MỌI kênh trong cùng lượt gửi (ctx dùng chung) — đỡ gọi lại nhiều lần
   async function ctxFull(conv, ctx) {
     if (!ctx.fullLoaded) {
@@ -4345,11 +4095,7 @@
 
     // Nhánh 2: Extension GET_GLOBAL_ID_FOR_CONV qua lane thích ứng. Cho WebSocket
     // một nhịp ngắn trước; nếu WS đã tìm thấy thì nhánh này tự hủy, không tốn lệnh Extension.
-    // [v1.92.47] `gidExtFinderAllowed()`: cầu dao đã đóng (xem noteGidFinderNoGid) ⇒ KHÔNG
-    // xếp lệnh dò Ext nữa, chỉ còn HTTP + WebSocket. Mỗi chat tiết kiệm 1 lệnh Ext + 250 ms
-    // + một vòng thử lại — đúng loại chi phí trong log console (Ext dò không ra gid mà vẫn
-    // được gọi lại y nguyên).
-    if (hasExtFinder && threadId && gidExtFinderAllowed()) {
+    if (hasExtFinder && threadId) {
       raceTasks.push((async () => {
         if (extStartDelayMs) await sleepUntil(Date.now() + extStartDelayMs, 'gid'); // [v1.92.9] WS có gid trước thì khỏi chờ đủ 80 ms
         if (settled || state.stopRequested) {
@@ -4512,9 +4258,6 @@
                 extFinderRespondedNoGid = true;
                 if (ctx) ctx.extFinderRespondedNoGid = true;
                 gidStats.extRespondedNoGid++;
-                // [v1.92.47] ghi vào cầu dao: đóng đường dò Ext khi dồn đủ ca, hoặc khi
-                // CÙNG thread lặp lại "không có gid" (hình dạng lỗi thật trong log console).
-                noteGidFinderNoGid(threadId);
               }
               onFinderNull();
               return;
@@ -4906,7 +4649,7 @@
       }
       socketNoAckStreak[pageId] = 0;
       let resp = null;
-      try { resp = JSON.parse(stripJsonPrefix(g.payload)); } catch (e) {
+      try { resp = JSON.parse(g.payload); } catch (e) {
         recordSocketAckOutcome('noack', Date.now() - publishedAt, pageId);
         return { kind: 'noack', publishedAt: publishedAt };
       }
@@ -8191,41 +7934,6 @@
    * thì ngân sách mở lại ngay, không bao giờ đóng oan.
    * Vẫn giữ nguyên hệ quả: ca bị đóng ⇒ ⚠ "chưa gửi" + danh sách gửi tay, KHÔNG chốt ❌ oan. */
   const extTry1545 = { tried: 0, saved: 0, closed: false, PROBE: 200, streak: 0, STREAK_MAX: 30 };
-  /* [v1.92.47] CẦU DAO ĐƯỜNG DÒ GLOBAL ID QUA EXTENSION — cùng loại ngân sách với `extTry1545`,
-   * nhưng dành cho khâu DÒ chứ không phải khâu GỬI.
-   * Bằng chứng ĐO ĐƯỢC:
-   *   • network-log2.har: 73 request / 81,4 s, trong đó **63/63** lượt phân trang danh sách
-   *     (`MessengerGraphQLThreadlistFetcher`) đều bắt đầu từ CÙNG một con trỏ
-   *     `before=1794874125000` — tức khối "load trang kế" nổ lỗi parse rồi bị thử lại vô hạn
-   *     (nhiều cặp khối trùng nội dung 100 %, chỉ khác `__req`), mãi không tiến được con trỏ.
-   *   • Log console Pancake v2: `FAIL TO GET GLOBAL ID --> INCORRECT THREAD <id>, undefined VS
-   *     undefined` lặp lại cho ĐÚNG 4 thread (1515207651668552 · 1513207581868559 ·
-   *     1471973704859890 · 1513112878544696), mỗi thread 2 lần — extension không nhớ "đã hỏng".
-   * `noteGidExtResult` chỉ giảm làn ×0,7 khi quá hạn (sàn 3) nên ca Ext trả lời "không có gid"
-   * KHÔNG BAO GIỜ đóng đường dò: mỗi chat vẫn tốn 2 lệnh Ext + 250 ms + chờ WS. Nay đóng hẳn
-   * đường dò Ext cho cả lượt khi dồn đủ ca "trả lời mà không có gid", và đóng sớm hơn nếu
-   * CÙNG MỘT thread id hỏng lặp lại (đúng hình dạng 4 thread trong log). */
-  const gidBreaker = { noGid: 0, sameThread: 0, lastThread: '', closed: false,
-    NO_GID_MAX: 40, SAME_THREAD_MAX: 3 };
-  function gidExtFinderAllowed() { return !gidBreaker.closed; }
-  function noteGidFinderNoGid(threadId) {
-    if (gidBreaker.closed) return;
-    const t = String(threadId || '');
-    gidBreaker.noGid++;
-    if (t && t === gidBreaker.lastThread) gidBreaker.sameThread++;
-    else { gidBreaker.lastThread = t; gidBreaker.sameThread = t ? 1 : 0; }
-    if (gidBreaker.noGid < gidBreaker.NO_GID_MAX && gidBreaker.sameThread < gidBreaker.SAME_THREAD_MAX) return;
-    gidBreaker.closed = true;
-    try {
-      logLine('🔒 Đóng đường dò global_id qua Extension cho lượt này: '
-        + (gidBreaker.sameThread >= gidBreaker.SAME_THREAD_MAX
-          ? 'thread ' + gidBreaker.lastThread + ' trả lời "không có gid" ' + gidBreaker.sameThread + ' lần'
-          : gidBreaker.noGid + ' lần liên tiếp Ext trả lời mà không có gid')
-        + ' ⇒ giống hệt lỗi parse GraphQL của extension (log: "INCORRECT THREAD …, undefined VS'
-        + ' undefined"). Từ giờ chỉ dò bằng HTTP/WebSocket; ca không dò được vẫn giữ ⚠ (chưa gửi),'
-        + ' KHÔNG chốt ❌ oan.');
-    } catch (e0) { /* ignore */ }
-  }
   function extFallback1545Allowed() { return !extTry1545.closed; }
   function noteExt1545Fail() {
     if (extTry1545.closed) return;
@@ -8590,15 +8298,6 @@
             ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy trong lịch sử ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
               + ' · phản hồi MUỘN (đã tính ✅) ' + extLateStats.ok + ' · muộn-mà-lỗi ' + extLateStats.fail
               + ' · im lặng hẳn ' + extLateStats.silent
-            : '')
-          /* [v1.92.47] CẦU DAO ĐƯỜNG DÒ GLOBAL ID — in khi đã đóng, để phân biệt
-           * "lô chậm vì FB từ chối" với "lô chậm vì khâu dò Ext hỏng" (network-log2.har:
-           * 63/63 lượt phân trang lặp lại cùng con trỏ vì extension không parse được phản hồi). */
-          + (gidBreaker.closed
-            ? ' | 🔒 Đã đóng đường dò global_id qua Extension (' + gidBreaker.noGid + ' lần trả lời không có gid'
-              + (gidBreaker.sameThread >= gidBreaker.SAME_THREAD_MAX
-                ? ', riêng thread ' + gidBreaker.lastThread + ' lặp ' + gidBreaker.sameThread + ' lần' : '')
-              + ') — phần còn lại chỉ dò HTTP/WebSocket'
             : '')
           + (dispatchMs
             ? ' | ⏱ Phát lệnh ' + (Math.round(dispatchMs / 100) / 10) + 's'

@@ -3801,7 +3801,7 @@ Vị trí lỗi ~37 000–40 500 ký tự của log khớp độ dài các khố
 con trỏ `before=1794874125000`; có những cặp khối trùng nội dung 100 %, chỉ khác `__req`. Tức khối
 "load trang kế" nổ lỗi parse → bị thử lại y nguyên → con trỏ không bao giờ tiến.
 
-### §78.2 Vá ở 1.92.47 (W200.93) — chỉ những gì HAR/log chứng minh được
+### §78.2 Vá ở 1.92.47 (W200.93) — ⛔ ĐÃ REVERT (xem §81) — giữ làm hồ sơ
 
 | # | Sửa | Bằng chứng | Vì sao không phải "đoán" |
 |---|---|---|---|
@@ -3912,3 +3912,42 @@ cursor ⇒ **không nhích**, dừng và đánh dấu thiếu (thà thiếu còn
 - 3 trang lỗi liền mà còn ngân sách ⇒ **không** dừng; cạn ngân sách mới dừng.
 - 3 lần 429 trong CÙNG trang ⇒ `streak = 1`; quá 4 s sang trang khác ⇒ `streak = 2`.
 - Không còn chuỗi `consecFail >= 3` trong nguồn; có chuỗi "Lượt tải kết thúc mà KHÔNG lấy được chat nào".
+
+
+---
+
+## §81 · REVERT 1.92.47 → 1.92.49 (người dùng: "lỗi luôn? sửa quay lại cơ chế tải cũ đi")
+
+### §81.1 Đã gỡ khỏi code (bằng `git checkout 0a12515 -- …`, không sửa tay)
+
+| Bản | Nội dung bị gỡ | File |
+|---|---|---|
+| 1.92.47 (§78) | `stripJsonPrefix()` + cầu dao `gidBreaker` + dòng TỔNG HỢP 🔒 | userscript + test |
+| 1.92.48 (§79) | nghỉ 429 dài dần, trần 1500 tách khỏi lần thử, sổ `errorPages`, tải bù `resumeCursor`, `loadListViaApi` → biểu thức, `shiftCursorBefore`, p50 ms/trang | userscript + test |
+| 1.92.49 (§80) | bọc `try/catch` khâu tải, giữ `allRows` phần đã tải, bỏ luật 3-trang-lỗi, gộp 3 lần thử 429, bậc 2,5/4/6/8 s, cảnh báo 0 chat | userscript + test |
+
+**Kiểm chứng revert (byte-exact):**
+- `scripts/pancake-send-lite.user.js` == `git show 0a12515:…` ✔
+- `tools/test-verify.mjs` == `git show 0a12515:…` ✔
+- `npm test` = **86/86** (đúng số ca của 1.92.46, không còn ca 24–28)
+- `npm run check` ✓ · `version.json` = `1.92.46 / W200.92`
+
+### §81.2 Trạng thái cơ chế tải SAU REVERT (bản đang chạy, đọc từ code)
+
+| Chỗ | Giá trị hiện tại |
+|---|---|
+| `loadListViaApi` | `async function` gốc (không tải bù, không `resumeCursor`) |
+| 429 | `rl.pauseUntil = Date.now() + 2500` — **cố định 2,5 s cho mọi lần**, không dài dần |
+| Luồng gốc | `while (guard++ < 1500 …)`, lỗi ⇒ `errRetry++`, `<= 8` thì `continue` sau **2 s** |
+| Ngân sách luồng phụ | `RL_HELPER_BUDGET_START = 0` ⇒ thực tế **1 chuỗi `next_cursor` tuần tự** |
+| `scanFullList` | không có nhánh giữ phần đã tải; lỗi ⇒ `⚠` rồi thôi |
+
+### §81.3 Bài học rút ra (để không tái phát)
+1. **Đừng đổi cơ chế TẢI khi chưa có log của chính người dùng về lần tải đó.** Hai lần liên tiếp
+   sửa "theo suy luận từ log 429 cũ" đều làm hỏng thêm: thêm luật dừng, thêm bậc nghỉ nhân đôi,
+   thêm đường tải bù — mỗi thứ đều là một nhánh mới có thể chặn lượt tải.
+2. Đường tải đang có **một điểm chết sẵn** (lỗi giữa vòng lặp ⇒ mất phần đã tải) nhưng đó là hành vi
+   người dùng đã quen và đang chạy được. Sửa nó **phải đi kèm log thật của lần chạy mới**, không
+   gộp vào cùng lúc với 429.
+3. Nếu cần làm lại: **một thay đổi mỗi bản**, và bản đó phải dựng lại được độc lập
+   (`git revert` từng commit được: `5354fbe` §78, `ee2b2ae` §79, `2f5bcea` §80).
