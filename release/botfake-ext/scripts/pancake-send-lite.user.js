@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.46-w200.92
+// @version      1.92.47-w200.93b
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.46-W200.92'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.47-W200.93b'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1485,6 +1485,9 @@
         }
         const txt = await r.text();
         if (!txt || !txt.trim()) return { ok: true, data: { conversations: [] } }; // body rỗng = hết dữ liệu
+        /* [v1.92.47b] KHÔNG bọc `stripJsonPrefix` ở đây: người dùng chốt "chỉ quay về cơ chế
+         * tải danh sách". Hàm `stripJsonPrefix` vẫn còn (dùng cho ACK Socket) nhưng đường tải
+         * giữ ĐÚNG như bản 1.92.46 — 0 khác biệt về hành vi. */
         try { return { ok: true, data: JSON.parse(txt) }; } catch (e) {
           try { return { ok: true, data: JSON.parse(atob(txt)) }; } catch (e2) {
             return { ok: false, error: 'Phản hồi không phải JSON' };
@@ -3694,6 +3697,30 @@
     return peekConv(conv);
   }
 
+  /* [v1.92.47] BÓC TIỀN TỐ CHỐNG-JSON-HIJACK `for (;;);` TRƯỚC KHI JSON.parse.
+   * Bằng chứng ĐO ĐƯỢC (network-log.har §78 + network-log2.har §78, hai mẻ cách nhau 12 giờ):
+   *   • 90/90 + 19/19 phản hồi `business.facebook.com/messaging/send/` bắt đầu bằng `for (;;);`
+   *     (HTTP vẫn 200) rồi mới tới `{"__ar":1,"error":…}`. JSESSION bóc prefix này trước khi parse;
+   *     JSON.parse trần thì ném `Unexpected non-whitespace character after JSON`.
+   *   • /api/graphqlbatch/ thì KHÔNG có prefix, nhưng có **khối JSON THỨ HAI** nối sau `\r\n`:
+   *     `{"__q0__":{…}}\r\n{spaces}{"successful_results":1,…}` — 47/47 phản hồi batch.
+   * Hệ quả thật của việc không bóc: `Unexpected non-whitespace character after JSON at position
+   * 40519` (log console Pancake v2) ⇒ `Cannot read properties of null (reading 'error')` ⇒
+   * `CANNOT GET GLOBAL ID` ⇒ gửi sai thread ⇒ FB trả 1545041 "Người này hiện không có mặt"
+   * hàng trăm lần. Script ta gọi `pancake.vn/api/v1` nên không tự sinh ra prefix, nhưng
+   * [v1.92.47b] PHẠM VI DÙNG: chỉ bọc ở ACK Socket + (tuỳ chọn) — KHÔNG bọc ở `fetchJson`,
+   * vì `fetchJson` là đường của KHÂU TẢI DANH SÁCH và người dùng yêu cầu giữ nguyên khâu tải
+   * như 1.92.46. Đường GỬI (`timedFetch`) gọi `fetch()` trực tiếp nên không liên quan. */
+  function stripJsonPrefix(txt) {
+    const s = String(txt == null ? '' : txt);
+    if (!s) return s;
+    let out = s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
+    out = out.replace(/^\s+/, '');
+    if (out.slice(0, 9) === 'for (;;);') out = out.slice(9).replace(/^\s+/, '');
+    else if (out.slice(0, 8) === 'for(;;);') out = out.slice(8).replace(/^\s+/, '');
+    return out.trim() ? out : s;
+  }
+
   // Lấy conversation 1 lần cho MỌI kênh trong cùng lượt gửi (ctx dùng chung) — đỡ gọi lại nhiều lần
   async function ctxFull(conv, ctx) {
     if (!ctx.fullLoaded) {
@@ -4095,7 +4122,11 @@
 
     // Nhánh 2: Extension GET_GLOBAL_ID_FOR_CONV qua lane thích ứng. Cho WebSocket
     // một nhịp ngắn trước; nếu WS đã tìm thấy thì nhánh này tự hủy, không tốn lệnh Extension.
-    if (hasExtFinder && threadId) {
+    // [v1.92.47] `gidExtFinderAllowed()`: cầu dao đã đóng (xem noteGidFinderNoGid) ⇒ KHÔNG
+    // xếp lệnh dò Ext nữa, chỉ còn HTTP + WebSocket. Mỗi chat tiết kiệm 1 lệnh Ext + 250 ms
+    // + một vòng thử lại — đúng loại chi phí trong log console (Ext dò không ra gid mà vẫn
+    // được gọi lại y nguyên).
+    if (hasExtFinder && threadId && gidExtFinderAllowed()) {
       raceTasks.push((async () => {
         if (extStartDelayMs) await sleepUntil(Date.now() + extStartDelayMs, 'gid'); // [v1.92.9] WS có gid trước thì khỏi chờ đủ 80 ms
         if (settled || state.stopRequested) {
@@ -4258,6 +4289,9 @@
                 extFinderRespondedNoGid = true;
                 if (ctx) ctx.extFinderRespondedNoGid = true;
                 gidStats.extRespondedNoGid++;
+                // [v1.92.47] ghi vào cầu dao: đóng đường dò Ext khi dồn đủ ca, hoặc khi
+                // CÙNG thread lặp lại "không có gid" (hình dạng lỗi thật trong log console).
+                noteGidFinderNoGid(threadId);
               }
               onFinderNull();
               return;
@@ -4649,7 +4683,7 @@
       }
       socketNoAckStreak[pageId] = 0;
       let resp = null;
-      try { resp = JSON.parse(g.payload); } catch (e) {
+      try { resp = JSON.parse(stripJsonPrefix(g.payload)); } catch (e) {
         recordSocketAckOutcome('noack', Date.now() - publishedAt, pageId);
         return { kind: 'noack', publishedAt: publishedAt };
       }
@@ -7934,6 +7968,41 @@
    * thì ngân sách mở lại ngay, không bao giờ đóng oan.
    * Vẫn giữ nguyên hệ quả: ca bị đóng ⇒ ⚠ "chưa gửi" + danh sách gửi tay, KHÔNG chốt ❌ oan. */
   const extTry1545 = { tried: 0, saved: 0, closed: false, PROBE: 200, streak: 0, STREAK_MAX: 30 };
+  /* [v1.92.47] CẦU DAO ĐƯỜNG DÒ GLOBAL ID QUA EXTENSION — cùng loại ngân sách với `extTry1545`,
+   * nhưng dành cho khâu DÒ chứ không phải khâu GỬI.
+   * Bằng chứng ĐO ĐƯỢC:
+   *   • network-log2.har: 73 request / 81,4 s, trong đó **63/63** lượt phân trang danh sách
+   *     (`MessengerGraphQLThreadlistFetcher`) đều bắt đầu từ CÙNG một con trỏ
+   *     `before=1794874125000` — tức khối "load trang kế" nổ lỗi parse rồi bị thử lại vô hạn
+   *     (nhiều cặp khối trùng nội dung 100 %, chỉ khác `__req`), mãi không tiến được con trỏ.
+   *   • Log console Pancake v2: `FAIL TO GET GLOBAL ID --> INCORRECT THREAD <id>, undefined VS
+   *     undefined` lặp lại cho ĐÚNG 4 thread (1515207651668552 · 1513207581868559 ·
+   *     1471973704859890 · 1513112878544696), mỗi thread 2 lần — extension không nhớ "đã hỏng".
+   * `noteGidExtResult` chỉ giảm làn ×0,7 khi quá hạn (sàn 3) nên ca Ext trả lời "không có gid"
+   * KHÔNG BAO GIỜ đóng đường dò: mỗi chat vẫn tốn 2 lệnh Ext + 250 ms + chờ WS. Nay đóng hẳn
+   * đường dò Ext cho cả lượt khi dồn đủ ca "trả lời mà không có gid", và đóng sớm hơn nếu
+   * CÙNG MỘT thread id hỏng lặp lại (đúng hình dạng 4 thread trong log). */
+  const gidBreaker = { noGid: 0, sameThread: 0, lastThread: '', closed: false,
+    NO_GID_MAX: 40, SAME_THREAD_MAX: 3 };
+  function gidExtFinderAllowed() { return !gidBreaker.closed; }
+  function noteGidFinderNoGid(threadId) {
+    if (gidBreaker.closed) return;
+    const t = String(threadId || '');
+    gidBreaker.noGid++;
+    if (t && t === gidBreaker.lastThread) gidBreaker.sameThread++;
+    else { gidBreaker.lastThread = t; gidBreaker.sameThread = t ? 1 : 0; }
+    if (gidBreaker.noGid < gidBreaker.NO_GID_MAX && gidBreaker.sameThread < gidBreaker.SAME_THREAD_MAX) return;
+    gidBreaker.closed = true;
+    try {
+      logLine('🔒 Đóng đường dò global_id qua Extension cho lượt này: '
+        + (gidBreaker.sameThread >= gidBreaker.SAME_THREAD_MAX
+          ? 'thread ' + gidBreaker.lastThread + ' trả lời "không có gid" ' + gidBreaker.sameThread + ' lần'
+          : gidBreaker.noGid + ' lần liên tiếp Ext trả lời mà không có gid')
+        + ' ⇒ giống hệt lỗi parse GraphQL của extension (log: "INCORRECT THREAD …, undefined VS'
+        + ' undefined"). Từ giờ chỉ dò bằng HTTP/WebSocket; ca không dò được vẫn giữ ⚠ (chưa gửi),'
+        + ' KHÔNG chốt ❌ oan.');
+    } catch (e0) { /* ignore */ }
+  }
   function extFallback1545Allowed() { return !extTry1545.closed; }
   function noteExt1545Fail() {
     if (extTry1545.closed) return;
@@ -8298,6 +8367,15 @@
             ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy trong lịch sử ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
               + ' · phản hồi MUỘN (đã tính ✅) ' + extLateStats.ok + ' · muộn-mà-lỗi ' + extLateStats.fail
               + ' · im lặng hẳn ' + extLateStats.silent
+            : '')
+          /* [v1.92.47] CẦU DAO ĐƯỜNG DÒ GLOBAL ID — in khi đã đóng, để phân biệt
+           * "lô chậm vì FB từ chối" với "lô chậm vì khâu dò Ext hỏng" (network-log2.har:
+           * 63/63 lượt phân trang lặp lại cùng con trỏ vì extension không parse được phản hồi). */
+          + (gidBreaker.closed
+            ? ' | 🔒 Đã đóng đường dò global_id qua Extension (' + gidBreaker.noGid + ' lần trả lời không có gid'
+              + (gidBreaker.sameThread >= gidBreaker.SAME_THREAD_MAX
+                ? ', riêng thread ' + gidBreaker.lastThread + ' lặp ' + gidBreaker.sameThread + ' lần' : '')
+              + ') — phần còn lại chỉ dò HTTP/WebSocket'
             : '')
           + (dispatchMs
             ? ' | ⏱ Phát lệnh ' + (Math.round(dispatchMs / 100) / 10) + 's'

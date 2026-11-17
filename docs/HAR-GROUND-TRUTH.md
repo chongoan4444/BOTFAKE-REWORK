@@ -3951,3 +3951,36 @@ cursor ⇒ **không nhích**, dừng và đánh dấu thiếu (thà thiếu còn
    gộp vào cùng lúc với 429.
 3. Nếu cần làm lại: **một thay đổi mỗi bản**, và bản đó phải dựng lại được độc lập
    (`git revert` từng commit được: `5354fbe` §78, `ee2b2ae` §79, `2f5bcea` §80).
+
+
+---
+
+## §82 · PHẠM VI REVERT CHÍNH XÁC (1.92.47-W200.93b) — chỉ khâu TẢI về bản cũ
+
+Người dùng chỉ đạo: **"cơ chế gửi xác nhận vẫn giữ của bản mới đúng không, chỉ quay về cơ chế tải
+danh sách thôi chứ?"** ⇒ §81 đã revert QUÁ TAY: gỡ cả hai thứ **không nằm trên đường tải**.
+
+### §82.1 Bản đang chạy = 1.92.46 + đúng 2 thứ
+
+| Thành phần | Trạng thái | Vị trí |
+|---|---|---|
+| **Cơ chế TẢI danh sách** (429 nghỉ 2,5 s cố định, `errRetry <= 8` sau 2 s, trần `guard++ < 1500`, 1 chuỗi `next_cursor`, `async function loadListViaApi`) | **y hệt 1.92.46** | 1753, 1792, 2175 |
+| **Cơ chế GỬI / XÁC NHẬN** (`isDefinitiveNotSent`, `isTransientServerError`, `tailChats`, `unavailFast`, `transientRetries`, `lastOutcomeOk`, `peakActive`, `extTry1545`, `extTimeoutMs`, TỔNG HỢP ⏳/🛰/🛡) | **y hệt 1.92.46** (đường gửi đi qua `timedFetch`, không qua `fetchJson`) | 3315, 3572… |
+| `gidBreaker` (cầu dao **khâu DÒ global_id**, trước khi gửi) | **CÓ** (từ 1.92.47) | 7968 |
+| `stripJsonPrefix()` | **CÓ**, nhưng **chỉ bọc ở ACK Socket** (4683) — **KHÔNG** bọc ở `fetchJson` | 3714, 4683 |
+
+### §82.2 Bằng chứng "khâu tải không đổi" (đối chiếu máy)
+`git diff 0a12515 -- scripts/pancake-send-lite.user.js` chỉ có 9 hunk; lọc các hunk rơi vào
+khoảng dòng 1340–2500 (khâu tải) ⇒ **chỉ còn 1 hunk ở 1485, và đó là 3 dòng COMMENT** (giải thích
+vì sao KHÔNG bọc `stripJsonPrefix`), không phải dòng thực thi:
+```js
+try { return { ok: true, data: JSON.parse(txt) }; } catch (e) {
+```
+Đúng nguyên văn của 1.92.46.
+
+### §82.3 Bài học bổ sung
+- Revert phải **theo phạm vi người dùng nêu**, không phải "càng sạch càng tốt": `stripJsonPrefix`
+  và `gidBreaker` không nằm trên đường tải, gỡ chúng là mất 2 bản vá đã có bằng chứng mà **không**
+  giải quyết lỗi đang báo.
+- Test mục 25 nay **khoá ngược**: `fetchJson` KHÔNG được bọc `stripJsonPrefix` — để lần sau không
+  ai "tối ưu" thêm vào đường tải nữa.
