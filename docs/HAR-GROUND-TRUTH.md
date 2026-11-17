@@ -4372,3 +4372,75 @@ bù trả lời; đến khi ca thứ 360 trả lời thì 364 ca đã vào hàng
 | `📷 bind fbId` | không có (lô không ảnh) | **chạy lô CÓ ảnh** để nghiệm thu vá (2) |
 | `⏱ GIỮ SLOT` | 201 + 0 + 1 362 | `chờ + chuẩn bị + còn lại = tổng`; theo dõi 1 362 ms còn ở đâu |
 | dòng 🏁 vs ⚡ | 107 s vs 54,5 s (lệch) | **phải bằng nhau** |
+
+---
+
+## §87 — LÔ 8 509 CHAT CÓ ẢNH, TAB NỀN (12:24:19→12:31:03, bản 1.92.51)
+
+Nguồn: `botfake-log-20261117-123347.txt` (407 dòng + sổ 9 505 dòng, 8 509 chat).
+Bối cảnh người dùng nêu: **tab chạy nền, làm việc ở tab khác cùng cửa sổ**.
+
+### 87.1 Kết quả
+✅ 6 768 (79,5 %) · ❌ 786 · ⚠ 955 · PHÁT 32,66/s · đuôi 142,8 s · tổng 404 s
+`📷 8 186 ca · TB 842 ms · max 18 978 ms · lỗi 0` (8 186 = 8 509 − 323 chat không ảnh)
+`⏱ GIỮ SLOT 662 + 0 + 5 079 = 5 741 ms/chat` · `ACK TB 1 654 / p90 1 431` · gửi trùng **0**
+
+### 87.2 HAI KẾT LUẬN CỦA TÔI Ở LƯỢT TRƯỚC ĐÃ SAI — ĐÍNH CHÍNH
+
+**(a) "163 slot luôn bận, chỉ dùng 85 % cap ⇒ phải nâng cap".** **SAI.**
+`floor(192 × 0,85) = 163` — đúng bằng `softActiveLimit` (dòng 11284). Con số "main đang bay 163"
+KHÔNG phải "chỉ 163 slot được dùng", mà là **giá trị được ghi lại đúng tại thời điểm cổng đang
+bị chặn**. Cổng chặn khi `inFlightMainCount > 176` (92 % cap) **hoặc** khi chưa đủ mục tiêu %
+(dòng 11298/11299) ⇒ `slogan "163"` chỉ nói rằng lúc in, nhánh mềm vừa đủ điều kiện.
+Bằng chứng phụ: `peak Socket/page active 256/256` — nếu main chỉ có 163 thì Socket/page không
+thể đạt 256. ⇒ **KHÔNG nâng `WAVE_MAIN_TOTAL_CAP`** (đó là điều đã bị cấm từ đầu phiên).
+
+**(b) "Bind ảnh nằm NGOÀI slot".** **SAI.** Đã kiểm trong code: nhánh fast-path (dòng ~7402)
+sau khi có sẵn globalId **vẫn** gọi `uploadOneTimePhoto()` → `uploadPhotoForPage()` trước khi
+publish. Số khớp: có ảnh 5 741 ms/chat vs không ảnh 1 362 ms/chat; 842 ms ≈ 15 % thời gian giữ
+slot. Chú thích cũ trong code ghi "BỎ QUA HOÀN TOÀN extPrepLane" cho cả trường hợp có ảnh ⇒
+đã sửa chú thích. **Bài học: chú thích sai trong code đã trực tiếp đẻ ra kết luận sai trong báo cáo.**
+
+### 87.3 NÚT CỔ CHAI THẬT: 18 CỔNG GIỮ 253,6 s / 404 s = 63 % THỜI GIAN LÔ
+
+| | |
+|---|---|
+| wave 15 | mở 12:26:21 → xong **12:28:07** = **106,0 s** (26 % cả lô) |
+| wave 16/17/18 | 16,1 / 11,5 / 4,6 s |
+| tổng 18 cổng | **253,6 s** |
+
+Cơ chế (đọc code): cổng mở khi `done ≥ 40 %` **và** `inFlightMainCount ≤ 144` (75 %), hoặc sau
+1 600 ms **và** `done ≥ 25 %` **và** `inFlightMainCount ≤ 163`. `acquireMainSlot()` gọi
+`runMainItem()` gần như tức thì sau `await` ⇒ "đang bay" hiếm khi đo được ở mức thấp.
+**Đây là GIẢ THUYẾT, chưa kết luận** ⇒ bản 1.92.52 thêm 4 số đo (xem 87.4), **không đổi nhịp
+kiểm cổng, không đổi ngưỡng nào**.
+
+### 87.4 BỐN VÁ CỦA 1.92.52
+
+1. **Cổng — tách 3 mức "đang bay"** (`gateBlockHard` / `gateBlockSoft` / `gateBlockProgress`)
+   + `gateIdleSeen` / `gateIdleMax` để kiểm chứng giả thuyết 87.3. **Chỉ đếm, nằm TRƯỚC khối chặn.**
+2. **Sổ kiểm chứng — hết 2 dòng ✅ cho 1 lần gửi.** `logFailGrouped(..., noAudit)`; chỉ dùng ở
+   dòng "bù THÀNH CÔNG" vì `markDelivered()` ngay đó đã ghi ✅. 50 chỗ gọi khác **không đổi**.
+3. **`gidExtLane` có đường hồi.** Lô này `Ext dò = 4` suốt lô trong khi **551 ca** thiếu globalId
+   (`lần dò chưa ra 555`, `Ext chưa rõ 555`), dẫn tới **547 ca ❌ "api (#10) | Ext không gid |
+   socket không gid"**. Đường hồi cũ chỉ có 10 phản hồi nhanh < 5 s — bất khả khi Ext bị bóp.
+   Nay: sau ≥ 2 lần đã co **và** còn ≥ 12 ca đang chờ ⇒ +2 mỗi 6 lần. **Trần 12, thấp hơn
+   khởi điểm 20** ⇒ không mở vùng vận hành mới.
+4. **Sửa chú thích sai** về bind ảnh (87.2b).
+
+### 87.5 CHỖ CHƯA KẾT LUẬN ĐƯỢC
+1. **4 237 ms "còn lại"** sau khi trừ bind ảnh (5 079 − 842) là gì: chờ `pageLane` / chờ ACK /
+   chờ CPU bị bóp. Cần số `gateIdleSeen` + `chi tiết giữ cổng` của lô sau.
+2. **Tab nền ảnh hưởng bao nhiêu?** `bị bóp 296 lần + trễ 3 312 lần · +5 374,7 s`. Chưa tách
+   được bao nhiêu trong 5 741 ms/chat là do Chrome bóp. Muốn biết phải chạy **cùng lô, tab hiện**.
+3. `⚠ 934 ca` = "GIỮ ⚠ vì đã đo 200 ca" ⇒ vào danh sách gửi tay. **Không mất tin im lặng.**
+
+### 87.6 TIÊU CHÍ LÔ SAU
+| số | lô này | lô sau |
+|---|---|---|
+| gửi trùng | 0 | **0** |
+| chat có ≥2 dòng ✅ | 6 (cùng 1 lần gửi) | **0** |
+| `Ext dò` | 4 suốt lô | phải > 4 khi còn ≥12 ca chờ |
+| `slot thoát ≤75% cap` | không có số | nếu **0 lần** ⇒ giả thuyết 87.3 đúng |
+| `chi tiết giữ cổng` | không có số | cứng/mềm/tiến độ phải cộng xấp xỉ `giữ cổng` |
+| pha giữa | 32,66/s | ≥ 40/s (với lô không ảnh: đã đạt 127/s) |

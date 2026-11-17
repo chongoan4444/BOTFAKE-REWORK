@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.51-w200.97
+// @version      1.92.52-w200.98
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.51-W200.97'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.52-W200.98'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6749,10 +6749,36 @@
       if (timedOut || !responded || latencyMs > 12000) {
         gidExtCtl.good = 0;
         gidExtCtl.bad++;
+        /* [v1.92.52] CO VỀ SÀN LÀ ĐÚNG — NHƯNG PHẢI CÓ ĐƯỜNG HỒI.
+         * Lô 12:24 (8 509 chat, tab nền): `Ext dò` = 4 suốt lô (sàn GID_EXT_MIN) trong khi
+         * **551 ca** vẫn thiếu globalId và `lần dò chưa ra 555`, `Ext chưa rõ 555`
+         * (Ext bị Chrome bóp ⇒ timeout ⇒ bad++ ⇒ ×0,7 ⇒ kẹp sàn, lặp mãi).
+         * Đường hồi CŨ chỉ có MỘT: 10 phản hồi nhanh < 5 s ⇒ +2. Khi Ext đã bị bóp thì không bao
+         * giờ có 10 phản hồi nhanh ⇒ làn chết ở sàn tới hết lô. Kết quả: 547 ca chốt ❌
+         * "api: (#10) ngoài 24h | Ext: không gid | socket: không gid" — không kênh nào gửi được.
+         * Nay thêm đường hồi THEO HÀNG ĐỢI: nếu còn ≥ 12 ca đang CHỜ dò thì nhả thêm +2 (chặn
+         * bởi GID_EXT_MAX nên tối đa vẫn ≤ 32; và chỉ khi đã co ít nhất 2 lần liên tiếp).
+         * Không đổi trần, không đổi sàn, không đổi điều kiện co. */
         if (gidExtCtl.bad >= 3) {
           gidExtCtl.bad = 0;
           gidExtLane.setLimit(gidExtLane.getLimit() * 0.7);
+          gidExtCtl.cooldowns = (gidExtCtl.cooldowns || 0) + 1;
         }
+        try {
+          /* TRẦN CỦA ĐƯỜNG HỒI NÀY = 12, KHÔNG PHẢI 32 — CỐ Ý.
+           * `GID_EXT_INITIAL = 20` (dòng 5998): làn này KHỞI ĐIỂM ở 20. Nên hồi lên 12 vẫn
+           * THẤP HƠN mức bình thường của chính nó ⇒ không mở vùng vận hành mới, không thể
+           * tạo tải chưa từng được thiết kế. Muốn nới hơn thì đổi 12 → số khác, có ý thức. */
+          const GID_EXT_QUEUE_RAMP_CAP = 12;
+          if ((gidExtCtl.cooldowns || 0) >= 2 && gidExtLane.waitingCount() >= 12
+              && gidExtLane.getLimit() < GID_EXT_QUEUE_RAMP_CAP) {
+            gidExtCtl.good++;
+            if (gidExtCtl.good >= 6) {
+              gidExtCtl.good = 0;
+              gidExtLane.setLimit(Math.min(GID_EXT_QUEUE_RAMP_CAP, gidExtLane.getLimit() + 2));
+            }
+          }
+        } catch (eR) { /* ignore */ }
         return;
       }
       gidExtCtl.bad = 0;
@@ -7369,8 +7395,15 @@
     // 🚀 LÀN CAO TỐC 0ms (ULTRA-TURBO FAST-PATH CHO CẢ TEXT VÀ ẢNH):
     // Nếu là luồng gửi thẳng ngoài 24h (dynamicDirect):
     //   • Kiểm tra đồng bộ 0ms xem chat này đã có sẵn global_id thật trong RAM/Cache/WebSocket chưa (peekFastGlobalId).
-    //   • Nếu ĐÃ CÓ SẴN global_id thật (kể cả khi gửi kèm ảnh!): điền thẳng vào ctx ở 0ms và BỎ QUA HOÀN TOÀN extPrepLane!
-    //   • Nếu chưa có trong RAM: vào prepareDirectCtx (chạy song song resolveGlobalId + uploadOneTimePhoto ở Làn 1).
+    //   • Nếu ĐÃ CÓ SẴN global_id thật: điền thẳng vào ctx ở 0ms và KHÔNG vào extPrepLane.
+    //     [v1.92.52] ĐÍNH CHÍNH: dòng cũ ở đây ghi "BỎ QUA HOÀN TOÀN extPrepLane" cho cả trường
+    //     hợp KÈM ẢNH — SAI. Nhánh fast-path bên dưới (dòng ~7402) vẫn gọi
+    //     `uploadOneTimePhoto()` để bind fbId riêng cho chat đó (is_reusable=false) rồi mới publish.
+    //     Bằng chứng số (lô 8 509 chat, 12:24, bản 1.92.51): `📷 bind fbId 8 186 ca · TB 842 ms`
+    //     và giữ slot 5 741 ms/chat (lô KHÔNG ảnh chỉ 1 362 ms/chat) ⇒ bind ảnh nằm TRONG slot,
+    //     chiếm ~842/5 741 ≈ 15 % thời gian giữ slot. Chú thích sai này từng làm báo cáo kết luận
+    //     nhầm là "ảnh không nằm trong slot".
+    //   • Nếu chưa có trong RAM: vào prepareDirectCtx (chạy song song resolveGlobalId + uploadOneTimePhoto).
     const peeked0 = peekConv(conv) || conv;
     const pid0 = (peeked0 && (peeked0.page_id || peeked0.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
     if (opts.dynamicDirect && conv.type !== 'comment' && (seq[0] === 'ext' || seq[0] === 'socket')) {
@@ -8168,6 +8201,29 @@
     maxExtQueue: 0, maxExtActive: 0, maxApiWaiting: 0,
     // [v1.92.28] ĐẾM AI GIỮ CỔNG: 4 lý do chặn mở wave, để biết cái gì làm lô chậm.
     gateBlockInflight: 0, gateBlockRetry: 0, gateBlockExt: 0, gateBlockApi: 0,
+    /* [v1.92.52] TÁCH "ĐANG BAY" THÀNH 3 MỨC — LÔ 12:24 (8 509 chat) KHÔNG GIẢI THÍCH ĐƯỢC BẰNG
+     * `gateBlockInflight` GỘP.
+     * Số đo: 19 dòng wave in "main đang bay 163" y nguyên; 18 cổng giữ tổng 253,6 s / 404 s
+     * (63 % thời gian lô), riêng wave 15 giữ 106,0 s. Trước bản này chỉ có MỘT bộ đếm
+     * `gateBlockInflight`, nên không phân biệt được:
+     *     (a) đang bay > 92 % cap (176)  → chặn hẳn, chờ slot thoát thật sự
+     *     (b) đang bay 164…176           → vượt 75 % (144) nên KHÔNG mở được bằng nhánh nhanh,
+     *                                      chỉ chờ nhánh mềm 85 % (163 ≤ 163 ⇒ mở được)
+     *     (c) đang bay ≤ 163 nhưng chưa đủ 25 % item xong → chờ TIẾN ĐỘ, không phải chờ slot
+     * Ba số dưới đây tách đúng 3 mức đó. Chỉ ĐẾM, không đổi một nhánh mở cổng nào.
+     * (1 180 ms ≈ 2 nhịp kiểm 60 ms; 174 = floor(192 × 0,92) − 2; 161 = floor(192 × 0,85) − 2.) */
+    gateBlockHard: 0, gateBlockSoft: 0, gateBlockProgress: 0,
+    /* [v1.92.52] ĐO "CHỜ SLOT ĐÃ NHƯỜNG" — giả thuyết về wave 15 giữ 106 s.
+     * `acquireMainSlot()` ở dòng ~11255 gọi `runMainItem()` gần như TỨC THÌ sau `await` (không có
+     * I/O ở giữa), nên khi một slot vừa nhả, worker nhận lại slot TRƯỚC KHI `bgClock.every(60)`
+     * kịp chạy `evaluateGate()` ⇒ `inFlightMainCount` gần như KHÔNG BAO GIỜ đo được ≤ 163
+     * (0,85 × 192) ở nhịp 60 ms. Đây là GIẢ THUYẾT, chưa phải kết luận.
+     * Hai số dưới đây đo đúng chỗ đó, KHÔNG đổi nhịp kiểm cổng:
+     *   gateIdleSeen  = số lần evaluateGate() thấy đang bay ≤ 144 (75 % cap)
+     *   gateIdleMax   = giá trị "đang bay" THẤP NHẤT từng thấy sau khi đã đạt 25 % item xong
+     * Nếu lô sau `gateIdleSeen` = 0 mà vẫn giữ cổng hàng chục giây ⇒ giả thuyết ĐÚNG.
+     * Nếu `gateIdleSeen` lớn mà cổng vẫn giữ ⇒ giả thuyết SAI, phải tìm nguyên nhân khác. */
+    gateIdleSeen: 0, gateIdleMax: -1,
     // [v1.92.43] ĐO THỜI GIAN GIỮ SLOT MAIN theo pha. Log 16:52/17:03: 192 slot mà chỉ
     // 17,75/18,45 tin/s ⇒ mỗi chat giữ slot ~10,7 s (192 ÷ 18). Trước đây KHÔNG có số nào
     // tách được thời gian đó nằm ở đâu ⇒ mọi phỏng đoán đều là đoán. Nay tách 3 phần:
@@ -8759,7 +8815,13 @@
                 : '')
             : '')
           + ' · giữ cổng (bay/retry/ext/api) ' + waveDiag.gateBlockInflight + '/' + waveDiag.gateBlockRetry
-          + '/' + waveDiag.gateBlockExt + '/' + waveDiag.gateBlockApi);
+          + '/' + waveDiag.gateBlockExt + '/' + waveDiag.gateBlockApi
+          /* [v1.92.52] "CHI TIẾT GIỮ CỔNG" tách 3 mức của "đang bay" — xem chú thích ở waveDiag.
+           * Đọc: cứng = quá 92 % cap (chờ slot thật) · mềm = trong (75 %, 85 %] (chỉ nhánh mềm
+           * mở được) · tiến độ = slot còn dư nhưng chưa đủ 25 % item xong. */
+          + ' · chi tiết giữ cổng: cứng ' + waveDiag.gateBlockHard + ' · mềm ' + waveDiag.gateBlockSoft
+          + ' · tiến độ ' + waveDiag.gateBlockProgress
+          + ' · slot thoát ≤75% cap: ' + waveDiag.gateIdleSeen + ' lần (thấp nhất ' + waveDiag.gateIdleMax + ')');
         logLine('📡 SOCKET: ACK OK/rejected/no-ACK ' + sendDiag.socketAckOk + '/' + sendDiag.socketAckRejected + '/' + sendDiag.socketNoAck
           + ' · ACK TB/max ' + socketAckAvgMs + '/' + sendDiag.socketAckMsMax + 'ms'
           + ' · buckets <250/250-999/1-2s/2-5s/≥5s '
@@ -9125,7 +9187,8 @@
           if (conv.__extFallback1545) noteExt1545Outcome('saved'); // [v1.92.49] Ext CỨU ĐƯỢC ca 1545041
           buStats.ok++;
           buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
-          logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅', conv.id);
+          // [v1.92.52] noAudit = true: markDelivered() ngay trên đã ghi ✅ vào sổ cho cùng lần gửi này.
+          logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅', conv.id, true);
         } else if (r && r.sent === 'maybe') {
           /* [v1.92.43] NGÂN SÁCH DÒ EXT PHẢI ĐÓNG Ở CẢ NHÁNH NÀY.
            * Log 16:52/17:03: dò Ext in 'thử 799 · cứu 0' và 'thử 1 431 · cứu 0' — tức ngân sách
@@ -11283,6 +11346,19 @@
             const fastActiveLimit = Math.floor(mainCap * 0.75);
             const softActiveLimit = Math.floor(mainCap * 0.85);
             // Có backpressure: không mở wave mới khi lane bù hoặc hàng đợi API đã quá sâu.
+            /* [v1.92.52] PHÂN LOẠI TRƯỚC KHI CHẶN (chỉ đếm). `>=` để mọi lần kiểm đều rơi vào
+             * đúng một trong ba nhóm; thứ tự ưu tiên trùng với thứ tự chặn bên dưới. */
+            if (retryBacklog <= 80 && extBacklog <= GATE_EXT_BACKLOG_LIMIT && apiBacklog <= WAVE_API_BACKLOG_HIGH_WATER) {
+              // [v1.92.52] đo "đã có lúc nào slot thoát xuống ≤ 75 % cap không" (xem waveDiag)
+              if (inFlightMainCount <= fastActiveLimit) waveDiag.gateIdleSeen++;
+              if (waveDoneCount >= softGateTarget
+                  && (waveDiag.gateIdleMax < 0 || inFlightMainCount < waveDiag.gateIdleMax)) {
+                waveDiag.gateIdleMax = inFlightMainCount;
+              }
+              if (inFlightMainCount > gateActiveLimit) waveDiag.gateBlockHard++;
+              else if (inFlightMainCount > softActiveLimit) waveDiag.gateBlockSoft++;
+              else waveDiag.gateBlockProgress++;
+            }
             if (inFlightMainCount > gateActiveLimit || retryBacklog > 80
                 || extBacklog > GATE_EXT_BACKLOG_LIMIT
                 || apiBacklog > WAVE_API_BACKLOG_HIGH_WATER) {
@@ -12822,10 +12898,19 @@
     const list = Array.from(errGroups.values());
     for (let i = 0; i < list.length; i++) flushGroup(list[i]);
   }
-  function logFailGrouped(name, reason, tag, cid) {
+  function logFailGrouped(name, reason, tag, cid, noAudit) {
     tag = tag || '❌';
     const display = compressErr(reason);
-    auditPush(tag, cid, name, display);   // sổ kiểm chứng: KHÔNG gộp, ghi trước khi gộp màn hình
+    // [v1.92.52] `noAudit` = chỉ in lên bảng log, KHÔNG ghi sổ kiểm chứng. Dùng cho đúng một chỗ:
+    // dòng "bù THÀNH CÔNG qua Extension/Socket" — vì ngay sau đó `markDelivered()` đã ghi ✅ cho
+    // cùng lần gửi ấy ⇒ sổ có 2 dòng ✅ cho 1 chat, đọc lên tưởng gửi 2 lần.
+    // Bằng chứng (lô 8 509 chat, 12:24, bản 1.92.51): 6 chat có 2 dòng ✅, ví dụ
+    //   12:30:50 🛟 kiểm chứng: hội thoại KHÔNG có tin ⇒ GỬI CỨU 1 lần qua Extension
+    //   12:30:51 ✅ bù THÀNH CÔNG qua Extension       ← logFailGrouped
+    //   12:30:51 ✅ đánh dấu ĐÃ TỚI NƠI qua ext       ← markDelivered
+    // Đây KHÔNG phải gửi trùng (một lần gửi, một tin), chỉ là ghi 2 dòng. Thứ tự hai dòng đảo
+    // nhau giữa các ca ⇒ không thể sửa bằng cách so thời gian ở chỗ khác.
+    if (!noAudit) auditPush(tag, cid, name, display);   // sổ kiểm chứng: KHÔNG gộp, ghi trước khi gộp màn hình
     const k = groupKeyOf(tag, display);
     const now = Date.now();
     let g = errGroups.get(k);

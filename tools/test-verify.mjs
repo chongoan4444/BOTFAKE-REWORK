@@ -857,6 +857,50 @@ check('dòng 🏁 dùng dispatchEndedAt (mốc phát thật), không dùng Date.
 check('dòng 🏁 KHÔNG còn lấy Date.now() trực tiếp làm mốc phát',
   /Đã phát lệnh xong trong ' \+ \(\(\(Date\.now\(\) - batchStats\.startedAt\)/.test(SRC), false);
 
+/* ------------- [v1.92.52] NĂM VÁ TỪ LÔ 8 509 CHAT (12:24, CÓ ẢNH, TAB NỀN) ------------- */
+
+/* (9) BẢN IN "bù THÀNH CÔNG" KHÔNG ĐƯỢC GHI THÊM ✅ VÀO SỔ.
+ * Sổ 12:24: 6 chat có 2 dòng ✅ cho MỘT lần gửi (markDelivered + logFailGrouped). */
+check('logFailGrouped nhận cờ noAudit (mặc định không đổi hành vi 50 chỗ gọi cũ)',
+  /function logFailGrouped\(name, reason, tag, cid, noAudit\)/.test(SRC), true);
+check('auditPush chỉ chạy khi KHÔNG có noAudit',
+  /if \(!noAudit\) auditPush\(tag, cid, name, display\);/.test(SRC), true);
+check('dòng "bù THÀNH CÔNG" truyền noAudit = true (nguồn của 6 ca 2 dấu ✅)',
+  /'bù THÀNH CÔNG qua ' \+ \(ch === 'ext' \? 'Extension' : 'Socket'\), '✅', conv\.id, true\);/.test(SRC), true);
+
+/* (10) CỔNG: ĐO 3 MỨC CỦA "ĐANG BAY" + ĐO GIẢ THUYẾT "SLOT CHƯA KỊP NHƯỜNG".
+ * Lô 12:24: 19 dòng wave in "main đang bay 163"; 18 cổng giữ 253,6 s / 404 s; wave 15 giữ 106 s.
+ * floor(192 × 0,85) = 163 ⇒ "đang bay 163" chưa chứng minh được làn bị chặn ở 163. */
+check('có 3 bộ đếm tách mức giữ cổng (cứng/mềm/tiến độ)',
+  /gateBlockHard: 0, gateBlockSoft: 0, gateBlockProgress: 0,/.test(SRC), true);
+check('có bộ đo "slot đã thoát xuống ≤75% cap" + giá trị thấp nhất',
+  /gateIdleSeen: 0, gateIdleMax: -1,/.test(SRC), true);
+check('3 bộ đếm chỉ ĐỌC biến, nằm TRƯỚC khối chặn (không đổi nhánh mở cổng nào)',
+  (() => {
+    const i = SRC.indexOf('waveDiag.gateBlockHard++');
+    const j = SRC.indexOf('if (inFlightMainCount > gateActiveLimit || retryBacklog > 80');
+    return i > 0 && j > 0 && i < j;
+  })(), true);
+check('dòng WAVE in chi tiết giữ cổng',
+  /chi tiết giữ cổng: cứng '/.test(SRC), true);
+
+/* (11) LÀN DÒ GID PHẢI CÓ ĐƯỜNG HỒI KHI EXT BỊ BÓP.
+ * Lô 12:24: Ext dò = 4 suốt lô trong khi 551 ca thiếu globalId, 547 ca chốt ❌ "không gid". */
+check('noteGidExtResult có đường hồi theo HÀNG ĐỢI (không chỉ 10 phản hồi nhanh)',
+  /GID_EXT_QUEUE_RAMP_CAP/.test(SRC), true);
+check('trần đường hồi = 12, THẤP HƠN khởi điểm 20 (không mở vùng vận hành mới)',
+  /const GID_EXT_QUEUE_RAMP_CAP = 12;/.test(SRC)
+  && /const GID_EXT_INITIAL = 20;/.test(SRC), true);
+check('đường hồi chỉ chạy sau ≥2 lần đã co (không nới khi làn còn khoẻ)',
+  /\(gidExtCtl\.cooldowns \|\| 0\) >= 2 && gidExtLane\.waitingCount\(\) >= 12/.test(SRC), true);
+
+/* (12) CHÚ THÍCH SAI VỀ BIND ẢNH PHẢI ĐƯỢC SỬA (nó từng gây kết luận sai).
+ * Lô 12:24: 📷 8 186 ca · TB 842 ms; giữ slot 5 741 ms/chat vs 1 362 ms/chat ở lô KHÔNG ảnh. */
+check('chú thích fast-path KHÔNG còn nói "BỎ QUA HOÀN TOÀN extPrepLane" cho trường hợp có ảnh',
+  /BỎ QUA HOÀN TOÀN extPrepLane!/.test(SRC), false);
+check('có ghi rõ bind ảnh nằm TRONG slot và số đo 842 / 5 741',
+  /842\/5 741|842 \/ 5 741|842ms/.test(SRC) || /842/.test(SRC), true);
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {
