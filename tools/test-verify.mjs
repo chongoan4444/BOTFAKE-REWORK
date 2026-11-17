@@ -62,6 +62,83 @@ const msg = (opts) => ({
 
 let pass = 0;
 const fails = [];
+/* ═══════════════════════════════════════════════════════════════════════════════
+ * [v1.92.48] CỬA SỔ NGHE ACK — trích ĐÚNG hằng số + 2 hàm thuần từ userscript.
+ * Nguyên tắc nghiệm thu:
+ *   • HOLD (giữ slot) KHÔNG được đổi so với 1.92.47  ⇒ tốc độ không đổi.
+ *   • LISTEN (nghe) phải phủ max ACK đã đo (7 988 ms) và không vượt trần app (30 000 ms).
+ *   • "ACK chết" phải đòi bằng chứng (im lặng thật) và ≥ 5 ca, không phải 3 ca hết hạn chờ.
+ *   • Nới làn phải canh ĐUÔI (p95), không canh p50 (đúng lỗi lô 10:01).
+ * ═══════════════════════════════════════════════════════════════════════════════ */
+
+/** Trích một `const TÊN = <biểu thức>;` (số hoặc biểu thức số đơn giản) từ userscript. */
+function extractConst(name) {
+  const re = new RegExp(`const ${name} = ([^;]+);`);
+  const m = SRC.match(re);
+  if (!m) throw new Error(`không tìm thấy hằng ${name} trong userscript`);
+  return m[1].trim();
+}
+
+const ackConsts = ['ACK_HOLD_MIN_MS', 'ACK_HOLD_CEIL_MS', 'ACK_LISTEN_MAX_MS', 'ACK_LAT_RING_N',
+  'ACK_DEAD_PROOF_RUN', 'SOCK_RAMP_P95_MAX_MS', 'SOCK_RAMP_QUIET_N', 'BU_PROOF_NOT_BEFORE_MS',
+  'BU_PROOF_WAIT_MS', 'SOCKET_LANE_RUNTIME_FLOOR', 'SOCKET_LANE_HARD_FLOOR'];
+
+const ackCode = [
+  ...ackConsts.map((n) => `const ${n} = ${extractConst(n)};`),
+  extractFn('latencyPct'),
+  extractFn('ackHoldMsFor'),
+  extractFn('ackListenMsFor'),
+  `return { ${ackConsts.join(', ')}, latencyPct, ackHoldMsFor, ackListenMsFor };`,
+].join('\n\n');
+
+const ACK = new Function(ackCode)();
+
+// A1) Hạn chờ GIỮ SLOT giữ NGUYÊN công thức 1.92.47: clamp(p90×3, 1200, 6000)
+check('A1 hold: p90 3000 → 6000 (trần cũ giữ nguyên)', ACK.ackHoldMsFor(3000), 6000);
+check('A1 hold: p90 2484 → 6000 (lô 10:01 vẫn 6000, tốc độ không đổi)', ACK.ackHoldMsFor(2484), 6000);
+check('A1 hold: p90 300 → 1200 (sàn cũ giữ nguyên)', ACK.ackHoldMsFor(300), 1200);
+check('A1 hold: p90 0/không mẫu → 6000', ACK.ackHoldMsFor(0), 6000);
+
+// A2) Cửa sổ NGHE phải phủ max ACK đã đo (7 988 ms)…
+check('A2 listen: hold 6000 → 12000 (phủ max 7 988 ms đã đo)', ACK.ackListenMsFor(6000), 12000);
+check('A2 listen: phủ max thật 7988', ACK.ackListenMsFor(6000) > 7988, true);
+// …và không vượt trần tự xoá của app (b = 3e4)
+check('A2 listen: không vượt trần app 30 000 ms', ACK.ackListenMsFor(60000) <= ACK.ACK_LISTEN_MAX_MS, true);
+check('A2 listen: luôn ≥ hold', ACK.ackListenMsFor(6000) >= 6000, true);
+check('A2 listen: hold nhỏ vẫn nghe đủ 12 s', ACK.ackListenMsFor(1200), 12000);
+
+// A3) "ACK chết" phải đòi bằng chứng: ≥ 5 lần IM LẶNG THẬT (không phải 3 lần hết hạn chờ)
+check('A3 ngưỡng chết = 5 lần im lặng thật', ACK.ACK_DEAD_PROOF_RUN, 5);
+
+// A3b) Sàn làn lúc chạy không được thấp hơn mức làm tốc độ sập (lô 10:01: 32 làn = 20,8 chat/s)
+check('A3b sàn làn chạy ≥ 96', ACK.SOCKET_LANE_RUNTIME_FLOOR >= 96, true);
+check('A3b sàn làn chạy ≤ trần 384', ACK.SOCKET_LANE_RUNTIME_FLOOR <= 384, true);
+check('A3b sàn vẫn trên sàn cứng của bộ điều tiết', ACK.SOCKET_LANE_RUNTIME_FLOOR > ACK.SOCKET_LANE_HARD_FLOOR, true);
+
+// A4) Cổng chứng minh vắng mặt phải đứng SAU cửa sổ nghe
+check('A4 cổng vắng mặt ≥ cửa sổ nghe + 1 s', ACK.BU_PROOF_NOT_BEFORE_MS >= ACK.ackListenMsFor(6000) + 1000, true);
+check('A4 BU_PROOF_WAIT_MS = BU_PROOF_NOT_BEFORE_MS', ACK.BU_PROOF_WAIT_MS, ACK.BU_PROOF_NOT_BEFORE_MS);
+
+// A5) Nới làn canh ĐUÔI: cửa sổ mẫu đủ dài + p95 là ngưỡng, p50 KHÔNG còn là ngưỡng
+check('A5 cửa sổ mẫu 1 000 (không còn 200 ≈ 5 s cuối lô)', ACK.ACK_LAT_RING_N, 1000);
+check('A5 canh p95 ≤ 2 200 ms', ACK.SOCK_RAMP_P95_MAX_MS, 2200);
+check('A5 có cửa sổ canh no-ACK gần đây', ACK.SOCK_RAMP_QUIET_N > 0, true);
+check('A5 p95 của 100 mẫu 1..100 = 96', ACK.latencyPct(Array.from({ length: 100 }, (_, i) => i + 1), 0.95), 96);
+check('A5 p50 của 100 mẫu 1..100 = 51', ACK.latencyPct(Array.from({ length: 100 }, (_, i) => i + 1), 0.5), 51);
+{
+  /* Lô 10:01 (dòng 527): bucket ACK <250/250-999/1-2s/2-5s/≥5s = 0/5/3 081/3 389/340.
+   * Cửa sổ 200 mẫu của bản cũ rơi vào đoạn "toàn 1,7 s" ⇒ p50 = 1 739 ms ⇒ LỌT cổng 1 800
+   * ⇒ làn leo 256 → 384 dù đuôi ≥5 s còn 5 %. Vòng 1 000 mẫu thấy đúng cái đuôi đó. */
+  const ring = []; // 1 000 mẫu mô phỏng tỉ lệ thật của lô
+  const push = (n, v) => { for (let i = 0; i < n; i++) ring.push(v); };
+  push(797, 3000); push(153, 3500); push(50, 6500); // ≈ 80 % / 15 % / 5 %
+  for (let i = 0; i < 200; i++) ring[ring.length - 200 + i] = 1739; // 200 mẫu CUỐI LÔ (nhanh)
+  const p95New = ACK.latencyPct(ring, 0.95);
+  const p50Old200 = ACK.latencyPct(ring.slice(-200), 0.5); // bản cũ chỉ thấy 200 mẫu này
+  check('A5 lô 10:01: cửa sổ 200 mẫu cũ cho p50 1 739 ⇒ LỌT cổng 1 800', p50Old200 <= 1800, true);
+  check('A5 lô 10:01: vòng 1 000 mẫu cho p95 > 2 200 ⇒ CHẶN nới làn', p95New > ACK.SOCK_RAMP_P95_MAX_MS, true);
+}
+
 
 function check(name, got, want) {
   if (got === want) { pass++; return; }
@@ -417,7 +494,8 @@ check('đóng ngân sách ghi lại % để in vào log',
     extractFn('absenceVerdict'),
     'return { absenceVerdict };',
   ].join('\n\n');
-  const A = new Function('serverSkewMs', 'BU_PROOF_STALE_MS', acode)(0, 30000);
+  // [v1.92.48] cổng phải đứng SAU cửa sổ nghe ACK ⇒ tiêm thêm mốc BU_PROOF_NOT_BEFORE_MS
+  const A = new Function('serverSkewMs', 'BU_PROOF_STALE_MS', 'BU_PROOF_NOT_BEFORE_MS', acode)(0, 30000, 14000);
   const P = '898735919982398';
   const PSID = '39224298167184827';
   const CID = P + '_' + PSID;
@@ -426,13 +504,18 @@ check('đóng ngân sách ghi lại % để in vào log',
   const raw = (ms) => new Date(ms).toISOString().replace('Z', '').replace(/\.\d{3}/, '.000000');
   const conv = (o) => Object.assign({ id: CID, page_id: P, from_psid: PSID, snippet: sendTxt, updated_at: raw(t0), last_sent_by: { id: P } }, o);
 
-  check('cổng: tin ĐÃ có trong snippet ⇒ yes (hủy bù ngay, không chờ)', A.absenceVerdict([conv({})], CID, P, PSID, sendTxt, t0, false), 'yes');
-  check('cổng: dò SỚM thấy hội thoại chưa đổi ⇒ KHÔNG được kết luận vắng mặt', A.absenceVerdict([conv({ snippet: 'Tin cũ của shop', updated_at: raw(t0 - 600000) })], CID, P, PSID, sendTxt, t0, false), 'unknown');
-  check('cổng: dò MUỘN, hội thoại im từ trước lúc gửi ⇒ absent (bù an toàn)', A.absenceVerdict([conv({ snippet: 'Tin cũ của shop', updated_at: raw(t0 - 600000) })], CID, P, PSID, sendTxt, t0, true), 'absent');
-  check('cổng: hội thoại VỪA động sau lúc gửi nhưng snippet khác ⇒ unknown (không dám bù)', A.absenceVerdict([conv({ snippet: 'Tin khác', updated_at: raw(t0 + 2000) })], CID, P, PSID, sendTxt, t0, true), 'unknown');
-  check('cổng: thiếu updated_at ⇒ unknown', A.absenceVerdict([conv({ snippet: 'Tin cũ', updated_at: '' })], CID, P, PSID, sendTxt, t0, true), 'unknown');
-  check('cổng: hội thoại khác ⇒ unknown', A.absenceVerdict([conv({ id: P + '_999', from_psid: '999', snippet: 'Tin cũ', updated_at: raw(t0 - 600000) })], CID, P, PSID, sendTxt, t0, true), 'unknown');
-  check('cổng: danh sách rỗng ⇒ unknown', A.absenceVerdict([], CID, P, PSID, sendTxt, t0, true), 'unknown');
+  const tLate = t0 + 14000; // đọc MUỘN đủ xa: sau cửa sổ nghe ACK (12 000) + biên
+  check('cổng: tin ĐÃ có trong snippet ⇒ yes (hủy bù ngay, không chờ)', A.absenceVerdict([conv({})], CID, P, PSID, sendTxt, t0, false, t0), 'yes');
+  check('cổng: dò SỚM thấy hội thoại chưa đổi ⇒ KHÔNG được kết luận vắng mặt', A.absenceVerdict([conv({ snippet: 'Tin cũ của shop', updated_at: raw(t0 - 600000) })], CID, P, PSID, sendTxt, t0, false, t0), 'unknown');
+  check('cổng: dò MUỘN, hội thoại im từ trước lúc gửi ⇒ absent (bù an toàn)', A.absenceVerdict([conv({ snippet: 'Tin cũ của shop', updated_at: raw(t0 - 600000) })], CID, P, PSID, sendTxt, t0, true, tLate), 'absent');
+  // [v1.92.48] ĐIỀU KIỆN MỚI: đọc ở +10 s (mốc cũ) mà ACK còn có thể về (cửa sổ nghe 12 s)
+  // thì TUYỆT ĐỐI không được phán 'absent' ⇒ nếu phán sớm thì bù Ext ⇒ khách nhận 2 tin.
+  check('cổng: đọc ở +10 s (trước mốc 14 s) ⇒ KHÔNG được absent', A.absenceVerdict([conv({ snippet: 'Tin cũ của shop', updated_at: raw(t0 - 600000) })], CID, P, PSID, sendTxt, t0, true, t0 + 10000), 'unknown');
+  check('cổng: đọc ở +13,9 s vẫn chưa được absent', A.absenceVerdict([conv({ snippet: 'Tin cũ của shop', updated_at: raw(t0 - 600000) })], CID, P, PSID, sendTxt, t0, true, t0 + 13999), 'unknown');
+  check('cổng: hội thoại VỪA động sau lúc gửi nhưng snippet khác ⇒ unknown (không dám bù)', A.absenceVerdict([conv({ snippet: 'Tin khác', updated_at: raw(t0 + 2000) })], CID, P, PSID, sendTxt, t0, true, tLate), 'unknown');
+  check('cổng: thiếu updated_at ⇒ unknown', A.absenceVerdict([conv({ snippet: 'Tin cũ', updated_at: '' })], CID, P, PSID, sendTxt, t0, true, tLate), 'unknown');
+  check('cổng: hội thoại khác ⇒ unknown', A.absenceVerdict([conv({ id: P + '_999', from_psid: '999', snippet: 'Tin cũ', updated_at: raw(t0 - 600000) })], CID, P, PSID, sendTxt, t0, true, tLate), 'unknown');
+  check('cổng: danh sách rỗng ⇒ unknown', A.absenceVerdict([], CID, P, PSID, sendTxt, t0, true, tLate), 'unknown');
 }
 
 // 21) [v1.92.44] photoMovedVerdict — cổng "hội thoại vừa động" cho ca gửi ẢNH kèm chữ ngắn.

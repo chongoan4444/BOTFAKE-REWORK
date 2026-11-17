@@ -3984,3 +3984,119 @@ try { return { ok: true, data: JSON.parse(txt) }; } catch (e) {
   giải quyết lỗi đang báo.
 - Test mục 25 nay **khoá ngược**: `fetchJson` KHÔNG được bọc `stripJsonPrefix` — để lần sau không
   ai "tối ưu" thêm vào đường tải nữa.
+
+---
+
+## §83 — "KHÔNG MẤT ACK" — đo, tính, và vá 4 con số (1.92.48 / W200.94)
+
+Người dùng hỏi: *"cách nào để đảm bảo không mất ACK, kể cả phải giảm tốc một chút — vì mất ACK
+vừa dễ gây trùng vừa chậm do phải bù lại"*. Chọn **mức B** (P1–P4). §83 ghi lại toàn bộ số đo để
+lần sau không phải suy lại.
+
+### 83.1 Trước hết: "mất ACK" ở lô 10:01 là do CHÍNH SCRIPT, không phải FB
+
+| nguồn | có thật? | bằng chứng |
+|---|---|---|
+| FB không trả `/ls_resp` cho frame gửi (type 3) | **không có ca nào** | 3 HAR có `_webSocketMessages`, ghép `request_id`: batmesss **8/8**, guisot **20/20**, guikhachcu **2/2** ⇒ **30/30** lệnh gửi đều được trả lời (p50 234/326/474 ms, max 1 531 ms). 2 frame không khớp đều là `type: 2` (đồng bộ init) |
+| Script tự cắt rồi **xoá chỗ nhận ACK** | **có — nguồn chính** | `socketPublishSend` cũ: hết `ackWaitMs` ⇒ `clearTimeout + delete helper.PENDING_MESSAGES[myKey]` ⇒ gói về sau không còn callback (app log `NOT_FOUND_CALLBACK_FOR_RESPONSE`) ⇒ `classify()` nhận `payload=null` ⇒ `noack` ⇒ ⚠ ⇒ kiểm chứng ⇒ bắn cứu Ext |
+| Kênh ACK chết thật (30 s không gói nào) | **0 ca trong lô** | app tự đặt trần `b = 3e4` (`_app` @815747, xoá entry ở @819154); log chỉ chạy 350 s và mọi ca ⚠ được cứu trong 12–31 s |
+
+### 83.2 Hai con số đo sai đã dẫn tới chuỗi sự cố
+
+1. **Vòng mẫu ACK chỉ 200 mẫu** ≈ **5 giây cuối lô** (40 tin/s). Dòng log in `p50/p90 1739/2484`
+   nhưng phân bố thật của cả lô (6 815 ACK, dòng 527 của log) là:
+
+   | bucket | n | % | percentile suy ra |
+   |---|---|---|---|
+   | 250–999 ms | 5 | 0,07 % | — |
+   | 1–2 s | 3 081 | 45,2 % | p50 ≈ **2,03 s** |
+   | 2–5 s | 3 389 | 49,7 % | p90 ≈ **4,70 s** · p95 ≈ **5,00 s** |
+   | ≥ 5 s | 340 | 5,0 % | max **7 988 ms** |
+
+   ⇒ ngưỡng nới làn, trần chờ ACK và ngưỡng "ACK chậm" đều bị chỉnh theo **đuôi lô**, không theo cả lô.
+2. **Trần cứng < max đo được**: hạn chờ hiệu dụng `clamp(p90×3, 1200, 6000)` = 3 974 ms (p90 200 mẫu),
+   trong khi max ACK của chính lô là **7 988 ms** ⇒ 340 ca ≥5 s bị cắt theo định nghĩa.
+
+### 83.3 Chuỗi sự cố 6 giây (log 10:01)
+
+```
+09:57:19  🧯 Socket ACK của page … coi như CHẾT (3 lần no-ACK liên tiếp)
+09:57:20  🐢 ACK chậm liên tiếp 4 lần — giảm lane 384 → 64
+09:57:21  🧯 Mất ACK liên tục 25 tin — hạ SÀN socket xuống 32/page
+09:57:21  ⚠ ×91 chat cùng lỗi — Socket không rõ kết quả (không có ACK)
+```
+**84/101 ca no-ACK nổ trong CÙNG MỘT GIÂY** ⇒ "3 lần liên tiếp" bị thoả bởi 8 % frame của một giây,
+không phải bởi kênh chết. Hệ quả đo được:
+
+| mốc | chat | thời gian | tốc độ |
+|---|---|---|---|
+| 09:55:09 → 09:57:19 | 0 → 6 058 | 130 s | **46,6 /s** |
+| 09:57:19 → 10:00:59 | 6 058 → 10 629 | 220 s | **20,8 /s** |
+
+`Socket bị né (ACK chết) 7 665` · `dò lại ACK chết 384 (hồi 0)` · `limits cuối [56×1]`.
+Nếu giữ 46,6 /s cho 4 571 chat còn lại: **98 s** thay vì 220 s ⇒ lô 228 s thay vì 350 s (**−35 %**).
+
+### 83.4 Nới làn 256 → 384 vừa không nhanh hơn vừa gây mất ACK
+
+Đo theo 12 dòng `🌊 Wave` (thời gian qua cổng của chính wave đó):
+
+| làn | wave | tốc độ wave | TB |
+|---|---|---|---|
+| 256 | 1, 2, 3 | 48,9 · 48,2 · 34,8 | **44,0 chat/s** |
+| 312–320 | 4, 5, 6 | 36,5 · 41,1 · 35,4 | **37,7 chat/s** |
+| **384** | 7–12 | 36,5 · 25,8 · 41,6 · 37,5 · 36,2 · 24,2 | **33,6 chat/s** |
+
+Cổng chặn nới làn cũ là `p50 ≤ 1 800 ms` trong khi p50 của lô = **1 739 ms** ⇒ **lọt**. Đây là lỗi
+thiết kế: **dùng trung vị để canh đuôi**. p50 1 739 hoàn toàn tương thích với p95 5 000.
+
+### 83.5 Tính chi phí tốc độ của "nghe ACK lâu hơn" (Little's law)
+
+`tốc độ = làn ÷ E[thời gian giữ 1 frame]`; E[giữ] lấy từ chính phân bố ở 83.2:
+
+| hạn chờ | E[giữ] | trần @ làn 256 | trần @ làn 384 |
+|---|---|---|---|
+| 6 s (đang chạy) | **2,62 s** | 97,7 tin/s | 146,6 tin/s |
+| 8 s | 2,72 s | 94,1 tin/s | 141,2 tin/s |
+| 12 s | 2,88 s | 88,9 tin/s | 133,3 tin/s |
+| 30 s (trần app) | 3,15 s | 81,3 tin/s | 121,9 tin/s |
+
+Tốc độ THẬT: 30,39 lệnh/s cả lô · 46,6 chat/s pha khoẻ · 20,8 chat/s pha sập.
+⇒ Mọi phương án đều nằm **dưới** trần làn. **Nút cổ chai không phải hạn chờ ACK** ⇒ nới nó không
+mua được gì. Vì vậy phương án "nới hạn chờ" đã **cân nhắc và BỎ** (xem 83.6): chỉ cần chỗ nhận
+ACK sống lâu hơn, còn thời gian giữ slot giữ nguyên ⇒ **0 % tốc độ**.
+
+### 83.6 Đã vá (1.92.48 / W200.94) — 4 việc, không thêm một lệnh gửi nào
+
+| # | chỗ sửa | trước | sau | vì sao |
+|---|---|---|---|---|
+| P1 | `socketPublishSend` khi hết hạn chờ | `clearTimeout + delete PENDING[myKey]` ⇒ ACK muộn bị vứt | **không xoá**; giữ tới `ackListenMs` = max(12 000, hold+6 000) ≤ 30 000; hết cửa sổ mới dọn + đánh dấu `mySilent` | ACK muộn vẫn được phân xử thật qua `lateApply` (chỉ đọc: `markDelivered` / nhánh bù đã có). HOLD **không đổi** ⇒ tốc độ không đổi |
+| P2 | `ackLatRing` | 200 mẫu (≈5 s cuối lô) | **1 000 mẫu** + `latencyPct()` + `sockAckP95()` | ngưỡng phải bám cả lô, không bám đuôi |
+| P3 | "ACK chết" | 3 lần `noack` (mà `hitCeiling` gần như luôn đúng) | chỉ đếm ca **im lặng thật** (`mySilent`), ngưỡng **5**; sàn làn chạy 32 → **96** | 84 ca/1 giây không được là bằng chứng; 32 làn = 1/8 cấu hình = 20,8 chat/s |
+| P4 | nới làn / phạt chậm | `p50 ≤ 1 800` · phạt khi `≥ 6 000 ms` ×0,8 | `p95 ≤ 2 200` **và** 0 no-ACK trong 50 ca gần nhất · phạt khi `> 1,5 × hạn chờ đang dùng` ×0,85 | canh đuôi; ngưỡng phạt phải bám hạn chờ của chính page |
+| C | cổng chứng minh vắng mặt | chờ mốc `+10 000 ms` | `+14 000 ms` (`BU_PROOF_WAIT_MS` = `BU_PROOF_NOT_BEFORE_MS`) | cổng phải đứng **sau** cửa sổ nghe 12 s, nếu không nó là đường sinh tin trùng duy nhất khi vừa nới cửa sổ nghe |
+
+Dòng log mới để nghiệm thu: `🔔 CỬA SỔ NGHE ACK: giữ slot …ms · nghe …ms · hết hạn chờ (còn nghe
+tiếp) N · im lặng THẬT hết cửa sổ M · ACK về MUỘN đã phân xử K (✅ a · FB từ chối b) …`
+
+### 83.7 Kỳ vọng lần chạy sau (tính từ số của chính lô 10:01)
+
+| chỉ số | lô 10:01 | kỳ vọng |
+|---|---|---|
+| ACK bị cắt bởi hạn chờ | 101 | **0** (chỉ còn im lặng thật) |
+| ⚠ cuối lượt | 156 | ≈ 0 |
+| `Socket bị né (ACK chết)` | 7 665 | **0** |
+| làn cuối | `[56×1]` | **256** |
+| pha sau sự cố | 20,8 chat/s | ≈ 44 chat/s |
+| tổng thời gian | 350 s | ≈ 228 s |
+| rủi ro trùng | 101 lần đánh cược ở cổng chứng minh | **0** |
+
+**Tiêu chí nghiệm thu:** `hết hạn chờ 0` · `im lặng thật ≤ 3` · `Socket bị né 0` ·
+`dò lại ACK chết 0` · tốc độ pha giữa ≥ 40 chat/s · `Dò Ext 1545041` **không được xấu đi**.
+
+### 83.8 Rủi ro còn lại (ghi để không phải phát hiện lại)
+
+1. `PENDING_MESSAGES` giữ lâu hơn: ≈ làn × 12 s entry (256 × 12 — không đáng kể); app tự dọn ở 30 s.
+2. Đuôi ⚠→✅ có thể dài hơn (tối đa ~12 s) vì ACK muộn giờ được tính thay vì bị vứt.
+3. Kênh **chết thật** thì cứu Ext vẫn chạy như cũ, chỉ muộn hơn ~12 s.
+4. Đường KHÔNG bắn-nhả (ảnh bù / lượt bù) chỉ **ghi nhận** ACK muộn (`sockLateUnapplied`) — không
+   phân xử lại, vì quyết định đã trả về cho người gọi; nếu lô sau thấy số này lớn thì xem lại riêng.

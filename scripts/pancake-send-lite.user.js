@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.47-w200.93b
+// @version      1.92.48-w200.94
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.47-W200.93b'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.48-W200.94'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4511,7 +4511,7 @@
   // Hỗ trợ đầy đủ cả ẢNH (task label "46" với attachment_fbids, send_type: 3, source: 0) lẫn TEXT
   // (task label "46" với send_type: 1, source: 4456448) + watermark label "21", khớp 100% với
   // ef.Z.sendMessage (@831250) trong _app-9331d46f21a84eb1.v6.js!
-  async function socketPublishSend(helper, pageId, gid, text, attFbIds, firedCb) {
+  async function socketPublishSend(helper, pageId, gid, text, attFbIds, firedCb, opts) {
     let sock = helper.SOCKETS && helper.SOCKETS[pageId];
     const warm = socketWarmPromises[pageId];
     if (warm) {
@@ -4531,6 +4531,7 @@
       return { kind: 'legacy' }; // helper cũ — quay về sendMessage đầy đủ
     }
     sock.taskId = sock.taskId || 0;
+    const lateApply = (opts && typeof opts.lateApply === 'function') ? opts.lateApply : null;
     const hasPhoto = Array.isArray(attFbIds) && attFbIds.length > 0;
     const hasText = !!(text && String(text).length > 0);
     const tasks = [];
@@ -4608,8 +4609,13 @@
     // ⇒ hạn chờ 3 000 < p90 ⇒ 16 ca "no-ACK" OAN (thật ra ACK chỉ chậm hơn 3 s), kéo theo 11 chuỗi
     // kiểm chứng + bắn cứu ⇒ GỬI TRÙNG. Nay trần = p90 × 1,6, kẹp trong [3 000, 6 000]:
     // p90 nhỏ như HAR (256 ms) vẫn 3 000 ms y như cũ; p90 lớn thì nới đúng theo số đo.
-    const ackCeiling = Math.max(3000, Math.min(6000, Math.round(sockAckP90() * 1.6)));
-    const ackWaitMs = Math.min(ackCeiling, Math.max(1200, Math.round(sockAckP90() * 3)));
+    /* [v1.92.48] HAI CỬA SỔ TÁCH RỜI — xem ACK_HOLD_* / ACK_LISTEN_MAX_MS ở trên.
+     *   ackWaitMs   = giữ SLOT = clamp(p90×3, 1 200, 6 000) — GIỐNG HỆT 1.92.47 (tốc độ).
+     *   ackListenMs = giữ CHỖ NHẬN = max(12 000, ackWaitMs + 6 000), trần 30 000 ms.
+     * Lô 10:01: hạn chờ hiệu dụng 3 974 ms nhưng max ACK của chính lô là 7 988 ms ⇒ 340 ca
+     * ≥5 s bị cắt rồi bị coi là no-ACK. Nay chỗ nhận còn sống 12 s ⇒ gói đó vẫn được phân xử. */
+    const ackWaitMs = ackHoldMsFor(sockAckP90());
+    const ackListenMs = ackListenMsFor(ackWaitMs);
     try { if (pageId) pageLastAckWait[pageId] = ackWaitMs; } catch (e0) { /* ignore */ }
     /* ===== SỬA GỐC "MẤT ACK" Ở LÔ LỚN =====
      * Trong _app (@818834) hàm publish() làm đúng thế này:
@@ -4633,18 +4639,40 @@
      */
     let myKey = null;
     let myEntry = null;
+    /* [v1.92.48] ĐÂY LÀ GỐC CỦA "MẤT ACK" (bản trước xoá CHỖ NHẬN ngay khi hết giờ):
+     *
+     *   cũ:  hết ackWaitMs ⇒ clearTimeout + delete PENDING_MESSAGES[myKey]
+     *        ⇒ /ls_resp về sau đó KHÔNG tra được callback (app log "NOT_FOUND_CALLBACK_FOR_RESPONSE")
+     *        ⇒ classify() nhận payload=null ⇒ ⚠ oan ⇒ kiểm chứng ⇒ bắn cứu Ext ⇒ nguồn tin trùng.
+     *   nay: hết ackWaitMs ⇒ chỉ ĐÁNH DẤU ⚠ (resolve timedOut như cũ, hành vi chốt sổ KHÔNG đổi)
+     *        và GIỮ entry thêm tới ackListenMs. Gói về muộn vẫn giao đúng callback ⇒ phân xử
+     *        thật (✅/❌) qua `lateRef` bên dưới — đường CHỈ ĐỌC, không bắn thêm lệnh nào.
+     *        Hết ackListenMs mới dọn: clearTimeout + delete, và đánh dấu `mySilent = true`
+     *        để lần no-ACK này được tính là IM LẶNG THẬT (bằng chứng) thay vì "hết hạn chờ". */
+    let mySilent = false;
+    let lateRef = null; // { resolve } — bơm kết quả ACK về muộn cho classify() chạy lại
+    const lateP = new Promise((resolve) => { lateRef = { resolve }; }); // ACK về SAU hạn chờ giữ slot
     const publishPromise = new Promise((resolve) => {
       let done = false;
       const timer = bgClock.after(ackWaitMs, () => {
         if (done) return;
         done = true;
-        try {
-          if (myKey && helper.PENDING_MESSAGES && helper.PENDING_MESSAGES[myKey] === myEntry) {
-            clearTimeout(myEntry.clearTimeout);
-            delete helper.PENDING_MESSAGES[myKey];
-          }
-        } catch (e0) { /* ignore */ }
+        // KHÔNG xoá entry ở đây (xem chú thích trên) — chỉ đánh ⚠ rồi nghe tiếp tới ackListenMs.
         resolve({ success: false, data: null, timedOut: true });
+        try {
+          bgClock.after(Math.max(0, ackListenMs - ackWaitMs), () => {
+            try {
+              const stillMine = !!(myKey && helper.PENDING_MESSAGES && helper.PENDING_MESSAGES[myKey] === myEntry);
+              // `stillMine` = entry còn nguyên nghĩa là KHÔNG gói nào về trong cả cửa sổ nghe.
+              // Nếu app đã tự dọn (gói về đúng lúc) thì entry không còn ⇒ không kết luận im lặng.
+              if (stillMine) {
+                mySilent = true; // hết cả cửa sổ nghe mà chưa có gói nào ⇒ im lặng THẬT
+                clearTimeout(myEntry.clearTimeout);
+                delete helper.PENDING_MESSAGES[myKey];
+              }
+            } catch (e0) { /* ignore */ }
+          });
+        } catch (e1) { /* ignore */ }
       });
       let publishRet = null;
       try {
@@ -4653,6 +4681,17 @@
         if (rid !== null) {
           myKey = pageId + '_' + rid;
           myEntry = (helper.PENDING_MESSAGES && helper.PENDING_MESSAGES[myKey]) || null;
+          /* [v1.92.48] NGHE MUỘN: app xoá entry + resolve promise của CHÍNH NÓ khi callback chạy.
+           * Ta bọc thêm một lớp CHỈ ĐỌC để bắt đúng trường hợp "đã hết hạn chờ giữ slot nhưng
+           * ACK vẫn về trong cửa sổ nghe": giữ callback gốc, gọi nó như app vẫn gọi, rồi đưa
+           * gói cho lateRef. Không đổi payload, không chặn app, không thêm request. */
+          if (myEntry && typeof myEntry.callback === 'function') {
+            const origCb = myEntry.callback;
+            myEntry.callback = function (resp) {
+              try { if (lateRef && !mySilent) lateRef.resolve(resp); } catch (eL) { /* ignore */ }
+              return origCb(resp);
+            };
+          }
         }
       } catch (ePub) {
         publishRet = null;
@@ -4671,11 +4710,42 @@
           resolve(null);
         });
     });
+    /* ===== [v1.92.48] PHỤC HỒI ACK VỀ MUỘN — CHỈ ĐỌC, KHÔNG BẮN THÊM =====
+     * Chạy khi /ls_resp về sau hạn chờ GIỮ SLOT nhưng còn trong cửa sổ NGHE (tới 30 s).
+     *   • ok       ⇒ tin ĐÃ tới ⇒ hạ ⚠, markDelivered('socket'), chạy side-effect như ACK thường.
+     *                Đây chính là ca mà bản cũ biến thành "no-ACK" ⇒ kiểm chứng ⇒ bù Ext ⇒ TRÙNG.
+     *   • rejected ⇒ FB xác nhận ĐỨT KHOÁT là tin chưa đi ⇒ mở đường bù 1 lần như nhánh
+     *                'rejected' bình thường (an toàn: FB nói chưa gửi). Không có ca này thì
+     *                chốt ❌ và người dùng phải gửi tay.
+     * KHÔNG gọi publish()/POST /messages ở đây. Chỉ có 1 trường hợp gọi mạng: bù của 'rejected'
+     * — đúng hành vi đã có với rejected thường, không phải đường mới. */
+    /* [v1.92.48] PHÂN BIỆT "HẾT HẠN CHỜ GIỮ SLOT" VỚI "IM LẶNG THẬT".
+     * Chỉ loại thứ hai (mySilent: đã hết cả cửa sổ nghe 12 s mà không có gói nào) mới đủ tư cách
+     * làm bằng chứng để tuyên bố "kênh ACK chết". Loại thứ nhất chỉ là chỉ báo ⇒ in log, và
+     * nếu ACK về sau thì đường lateApply đã xử lý (✅) trước khi bất kỳ ai kết luận.
+     * Trong lô 10:01, 101 ca no-ACK đều là loại thứ nhất (chúng bị cắt ở ~4–8 s, ACK thật của
+     * lô đó lên tới 7 988 ms) nên lẽ ra KHÔNG được tính vào pageAckTimeoutRun. */
+    const noteAckWindowOutcome = (pid, silent) => {
+      try {
+        const k = String(pid || '');
+        if (!k) return;
+        if (silent) {
+          pageAckSilentRun[k] = (pageAckSilentRun[k] || 0) + 1;
+          sendDiag.sockAckSilent = (sendDiag.sockAckSilent || 0) + 1;
+        } else {
+          pageAckHoldExpired[k] = (pageAckHoldExpired[k] || 0) + 1;
+          sendDiag.sockAckHoldExpired = (sendDiag.sockAckHoldExpired || 0) + 1;
+        }
+      } catch (e0) { /* ignore */ }
+    };
     // Phân loại kết quả từ gói /ls_resp của FB (dùng chung cho cả đường chờ ACK lẫn đường bắn-nhả)
-    const classify = (g) => {
+    // `lateMode` = gói này về SAU hạn chờ giữ slot (cửa sổ nghe). Khi đó KHÔNG được kết luận
+    // 'noack' cho việc thiếu payload (đã hết hạn chờ từ trước rồi), và phải đi đường phục hồi.
+    const classify = (g, lateMode) => {
       if (!(g && g.payload)) {
         socketNoAckStreak[pageId] = (socketNoAckStreak[pageId] || 0) + 1;
         recordSocketAckOutcome('noack', Date.now() - publishedAt, pageId);
+        noteAckWindowOutcome(pageId, mySilent);
         // Publish ĐÃ được giao cho helper rồi mới mất phản hồi: socket chết lúc này KHÔNG
         // chứng minh được frame chưa đi (FB có thể đã nhận) → 'noack' = không rõ, cấm bù
         // bắn lần 2. 'dead' thật (socket chết TRƯỚC khi publish) đã bị chặn ở đầu hàm.
@@ -4691,6 +4761,7 @@
       const failed = helper.findAllBlockActions(resp.step, 'markOptimisticMessageFailed') || [];
       if (failed.length && !replaced.length) {
         recordSocketAckOutcome('rejected', Date.now() - publishedAt, pageId);
+        if (lateMode && lateApply) lateApply('rejected', Date.now() - publishedAt);
         return { kind: 'rejected' };
       }
       // QUAN TRỌNG: Khi gửi CẢ ẢNH LẪN CHỮ (2 task label "46"), nếu chữ đi được (replaced.length > 0)
@@ -4714,6 +4785,7 @@
         return { kind: 'noack', publishedAt: publishedAt };
       }
       recordSocketAckOutcome('ok', Date.now() - publishedAt, pageId);
+      if (lateMode && lateApply) lateApply('ok', Date.now() - publishedAt);
       return { kind: 'ok' };
     };
     // 🔥 NẤC 2 (v1.71.0): bắn xong NHẢ NGAY — không giữ worker chờ ACK của FB (vốn mất ~2,8s/tin).
@@ -4722,9 +4794,33 @@
       publishPromise
         .then((g) => { try { firedCb(classify(g)); } catch (e) { firedCb({ kind: 'noack', publishedAt: publishedAt }); } })
         .catch(() => firedCb({ kind: 'noack', publishedAt: publishedAt }));
+      /* [v1.92.48] CHỈ ĐỌC — ACK về MUỘN hơn hạn chờ giữ slot nhưng còn trong cửa sổ nghe.
+       * Cũ: chỗ nhận đã bị xoá ⇒ gói này mất ⇒ ⚠ ⇒ kiểm chứng ⇒ BẮN CỨU Ext (101 ca lô 10:01).
+       * Nay: gói vẫn được giao ⇒ nếu là ✅ thì chốt luôn, KHÔNG bắn cứu ⇒ bớt đúng nguồn trùng.
+       * Đường này không gọi publish/POST nào, chỉ markDelivered + side-effect nền như ACK thường. */
+      lateP.then((resp) => {
+        try {
+          if (!resp) return;
+          classify(resp, true);
+        } catch (eL2) {
+          try { sendDiag.sockLateAckErr = (sendDiag.sockLateAckErr || 0) + 1; } catch (eL3) { /* ignore */ } // ⚠ giữ nguyên, KHÔNG bắn lại
+        }
+      });
       return { kind: 'fired' };
     }
     const g = await publishPromise;
+    /* [v1.92.48] Đường KHÔNG bắn-nhả (ảnh bù / lượt bù): kết quả đã trả về cho người gọi ngay
+     * nên KHÔNG phân xử lại ở đây (sẽ đếm ACK hai lần và không đổi được quyết định đã trả).
+     * Chỉ ghi nhận để lần sau có số: nếu gói về muộn thì đó là ca mà bản cũ coi là no-ACK. */
+    if (!mySilent) {
+      lateP.then((resp) => {
+        try {
+          if (!resp) return;
+          sendDiag.sockLateAck = (sendDiag.sockLateAck || 0) + 1;
+          sendDiag.sockLateUnapplied = (sendDiag.sockLateUnapplied || 0) + 1;
+        } catch (e0L) { /* ignore */ }
+      });
+    }
     return classify(g);
   }
 
@@ -4792,6 +4888,38 @@
     }
     ctx = ctx || {};
     if (conv.type === 'comment') return { ok: false, sent: false, error: 'Socket chỉ áp dụng cho inbox' };
+    /* [v1.92.48] ĐĂNG KÝ ĐƯỜNG PHỤC HỒI ACK MUỘN cho ĐÚNG lần publish này.
+     * `socketPublishSend` gọi hàm này ngay khi đã biết request_id. Đường phục hồi CHỈ ĐỌC
+     * (xem chú thích ở lateApply trong socketPublishSend): ok ⇒ markDelivered; rejected ⇒
+     * đi tiếp nhánh bù đã có. KHÔNG publish thêm, KHÔNG POST thêm. */
+    let lateAckClosed = false; // đã có kết quả cho lần bắn này ⇒ ACK muộn không được chạy lại
+    const onLateAck = (kind, latencyMs) => {
+      try {
+        if (lateAckClosed) return;
+        lateAckClosed = true;
+        sendDiag.sockLateAck = (sendDiag.sockLateAck || 0) + 1;
+        if (kind === 'ok') {
+          sendDiag.sockLateOk = (sendDiag.sockLateOk || 0) + 1;
+          const nm0 = conv.name || conv.id;
+          reopenUncertain(conv.id);
+          markDelivered(conv.id, 'socket');
+          if (ctx && ctx.isSocketRetryPass) sockRetryBudgetNote(sockRetryBudgetState, 'saved', 0);
+          try { postSendSideEffects(conv); } catch (ePS) { /* ignore */ }
+          logFailGrouped(nm0, 'ACK về MUỘN sau hạn chờ giữ slot (' + Math.round(latencyMs) + 'ms) — tin ĐÃ tới nơi, tính ✅ Socket'
+            + ' (không bắn cứu ⇒ đây là ca trước đây sinh tin trùng)', '🔎', conv.id);
+          return;
+        }
+        if (kind === 'rejected') {
+          // FB nói ĐỨT KHOÁT tin chưa đi ⇒ bù 1 lần như nhánh rejected bình thường (an toàn).
+          if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+          const nm1 = conv.name || conv.id;
+          sendDiag.sockLateRejected = (sendDiag.sockLateRejected || 0) + 1;
+          logFailGrouped(nm1, 'ACK muộn = FB TỪ CHỐI (' + Math.round(latencyMs) + 'ms sau khi gửi) — tin chưa đi, bù 1 lần', '🔁', conv.id);
+          scheduleBuRetry(conv, text, photo, nm1, 'Socket bị FB từ chối (ACK muộn)', ['socket'],
+            { ambiguous: false, via: 'socket', sentAt: Date.now() - Math.max(0, latencyMs) });
+        }
+      } catch (eLA) { /* đường phục hồi không được làm hỏng gửi */ }
+    };
     const helper = window.__MqttHelper__;
     if (!helper || (typeof helper.sendMessage !== 'function' && typeof helper.publish !== 'function')) {
       return { ok: false, sent: false, error: 'Không thấy __MqttHelper__' };
@@ -5201,7 +5329,8 @@
         const slotStartedPromise = new Promise((resolve) => { notifySlotStarted = resolve; });
         pageLane(() => {
           if (notifySlotStarted) { const fn0 = notifySlotStarted; notifySlotStarted = null; fn0(true); }
-          return socketPublishSend(helper, pageId, gid, text, attFbIds);
+          // [v1.92.48] opts.lateApply: đăng ký đường phục hồi ACK-muộn CHỈ ĐỌC (xem onLateAck)
+          return socketPublishSend(helper, pageId, gid, text, attFbIds, null, { lateApply: onLateAck });
         })
           .then((rawSync) => {
             if (notifySlotStarted) {
@@ -5899,6 +6028,13 @@
   // hạ hẳn sàn (64→32→16) để lane co xuống thật sâu và ACK có cơ hội hồi lại.
   let sockNoAckRun = 0;
   const SOCK_ACK_STORM_RUN = 25;
+  /* [v1.92.48] SÀN LÀN TỐI THIỂU LÚC CHẠY: 32 → 96.
+   * Lô 10:01 sập sàn xuống 32 (09:57:21) rồi 32 → 40 và ghim ở [56×1] tới hết lô.
+   * 32 làn là 1/8 cấu hình 256; đo theo wave: làn 32–40 = 20,8 chat/s, làn 256 = 44,0 chat/s.
+   * Sàn 32 chỉ có nghĩa khi kênh ACK CHẾT THẬT (lúc đó đi Extension chứ không phải Socket),
+   * mà từ 1.92.48 "chết" đòi bằng chứng (xem noteSocketPageLaneOutcome) ⇒ hạ sâu không còn
+   * lý do. Sàn cứng của bộ điều tiết vẫn là SOCKET_LANE_HARD_FLOOR = 16 (không đổi). */
+  const SOCKET_LANE_RUNTIME_FLOOR = 96;
   // [v1.91.86] KÊNH ACK CHẾT THEO PAGE.
   // Bằng chứng lô 20:36–20:38 (11/11): các lô 5–10 chat, mỗi lô chỉ 1 tin đi Socket và
   // tin đó LUÔN mất ACK với độ trễ đúng bằng hạn chờ (8000/8002/8003 ms; lô 68 tin: 20016 ms).
@@ -5909,22 +6045,70 @@
   // [v1.91.87] ĐO ĐỘ TRỄ ACK THẬT ĐỂ BỎ "CHỜ CỨNG".
   // Hạn chờ cũ là hằng số 8000/20000ms do script tự đặt, không phải Pancake bắt chờ.
   // Nay hạn chờ bám theo p90 độ trễ ACK quan sát được: wait = clamp(3 × p90, 2500, mức cũ).
-  const ackLatRing = [];   // 200 mẫu ACK OK gần nhất (ms)
+  /* ===== [v1.92.48] CỬA SỔ NGHE ACK — THÔI TỰ CẮT ACK CỦA CHÍNH MÌNH =====
+   * Số đo lô 10:01 (10 629 chat, 1.92.47): ACK OK/rejected/no-ACK 5 629/1 186/101 ·
+   * bucket <250/250-999/1-2s/2-5s/≥5s = 0/5/3 081/3 389/340 · max 7 988 ms.
+   *   ⇒ p90 THẬT của cả lô ≈ 4 700 ms (tính từ phân bố), trong khi dòng log in
+   *     "ACK p50/p90 1739/2484ms" — vì vòng mẫu chỉ giữ **200 mẫu ≈ 5 giây cuối lô**
+   *     ⇒ ngưỡng và trần chờ bị chỉnh theo ĐUÔI lô chứ không theo cả lô.
+   *   ⇒ trần cứng 6 000 ms < max 7 988 ms ⇒ 340 ca ≥5 s bị cắt NGAY TRONG KHI FB vẫn trả lời.
+   * Bằng chứng HAR (3 HAR có `_webSocketMessages`, ghép request_id):
+   *   batmesss 8/8 · guisot 20/20 · guikhachcu 2/2 frame gửi (type 3) có /ls_resp
+   *   ⇒ **30/30 lệnh gửi đều được FB trả lời**, p50 234/326/474 ms, max 1 531 ms.
+   *   2 frame không khớp đều là `type: 2` (đồng bộ init), không phải lệnh gửi.
+   * ⇒ "no-ACK" ở lô lớn KHÔNG phải FB mất ACK — đó là script tự xoá chỗ nhận
+   *   (`delete helper.PENDING_MESSAGES[myKey]` khi hết hạn chờ) rồi gói về sau không còn
+   *   callback để giao ⇒ classify() nhận payload=null ⇒ ⚠ oan ⇒ kiểm chứng ⇒ bắn cứu 1 lần
+   *   qua Extension (101 ca ở lô trên) = đúng đường sinh tin trùng.
+   * NAY: tách làm HAI cửa sổ — và CHỈ cửa sổ thứ hai đổi.
+   *   • HOLD (ackWaitMs) = thời gian GIỮ SLOT = clamp(p90×3, 1 200, 6 000) **y như 1.92.47**.
+   *     Giữ nguyên vì đây là MẪU SỐ CỦA TỐC ĐỘ: tốc độ = làn ÷ E[giữ]. Đo từ chính lô 10:01
+   *     (bucket 0/5/3 081/3 389/340, lấy trung bình trong bucket) ⇒ E[giữ] 2,62 s.
+   *     Nới hạn chờ (đã cân nhắc và BỎ): 8 000 ms ⇒ E[giữ] 2,72 s ⇒ trần 94 tin/s ở làn 256;
+   *     12 000 ms ⇒ 2,88 s ⇒ 89 tin/s; 30 000 ms ⇒ 3,15 s ⇒ 81 tin/s. Mọi phương án đều ≫
+   *     tốc độ thật của pha khoẻ (46,6 chat/s) nhưng vẫn là ĐÁNH ĐỔI, mà đánh đổi đó KHÔNG
+   *     cần thiết: chỗ nhận ACK không phụ thuộc thời gian giữ slot.
+   *   • LISTEN (giữ entry PENDING) = max(12 000, HOLD + 6 000), trần 30 000 ms = đúng trần
+   *     tự xoá của chính app (`_app` @815747 `let b=3e4`; @819154 `setTimeout(… , b)`).
+   *     Hết HOLD mà ACK chưa về ⇒ vẫn đánh ⚠ **và vẫn nhả slot như cũ** (tốc độ không đổi)
+   *     NHƯNG **không xoá chỗ nhận** ⇒ gói về muộn được phân xử thật (✅/❌) qua đường CHỈ ĐỌC.
+   * Đây là đường ĐỌC, không thêm một lệnh gửi nào ⇒ không thể sinh tin trùng. */
+  const ACK_HOLD_MIN_MS = 1200;     // sàn hạn chờ GIỮ SLOT (giữ nguyên như 1.92.47)
+  const ACK_HOLD_CEIL_MS = 6000;    // trần hạn chờ GIỮ SLOT (giữ nguyên như 1.92.47)
+  const ACK_LISTEN_MAX_MS = 30000;  // = trần tự xoá của app (b=3e4) — nghe tới đây rồi thôi
+  const ACK_LAT_RING_N = 1000;      // [v1.92.48] 200 → 1 000 mẫu: 200 mẫu ≈ 5 s cuối lô
+  const ackLatRing = [];            // N mẫu ACK gần nhất (ms) — PHẢI đủ dài để phủ cả lô
   function noteAckLatency(ms) {
     const v = Math.round(Number(ms) || 0);
     if (v <= 0) return;
     ackLatRing.push(v);
-    if (ackLatRing.length > 200) ackLatRing.shift();
+    if (ackLatRing.length > ACK_LAT_RING_N) ackLatRing.shift();
+  }
+  /** Phân vị của mảng ĐO ĐƯỢC (không sắp xếp mảng gốc). pct = 0…1 */
+  function latencyPct(arr, pct) {
+    const a = (arr || []).slice().sort((x, y) => x - y);
+    if (!a.length) return 0;
+    const i = Math.min(a.length - 1, Math.max(0, Math.floor(a.length * pct)));
+    return a[i];
+  }
+  /** Hạn chờ GIỮ SLOT theo p90 — GIỐNG HỆT 1.92.47 (clamp(p90×3, 1200, 6000)).
+   *  Giữ nguyên vì đây là MẪU SỐ CỦA TỐC ĐỘ (lane ÷ hạn chờ giữ slot), không phải công cụ
+   *  chống mất ACK. Chống mất ACK là việc của ackListenMsFor() bên dưới. */
+  function ackHoldMsFor(p90) {
+    const v = Math.round(Number(p90) || 0) || 3000;
+    return Math.max(ACK_HOLD_MIN_MS, Math.min(ACK_HOLD_CEIL_MS, Math.round(v * 3)));
   }
   function sockAckP90() {
     if (ackLatRing.length < 20) return 3000; // chưa đủ mẫu ⇒ 3s (≈2× ACK TB đã đo)
-    const a = ackLatRing.slice().sort((x, y) => x - y);
-    return a[Math.min(a.length - 1, Math.floor(a.length * 0.9))];
+    return latencyPct(ackLatRing, 0.9);
+  }
+  function sockAckP95() {
+    if (ackLatRing.length < 20) return 0; // chưa đủ mẫu ⇒ chưa dùng ngưỡng thích ứng
+    return latencyPct(ackLatRing, 0.95);
   }
   function sockAckP50() {
     if (ackLatRing.length < 20) return 0; // chưa đủ mẫu ⇒ chưa dùng ngưỡng thích ứng
-    const a = ackLatRing.slice().sort((x, y) => x - y);
-    return a[Math.min(a.length - 1, Math.floor(a.length * 0.5))];
+    return latencyPct(ackLatRing, 0.5);
   }
   /* [v1.92.16] NGƯỠNG "ACK NHANH" PHẢI BÁM SỐ ĐO, KHÔNG ĐƯỢC LÀ HẰNG 2 500 ms.
    * Lô 19:52 (11 844 chat, 1.92.15): ACK TB 3 163 ms · 9 668/10 688 ACK rơi vào 2–5 s.
@@ -5944,12 +6128,37 @@
    * đó 0 ✅, 8,2 chat/s, 102 ca Ext quá hạn. ACK của lô này p50 2 194 ms — vẫn "nhanh" theo
    * ngưỡng cũ (p50×1,2 = 2 633 ms) nên +8 chạy liên tục. Nay chỉ nới khi p50 < 1 800 ms
    * (bằng chứng: 3 230 chat đầu chạy tốt ở 256 làn ≈ 116 chat/s với p50 2,2 s ⇒ 256 là ĐỦ;
-   * nới thêm chỉ đổi lấy nguy cơ dồn ACK). Số lần bỏ nới in ở dòng 📡 SOCKET. */
-  const SOCK_RAMP_P50_MAX_MS = 1800;
+   * nới thêm chỉ đổi lấy nguy cơ dồn ACK). Số lần bỏ nới in ở dòng 📡 SOCKET.
+   *
+   * [v1.92.48] CANH ĐUÔI, KHÔNG CANH TRUNG VỊ — số đo lô 10:01 chứng minh p50 là chỉ báo SAI:
+   *   p50 = 1 739 ms (LỌT cổng 1 800) nhưng p95 ≈ 5 000 ms và max 7 988 ms.
+   *   Kết quả: làn leo 256 → 296 → 312 → 320 → 384 trong 60 s; rồi 09:57:19 ba ca no-ACK
+   *   ⇒ tuyên bố ACK chết ⇒ né Socket 7 665 ca ⇒ lô rơi 46,6 → 20,8 chat/s trong 220 s.
+   *   Đo theo wave của chính lô đó (thời gian qua cổng): làn 256 = 44,0 chat/s · 312–320 = 37,7 ·
+   *   384 = 33,6 ⇒ nới làn KHÔNG nhanh hơn, chỉ tăng nguy cơ dồn ACK.
+   * Nay nới chỉ khi CẢ HAI: p95 ≤ 2 200 ms VÀ 50 lượt ACK gần nhất không có no-ACK nào.
+   * (docs §53: làn 384 vẫn TỐT khi p95 thấp — nên đây là điều kiện, không phải trần cứng.) */
+  const SOCK_RAMP_P95_MAX_MS = 2200;
+  const SOCK_RAMP_QUIET_N = 50;
   let sockRampSkipped = 0;
+  let sockRampSkippedTail = 0;
+  let sockRampSkippedNoAck = 0;
+  const sockRecentOutcome = []; // 'ok' | 'rejected' | 'noack' — cửa sổ ngắn để canh no-ACK gần đây
+  function noteRecentOutcome(kind) {
+    if (kind !== 'ok' && kind !== 'rejected' && kind !== 'noack') return;
+    sockRecentOutcome.push(kind);
+    if (sockRecentOutcome.length > SOCK_RAMP_QUIET_N) sockRecentOutcome.shift();
+  }
+  function sockRecentNoAckCount() {
+    let n = 0;
+    for (let i = 0; i < sockRecentOutcome.length; i++) if (sockRecentOutcome[i] === 'noack') n++;
+    return n;
+  }
   function rampAllowed() {
-    const p50 = sockAckP50();
-    if (p50 && p50 > SOCK_RAMP_P50_MAX_MS) { sockRampSkipped++; return false; }
+    const p95 = sockAckP95();
+    if (p95 && p95 > SOCK_RAMP_P95_MAX_MS) { sockRampSkipped++; sockRampSkippedTail++; return false; }
+    const noack = sockRecentNoAckCount();
+    if (noack >= 2) { sockRampSkipped++; sockRampSkippedNoAck++; return false; }
     return true;
   }
   // [v1.91.92] CHẾ ĐỘ GỬI TOÀN BỘ QUA HTTP — API trước, Ext dự phòng (KHÔNG dùng Socket).
@@ -5989,6 +6198,21 @@
   try { window.__botfakeForceExt__ = setForceExtMode; } catch (e) { /* ignore */ }
   const pageLastAckWait = {};   // pageId → hạn chờ vừa dùng cho lần publish gần nhất
   const pageAckTimeoutRun = {}; // pageId → số lần no-ACK đủ hạn chờ liên tiếp
+  /* [v1.92.48] "ACK CHẾT" PHẢI CÓ BẰNG CHỨNG, KHÔNG PHẢI 3 LẦN HẾT HẠN CHỜ.
+   * Lô 10:01: 09:57:19 ba ca no-ACK liên tiếp ⇒ tuyên bố ACK CHẾT ⇒ né Socket 7 665 ca
+   * (log `chọn kênh: Socket bị né (ACK chết) 7665`) ⇒ 220 s ở 20,8 chat/s.
+   * Nhưng 84/101 ca no-ACK của lô đó nổ TRONG CÙNG MỘT GIÂY (09:57:21) — chúng không phải
+   * kênh chết, chúng là cùng một cú dồn (làn 384 + hạn chờ 3 974 ms < p95 5 000 ms) bị cắt
+   * cùng lúc. "3 lần liên tiếp" vì thế bị thoả một cách tầm thường bởi 8 % frame của một giây.
+   * Nay mỗi page giữ HAI bộ đếm:
+   *   • `pageAckHoldExpired` — hết hạn chờ GIỮ SLOT nhưng ACK có thể còn về trong cửa sổ nghe
+   *     30 s ⇒ CHỈ là chỉ báo, KHÔNG BAO GIỜ dùng để tuyên bố chết.
+   *   • `pageAckTimeoutRun` — chỉ tăng khi no-ACK là **IM LẶNG THẬT**: cửa sổ nghe (LISTEN,
+   *     tới 30 000 ms = đúng trần tự xoá của app) đã hết mà không có gói nào. Đây là bằng
+   *     chứng, không phải suy diễn. Ngưỡng 5 lần liên tiếp. */
+  const pageAckHoldExpired = {}; // pageId → số ca hết hạn chờ giữ slot (chỉ để in log)
+  const pageAckSilentRun = {};   // pageId → số ca IM LẶNG THẬT liên tiếp (bằng chứng)
+  const ACK_DEAD_PROOF_RUN = 5;  // [v1.92.48] 5 ca im lặng thật liên tiếp ⇒ mới dám tuyên bố chết
   const pageAckDeadAt = {};     // pageId → thời điểm đánh dấu kênh ACK chết
   // [v1.91.88] Lô 08:19 (11/11): 74 tin đi Socket, ACK OK = 0, no-ACK = 74, cả 74 phải bù Ext.
   // 77 chat được PHÁT trong 779ms ⇒ mọi tin đi trước khi ACK đầu tiên kịp mất, nên trong cùng
@@ -6250,6 +6474,7 @@
       if (!lane) return;
       const ctl = socketPageLaneCtl[pid] || (socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0, noAckStreak: 0 });
       const ms = Math.max(0, Number(latencyMs) || 0);
+      noteRecentOutcome(kind); // [v1.92.48] cửa sổ 50 kết quả gần nhất — điều kiện nới làn (rampAllowed)
       /* [v1.92.18] MẪU ĐỘ TRỄ ACK BỊ CẮT CỤT — SỬA GỐC.
        * noteAckLatency() cũ chỉ chạy TRONG nhánh "ACK nhanh" (ms < fastAckMs) ⇒ mọi ACK chậm
        * hơn ngưỡng bị VỨT khỏi vòng mẫu. Vòng mẫu vì thế chỉ toàn ca nhanh ⇒ p50 thấp ⇒ ngưỡng
@@ -6263,7 +6488,7 @@
         ctl.slowAck = 0;
         ctl.noAckStreak = 0;
         sockNoAckRun = 0; // ACK hồi ⇒ reset cầu dao
-        if (pid) { delete pageAckTimeoutRun[pid]; if (pageAckDeadAt[pid]) { socketPickDiag.probeOk++; delete pageAckDeadProbeAt[pid]; } delete pageAckDeadAt[pid]; }
+        if (pid) { delete pageAckTimeoutRun[pid]; delete pageAckHoldExpired[pid]; delete pageAckSilentRun[pid]; if (pageAckDeadAt[pid]) { socketPickDiag.probeOk++; delete pageAckDeadProbeAt[pid]; } delete pageAckDeadAt[pid]; }
         if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX && rampAllowed()) {
           ctl.fastOk = 0;
           const prevLimit = lane.getLimit();
@@ -6287,9 +6512,12 @@
         ctl.noAckStreak++;
         // [v1.91.87] Trễ ĐÚNG BẰNG hạn chờ vừa áp dụng ⇒ bộ đếm giờ đã nổ, tức KHÔNG có
         // phản hồi nào ⇒ một lần là đủ kết luận kênh ACK chết (thay vì 2 lần như 1.91.86).
-        const lastWait = (pid && pageLastAckWait[pid]) || 0;
-        const hitCeiling = lastWait > 0 && ms >= lastWait * 0.95;
-        if ((ms >= 6000 || hitCeiling) && pid) {
+        /* [v1.92.48] CHỈ "IM LẶNG THẬT" MỚI ĐẾM VÀO pageAckTimeoutRun.
+         * Bản cũ đếm mọi ca có `ms >= 6000` hoặc `ms >= 0,95 × hạn chờ` — mà `hitCeiling`
+         * gần như LUÔN đúng vì `ms` là thời gian bộ đếm nổ. Hệ quả lô 10:01: 84 ca nổ trong
+         * cùng một giây 09:57:21 ⇒ 3 lần "liên tiếp" ⇒ tuyên bố ACK chết ⇒ né Socket 7 665 ca.
+         * Nay: chỉ đếm khi `mySilent` (đã hết cả cửa sổ nghe 12 s, không một gói nào). */
+        if (mySilent && pid) {
           pageAckTimeoutRun[pid] = (pageAckTimeoutRun[pid] || 0) + 1;
           // [v1.92.14] need 1 → 2. `hitCeiling` gần như LUÔN đúng (bộ đếm giờ nổ đúng hạn chờ
           // nên ms ≈ lastWait), nghĩa là chỉ MỘT ACK trượt là page bị tuyên bố chết 10 phút.
@@ -6297,25 +6525,26 @@
           // minh được kênh ACK chết (mọi ACK OK đều xoá bộ đếm này). Đòi 2 ca LIÊN TIẾP: đổi lại
           // chỉ tốn thêm ~3s trước khi kết luận, nhưng không còn cảnh "trượt một ca ⇒ cả lô 9 455
           // chat rơi vào Extension".
-          const need = 3; // [v1.92.24] 2 → 3: hạn chờ 3 s < p90 3 086 ms của lô 09:46 làm 2 ca trượt liên tiếp là chuyện thường ⇒ tuyên bố "chết" oan rồi đẩy cả page sang Extension
+          const need = ACK_DEAD_PROOF_RUN; // [v1.92.48] 3 → 5 VÀ đổi đơn vị đếm: xem pageAckSilentRun
           if (pageAckTimeoutRun[pid] >= need && !isPageAckDead(pid)) {
             pageAckDeadAt[pid] = Date.now();
             try { if (lane.getLimit() > socketLaneFloor) lane.setLimit(socketLaneFloor); } catch (e0) { /* ignore */ }
-            logLine('🧯 Socket ACK của page ' + pid + ' coi như CHẾT (3 lần no-ACK liên tiếp đủ hạn chờ ~'
-              + Math.round(ms / 1000) + 's) — bỏ Socket khỏi thứ tự làn, đi Extension/API cho tới khi hồi (dò lại sau '
+            logLine('🧯 Socket ACK của page ' + pid + ' coi như CHẾT (' + need
+              + ' lần IM LẶNG THẬT liên tiếp — hết cả cửa sổ nghe ' + Math.round(ms / 1000) + 's mà không có gói nào)'
+              + ' — bỏ Socket khỏi thứ tự làn, đi Extension/API cho tới khi hồi (dò lại sau '
               + Math.round(SOCK_DEAD_PROBE_MS / 1000) + 's hoặc 20 ca bị né)');
           }
         }
         // [v1.91.85] Cầu dao toàn cục: mất ACK liên tục ⇒ hạ SÀN socket (không chỉ hạ limit).
         sockNoAckRun++;
-        if (sockNoAckRun >= SOCK_ACK_STORM_RUN && socketLaneFloor > 32) {
+        if (sockNoAckRun >= SOCK_ACK_STORM_RUN && socketLaneFloor > SOCKET_LANE_RUNTIME_FLOOR) {
           sockNoAckRun = 0;
           /* [v1.92.43] SÀN KHÔNG XUỐNG DƯỚI 32 + KHÔNG ĐƯỢC GIỮ TỚI HẾT PHIÊN.
            * Log 16:52 (7 073 chat): '🧯 Mất ACK liên tục 25 tin — hạ SÀN socket xuống 32 rồi 16/page'
            * chỉ 2 dòng, sau đó `Socket/page limits cuối [16×1]` và cả lô phát 17,75 tin/s trong khi
            * làn cho phép 384. 16 làn là **1/24** cấu hình ⇒ tự bóp cả lô vì 25 ca no-ACK.
            * Nay: sàn thấp nhất 32, và ACK hồi thì nâng lại NGAY (xem nhánh 'ok' bên dưới). */
-          socketLaneFloor = Math.max(32, Math.floor(socketLaneFloor / 2));
+          socketLaneFloor = Math.max(SOCKET_LANE_RUNTIME_FLOOR, Math.floor(socketLaneFloor / 2));
           try { lane.setLimit(Math.max(socketLaneFloor, Math.floor(lane.getLimit() * 0.8))); } catch (e0) { /* ignore */ }
           logLine('🧯 Mất ACK liên tục ' + SOCK_ACK_STORM_RUN + ' tin — hạ SÀN socket xuống '
             + socketLaneFloor + '/page (ACK hồi 20 nhịp liền là nâng lại ' + SOCKET_LANE_MIN + ')');
@@ -6351,13 +6580,21 @@
           if (kind === 'ok') ctl.fastOk = 0;
           ctl.noAckStreak = 0;
         }
-        if (ms >= 6000) {
+        /* [v1.92.48] PHẠT "ACK CHẬM" PHẢI BÁM HẠN CHỜ ĐANG DÙNG, KHÔNG PHẢI HẰNG 6 000 ms.
+         * Lô 10:01: trần chờ hiệu dụng = clamp(3000, p90×1,6 = 3 974, 6000) = 3 974 ms, nhưng
+         * ngưỡng phạt vẫn là 6 000 ms ⇒ một ACK 4 100 ms (bình thường với chính page đó) bị
+         * tính là "chậm"; 4 lần liên tiếp là hạ làn ×0,8 (log 09:57:20: 384 → 64 = 8 lần hạ).
+         * Nay: ngưỡng phạt = hạn chờ vừa áp dụng (pageLastAckWait) + 50 % biên, sàn 3 000 ms.
+         * Phạt làn là ĐÚNG khi ACK vượt hẳn cửa sổ nghe của chính nó; sai khi nó chỉ vượt một
+         * hằng số do người viết chọn. Hệ số hạ 0,8 → 0,85 và sàn 32 → SOCKET_LANE_RUNTIME_FLOOR. */
+        const slowAckMs = Math.max(3000, Math.round(((pid && pageLastAckWait[pid]) || 0) * 1.5));
+        if (ms >= slowAckMs) {
           ctl.slowAck++;
           if (ctl.slowAck >= SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD && lane.getLimit() > socketLaneFloor) {
             ctl.slowAck = 0;
             const prevLimit = lane.getLimit();
-            const next = lane.setLimit(Math.max(socketLaneFloor, Math.floor(prevLimit * 0.8)));
-            logLaneDrop(pid, prevLimit, next, 'Socket ACK chậm liên tiếp ' + SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD + ' lần');
+            const next = lane.setLimit(Math.max(socketLaneFloor, Math.floor(prevLimit * 0.85)));
+            logLaneDrop(pid, prevLimit, next, 'Socket ACK chậm liên tiếp ' + SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD + ' lần (> ' + slowAckMs + 'ms)');
           }
         } else {
           ctl.slowAck = 0;
@@ -7820,6 +8057,15 @@
   const buStats = { ok: 0, cancelled: 0, byWhy: {} };
   // Đếm các lần BẮN LẠI cùng nội dung ngay trong 1 lần gửi Socket (retry khi FB báo
   // rejected + bắn lại riêng ảnh) — in vào TỔNG HỢP để đối chiếu với phản ánh lặp của khách
+  /** Cửa sổ NGHE ACK (giữ entry PENDING lại) — phủ max ACK đã đo 7 988 ms + biên đồng hồ.
+   *  Trần 30 000 ms = đúng trần tự xoá của app (`_app` @815747 b=3e4).
+   *  [v1.92.48] Khai báo SỚM (trước sendDiag) để dòng log 📡 dùng được — các hằng số ACK_LISTEN_*
+   *  nằm trong cùng scope, không có TDZ. */
+  function ackListenMsFor(holdMs) {
+    const h0 = Math.round(Number(holdMs) || 0) || 1200;
+    const h = Math.min(h0, ACK_LISTEN_MAX_MS); // không bao giờ vượt trần tự xoá của app
+    return Math.min(ACK_LISTEN_MAX_MS, Math.max(h, Math.max(h + 6000, 12000)));
+  }
   const sendDiag = {
     sockRetry: 0, sockRetryRecovered: 0, sockRetryRejected: 0, sockRetryOther: 0, photoRetry: 0,
     recipientUnavailable: 0,
@@ -7832,6 +8078,11 @@
     socketAckOk: 0, socketAckRejected: 0, socketNoAck: 0,
     socketAckMsTotal: 0, socketAckMsMax: 0,
     socketAckLt250: 0, socketAck250To999: 0, socketAck1To2s: 0, socketAck2To5s: 0, socketAckGte5s: 0,
+    // [v1.92.48] TÁCH "CẮT ACK" KHỎI "IM LẶNG THẬT" — tiêu chí nghiệm thu của lần chạy sau:
+    //   sockAckHoldExpired phải về 0 khi ACK thật đang về; sockAckLateOk là số ca được CỨU
+    //   (␣→✅) nhờ nghe muộn ⇒ mỗi ca ở đây là MỘT TIN KHÔNG BỊ TRÙNG.
+    sockAckHoldExpired: 0, sockAckSilent: 0, sockLateAck: 0, sockLateOk: 0, sockLateRejected: 0,
+    sockLateAckErr: 0, sockLateUnapplied: 0,
     apiQueued: 0, apiStarted: 0, apiFetchAttempts: 0, apiSuccess: 0, apiRejected: 0, apiUnknown: 0,
     api429: 0, api429Retries: 0, apiCancelled: 0, apiFallback: 0,
     apiQueueWaitMsTotal: 0, apiQueueWaitMsMax: 0, apiFetchMsTotal: 0, apiFetchMsMax: 0,
@@ -8428,6 +8679,16 @@
           + sendDiag.sockRetryRejected + ' · khác ' + sendDiag.sockRetryOther           + ' · retry ảnh ' + sendDiag.photoRetry
           + ' · bỏ thử lần 2 (ngân sách) ' + sendDiag.sockRetryBudgetSkipped
           + ' · khách không nhận được ' + sendDiag.recipientUnavailable + ' (chỉ đếm, không lưu)');
+        /* [v1.92.48] Dòng riêng cho CỬA SỔ NGHE ACK — đây là dòng để nghiệm thu lần chạy sau.
+         * Đọc: hold-expired > 0 mà lateOk = 0 ⇒ hạn chờ giữ slot vẫn đang cắt (nên xem lại
+         * p90/p95); lateOk > 0 ⇒ cửa sổ nghe đã cứu được đúng số tin trước đây bị bù Ext oan. */
+        logLine('🔔 CỬA SỔ NGHE ACK: giữ slot ' + ackHoldMsFor(sockAckP90()) + 'ms · nghe ' + ackListenMsFor(ackHoldMsFor(sockAckP90()))
+          + 'ms · hết hạn chờ (còn nghe tiếp) ' + (sendDiag.sockAckHoldExpired || 0)
+          + ' · im lặng THẬT hết cửa sổ ' + (sendDiag.sockAckSilent || 0)
+          + ' · ACK về MUỘN đã phân xử ' + (sendDiag.sockLateAck || 0)
+          + ' (trong đó ✅ ' + (sendDiag.sockLateOk || 0) + ' · FB từ chối ' + (sendDiag.sockLateRejected || 0) + ')'
+          + ' · lỗi xử lý muộn ' + (sendDiag.sockLateAckErr || 0)
+          + ' · p90/p95 ' + sockAckP90() + '/' + (sockAckP95() || 0) + 'ms (' + ackLatRing.length + ' mẫu)');
         logLine('🌐 API NỀN: queued(nền)/started(nền+đồng bộ)/fetch ' + sendDiag.apiQueued + '/' + sendDiag.apiStarted + '/' + sendDiag.apiFetchAttempts
           + ' · OK/rejected/không rõ ' + sendDiag.apiSuccess + '/' + sendDiag.apiRejected + '/' + sendDiag.apiUnknown
           + ' · HTTP status [' + apiStatuses + '] · 429/retry ' + sendDiag.api429 + '/' + sendDiag.api429Retries
@@ -8449,7 +8710,8 @@
           + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
           + ' · Ext p90 ' + (extLatP90() || 0) + 'ms → timeout ' + extTimeoutMs() + 'ms'
           + ' · ACK p50/p90 ' + (sockAckP50() || 0) + '/' + sockAckP90() + 'ms → ngưỡng nhanh ' + fastAckMs() + 'ms'
-          + ' · bỏ nới lane (p50 > ' + SOCK_RAMP_P50_MAX_MS + 'ms) ' + sockRampSkipped + ' lần'
+          + ' · bỏ nới lane ' + sockRampSkipped + ' lần (đuôi p95 > ' + SOCK_RAMP_P95_MAX_MS + 'ms: '
+          + sockRampSkippedTail + ' · có no-ACK trong ' + SOCK_RAMP_QUIET_N + ' ca gần nhất: ' + sockRampSkippedNoAck + ')'
           + ' · can_inbox=false ' + ((sendDiag && sendDiag.canInboxFalse) || 0) + '/' + ((sendDiag && sendDiag.canInboxSeen) || 0)
            + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
            + ' · chờ dò ngắn (server nói không có gid) ' + (gidStats.shortNoGidWait || 0) + ' ca'
@@ -9065,12 +9327,25 @@
    *   'absent' → chứng minh vắng mặt (hội thoại KHÔNG hề đổi sau lúc gửi ≥ 30 s) ⇒ bù an toàn;
    *   'unknown'→ không chứng minh được ⇒ bù như cũ (ưu tiên KHÔNG SÓT, giữ nguyên hành vi).
    * Toàn bộ chạy ở buProbeLane + bgClock, KHÔNG giữ lane gửi ⇒ tốc độ lô không đổi. */
-  const BU_PROOF_WAIT_MS = 10000;   // phải chờ đủ mốc này kể từ lúc gửi rồi mới dám kết luận "vắng mặt"
+  /* [v1.92.48] 10 000 → BU_PROOF_NOT_BEFORE_MS: phải đứng SAU cửa sổ nghe ACK (12 000 ms).
+   * Đây là "mức 9 chỗ" (mức C) đã được duyệt: cổng không được phán 'absent' khi ACK ✅ còn
+   * có thể về, vì phán sớm ⇒ bù Ext ⇒ khách nhận 2 tin. Điều kiện chỉ CHẶT HƠN, không nới. */
+  const BU_PROOF_WAIT_MS = 14000;   // = BU_PROOF_NOT_BEFORE_MS (phải khai báo cùng trị số)
   const BU_PROOF_STALE_MS = 30000;  // hội thoại phải im ≥ 30 s trước lúc gửi (dư sức vượt độ trễ 10 s)
+  /* [v1.92.48] CỔNG CHỨNG MINH VẮNG MẶT PHẢI ĐỨNG SAU CỬA SỔ NGHE ACK — nếu không nó là
+   * ĐƯỜNG SINH TIN TRÙNG DUY NHẤT khi ta vừa nới cửa sổ nghe.
+   * Lô 10:01: 101 ca no-ACK ⇒ 101 lần "chứng minh vắng mặt" ⇒ 101 ca bù Ext (log
+   * "bù THÀNH CÔNG qua Extension" 101). Với 1.92.48, cửa sổ nghe là 12 000 ms, mà cổng chỉ
+   * chờ `BU_PROOF_WAIT_MS = 14 000` ⇒ cổng có thể phán 'absent' khi ACK ✅ vẫn đang trên đường
+   * về ⇒ bù Ext ⇒ khách nhận 2 tin. Nay: KHÔNG phán 'absent' trước `sentAt + BU_PROOF_NOT_BEFORE_MS`
+   * (= 14 000 ms > cửa sổ nghe 12 000 ms + 2 000 ms biên đồng hồ). Quá mốc đó ⇒ 'unknown'.
+   * Đây là điều kiện CHẶT HƠN (bớt bù), không bao giờ làm mất tin: ca 'unknown' giữ ⚠ + vào
+   * danh sách gửi tay như cũ. */
+  const BU_PROOF_NOT_BEFORE_MS = 14000; // > cửa sổ nghe ACK (12 000) + 2 000 ms biên đồng hồ
   const buProofCache = new Map();   // convId|mốc → { at, promise } — 1 chat chỉ chứng minh 1 lần
   const buProbeLane = makeLane(96); // [v1.92.43b] 32 → 96: cùng lý do trên, đọc lịch sử rất rẻ
 
-  function absenceVerdict(convs, convId, pageId, psid, want, sentAt, late) {
+  function absenceVerdict(convs, convId, pageId, psid, want, sentAt, late, lateAtMs) {
     if (!Array.isArray(convs) || !convs.length) return 'unknown';
     if (snippetVerdict(convs, convId, pageId, psid, want, sentAt) === 'yes') return 'yes';
     if (!late) return 'unknown'; // dò sớm: "chưa thấy" KHÔNG có nghĩa là "chưa đi" (trễ 7–10 s)
@@ -9093,6 +9368,8 @@
     const t = msgTimeMs(hit.updated_at);
     if (!t || isNaN(t)) return 'unknown';
     if (t >= at + skew - BU_PROOF_STALE_MS) return 'unknown'; // hội thoại vừa động ⇒ không dám kết luận
+    // [v1.92.48] Không phán "vắng mặt" khi cửa sổ nghe ACK còn đang mở (xem BU_PROOF_NOT_BEFORE_MS)
+    if (!(Number(lateAtMs) >= at + BU_PROOF_NOT_BEFORE_MS)) return 'unknown';
     return 'absent';
   }
 
@@ -9105,7 +9382,8 @@
       const res = await buProbeLane(() => fetchJson(url, 1, { timeoutMs: 8000 }));
       if (!res || !res.ok || !res.data || res.data.success === false) return 'unknown';
       const convs = res.data.conversations || (res.data.data && res.data.data.conversations) || [];
-      const v = absenceVerdict(convs, convId, pageId, psid, want, sentAtMs, late);
+      // [v1.92.48] truyền cả MỐC ĐỌC THẬT của lần dò này để cổng không phán sớm
+      const v = absenceVerdict(convs, convId, pageId, psid, want, sentAtMs, late, Date.now());
       if (v === 'yes') return v;
       // [v1.92.44] ca có ảnh: chữ ngắn/không khớp được vẫn kết luận được nếu hội thoại vừa động
       if (hasPhoto && photoMovedVerdict(convs, convId, pageId, psid, sentAtMs) === 'yes') return 'yes';
@@ -9317,7 +9595,7 @@
          * Socket bắn → không có ACK → đọc lịch sử 3 lần không thấy → theo luật 1.92.24/25 thì
          * GIỮ ⚠ vĩnh viễn: khách không nhận được gì, script cũng không cứu, người dùng phải
          * gửi tay. Nay đọc thêm **CỔNG CHỨNG MINH VẮNG MẶT** — đúng cổng đang dùng trước mỗi lần
-         * bù: dò MUỘN (≥ BU_PROOF_WAIT_MS = 10 s sau lúc gửi) + hội thoại phải IM ≥ 30 s và
+         * bù: dò MUỘN (≥ BU_PROOF_WAIT_MS = 14 s sau lúc gửi) + hội thoại phải IM ≥ 30 s và
          * không đổi so với lúc gửi. Chỉ khi đó mới dám kết luận "tin chưa đi" ⇒ GỬI CỨU 1 LẦN
          * qua kênh KHÁC (Extension), rồi khoá `sockVerifyFired` để không cứu vòng 2.
          * Không chứng minh được ⇒ vẫn giữ ⚠ và đưa vào DANH SÁCH GỬI TAY (không im lặng nữa). */
@@ -9994,6 +10272,13 @@
       });
     } catch (eNm) { /* ignore */ }
     try { deadRecheckQueue.length = 0; } catch (eDq) { /* ignore */ }
+    // [v1.92.48] sổ ACK phải tính lại từ đầu mỗi lượt (tránh mang "im lặng" của lô trước sang)
+    try {
+      sockRecentOutcome.length = 0;
+      sockRampSkipped = 0; sockRampSkippedTail = 0; sockRampSkippedNoAck = 0;
+      Object.keys(pageAckSilentRun).forEach((k) => { delete pageAckSilentRun[k]; });
+      Object.keys(pageAckHoldExpired).forEach((k) => { delete pageAckHoldExpired[k]; });
+    } catch (eAckRing) { /* ignore */ }
     // [v1.92.35] LÀN SOCKET KHÔNG ĐƯỢC MANG TRẦN CỦA LÔ TRƯỚC.
     // Lô 14:23 kết thúc ở [384×1]; lô 14:28 mở màn đã `lane 384×1` dù ACK p50 của lô trước là
     // 2 449 ms. Vì limit đã bằng trần nên điều kiện `getLimit() < SOCKET_LANE_MAX` sai ngay từ
@@ -10004,8 +10289,10 @@
     try {
       const LANE_CARRY_CLAMP = true;
       if (LANE_CARRY_CLAMP) {
-        const p50Prev = sockAckP50();
-        const capStart = (!p50Prev || p50Prev > SOCK_RAMP_P50_MAX_MS) ? BUS_PARALLEL_SOCKET : SOCKET_LANE_MAX;
+        /* [v1.92.48] CANH ĐUÔI p95, KHÔNG CANH p50 — cùng lý do như rampAllowed().
+         * Lô 10:01 mở màn ở 256 (đúng) nhưng lại leo lên 384 vì p50 1 739 ms lọt cổng 1 800. */
+        const p95Prev = sockAckP95();
+        const capStart = (!p95Prev || p95Prev > SOCK_RAMP_P95_MAX_MS) ? BUS_PARALLEL_SOCKET : SOCKET_LANE_MAX;
         const clamped = [];
         Object.keys(pageSocketLanes).forEach((pid) => {
           const lane = pageSocketLanes[pid];
@@ -10015,7 +10302,7 @@
         });
         if (clamped.length) {
           logLine('🐢 Làn Socket mang từ lô trước bị hạ về ' + capStart + ': ' + clamped.join(' · ')
-            + ' — ' + (p50Prev ? ('ACK p50 lô trước ' + p50Prev + 'ms > ' + SOCK_RAMP_P50_MAX_MS + 'ms')
+            + ' — ' + (p95Prev ? ('ACK p95 lô trước ' + p95Prev + 'ms > ' + SOCK_RAMP_P95_MAX_MS + 'ms')
               : 'chưa đủ mẫu ACK')
             + ' ⇒ lô mới khởi động ở mức an toàn, ACK nhanh thì lane tự leo lại.');
         }
