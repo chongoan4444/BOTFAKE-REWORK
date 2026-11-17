@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.61-w200.107
+// @version      1.92.62-w200.108
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.61-W200.107'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.62-W200.108'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6364,19 +6364,43 @@
    *   st.lost = số ca chứng minh được hội thoại KHÔNG có tin sau khi bắn Socket
    * Luật (tự hồi, không cần TTL): một lần giao được ⇒ xoá sạch lost. Ban chỉ khi lost ≥ 2 liên
    * tiếp mà không có lần nào tới, hoặc (ACK chết + đã có ≥1 lần chứng minh mất tin). */
-  const sockRoute = {}; // pageId → { sent, dlv, lost, probeAt }
+  /* ═══ [v1.92.62] SỬA LỖI MẤT TIN: "KHÁCH VẮNG MẶT" TỪNG BỊ TÍNH LÀ "SOCKET MẤT TIN" ═══
+   * Log 19:00:54 (lô 8 518 chat): `Socket bị né (mất tin 774 · ACK chết 0) 774` — tức 774 chat
+   * bị đẩy KHỎI làn Socket. Nhưng CẢ FILE chỉ có **5** ca thật sự `chứng minh VẮNG MẶT`, còn
+   * 414 ca là `bù Extension không được` và 13 ca `Bù OK`.
+   * Gốc: `proveAbsentBeforeBu()` trả `'absent'` khi **hội thoại không đổi sau lúc gửi**. Nhưng
+   * "không đổi" KHÔNG phải bằng chứng về Socket — nó là định nghĩa của **khách vắng mặt**, đúng
+   * nhóm FB từ chối (log: 4 624 ca `FB từ chối`). Hệ quả dây chuyền:
+   *   lost ≥ 2  ⇒  pageSocketUsable() = false  ⇒  cả page bị né Socket  ⇒  dồn sang Extension
+   *   ⇒  Extension nghẽn ("bộ ngắt quá tải")  ⇒  hẹn 9 s  ⇒  vẫn nghẽn  ⇒  ❌ oan.
+   * Nay TÁCH SỔ theo KÊNH và chỉ tính cái đúng là mất tin:
+   *   lostSock = ca do CHÍNH Socket bắn, kiểm chứng thấy KHÔNG có tin  ⇒ mới ban Socket
+   *   absent   = "hội thoại không đổi"  ⇒ CHỈ đếm để chẩn đoán, KHÔNG ban làn nào
+   *   lostExt  = ca Extension bắn mà không tới        ⇒ KHÔNG bao giờ ban Socket
+   * 2 ca "absent" liên tiếp KHÔNG còn đủ để gỡ Socket (trước đây đủ — đó là lỗi). */
+  const sockRoute = {}; // pageId → { sent, dlv, lostSock, lostExt, absent, probeAt }
   function sockRouteOf(pid) {
     const k = String(pid || '');
     if (!k) return null;
-    if (!sockRoute[k]) sockRoute[k] = { sent: 0, dlv: 0, lost: 0, probeAt: 0 };
+    if (!sockRoute[k]) sockRoute[k] = { sent: 0, dlv: 0, lostSock: 0, lostExt: 0, absent: 0, probeAt: 0 };
     return sockRoute[k];
   }
+  /* [v1.92.62] Chỉ `lostSock` mới có quyền gỡ Socket. `absent`/`lostExt` chỉ để đọc. */
+  const SOCK_LOST_BAN = 2;   // 2 lần SOCKET thật sự làm mất tin (0 lần tới) ⇒ gỡ Socket
   function pageSocketUsable(pid) {
     const st = sockRoute[String(pid || '')];
-    if (!st) return true;                 // chưa có bằng chứng gì ⇒ cho thử (đã có cổng cứu 1.92.37)
-    if (st.lost >= 2) return false;       // 2 lần chứng minh mất tin, 0 lần tới ⇒ Socket vô dụng
-    if (st.lost >= 1 && isPageAckDead(pid)) return false; // mất tin + mất ACK ⇒ đừng đốt thêm tin
+    if (!st) return true;                    // chưa có bằng chứng gì ⇒ cho thử
+    if (st.lostSock >= SOCK_LOST_BAN) return false;
+    if (st.lostSock >= 1 && isPageAckDead(pid)) return false;
     return true;
+  }
+  /* Lý do né — tách đúng nguồn để log không nói sai (xem socketPickDiag.skipLost). */
+  function socketSkipReason(pid) {
+    const st = sockRoute[String(pid || '')];
+    if (!st) return 'unknown';
+    if (st.lostSock >= SOCK_LOST_BAN) return 'lostSock';
+    if (st.lostSock >= 1 && isPageAckDead(pid)) return 'lostSock+ackDead';
+    return 'unknown';
   }
   const pageAckDeadProbeAt = {};
   const SOCK_DEAD_PROBE_MS = 20000;
@@ -7269,8 +7293,10 @@
       socketPickDiag.deadSkip++;
       /* [v1.92.55] TÁCH LÝ DO — `pageSocketUsable` trả false vì 1 trong 2 luật khác nhau. */
       try {
-        const _st = sockRoute[String(pageId || '')];
-        if (_st && _st.lost >= 2) socketPickDiag.skipLost++;
+        /* [v1.92.62] Đếm theo LÝ DO THẬT (socketSkipReason) — trước đây nhãn "mất tin" cộng cả
+         * ca `lost` mà chính nó đã bị cộng oan (xem chú thích ở sockRoute/socksProof). */
+        const _why = socketSkipReason(pageId);
+        if (_why === 'lostSock' || _why === 'lostSock+ackDead') socketPickDiag.skipLost++;
         else socketPickDiag.skipAckDead++;
       } catch (eSk) { /* ignore */ }
       const noSock = seq.filter((x) => x !== 'socket');
@@ -9325,7 +9351,7 @@
     if (ch === 'socket') {
       try {
         const _st = sockRoute[String(String(convId).split('_')[0])];
-        if (_st) { _st.dlv++; _st.lost = 0; }
+        if (_st) { _st.dlv++; _st.lostSock = 0; _st.lostExt = 0; }
       } catch (eSt2) { /* ignore */ }
     }
     softNotify('delivered'); // [v1.92.9] chỗ chờ "đã giao" thức ngay, khỏi chờ mù 220 ms
@@ -10139,11 +10165,18 @@
         // KHÔNG chốt ❌ oan — người dùng vẫn gửi tay được.
         const hasExtNow = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
         if (socksProof === 'absent') {
-          // [v1.92.40] BẰNG CHỨNG MẤT TIN: cổng vừa chứng minh hội thoại không có tin ⇒ ghi sổ
-          // định tuyến của page. 2 lần liên tiếp như vậy ⇒ gỡ Socket khỏi kế hoạch page này.
+          /* [v1.92.62] ĐÂY LÀ CHỖ GÂY "MẤT TIN". Bản 1.92.40 cộng `_st.lost++` cho page ở nhánh
+           * này với giả định "không có tin ⇒ Socket làm mất tin". Giả định đó SAI: bước kiểm
+           * chứng này chạy cho MỌI ca Socket không có ACK, kể cả ca **khách vắng mặt** — đúng
+           * nhóm FB từ chối (log 19:00:54: 4 624 ca). "Hội thoại không đổi" chỉ nói lên khách
+           * không trả lời, KHÔNG nói gì về việc Socket có giao được tin hay không.
+           * Đo trên log: 5 ca chứng minh vắng mặt thật, nhưng 774 ca bị né Socket ⇒ 2 ca đầu
+           * tiên đã gỡ cả page khỏi làn Socket, phần còn lại dồn sang Extension nghẽn.
+           * Nay: chỉ đếm `absent` (chẩn đoán). `lostSock` chỉ tăng khi có bằng chứng DƯƠNG về
+           * việc Socket đánh rơi tin của chính nó — xem markSocketProofLost(). */
           try {
             const _st = sockRouteOf(pageId);
-            if (_st) _st.lost++;
+            if (_st) _st.absent++;
           } catch (eSt3) { /* ignore */ }
         }
         if (socksProof === 'absent' && !hasExtNow) {
@@ -10587,31 +10620,26 @@
     });
     return n;
   }
-  /* [v1.92.43b] KHÔNG CHIA ĐỀU NỮA — chia đều làm CẢ HAI tab chậm đi (96+96) đúng như người dùng
-   * phàn nàn "chạy 1 cái thì nhanh mà song song là lag". Nay: **tab đang xem giữ nguyên 192**,
-   * **tab bị ẩn nhường** (128) — vì tab ẩn không ai nhìn, còn tab đang xem phải nhanh.
-   *   peers = 0            → 192
-   *   peers = 1, đang xem  → 192   (tổng 320 = 1,67× một tab ⇒ song song VẪN NHANH HƠN)
-   *   peers = 1, đang ẩn   → 128
-   *   peers ≥ 2, đang xem  → 144   (3 tab: 144+112+112 = 368)
-   *   peers ≥ 2, đang ẩn   → 112
-   * Phần lag còn lại xử lý bằng cách BỎ việc vẽ/log vô ích ở tab ẩn (xem renderThrottled/logLine),
-   * chứ không cắt tốc độ gửi. */
-  function computeMainSlotCap(baseCap) {
-    if (mainCapOverride) return mainCapOverride;
-    const peers = peerSendingCount();
-    let hidden = false;
-    try { hidden = !!(document && document.hidden); } catch (e) { hidden = false; }
-    /* [v1.92.43b] 3 mức ưu tiên, không phải 2: TAB ĐANG GÕ (có focus) > tab hiện nhưng không
-     * focus (2 cửa sổ cạnh nhau) > tab ẩn. Nếu chỉ xét `document.hidden` thì 2 cửa sổ cạnh nhau
-     * đều "không ẩn" ⇒ mỗi tab 192, tổng 384 — đúng cấu hình gây lag. */
-    let focused = true;
-    try { focused = !!(document && document.hasFocus && document.hasFocus()); } catch (e) { focused = true; }
-    let cap = baseCap;
-    if (peers === 1) cap = hidden ? 128 : (focused ? baseCap : 144);
-    else if (peers >= 2) cap = hidden ? 112 : (focused ? 144 : 128);
-    cap = Math.max(48, Math.min(baseCap, cap));
-    return { cap, peers, hiddenTrim: hidden && peers > 0, focused };
+  /* ═══ [v1.92.62] BỎ PHÂN LUỒNG GIỮA 2 TAB — mọi tab dùng HẾT slot ═══
+   * Người dùng: "bỏ luôn cơ chế phân luồng khi gửi 2 tab đi, cho nó bắn hết tốc lực như trước".
+   * Bản 1.92.43b chia slot: tab ẩn chỉ 128/192, 3 tab thì 144/112 — tức TỰ BÓP tốc độ của tab
+   * đang gửi khi có tab khác. Log 14:03 cho thấy `main cap 128–96` và log 17:03 bị bóp tương tự,
+   * trong khi `wave→cổng` vẫn 4–5 s. Nay: KHÔNG tab nào nhường slot nữa, mỗi tab dùng trọn
+   * `WAVE_MAIN_TOTAL_CAP` (192) — chạy 2 tab thì tổng 384, đúng "hết tốc lực".
+   * GIỮ LẠI hai thứ KHÔNG liên quan tốc độ:
+   *   • khoá chống gửi trùng (`acquireSendLock`) — 2 tab không bao giờ gửi cùng một chat;
+   *   • cờ "đang gửi" để tab khác biết (chỉ dùng cho LOG/đếm, không dùng để cắt slot). */
+  /* `peersMock`/`tabMock` chỉ dùng cho công cụ kiểm (tools/_check_slots.mjs) — đường chạy thật
+   * luôn gọi với 1 tham số nên đọc số tab thật. */
+  function computeMainSlotCap(baseCap, peersMock, tabMock) {
+    if (mainCapOverride) return { cap: baseCap, peers: 0, hiddenTrim: false, focused: true, override: true };
+    let peers = 0;
+    if (typeof peersMock === 'number') peers = peersMock;
+    else { try { peers = peerSendingCount(); } catch (e) { peers = 0; } }
+    /* [v1.92.62] KHÔNG còn nhánh nào giảm `cap` theo số tab, tab ẩn, hay tab không focus.
+     * Mỗi tab dùng TRỌN `baseCap` — đúng yêu cầu "bắn hết tốc lực như trước". */
+    const focused = tabMock ? tabMock.focused !== false : true;
+    return { cap: baseCap, peers, hiddenTrim: false, focused };
   }
   let sendLockPending = false; // chặn bấm đúp TRONG 150 ms chờ kiểm khoá (state.sending chưa bật)
   async function sendToAll() {
@@ -14283,6 +14311,22 @@
      * cần gọi đúng hàm thật của panel để chứng minh log KHÔNG bị vẽ khi cửa sổ phóng to đóng. */
     render,
     logLine,
+    /* [v1.92.62] Đường KIỂM cho tools/_check_sockban.mjs — chứng minh "khách vắng" không
+     * còn gỡ Socket khỏi làn gửi (lỗi mất tin ở log 19:00:54). */
+    /* [v1.92.62] Đường KIỂM cho tools/_check_slots.mjs — chứng minh mọi tab dùng HẾT slot
+     * (không còn nhường theo số tab / theo tab ẩn). */
+    __slotTest: {
+      compute: (baseCap, peers, tab) => computeMainSlotCap(baseCap, peers, tab),
+    },
+    __sockTest: {
+      noteAbsent: (pid) => { const st = sockRouteOf(pid); if (st) st.absent++; },
+      noteLostSock: (pid) => { const st = sockRouteOf(pid); if (st) st.lostSock++; },
+      noteLostExt: (pid) => { const st = sockRouteOf(pid); if (st) st.lostExt++; },
+      noteDlv: (pid) => { const st = sockRouteOf(pid); if (st) { st.dlv++; st.lostSock = 0; st.lostExt = 0; } },
+      usable: (pid) => pageSocketUsable(pid),
+      skipReason: (pid) => socketSkipReason(pid),
+      stats: (pid) => JSON.parse(JSON.stringify(sockRoute[String(pid)] || {})),
+    },
     logAll,
     batchStats,
     summaryCounters,

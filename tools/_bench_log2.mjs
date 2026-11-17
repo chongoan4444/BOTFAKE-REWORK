@@ -52,23 +52,35 @@ const out = await page.evaluate(() => {
   const S = window.__SSB__.state;
   S.log = [];
   for (let i = 0; i < 1500; i++) S.log.push('[10:00:' + String(i % 60).padStart(2, '0') + '] dòng log thứ ' + i + ' — ✅ đã gửi chat 694078980461601_' + (300000 + i));
-  S.matches = [{ id: '694078980461601_200000', checked: true }];
-  const sr = document.getElementById('ssb-root').shadowRoot;
+  const host = document.getElementById('ssb-root');
+  const sr = host.shadowRoot;
   const el = sr.getElementById('ssb-log');
+  const med = (f, k = 7) => { const a = []; for (let i = 0; i < k; i++) a.push(f()); a.sort((x, y) => x - y); return +a[Math.floor(k / 2)].toFixed(2); };
+  // ĐÚNG hai phép bản 1.92.58 làm trong render() + flushLogUI()
+  const textOnly = () => { const t = performance.now(); el.textContent = S.log.join('\n'); return performance.now() - t; };
+  const joinOnly = () => { const t = performance.now(); void S.log.join('\n'); return performance.now() - t; };
+  const readSH = () => { const t = performance.now(); void (el.scrollHeight - el.scrollTop - el.clientHeight); return performance.now() - t; };
+  const scrollOnly = () => { const t = performance.now(); el.scrollTop = 1e9; return performance.now() - t; };
+  const withLayoutRead = () => { const t = performance.now(); el.textContent = S.log.join('\n'); el.scrollTop = el.scrollHeight; return performance.now() - t; };
   const R = {};
-  const time = (f, k = 10) => { f(); const t = performance.now(); for (let i = 0; i < k; i++) f(); return (performance.now() - t) / k; };
-
-  // gọi ĐÚNG các hàm thật qua đường công khai
-  R.render = time(() => { S.log = S.log; window.__SSB__.render ? window.__SSB__.render() : null; });
-  R.flushLogUI = time(() => { try { window.__SSB__._flushLogUI(); } catch (e) {} });
-
-  // và tách thành phần trong CHÍNH trang này
-  R.textContent = time(() => { el.textContent = S.log.join('\n'); });
-  R.textContentPlusScroll = time(() => { el.textContent = S.log.join('\n'); el.scrollTop = el.scrollHeight; });
-  R.textContentPlusNearBottom = time(() => { el.textContent = S.log.join('\n'); void (el.scrollHeight - el.scrollTop - el.clientHeight) <= 48; });
-  R.noText = time(() => { /* chỉ để so */ });
+  const wrap = sr.getElementById('ssb-logwrap');
+  // (A) BỐ CỤC BẢN 1.92.58: khung log HIỆN trong panel, panel MỞ  ← đúng ca người dùng báo lag
+  if (wrap) wrap.style.display = 'block';
+  R['A. panel MỞ + khung log HIỆN (bố cục 1.92.58)'] = { textOnly: med(textOnly), withLayoutRead: med(withLayoutRead),
+    joinOnly: med(joinOnly), readSH_stable: med(readSH), readSH_afterText: med(() => { textOnly(); return readSH(); }),
+    scrollOnly: med(scrollOnly) };
+  // (B) panel MỞ nhưng khung log ẨN  ← bố cục 1.92.61
+  if (wrap) wrap.style.display = 'none';
+  R['B. panel MỞ + khung log ẨN (bố cục 1.92.61)'] = { textOnly: med(textOnly), withLayoutRead: med(withLayoutRead) };
+  // (C) ĐÓNG PANEL hẳn (bấm ✕) — khung log vẫn hiện nhưng cả panel bị display:none
+  if (wrap) wrap.style.display = 'block';
+  host.style.display = 'none';
+  R['C. panel ĐÓNG hẳn (bấm ✕)'] = { textOnly: med(textOnly), withLayoutRead: med(withLayoutRead) };
+  host.style.display = '';
   return R;
 });
-console.log('══ trong trang THẬT có panel + app (1 500 dòng log) ══');
-for (const [k, v] of Object.entries(out)) console.log(`  ${k.padEnd(24)} ${v.toFixed(2)} ms`);
+console.log('══ CÙNG đoạn mã, CÙNG 1 500 dòng log — chỉ khác panel MỞ/ĐÓNG ══');
+for (const [k, v] of Object.entries(out)) {
+  console.log(`  ${k}`); for (const [kk, vv] of Object.entries(v)) console.log(`      ${kk.padEnd(20)} ${String(vv).padStart(8)} ms`);
+}
 await browser.close();

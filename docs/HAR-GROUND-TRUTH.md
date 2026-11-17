@@ -5229,3 +5229,93 @@ logNotPaintedWhileClosed / PaintedWhenZoomed / NotPaintedAfterCollapse: true/tru
 
 Test **285 ca**. Mutation **4/4 bị bắt** (M15 thêm lại dải vào panel · M16 badge ghi DOM mỗi lần ·
 M17 badge hiện số chat thay vì ok/total · M18 render không cập nhật badge).
+
+---
+
+## §98 — SỬA MẤT TIN + BỎ PHÂN LUỒNG 2 TAB (1.92.62)
+
+Người dùng: *"sửa lỗi mất tin đi nhé, bỏ luôn cơ chế phân luồng khi gửi 2 tab đi, cho nó bắn hết
+tốc lực như trước luôn"*.
+
+### 1) MẤT TIN — "khách vắng mặt" bị tính là "Socket mất tin"
+
+**Bằng chứng trong log 19:00:54 (lô 8 518 chat):**
+
+| con số trong chính file log | giá trị |
+|---|---|
+| `Socket bị né (mất tin 774 · ACK chết 0) 774` | **774 chat bị đẩy KHỎI làn Socket** |
+| `🔎 chứng minh VẮNG MẶT (hội thoại không đổi sau lúc gửi) ⇒ bù an toàn` | **5** |
+| `❌ bù Extension không được` | 414 |
+| `🔁 Bù OK: 13` | 13 |
+| `Socket: FB từ chối` | 4 624 |
+
+774 ca bị né trong khi chỉ **5** ca thật sự chứng minh được — lệch ~150×.
+
+**Gốc (dòng ~10146 bản 1.92.61):** `proveAbsentBeforeBu()` trả `'absent'` khi *hội thoại không đổi
+sau lúc gửi*, rồi cộng `_st.lost++`. Nhưng "không đổi" **không phải bằng chứng về Socket** — nó
+chính là định nghĩa của **khách vắng mặt**, đúng nhóm FB từ chối. Rồi `lost ≥ 2` ⇒
+`pageSocketUsable() = false` ⇒ gỡ Socket khỏi **cả page** ⇒ dồn sang Extension ⇒ Extension nghẽn
+("bộ ngắt quá tải") ⇒ hẹn 9 s ⇒ vẫn nghẽn ⇒ ❌ oan. Vòng lặp này thấy rõ trong log: `lần 1/2`
+**373** lần, `lần 2/2` **0** lần.
+
+**Sửa:** tách sổ theo kênh.
+
+| biến | nghĩa | có quyền gỡ Socket? |
+|---|---|---|
+| `lostSock` | chứng minh **Socket** đánh rơi tin | **CÓ** (ngưỡng 2) |
+| `absent` | hội thoại không đổi (khách vắng) | **KHÔNG** — chỉ chẩn đoán |
+| `lostExt` | Extension bắn mà không tới | **KHÔNG** |
+
+Thêm `socketSkipReason()` để nhãn `Socket bị né (mất tin …)` đếm đúng nguồn.
+
+**Chứng minh trước/sau** (`tools/_ab_lost.mjs`, chạy chính 2 phiên bản hàm trên cùng dữ liệu —
+5 ca "khách vắng" như log):
+
+```
+1.92.61 (trước):  usableAfter5Absent = false   ← gỡ Socket  ⇒ MẤT TIN
+1.92.62 (sau):    usableAfter5Absent = true    ← giữ Socket
+```
+
+Hành vi chi tiết (`tools/_check_sockban.mjs`, Chromium, chạy nguyên bản userscript):
+
+```
+3 ca khách vắng (absent)        ⇒ Socket còn dùng được?  true
+1 ca lostSock                   ⇒ Socket còn dùng được?  true   (ngưỡng 2)
+2 ca lostSock                   ⇒ Socket còn dùng được?  false  · lý do né: "lostSock"
+giao được 1 lần                 ⇒ Socket còn dùng được?  true   (tự hồi)
+5 ca Extension không tới        ⇒ Socket còn dùng được?  true   (lostExt không ban Socket)
+```
+
+### 2) BỎ PHÂN LUỒNG 2 TAB — mọi tab bắn hết tốc lực
+
+Bản 1.92.43b chia slot: tab ẩn 128/192, 3 tab thì 144/112 — tự bóp tốc độ tab đang gửi. Log 14:03
+ghi `main cap 128–96` trong khi `wave→cổng` vẫn 4–5 s.
+
+Nay `computeMainSlotCap()` **luôn trả `baseCap`** (192). KIỂM (`tools/_check_slots.mjs`, gọi chính
+hàm thật):
+
+```
+0 tab khác            → 192    1 tab khác · tab ẨN   → 192
+1 tab khác · đang xem → 192    2 tab khác · tab ẨN   → 192
+2 tab khác · đang xem → 192    3 tab khác · no focus → 192
+__chốt: mọi cấu hình dùng hết slot? = true
+```
+
+**GIỮ LẠI (không liên quan tốc độ):** `acquireSendLock()` — khoá chống gửi trùng giữa 2 tab. Bỏ nó
+thì 2 tab gửi cùng một chat ⇒ đúng lỗi "chat có ≥2 dòng ✅". Có test khoá: `sendToAll` phải còn
+`if (!(await acquireSendLock())) return;`.
+
+### Test
+
+`npm test` **300 ca**. Mutation **5/5 bị bắt**: M19 `absent` lại cộng `lostSock` · M20
+`pageSocketUsable` đọc lại `st.lost` · M21 ban Socket vì `lostExt` · M22 trả lại chia slot tab ẩn
+128 · M23 bỏ khoá chống gửi trùng.
+
+Hai bẫy test đã mắc và đã vá: M22 lọt vì test chỉ khớp `/144/` trong chuỗi (nay **chạy thật**
+`computeMainSlotCap` với 5 cấu hình); M23 lọt vì chỉ kiểm tên `acquireSendLock` có xuất hiện (nay
+kiểm cả nhánh `return` khi khoá thất bại).
+
+### Đo lại hiệu năng (không thoái hoá)
+
+Panel MỞ + đang gửi, 6 s, 180 dòng log (20 000 thread): **long task 0 · max 0 ms · main thread bận
+0 % · wall 6 005 ms** (bản 1.92.58: 6 long task, max 1 828 ms, bận 51,3 %, wall 12 341 ms).

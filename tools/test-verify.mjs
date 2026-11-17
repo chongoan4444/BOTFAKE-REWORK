@@ -1014,8 +1014,12 @@ check('[v1.92.55] số đo cổng nằm SAU khối chặn, TRƯỚC nhánh mở 
  * im lặng thật liên tiếp ⇒ không chạy. Thủ phạm là `st.lost >= 2` (chứng minh MẤT TIN). */
 check('[v1.92.55] tách Socket bị né thành 2 lý do (mất tin · ACK chết)',
   /skipLost: 0, skipAckDead: 0 \}/.test(SRC), true);
-check('[v1.92.55] đếm đúng luật: lost >= 2 ⇒ "mất tin", còn lại ⇒ "ACK chết"',
-  /if \(_st && _st\.lost >= 2\) socketPickDiag\.skipLost\+\+;\s*\n\s*else socketPickDiag\.skipAckDead\+\+;/.test(SRC), true);
+/* [v1.92.62] Luật đếm ĐÃ ĐỔI: nguồn là `socketSkipReason()` (tách lostSock khỏi absent/lostExt),
+ * không còn đọc trực tiếp `_st.lost` — chính `_st.lost` cũ là thứ bị cộng oan. */
+check('[v1.92.62] đếm lý do né Socket qua socketSkipReason (không đọc _st.lost trực tiếp)',
+  /const _why = socketSkipReason\(pageId\);/.test(stripComments(SRC)), true);
+checkNot('[v1.92.62] không còn cộng oan: Socket bị né không dựa vào _st.lost',
+  stripComments(SRC), /_st\.lost >= 2/);
 check('[v1.92.55] nhãn log KHÔNG còn gọi tất cả là "ACK chết"',
   /' \/ Socket bị né \(ACK chết\) '/.test(SRC), false);
 check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
@@ -1383,6 +1387,60 @@ check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
     check('[v1.92.61] thanh tiến trình dưới nút Chạy vẫn còn nguyên',
       /id="ssb-bar"/.test(SRC) && /id="ssb-progstat"/.test(SRC), true);
     check('[v1.92.61] render() cập nhật badge', /updateMiniProgressUI\(\)/.test(stripComments(extractFn('render'))), true);
+
+  /* ══════════════════════════════════════════════════════════════════════════════════════
+   * [v1.92.62] SỬA MẤT TIN + BỎ PHÂN LUỒNG 2 TAB
+   * ══════════════════════════════════════════════════════════════════════════════════════ */
+  {
+    /* 1) "Hội thoại không đổi" (khách vắng mặt) KHÔNG được gỡ Socket.
+     * Đo trên log 19:00:54: chỉ 5 ca chứng minh vắng mặt thật, nhưng 774 chat bị né Socket
+     * (gấp ~150×) ⇒ dồn sang Extension nghẽn ⇒ ❌ oan. */
+    const st = stripComments(extractFn('sockRouteOf'));
+    check('[v1.92.62] sổ định tuyến tách lostSock / lostExt / absent',
+      /lostSock: 0, lostExt: 0, absent: 0/.test(st), true);
+
+    const usable = stripComments(extractFn('pageSocketUsable'));
+    check('[v1.92.62] chỉ lostSock mới được gỡ Socket',
+      /st\.lostSock >= SOCK_LOST_BAN/.test(usable), true);
+    checkNot('[v1.92.62] pageSocketUsable KHÔNG đọc st.lost (sổ cũ bị cộng oan)', usable, /st\.lost\b/);
+    checkNot('[v1.92.62] pageSocketUsable KHÔNG ban vì absent', usable, /absent/);
+    checkNot('[v1.92.62] pageSocketUsable KHÔNG ban vì lostExt', usable, /lostExt/);
+
+    /* 2) Chỗ cộng sổ: "absent" chỉ đếm chẩn đoán, không cộng lost nữa. */
+    const srcNoCmt = stripComments(SRC);
+    checkNot('[v1.92.62] không còn _st.lost++ (nguồn gây né Socket 774 ca)',
+      srcNoCmt, /_st\.lost\+\+/);
+    check('[v1.92.62] ca "absent" chỉ tăng bộ đếm chẩn đoán', /_st\.absent\+\+/.test(srcNoCmt), true);
+
+    /* 3) Bỏ phân luồng 2 tab: CHẠY THẬT computeMainSlotCap, không khớp chữ.
+     * (Lần đầu tôi chỉ kiểm "/144/.test(cap) === false" nên mutation "tab ẩn ⇒ 128" LỌT.) */
+    {
+      const body = stripComments(extractFn('computeMainSlotCap'));
+      const fn = new Function('mainCapOverride', 'peerSendingCount', 'sockRoute',
+        body.replace(/^function computeMainSlotCap\(baseCap, peersMock, tabMock\) \{/, 'return function (baseCap, peersMock, tabMock) {')
+            .replace(/\}\s*$/, '};'))(0, () => 0, {});
+      const cases = [
+        ['0 tab khác', 192, 0, undefined, 192],
+        ['1 tab khác · đang xem', 192, 1, { focused: true }, 192],
+        ['1 tab khác · tab ẨN', 192, 1, { focused: false }, 192],
+        ['2 tab khác · tab ẨN', 192, 2, { focused: false }, 192],
+        ['3 tab khác · không focus', 192, 3, { focused: false }, 192],
+      ];
+      for (const [name, base, peers, tab, want] of cases) {
+        const got = fn(base, peers, tab);
+        check(`[v1.92.62] slot = ${want} khi ${name}`, got && got.cap, want);
+      }
+    }
+    /* 4) Khoá chống gửi trùng GIỮA 2 TAB phải còn và phải CHẶN THẬT — bỏ nhầm là 2 tab gửi
+     * cùng một chat ⇒ đúng lỗi "chat có ≥2 dòng ✅" mà nghiệm thu cấm. */
+    {
+      const body = stripComments(extractFn('sendToAll'));
+      check('[v1.92.62] sendToAll còn gọi acquireSendLock',
+        /acquireSendLock/.test(body), true);
+      check('[v1.92.62] khoá được kiểm TRƯỚC khi gửi (có nhánh return khi khoá thất bại)',
+        /if \(!\(await acquireSendLock\(\)\)\) return;/.test(body), true);
+    }
+  }
 
     const r60 = stripComments(extractFn('render'));
     check('[v1.92.60] render() cập nhật dải tiến trình', /updateMiniProgressUI\(\)/.test(r60), true);
