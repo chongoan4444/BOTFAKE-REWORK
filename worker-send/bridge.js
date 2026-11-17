@@ -1,0 +1,157 @@
+/**
+ * BOTFAKE WORKER-SEND — CẦU NỐI PHÍA TRANG (main thread)
+ * ============================================================================
+ * Nạp file này ở cuối userscript (hoặc content script). Nó:
+ *   1. tạo Web Worker từ `worker.js` + `engine.mjs` (bundle thành Blob),
+ *   2. đưa cấu hình (token, apiBase, mainCap) sang,
+ *   3. nhận log/tick/done và đẩy vào `logLine()` / TỔNG HỢP của panel hiện có,
+ *   4. trả lời RPC khi worker cần thứ chỉ main thread có (dò global_id…).
+ *
+ * ĐIỂM CỐT LÕI: sau khi bật cái này, đường gửi KHÔNG còn chạy trên main thread.
+ * React/MQTT của trang Pancake không còn tranh CPU với vòng lặp gửi ⇒ đồng hồ
+ * không trễ ⇒ ACK không bị cắt oan (§91).
+ *
+ * KHÔNG đụng: script cũ, các lane cũ, extension release/. Đây là đường SONG SONG để
+ * bật/tắt bằng `BOTFAKE_USE_WORKER_SEND`.
+ */
+
+/* eslint-disable no-var */
+(function botfakeWorkerSendBridge() {
+  'use strict';
+
+  var NS = '__BOTFAKE_WORKER_SEND__';
+  if (window[NS]) return;
+
+  var CFG = {
+    enabled: false,      // bật bằng tay hoặc bằng localStorage
+    mainCap: 96,
+    apiBase: '',
+    accessToken: '',
+    version: 'worker-send-1',
+  };
+
+  var worker = null;
+  var objUrl = null;
+  var rpcHandlers = {};
+  var stats = { n: 0, ok: 0, fail: 0, uncertain: 0, dupBlocked: 0, holdAvg: 0, rate: 0, peaks: {} };
+  var listeners = { log: [], tick: [], done: [], error: [] };
+  var seq = 0;
+
+  function emit(ev, payload) {
+    var arr = listeners[ev] || [];
+    for (var i = 0; i < arr.length; i++) {
+      try { arr[i](payload); } catch (e) { /* ignore */ }
+    }
+  }
+
+  /**
+   * Lấy mã nguồn 2 file (engine + worker) để dựng Blob.
+   * Trong userscript, `__BOTFAKE_WS_SRC__` được build nạp sẵn; nếu không có thì
+   * người dùng phải gọi `setSources()` trước (xem README).
+   */
+  var SRC = { engine: '', worker: '' };
+
+  function setSources(engineSrc, workerSrc) {
+    SRC.engine = String(engineSrc || '');
+    SRC.worker = String(workerSrc || '');
+  }
+
+  function buildBlobUrl() {
+    if (!SRC.engine || !SRC.worker) throw new Error('worker-send: chưa có mã nguồn (gọi setSources)');
+    /* Worker kiểu module: cần import engine.mjs. Blob không có đường dẫn tương đối ⇒
+     * nối engine vào trước và bỏ `import ... from './engine.mjs'` của worker, thay bằng
+     * chính nội dung engine đã bọc trong một khối. */
+    var engineNoExport = SRC.engine
+      .replace(/^export\s+/gm, '')
+      .replace(/^export\s*\{[^}]*\}\s*;?$/gm, '');
+    var workerBody = SRC.worker
+      .replace(/import\s*\{[\s\S]*?\}\s*from\s*['"]\.\/engine\.mjs['"]\s*;?/m, '');
+    var code = '(function(){\n"use strict";\n' + engineNoExport + '\n' + workerBody + '\n})();';
+    var blob = new Blob([code], { type: 'text/javascript' });
+    return URL.createObjectURL(blob);
+  }
+
+  function spawn() {
+    if (worker) return worker;
+    objUrl = buildBlobUrl();
+    worker = new Worker(objUrl, { type: 'classic', name: 'botfake-worker-send' });
+    worker.onmessage = onMessage;
+    worker.onerror = function (e) {
+      emit('error', { message: (e && e.message) || 'worker error' });
+    };
+    return worker;
+  }
+
+  function onMessage(ev) {
+    var m = ev && ev.data;
+    if (!m || !m.t) return;
+    if (m.t === 'log') { emit('log', m.rec); return; }
+    if (m.t === 'tick') { if (m.stats) stats = Object.assign(stats, m.stats); emit('tick', m); return; }
+    if (m.t === 'done') { if (m.stats) stats = Object.assign(stats, m.stats); emit('done', m); return; }
+    if (m.t === 'error') { emit('error', m); return; }
+    if (m.t === 'ready') { emit('tick', { t: 'ready', mainCap: m.mainCap }); return; }
+    if (m.t === 'rpc') { handleRpc(m); return; }
+  }
+
+  /**
+   * RPC: worker cần main thread làm hộ.
+   * Hiện hỗ trợ:
+   *   'gid'   → dò global_id cho 1 chat (gọi hàm sẵn có của script cũ nếu có)
+   *   'token' → trả access_token hiện tại
+   */
+  function handleRpc(m) {
+    var id = m.id;
+    var reply = function (ok, data, error) {
+      try { worker.postMessage({ t: 'rpc-result', id: id, ok: !!ok, data: data, error: error }); } catch (e) { /* ignore */ }
+    };
+    var fn = rpcHandlers[m.what];
+    if (!fn) { reply(false, null, 'không có handler: ' + m.what); return; }
+    Promise.resolve()
+      .then(function () { return fn(m.args || {}); })
+      .then(function (r) { reply(true, r); })
+      .catch(function (e) { reply(false, null, String(e && e.message || e)); });
+  }
+
+  var API = {
+    setConfig: function (patch) { Object.assign(CFG, patch || {}); return CFG; },
+    getConfig: function () { return Object.assign({}, CFG); },
+    setSources: setSources,
+    onRpc: function (what, fn) { rpcHandlers[what] = fn; },
+    on: function (ev, fn) { if (listeners[ev]) listeners[ev].push(fn); },
+    stats: function () { return Object.assign({}, stats); },
+    isRunning: function () { return !!CFG.running; },
+    start: function () {
+      spawn();
+      CFG.running = true;
+      worker.postMessage({ t: 'init', cfg: { mainCap: CFG.mainCap, apiBase: CFG.apiBase, accessToken: CFG.accessToken } });
+      return true;
+    },
+    stop: function () {
+      CFG.running = false;
+      if (worker) { try { worker.postMessage({ t: 'stop' }); } catch (e) { /* ignore */ } }
+      return true;
+    },
+    send: function (list, limit) {
+      if (!worker) API.start();
+      var payload = (list || []).map(function (c) {
+        return {
+          id: String(c.id || ''),
+          pageId: c.pageId || String(c.id || '').split('_')[0],
+          name: c.name || '',
+          text: c.text || '',
+          contentIds: c.contentIds || null,
+          isRecordCtx7Days: !!c.isRecordCtx7Days,
+        };
+      });
+      worker.postMessage({ t: 'send', list: payload, limit: limit || CFG.mainCap });
+      seq++;
+      return seq;
+    },
+    terminate: function () {
+      if (worker) { try { worker.terminate(); } catch (e) { /* ignore */ } worker = null; }
+      if (objUrl) { try { URL.revokeObjectURL(objUrl); } catch (e) { /* ignore */ } objUrl = null; }
+    },
+  };
+
+  try { window[NS] = API; } catch (e) { /* ignore */ }
+})();

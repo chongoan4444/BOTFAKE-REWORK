@@ -4679,3 +4679,78 @@ liên tiếp** (dòng ~6583) ⇒ **không chạy**. Thủ phạm là `st.lost >=
 | `chờ việc xong: … không còn worker X` | **X > 0** ⇒ xác nhận 90.3 | X = 0 ⇒ giả thuyết 90.3 sai |
 | `treo chờ xác nhận đỉnh Y` | Y ≈ số ca bị 90.3 | Y = 0 ⇒ cổng giữ vì lý do khác |
 | `Socket bị né (mất tin … · ACK chết …)` | ACK chết ≈ 0 | ACK chết lớn ⇒ phải xem lại |
+
+---
+
+## §91 — CPU LÀ NGUYÊN NHÂN GỐC CỦA MẤT ACK (3 lô 16:27) + `worker-send/`
+
+Nguồn: `botfake-log-20261117-162705.txt` · `...162714.txt` · `...162718.txt`, cả ba **1.92.55-W200.101**,
+xuất cùng lúc 16:27 ⇒ **3 tab chạy song song**.
+
+### 91.1 Ba tab cùng chạy: số liệu
+
+| tab | PHÁT | ACK OK | **no-ACK** | giữ slot | 🫥 CPU-kẹt |
+|---|---|---|---|---|---|
+| 16:27:05 | 19,28/s | **77** | **5 601** | **5 372 ms** | `+84 969 s` · trễ 15 925 · **max 10,9 s** |
+| 16:27:14 | 16,23/s | 132 | 5 038 | — | — |
+| 16:27:18 | 16,51/s | 5 080 | 2 033 | — | `+66 575 s` · trễ 15 015 · **max 45,9 s** |
+
+Tab 1: `chờ 364 · chuẩn bị 0 · còn lại 5 372` ⇒ **98,7 % giữ slot là KẸT**, không phải I/O.
+
+### 91.2 Chuỗi nhân quả (người dùng phát hiện, số xác nhận)
+
+**CPU bị bóp → đồng hồ trễ → ACK về muộn hơn hạn chờ → mất ACK.**
+
+`p90 ACK 6 572 ms` (tab 1) và `8 292 ms` (tab 3) **> trần `ACK_HOLD_CEIL_MS = 6 000`**
+(dòng 6131) ⇒ ACK thật bị cắt ⇒ `hết hạn chờ 5 601 ≈ ⚠ 1 468 + no-ACK`. `retry lần 0`.
+
+### 91.3 VÌ SAO "ẨN DANH SÁCH" KHÔNG CỨU ĐƯỢC
+
+Đã kiểm trong code — phần VẼ đã hạ nhịp từ trước: `flushLogUI` 1 s (2,5 s khi tab ẩn),
+`setProgress` 250 ms, `recordWavePressure` ≤10 lần/s. **Thủ phạm không phải DOM:**
+
+| nguồn | dòng | chi phí |
+|---|---|---|
+| `runPool` | 401 | **1 closure + 1 `await` cho MỖI chat** |
+| `sleepUntil` | 317 | **3 promise mỗi lần gọi** (`bgClock.wait` + `stopSignal` + `softWait`) |
+| `paceSocketPublish` | 4426 | gọi `sleepUntil` **trước mỗi lần publish** ⇒ mỗi tin 3 promise |
+
+`bgClock.wait` chỉ dùng Worker khi `document.hidden` (dòng 215–221) ⇒ tab HIỆN dùng
+`setTimeout` gốc và bị bóp.
+
+### 91.4 TÁCH ĐƯỜNG GỬI RA WEB WORKER — `worker-send/` (thư mục riêng)
+
+Không nằm trong `release/botfake-ext/` hay `release/botfake-ext-stable/` (đã kiểm).
+
+| file | chạy ở | nội dung |
+|---|---|---|
+| `engine.mjs` | Worker + Node | lõi điều phối, **không DOM/localStorage/fetch** |
+| `worker.js` | Web Worker | vỏ: postMessage + `fetch` + tương thích Node để test |
+| `bridge.js` | main thread | tạo Worker từ Blob, cấp token/apiBase, trả lời RPC |
+| `test-engine.mjs` | Node | **46 test** (đồng hồ giả, không mạng) |
+| `test-worker.mjs` | Node | **15 test** chạy **worker thật + HTTP server thật** |
+
+### 91.5 HAI LỖI CHỐNG TRÙNG PHÁT HIỆN KHI VIẾT TEST (đáng ghi lại)
+
+1. **Đặt cờ `inFlight` trong `lane.enqueue` ⇒ CHỐNG TRÙNG MÀ VẪN TRÙNG.**
+   `enqueue` chạy fn ở microtask sau ⇒ 3 lần gọi song song cùng chat đều lọt ⇒ **bắn 3 lần**.
+   Test `K17` bắt được. Sửa: kiểm + đặt cờ **đồng bộ** ngay đầu `sendOne`.
+2. **Item trùng trong danh sách bị lọc im lặng.** Nhánh `delivered` chặn nhưng **không đếm**
+   ⇒ người dùng không biết danh sách có chat lặp. Nay cả 3 cổng đều tăng `dupBlocked`.
+
+Cả hai đều thuộc loại "chống trùng mà vẫn trùng" — đúng lỗi bản 1.92.x từng gặp với
+`sockFiredPending`. Mutation test: gỡ 7 chỗ then chốt ⇒ **cả 7 đều làm test đỏ**.
+
+### 91.6 GIỚI HẠN HIỆN TẠI (nói rõ, không tô hồng)
+
+1. **Đường gửi trong worker hiện là HTTP API**, không phải Socket. Lý do: `fetch` có sẵn
+   trong Worker, và API chỉ cần `conversation_id + token` (HAR: 58/58 lệnh gửi API không có
+   global_id) ⇒ **bỏ hẳn khâu dò gid**. Nhưng API chậm/hạn chế hơn Socket.
+2. **Chưa chuyển MQTT/Socket vào Worker** — việc lớn, chưa làm.
+3. **RPC dò global_id mới có khung** (`API.onRpc('gid', fn)`), chưa nối vào hàm cũ.
+4. **Chưa bật mặc định.** Đường cũ nguyên vẹn; `worker-send` chỉ chạy khi gọi `start()`.
+
+### 91.7 VIỆC NÊN LÀM NGAY (không cần code)
+
+**Giảm 3 tab → 1 tab/page.** 3 tab cùng chạy: tổng 52/s nhưng **12 672 no-ACK**.
+Một tab đơn lẻ ở lô 14:03 đạt **51/s với 1 246 no-ACK** — cùng tốc độ, **ít hơn 10× lỗi**.
