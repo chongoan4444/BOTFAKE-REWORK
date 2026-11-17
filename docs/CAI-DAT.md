@@ -115,42 +115,50 @@ Muốn có `.crx` mới thì cần **khoá ký riêng** (`installer/extension-si
 
 ---
 
-## 4. THỬ `worker-send/` (đường gửi mới, chưa bật mặc định)
+## 4. DÙNG `worker-send/` (đường gửi chạy trong Web Worker)
 
-Đây **không phải** bản cài. Là đường chạy **song song**, bật bằng tay trong console.
-Code cũ vẫn là đường gửi chính.
+**Không phải extension.** Là 1 file JS dán vào console trang Pancake. Không cần
+Developer mode, không cần cài gì.
 
-```js
-// 1) Mở trang Pancake, F12 → Console. Dán NGUYÊN nội dung 3 file:
-//    worker-send/bridge.js
-//    rồi gán nội dung 2 file còn lại:
-const ENGINE = `...nội dung worker-send/engine.mjs...`;
-const WORKER = `...nội dung worker-send/worker.js...`;
+### 4.1 Tạo file cài
 
-// 2) Bật
-const b = window.__BOTFAKE_WORKER_SEND__;
-b.setSources(ENGINE, WORKER);
-b.setConfig({
-  mainCap: 96,
-  apiBase: 'https://pages.fm/api/public_api/v1',   // kiểm lại base đúng của bạn
-  accessToken: '<access_token trong localStorage/cookie Pancake>',
-});
-b.on('log', r => console.log('[WS]', r));
-b.start();
-
-// 3) Gửi thử 1 chat
-b.send([{ id: '111_222', pageId: '111', text: 'xin chào' }]);
+```bash
+node worker-send/build.mjs
+# → dist/worker-send.install.js   (57,7 KB)
 ```
 
-Kiểm: `b.stats()` phải có `ok: 1`, và **server Pancake nhận đúng 1 tin**.
+Hoặc tải `dist/worker-send.install.js` từ máy bạn sau khi chạy lệnh trên.
 
-**Giới hạn phải biết (không tô hồng):**
-- Đường gửi là **HTTP API, chưa phải Socket** ⇒ chậm hơn đường cũ.
-- **Chưa chuyển MQTT vào Worker.**
-- RPC dò `global_id` mới có khung (`b.onRpc('gid', fn)`), chưa nối vào hàm cũ.
-- **Chưa có giao diện** — chỉ console.
+### 4.2 Nạp
 
----
+1. Mở tab Pancake, **đợi danh sách chat tải xong**
+2. `F12` → **Console**
+3. Dán toàn bộ file → `Enter`
+
+Thấy `[BOTFAKE-WS] đã nạp ✓` là được.
+
+### 4.3 Dùng
+
+```js
+BOTFAKE_WS.help()
+BOTFAKE_WS.run({ text: 'Xin chào', dryRun: true })   // CHẠY THỬ, không gửi
+BOTFAKE_WS.run({ text: 'Xin chào' })                 // GỬI THẬT
+BOTFAKE_WS.run({ text: '…', limit: 8, maxPages: 5 }) // 8 luồng, tải 5 trang
+BOTFAKE_WS.stats()    // số đo
+BOTFAKE_WS.results()  // chat nào OK / chat nào CHƯA RÕ
+BOTFAKE_WS.stop()
+```
+
+**Luôn `dryRun: true` trước.** Nó báo: bao nhiêu chat, bao nhiêu có cờ `ctx7`, danh sách
+có bị cắt giữa đường không.
+
+### 4.4 Giới hạn (đọc trước khi tin)
+
+- Đường gửi là **HTTP API, không phải Socket** ⇒ **chậm hơn** bản 1.92.55.
+- Chưa chuyển MQTT vào Worker. Không có giao diện, chỉ console.
+- **Đừng gửi cùng một danh sách bằng cả bản cũ và bản này** — lưới chống trùng của mỗi
+  bên không thấy bên kia.
+- Token hết hạn ⇒ `HTTP 401` ⇒ tải lại trang rồi dán lại file.
 
 ## 5. Bảng tra nhanh
 
