@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.50-w200.96
+// @version      1.92.51-w200.97
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.50-W200.96'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.51-W200.97'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -11471,7 +11471,11 @@
         + (sumNow.unsureTotal ? ' ' + sumNow.unsureTotal + ' tin không rõ kết quả (không gửi thêm).' : '')
         + (windowBlocked ? ' 🚫 ' + windowBlocked + ' lần API bị chặn ngoài cửa sổ 24h.' : '')
         + (sumNow.pending > 0
-          ? ' ⏱ Đã phát lệnh xong trong ' + (((Date.now() - batchStats.startedAt) / 1000).toFixed(0)) + 's — tốc độ chốt xem ở dòng TỔNG HỢP cuối cùng.'
+          /* [v1.92.51] PHẢI LÀ MỐC PHÁT, KHÔNG PHẢI "BÂY GIỜ". Log 12:06 in ở đây "Đã phát lệnh xong
+           * trong 107s" nhưng dòng ⚡ cùng lượt in "PHÁT … trong 54,5s" — vì chỗ này lấy
+           * Date.now() tại lúc IN (sau khi đuôi đã chạy một phần), không lấy dispatchEndedAt.
+           * Hai dòng nói hai số khác nhau về cùng một việc ⇒ không dùng để nghiệm thu được. */
+          ? ' ⏱ Đã phát lệnh xong trong ' + ((((batchStats.dispatchEndedAt || Date.now()) - batchStats.startedAt) / 1000).toFixed(0)) + 's — tốc độ chốt xem ở dòng TỔNG HỢP cuối cùng.'
           : ' ⏱ Tổng thời gian: ' + (((Date.now() - batchStats.startedAt) / 60000).toFixed(1)) + ' phút'
             + ' (trung bình ' + (totalAll / Math.max(1, (Date.now() - batchStats.startedAt) / 1000) * 60).toFixed(0) + ' tin/phút).'));
     }

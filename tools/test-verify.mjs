@@ -848,6 +848,15 @@ check('mốc phát xong đóng ở cuối vòng WAVE (trước khi chạy đuôi
 check('sendToAll KHÔNG ghi đè mốc đã đóng (ghi đè ⇒ tính cả đuôi 131 s vào PHÁT …/s)',
   (SRC.match(/if \(!batchStats\.dispatchEndedAt\) batchStats\.dispatchEndedAt = Date\.now\(\);/g) || []).length, 2);
 
+/* --------- [v1.92.51] DÒNG 🏁 PHẢI IN MỐC PHÁT, KHÔNG PHẢI "BÂY GIỜ" ---------
+ * Log 12:06 (6 920 chat): dòng 🏁 in "Đã phát lệnh xong trong 107s" nhưng dòng ⚡ cùng lượt in
+ * "PHÁT … trong 54,5s" — 107 s là thời điểm IN (đuôi đã chạy được nửa), không phải lúc phát xong.
+ * Hai dòng nói hai số khác nhau về cùng một việc ⇒ không nghiệm thu được. */
+check('dòng 🏁 dùng dispatchEndedAt (mốc phát thật), không dùng Date.now() lúc in',
+  /Đã phát lệnh xong trong ' \+ \(\(\(\(batchStats\.dispatchEndedAt \|\| Date\.now\(\)\) - batchStats\.startedAt\)/.test(SRC), true);
+check('dòng 🏁 KHÔNG còn lấy Date.now() trực tiếp làm mốc phát',
+  /Đã phát lệnh xong trong ' \+ \(\(\(Date\.now\(\) - batchStats\.startedAt\)/.test(SRC), false);
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {

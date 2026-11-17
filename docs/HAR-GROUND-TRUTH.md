@@ -4287,3 +4287,88 @@ không qua `acquireMainSlot`**; `WAVE_EXT_WORKERS = 128` nhưng trần thật c�
 | `⏱ GIỮ SLOT (ms/chat)` | không có nhãn | **có nhãn**, và `chờ + chuẩn bị + còn lại = tổng` |
 | `⏳ Đuôi chờ xác nhận: N ca` | 9 263 (> số lệnh) | **≤ số chat của lô** |
 | `⚡ PHÁT …/s` | 31,14/s (gộp đuôi) | số phát thật, tách khỏi `đuôi xác nhận` |
+
+---
+
+## §86 — KIỂM CHỨNG BẢN 1.92.50 TRÊN LÔ 6 920 CHAT (12:06:38→12:08:26)
+
+Nguồn: `botfake-log-20261117-120932.txt` — Mục 1 (158 dòng) + Mục 2 (7 842 dòng sổ, 6 920 chat).
+Đây là lô ĐẦU TIÊN chạy bản 1.92.50-W200.96, nên đây là lần kiểm chứng 4 vá của §85.
+
+### 86.1 Bốn vá đều chạy đúng
+
+| vá | kỳ vọng | thực tế lô này | |
+|---|---|---|---|
+| (1) cầu dao Ext | có dòng `🔒`, dồn Ext ≤ 200 ca | **`🔒` xuất hiện lúc 12:07:11**, dồn Ext **364 ca** (lô trước 3 280) | ✅ |
+| (2) `photoUpStats` | `📷` khớp lượt, không lặp số cũ | **không in `📷`** — ĐÚNG: lô này **không dùng câu nhanh** (0 dòng `câu nhanh`), không chat nào có ảnh | ✅ |
+| (3) `tailChats` | ≤ số chat (6 920) | **6 920** (đúng bằng số chat; lô trước 9 263 > 9 242) | ✅ |
+| (4) `dispatchEndedAt` | `PHÁT …/s` tách khỏi đuôi | **PHÁT 54,5 s · đuôi 53 s** — hai số riêng, 14 cổng wave mở hết 12:06:40→12:07:31 = **51 s** khớp | ✅ |
+
+### 86.2 LÔ NÀY NHANH HƠN THẬT — 127,01 lệnh/s
+
+| | lô 9 242 (1.92.49) | **lô 6 920 (1.92.50)** |
+|---|---|---|
+| PHÁT | 31,14/s (gộp đuôi) | **127,01/s** |
+| phát (đo lại từ cổng wave) | 55,7/s | **135,7/s** (6 920 ÷ 51 s) |
+| ✅ | 5 696 (61,6 %) | **3 912 (56,5 %)** |
+| ❌ | 3 387 | **553** (−84 %) |
+| ⚠ | 159 | **2 455** (xem 86.3) |
+| `📡 ACK OK/rejected` | 5 686 / 3 392 | 3 904 / 2 924 |
+| `⏱ GIỮ SLOT` | ms/chat 571+0+3 855 | **ms/chat 201+0+1 362 (tổng 1 362)** |
+
+Tốc độ chốt theo cửa sổ 10 s: `12:06:41 153,2/s · 12:06:51 143,6 · 12:07:01 134,9 · 12:07:11 81,8 ·
+12:07:21 121,0 · 12:07:31 45,5 · 12:07:41 2,5` (đuôi).
+⇒ Tiêu chí §83.7 (≥ 40 chat/s) **đạt** ở pha giữa, và đạt cả khi tính bình quân.
+
+### 86.3 ⚠ 2 455 KHÔNG PHẢI LỖI MỚI — đó là HỆ QUẢ TRỰC TIẾP của vá (1)
+
+Sổ: **2 451 ca** kết thúc bằng đúng một câu:
+`Socket: FB từ chối · đã đo 200 ca thì Extension cũng bị chặn ⇒ GIỮ ⚠ (chưa gửi), vào danh sách gửi tay`
+(+ 4 ca `bù không rõ kết quả`). Toàn bộ rơi vào **12:07:10–12:08:25**.
+
+Đây là nhánh dòng 5304–5307: sau khi `extTry1545.closed = true` thì MỌI ca Socket-bị-từ-chối
+sau đó **không bắn lại Socket (biết chắc vô ích) và không bù Ext (đã đo Ext cũng chặn)** ⇒ giữ ⚠.
+Trước vá (1), cầu dao không đóng nên các ca này bị đẩy sang Ext, Ext từ chối, rồi chốt **❌**
+(lô 9 242: ❌ 3 387, ⚠ 159). Nay chúng thành **⚠** (lô này: ❌ 553, ⚠ 2 455).
+Tổng `❌ + ⚠`: **3 546 → 3 008** (giảm 538), và **không ca nào bị chốt ❌ oan**.
+
+⚠ **Đánh đổi phải nói rõ:** 2 455 chat này giờ nằm trong danh sách **gửi tay**. Không mất tin
+im lặng (vẫn được liệt kê trong `.txt`), nhưng người dùng phải xử lý tay nếu muốn.
+
+### 86.4 VÌ SAO ĐÓNG Ở 364 CHỨ KHÔNG PHẢI 30 (ngưỡng `STREAK_MAX`)
+
+Đếm theo thời gian từ log:
+```
+t=0s   (12:07:10)  🛟 dồn Ext 364  ·  ❌ bù Ext bị chặn 61  ·  ⚠ giữ tay 209   🔒
+t=5s               🛟 0            ·  ❌ 68                 ·  ⚠ 386
+t=10s              🛟 0            ·  ❌ 98                 ·  ⚠ 675
+t=15s              🛟 0            ·  ❌ 91                 ·  ⚠ 526
+t=20s              🛟 0            ·  ❌ 42                 ·  ⚠ 610
+t=25s+             🛟 0            ·  ❌ 0                  ·  ⚠ 37 (đuôi)
+```
+364 ca dồn trong **cùng 1–2 giây** vì `runMainItem` bắn một wave 192 slot và ACK rejected về
+gần như đồng loạt (ACK TB 1 543 ms). `noteExt1545Outcome('blocked')` chỉ chạy **sau** khi Ext
+bù trả lời; đến khi ca thứ 360 trả lời thì 364 ca đã vào hàng. Vì vậy `tried` (364) > `streak` (30)
+⇒ log in `byProbe = tried >= PROBE`, không in `thử từng ca một`.
+**Không phải lỗi logic**: sau khi đóng, 2 451 ca còn lại không dồn Ext thêm lần nào.
+
+### 86.5 HAI CHỖ IN LỆCH NHAU (đã vá ở 1.92.51-W200.97)
+
+- Dòng `🏁 … Đã phát lệnh xong trong **107 s**` và dòng `⚡ PHÁT … trong **54,5 s**` nói hai số
+  khác nhau về cùng một việc. Gốc: chỗ in 🏁 lấy `Date.now()` tại **lúc in** (đuôi đã chạy ~53 s),
+  không lấy `dispatchEndedAt`. Vá: dùng `batchStats.dispatchEndedAt`.
+- **ĐÍNH CHÍNH §85.6:** dòng `📷 bind fbId` vắng mặt ở lô này **không phải lỗi reset** — lô không
+  dùng câu nhanh. Muốn nghiệm thu `📷` phải chạy lô **có ảnh**.
+
+### 86.6 TIÊU CHÍ LÔ SAU
+
+| số | lô này | lô sau |
+|---|---|---|
+| gửi trùng | 0 | **0** |
+| `Socket bị né` / `im lặng THẬT` / `hết hạn chờ` | 0 / 0 / 0 | **0 / 0 / 0** |
+| pha giữa | 121–153/s ✅ | ≥ 40/s |
+| `❌` | 553 | không tăng khi `⚠` giảm |
+| `⚠` (vào gửi tay) | 2 455 | phải được người dùng xử lý tay, không bỏ qua |
+| `📷 bind fbId` | không có (lô không ảnh) | **chạy lô CÓ ảnh** để nghiệm thu vá (2) |
+| `⏱ GIỮ SLOT` | 201 + 0 + 1 362 | `chờ + chuẩn bị + còn lại = tổng`; theo dõi 1 362 ms còn ở đâu |
+| dòng 🏁 vs ⚡ | 107 s vs 54,5 s (lệch) | **phải bằng nhau** |
