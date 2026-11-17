@@ -4844,3 +4844,73 @@ trả **0 chat mà vẫn `ok:true`**.
 **Test khoá: N1–N4** (10 page/40 chat/trang/1600 chat · 429 hai lần · `{data:{}}` · cursor bị bỏ qua).
 Mutation: trả `multi` về tính từ Redux ⇒ N1b/N1d/N1e đỏ; bỏ thử lại 429 ⇒ N2/N2a/N2b đỏ;
 bỏ đọc `{data:{}}` ⇒ N3 đỏ.
+
+---
+
+## §92 — HIỆU NĂNG: O(N²) TRONG ĐƯỜNG NÓNG (đã đo, đã sửa, 1.92.56)
+
+Người dùng phản ánh: *"khi gửi tôi ẩn danh sách chat rồi, giao diện trống không vẫn lag"*.
+Đây là bằng chứng quyết định — **lag không phải do vẽ DOM**, vì lúc đó không có gì để vẽ.
+
+### 92.1 PHÉP ĐO (trích nguyên văn hàm từ chính userscript, chạy với dữ liệu thật)
+
+| n (số chat) | `getBatchSummaryCounts()` gọi n lần |
+|---|---|
+| 2 000 | 163,9 ms |
+| 4 000 | 806,5 ms |
+| 8 000 | 4 052,1 ms |
+| **12 410** | **9 945,7 ms** |
+
+Tăng theo bình phương ⇒ O(n²) thật, không phải cảm giác.
+
+### 92.2 NGUYÊN NHÂN
+
+`getBatchSummaryCounts()` (dòng 8700–8702 bản 1.92.55):
+
+```js
+const verifyPendingNow        = Object.keys(sockVerifyPending).filter(...).length;
+const extVerifyPendingNow     = Object.keys(extVerifyPending).filter(...).length;
+const uncertainVerifyPendingNow = Object.keys(uncertainVerifyPending).filter(...).length;
+```
+
+Ba sổ này giữ **mọi chat đang chờ kiểm chứng**. Mỗi lần **một** chat chốt xong,
+`updateBatchSummaryUI()` → `getBatchSummaryCounts()` ⇒ 3 lần `Object.keys` + `filter`
+(cấp phát mảng mới cho cả 3 sổ). Tổng O(n²).
+
+**Vì sao ẩn danh sách vô ích:** phép tính này **không đọc DOM, không đụng panel**.
+Ẩn danh sách hay để giao diện trống **không bớt được một phép duyệt nào**. Đây là chỗ
+tôi từng kết luận sai (§91 ghi "thủ phạm là promise/closure" và "highlightRows") — cả
+hai đều không giải thích được hiện tượng "trống mà vẫn lag".
+
+### 92.3 BA CHỖ ĐÃ SỬA
+
+| # | sửa | trước | sau |
+|---|---|---|---|
+| 1 | 3 biến đếm `verifyPendingCount` thay 3 lần quét (6 hàm `markXxx`/`clearXxx` + `resetVerifyPending`) | **9 946 ms** (n=12 410) | **0,8 ms** |
+| 2 | `reportExtJob` dùng `pending` người gọi đã tính, không gọi lại `getBatchSummaryCounts` | tính 2 lần/lần vẽ | 1 lần |
+| 3 | `countResendSplit()` một lượt duyệt trả cả hai số; chỗ dựng TỔNG HỢP dùng lại | 4 lượt duyệt × 5 000 | 1 lượt |
+
+Phát hiện thêm khi sửa: **3 sổ kiểm chứng không được reset đầu mỗi lượt** (trong khi mọi
+sổ per-run khác đều được). Khoá của lượt cũ nằm lại vĩnh viễn ⇒ bộ đếm/bảng TỔNG HỢP
+đếm cao hơn thực tế. Nay `resetVerifyPending()` chạy ngay cạnh `runSeq++`.
+
+### 92.4 TEST KHOÁ (225 ca, +24)
+
+- `getBatchSummaryCounts` **không được** chứa `Object.keys` trên 3 sổ
+- 6 hàm `markXxx`/`clearXxx` tăng/giảm đúng chiều, không xuống dưới 0
+- `markExtVerify` lần đọc-lại **không** cộng vào "đang chờ" (giữ hành vi cũ)
+- **Ngoài khối bộ đếm không được ghi/xoá trực tiếp** 3 sổ (bản đầu của test chỉ quét phần
+  sau `getBatchSummaryCounts` nên mutation ở phía trước **lọt**; đã sửa để xét cả hai phía)
+- `resetVerifyPending()` phải có ngay sau `runSeq++`
+
+Mutation-test 3 nhát: trả về `Object.keys` ⇒ đỏ · bỏ `resetVerifyPending` ⇒ đỏ · ghi trực
+tiếp vào sổ ⇒ đỏ.
+
+### 92.5 CÒN LẠI (chưa sửa, đã đo, chờ đo lại sau khi chạy thật)
+
+| vị trí | vấn đề | đo |
+|---|---|---|
+| `sweepBgPending` 8636 | `Object.keys(pendingBg)` + `sendLanesBusy()` mỗi 5 s | 890 ms/phút khi pendingBg=8 000 |
+| `getPageSocketLaneStats` 6668 | dựng thống kê mỗi lần cấp/nhả slot (chặn 100 ms) | nhỏ |
+| `highlightRows` 1209 | quét cả danh sách, 5 `querySelector`/dòng | chỉ khi có list |
+| `logAll.shift()` / `auditRows.shift()` | O(n) memmove khi mảng 60 000 đầy | nhỏ, liên tục |

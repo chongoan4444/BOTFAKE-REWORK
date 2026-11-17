@@ -533,8 +533,17 @@
     // Chỉ ẩn khi đã chốt xong thật (pending = 0) hoặc user bấm Dừng — chốt idle cuối
     // do markSendIdleIfSettled() đảm nhiệm.
     if (typeof batchStats !== 'undefined' && batchStats.loopFinished && extra.phase === 'send') {
-      let pend = 1;
-      try { pend = getBatchSummaryCounts().pending; } catch (e) { pend = 0; }
+      /* [v1.92.56] KHÔNG tính lại toàn bộ tổng hợp ở đây nữa.
+       * `reportExtJob` được gọi từ `flushProgressUi` (250 ms/lần) — mà `flushBatchSummaryUI`
+       * vừa gọi `getBatchSummaryCounts()` NGAY TRƯỚC ĐÓ rồi truyền số xuống qua `setProgress`.
+       * Gọi lại ở đây là làm 2 lần cùng một phép tính, và trước 1.92.56 phép tính đó là O(k)
+       * trên cả 3 sổ kiểm chứng ⇒ nhân đôi phần đắt nhất.
+       * Nay dùng số `pending` mà người gọi đã có (truyền qua `extra.pending`), chỉ tính lại
+       * khi THỰC SỰ chưa có ai tính. */
+      let pend = (typeof extra.pending === 'number') ? extra.pending : 1;
+      if (typeof extra.pending !== 'number') {
+        try { pend = getBatchSummaryCounts().pending; } catch (e) { pend = 0; }
+      }
       if (pend <= 0 || state.stopRequested) extra.phase = 'idle';
     }
     const idle = extra.phase === 'idle' || (!state.sending && !state.scanning && extra.phase !== 'scan');
@@ -8570,18 +8579,21 @@
     if ((now || Date.now()) - at > RESCUE_INFLIGHT_STALE_MS) { delete rescueInFlight[k]; return false; }
     return true;
   }
-  function countRescuing() {
+  /* [v1.92.56] TRƯỚC: `countRescuing()` + `countManualResendWait()` mỗi hàm duyệt TOÀN BỘ
+   * `manualResendList` (tới 5 000 phần tử), và chỗ dựng TỔNG HỢP gọi mỗi hàm HAI lần
+   * (`(x ? '…'+x : '')` gọi lại lần 2) ⇒ 4 lượt duyệt cho một lần dựng bảng.
+   * Đo: 163 ms / 200 lần gọi khi list = 5 000.
+   * Nay: MỘT lượt duyệt trả cả hai số; chỗ gọi dùng lại kết quả, không gọi lại. */
+  function countResendSplit() {
     const now = Date.now();
-    let n = 0;
-    for (let i = 0; i < manualResendList.length; i++) if (isRescuing(manualResendList[i].id, now)) n++;
-    return n;
+    let rescuing = 0;
+    for (let i = 0; i < manualResendList.length; i++) {
+      if (isRescuing(manualResendList[i].id, now)) rescuing++;
+    }
+    return { rescuing: rescuing, waiting: manualResendList.length - rescuing };
   }
-  function countManualResendWait() {
-    const now = Date.now();
-    let n = 0;
-    for (let i = 0; i < manualResendList.length; i++) if (!isRescuing(manualResendList[i].id, now)) n++;
-    return n;
-  }
+  function countRescuing() { return countResendSplit().rescuing; }
+  function countManualResendWait() { return countResendSplit().waiting; }
   const extVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng sau khi Ext timeout
   // [v1.91.79] Ca ĐỌC LẠI nhịp giãn: KHÔNG được tính vào "đang chờ" của bảng TỔNG HỢP.
   // Log 19:01→19:04 (10672 tin): phát lệnh xong 19:01:29 nhưng mãi 19:04:25 mới chốt vì
@@ -8590,6 +8602,77 @@
   const tailSeen = {}; // [v1.92.50] convId → đã đếm vào "đuôi chờ xác nhận" của lượt này
   const extRecheckPending = {}; // convId → runSeq đang đọc lại (không giữ lượt)
   const uncertainVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng ca "không rõ kết quả" (API timeout/5xx)
+
+  /* ==========================================================================
+   * [v1.92.56] BỘ ĐẾM O(1) CHO 3 SỔ ĐANG CHỜ KIỂM CHỨNG — SỬA O(N²)
+   *
+   * ĐO ĐƯỢC TRƯỚC KHI SỬA (`/tmp/bench.mjs`, trích nguyên văn getBatchSummaryCounts
+   * từ chính file này rồi chạy với dữ liệu thật):
+   *     n = 12 410 chat  ⇒  9 946 ms CPU  (801 µs mỗi lần gọi)
+   * Nguyên nhân: mỗi lần MỘT chat chốt xong, `getBatchSummaryCounts()` chạy
+   *     Object.keys(sockVerifyPending).filter(...)      ← tạo mảng mới + quét
+   *     Object.keys(extVerifyPending).filter(...)       ← làm 3 lần như vậy
+   *     Object.keys(uncertainVerifyPending).filter(...)
+   * Ba sổ này giữ MỌI chat đang chờ kiểm chứng ⇒ chi phí O(k) mỗi lần, và lần nào
+   * cũng cấp phát mảng mới ⇒ tổng O(n²).
+   *
+   * ĐÂY CŨNG LÀ LÝ DO "ẨN DANH SÁCH VẪN LAG": phép tính này KHÔNG đọc DOM, không vẽ
+   * gì. Ẩn danh sách hay để giao diện trống cũng không bớt được một phép duyệt nào.
+   *
+   * Nay: 3 biến đếm, tăng lúc GHI khoá, giảm lúc XOÁ khoá. Đọc là O(1).
+   * Các hàm ghi/xoá: markSockVerify / clearSockVerify / markExtVerify / clearExtVerify /
+   * markUncertainVerify / clearUncertainVerify — TẤT CẢ chỗ đụng 3 sổ đều phải đi qua đây.
+   * Test `tools/test-verify.mjs` có ca khoá lại (không cho quay về Object.keys).
+   * ========================================================================== */
+  const verifyPendingCount = { sock: 0, ext: 0, uncertain: 0 };
+
+  function markSockVerify(id) {
+    if (sockVerifyPending[id]) return false;
+    sockVerifyPending[id] = runSeq;
+    verifyPendingCount.sock++;
+    return true;
+  }
+  function clearSockVerify(id) {
+    if (!sockVerifyPending[id]) return;
+    delete sockVerifyPending[id];
+    if (verifyPendingCount.sock > 0) verifyPendingCount.sock--;
+  }
+  function markExtVerify(id, recheck) {
+    const store = recheck ? extRecheckPending : extVerifyPending;
+    if (store[id]) return false;
+    store[id] = runSeq;
+    /* Lần ĐỌC LẠI (recheck) cố ý KHÔNG cộng vào "đang chờ" của bảng TỔNG HỢP —
+     * giữ đúng hành vi cũ (xem chú thích [v1.91.79] ngay dưới). */
+    if (!recheck) verifyPendingCount.ext++;
+    return true;
+  }
+  function clearExtVerify(id, recheck) {
+    const store = recheck ? extRecheckPending : extVerifyPending;
+    if (!store[id]) return;
+    delete store[id];
+    if (!recheck && verifyPendingCount.ext > 0) verifyPendingCount.ext--;
+  }
+  function markUncertainVerify(id) {
+    if (uncertainVerifyPending[id]) return false;
+    uncertainVerifyPending[id] = runSeq;
+    verifyPendingCount.uncertain++;
+    return true;
+  }
+  function clearUncertainVerify(id) {
+    if (!uncertainVerifyPending[id]) return;
+    delete uncertainVerifyPending[id];
+    if (verifyPendingCount.uncertain > 0) verifyPendingCount.uncertain--;
+  }
+  /** Đặt lại cả 3 sổ + bộ đếm (đầu mỗi lượt / khi Dừng). */
+  function resetVerifyPending() {
+    Object.keys(sockVerifyPending).forEach((k) => delete sockVerifyPending[k]);
+    Object.keys(extVerifyPending).forEach((k) => delete extVerifyPending[k]);
+    Object.keys(extRecheckPending).forEach((k) => delete extRecheckPending[k]);
+    Object.keys(uncertainVerifyPending).forEach((k) => delete uncertainVerifyPending[k]);
+    verifyPendingCount.sock = 0;
+    verifyPendingCount.ext = 0;
+    verifyPendingCount.uncertain = 0;
+  }
   const extTimeoutStats = { timeout: 0, skipped: 0, found: 0, notFound: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
   let bgWatchdogTimer = null;
   // ⚡ [FIX-5] Với bắn-nhả 192 slot, đuôi hàng đợi retry Socket/Ext có thể chờ >90s khi lô lớn.
@@ -8697,9 +8780,13 @@
     const unsureTotal = summaryCounters.unsure;
     const skipLateTotal = summaryCounters.skipLate;
     const settled = okTotal + failTotal + unsureTotal + skipLateTotal;
-    const verifyPendingNow = Object.keys(sockVerifyPending).filter((id) => sockVerifyPending[id] === runSeq).length;
-    const extVerifyPendingNow = Object.keys(extVerifyPending).filter((id) => extVerifyPending[id] === runSeq).length;
-    const uncertainVerifyPendingNow = Object.keys(uncertainVerifyPending).filter((id) => uncertainVerifyPending[id] === runSeq).length;
+    /* [v1.92.56] O(1) thay vì O(k) — xem khối chú thích dài ở `verifyPendingCount`.
+     * Ba dòng cũ tạo 3 mảng mới + quét toàn bộ 3 sổ MỖI LẦN một chat chốt xong:
+     * đo được 9 946 ms cho lô 12 410 chat. Nay đọc biến đếm.
+     * `resetVerifyPending()` / `markXxx` / `clearXxx` giữ 3 biến này khớp với 3 sổ. */
+    const verifyPendingNow = verifyPendingCount.sock;
+    const extVerifyPendingNow = verifyPendingCount.ext;
+    const uncertainVerifyPendingNow = verifyPendingCount.uncertain;
     /* [v1.92.36] CHỐT LƯỢT KHÔNG ĐỢI KIỂM CHỨNG NỀN.
      * Lô 3 chat (15:48): phát lệnh 0,6 s nhưng bảng TỔNG HỢP chỉ in sau 13 s; lô 90 chat (15:44):
      * 0,6 s phát, 31,4 s chờ. Mọi chat đã có kết luận từ lâu, phần chờ là 3 lượt ĐỌC LẠI lịch sử
@@ -8743,6 +8830,8 @@
       const socketAckCount = sendDiag.socketAckOk + sendDiag.socketAckRejected + sendDiag.socketNoAck;
       const socketAckAvgMs = socketAckCount ? Math.round(sendDiag.socketAckMsTotal / socketAckCount) : 0;
       const socketLaneFinal = getPageSocketLaneStats();
+      /* [v1.92.56] Tính MỘT lần rồi dùng cho cả hai nhãn (trước đây gọi 2 hàm × 2 lần). */
+      const resendSplit = countResendSplit();
       const apiStartedSafe = Math.max(1, sendDiag.apiStarted);
       const apiFetchSafe = Math.max(1, sendDiag.apiFetchAttempts);
       const apiStatuses = Object.keys(sendDiag.apiStatusCounts).sort((a, b) => Number(a) - Number(b))
@@ -8766,7 +8855,7 @@
         sumEl.style.display = '';
         sumEl.innerHTML = html;
       }
-      if (c.total > 0) setProgress(c.settled, c.total, c.okTotal);
+      if (c.total > 0) setProgress(c.settled, c.total, c.okTotal, c.pending);
       if (isDoneAll || c.total <= 200) {
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
       }
@@ -8816,8 +8905,8 @@
               + ((extSendCtl.peakActive || 0) < extSendLane.getLimit()
                 ? ' (làn CHƯA đầy ⇒ nút cổ chai là Extension, không phải làn)' : ' (làn ĐÃ đầy ⇒ nâng làn mới có ích)')
             : '')
-          + (countRescuing() ? ' | ⏳ ĐANG CỨU tự động: ' + countRescuing() + ' chat (Extension, ~10–13 s)' : '')
-          + (countManualResendWait() ? ' | 🖐 CẦN GỬI TAY: ' + countManualResendWait() + ' chat (xem 💾 .txt)' : '')
+          + (resendSplit.rescuing ? ' | ⏳ ĐANG CỨU tự động: ' + resendSplit.rescuing + ' chat (Extension, ~10–13 s)' : '')
+          + (resendSplit.waiting ? ' | 🖐 CẦN GỬI TAY: ' + resendSplit.waiting + ' chat (xem 💾 .txt)' : '')
           + (c.skipTotal ? ' | 🧹 Bỏ qua: ' + c.skipTotal : '')
           + ((buStats.ok || buStats.cancelled)
             ? ' | 🔁 Bù OK: ' + buStats.ok + ' (' + Object.keys(buStats.byWhy).map((k) => k + ': ' + buStats.byWhy[k]).join(' · ') + ') · hủy bù tránh trùng: ' + buStats.cancelled
@@ -9763,7 +9852,7 @@
     if (sockVerifyPending[conv.id]) return; // đã có 1 kiểm chứng đang chờ cho chat này
     if (sockVerifyFired[conv.id] === runSeq) return; // lượt này đã cứu 1 lần rồi — giữ ⚠, không cứu vòng 2
     const myRun = runSeq;
-    sockVerifyPending[conv.id] = myRun;
+    if (!markSockVerify(conv.id)) return;   // [v1.92.56] đi qua bộ đếm O(1)
     const nm = conv.name || conv.id;
     const sentAt = publishedAtMs || Date.now();
     const verifyDelay = (batchStats && batchStats.total > 50) ? 3000 : SOCK_VERIFY_DELAY_MS;
@@ -9924,7 +10013,7 @@
         verifyStats.unknown++;
         logFailGrouped(nm, 'kiểm chứng lỗi (' + (e && e.message || e) + ') — giữ ⚠ như cũ, không gửi lại', '🔎', conv.id);
       } finally {
-        delete sockVerifyPending[conv.id]; // nhả sổ chờ ở mọi lối ra — lượt chỉ được kết thúc sau khi kiểm chứng chốt xong
+        clearSockVerify(conv.id); // [v1.92.56] nhả sổ + GIẢM bộ đếm ở mọi lối ra
         // Dù kiểm chứng thấy/không thấy/lỗi cũng phải tính lại pending và
         // nhả nút Đang gửi; thiếu bước này UI treo ở “còn 1 tin đang xác
         // nhận/bù nền” dù ca đó đã được đếm ⚠ từ trước.
@@ -9961,13 +10050,7 @@
     if (!want && !photo) return;
     if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
     const myRun = runSeq;
-    if (recheck) {
-      if (extRecheckPending[conv.id]) return;
-      extRecheckPending[conv.id] = myRun;
-    } else {
-      if (extVerifyPending[conv.id]) return;
-      extVerifyPending[conv.id] = myRun;
-    }
+    if (!markExtVerify(conv.id, recheck)) return; // [v1.92.56] đi qua bộ đếm O(1)
     const nm = conv.name || conv.id;
     // [v1.91.79] Chỉ còn 1 lần đọc lại: 3 lượt liên tiếp cho 'thấy tin 0' ⇒ đọc nhiều là vô ích,
     // chỉ tốn request trên máy yếu.
@@ -10019,7 +10102,7 @@
       } catch (e) {
         if (!isRecheck) extTimeoutStats.unknown++;
       } finally {
-        if (isRecheck) delete extRecheckPending[conv.id]; else delete extVerifyPending[conv.id];
+        clearExtVerify(conv.id, isRecheck); // [v1.92.56] nhả sổ + GIẢM bộ đếm
         // [v1.91.78] Hẹn lần đọc lại kế tiếp (chỉ đọc, không bắn).
         try {
           if (left > 0 && !state.stopRequested && runSeq === myRun
@@ -10137,7 +10220,7 @@
     if (uncertainVerifyPending[conv.id]) return;
     if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
     const myRun = runSeq;
-    uncertainVerifyPending[conv.id] = myRun;
+    if (!markUncertainVerify(conv.id)) return; // [v1.92.56] đi qua bộ đếm O(1)
     const nm = conv.name || conv.id;
     const sentAt = sentAtMs || Date.now();
     bgClock.wait(UNCERTAIN_VERIFY_FIRST_MS).then(async () => {
@@ -10195,7 +10278,7 @@
       } catch (e) {
         // kiểm chứng lỗi → giữ nguyên ⚠
       } finally {
-        delete uncertainVerifyPending[conv.id];
+        clearUncertainVerify(conv.id); // [v1.92.56] nhả sổ + GIẢM bộ đếm
         try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
         try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
       }
@@ -10596,6 +10679,12 @@
     // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
     // bù của lượt trước đang chờ sẽ tự hủy (runSeq) — không gửi lẫn vào lượt mới
     runSeq++;
+    /* [v1.92.56] Sổ đang-chờ-kiểm-chứng cũng phải về 0 mỗi lượt, cùng lúc với các sổ
+     * per-run khác ngay dưới đây. TRƯỚC ĐÂY KHÔNG CÓ BƯỚC NÀY ⇒ khoá của lượt cũ
+     * (kiểm chứng chưa xong đã bị huỷ) nằm lại vĩnh viễn trong 3 sổ ⇒ bộ đếm (và cả
+     * 3 lần quét cũ) ĐẾM CAO hơn thực tế, đồng thời bảng TỔNG HỢP hiện "đang kiểm chứng
+     * nền" mãi không về 0. */
+    try { resetVerifyPending(); } catch (eVR) { /* ignore */ }
     buRetrySeq = 0;
     Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
     Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
@@ -13265,14 +13354,18 @@
     if (bar) bar.style.width = snap.pct + '%';
     const st = shadow && shadow.getElementById('ssb-progstat');
     if (st) st.textContent = snap.pct + '% · ✅ ' + (snap.ok || 0) + '/' + (snap.total || 0);
-    reportExtJob({ phase: 'send', pct: snap.pct, ok: snap.ok, total: snap.total, done: snap.done });
+    reportExtJob({ phase: 'send', pct: snap.pct, ok: snap.ok, total: snap.total, done: snap.done,
+      pending: (typeof snap.pending === 'number') ? snap.pending : undefined });
   }
-  function setProgress(done, total, ok) {
+  function setProgress(done, total, ok, pendingCount) {
     const snap = {
       pct: total ? Math.min(100, Math.round((done / total) * 100)) : 0,
       ok: (ok != null) ? ok : done,
       total: total || 0,
       done: done || 0,
+      /* [v1.92.56] Cho người gọi TRUYỀN số `pending` đã tính sẵn (flushBatchSummaryUI vừa
+       * gọi getBatchSummaryCounts) để reportExtJob không phải tính lại lần nữa. */
+      pending: (typeof pendingCount === 'number') ? pendingCount : undefined,
     };
     const immediate = total <= 200 || done >= total || !state.sending;
     const elapsed = Date.now() - progressUiLastAt;

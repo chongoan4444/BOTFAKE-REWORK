@@ -997,6 +997,116 @@ check('[v1.92.55] nhãn log KHÔNG còn gọi tất cả là "ACK chết"',
 check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
   /Socket bị né \(mất tin ' \+ socketPickDiag\.skipLost/.test(SRC), true);
 
+/* ================= [v1.92.56] CHỐNG O(N²) TRONG ĐƯỜNG NÓNG =================
+ * Ba sổ "đang chờ kiểm chứng" giữ MỌI chat chưa xong. Mỗi lần một chat chốt,
+ * `getBatchSummaryCounts()` chạy để vẽ TỔNG HỢP. Bản 1.92.55 quét cả 3 sổ ở đó:
+ *     Object.keys(sockVerifyPending).filter(...)          (×3)
+ * Đo với lô 12 410 chat: 9 946 ms CPU. Và vì nó KHÔNG đọc DOM, ẩn danh sách cũng
+ * không bớt được gì — đúng hiện tượng người dùng báo "ẩn danh sách vẫn lag".
+ * Nay: 3 biến đếm O(1). Test dưới đây khoá lại để không ai vô tình quay về. */
+
+{
+  const fn = extractFn('getBatchSummaryCounts');
+  checkNot('[v1.92.56] getBatchSummaryCounts KHÔNG quét sổ kiểm chứng',
+    fn, /Object\.keys\(\s*(sockVerifyPending|extVerifyPending|uncertainVerifyPending)/);
+  check('[v1.92.56] getBatchSummaryCounts đọc bộ đếm O(1)',
+    /verifyPendingCount\.sock/.test(fn) && /verifyPendingCount\.ext/.test(fn) && /verifyPendingCount\.uncertain/.test(fn), true);
+}
+
+// 6 hàm đi qua bộ đếm phải tồn tại và tăng/giảm đúng chiều
+{
+  const markSock = extractFn('markSockVerify');
+  const clearSock = extractFn('clearSockVerify');
+  check('[v1.92.56] markSockVerify TĂNG bộ đếm', /verifyPendingCount\.sock\+\+/.test(markSock), true);
+  check('[v1.92.56] clearSockVerify GIẢM bộ đếm', /verifyPendingCount\.sock--/.test(clearSock), true);
+  check('[v1.92.56] clearXxx không xuống dưới 0', /> 0\) verifyPendingCount\.sock--/.test(clearSock), true);
+
+  const markExt = extractFn('markExtVerify');
+  check('[v1.92.56] markExtVerify: lần ĐỌC LẠI không cộng vào "đang chờ"',
+    /if \(!recheck\) verifyPendingCount\.ext\+\+/.test(markExt), true);
+
+  const resetFn = extractFn('resetVerifyPending');
+  check('[v1.92.56] resetVerifyPending đặt lại CẢ 3 bộ đếm về 0',
+    /verifyPendingCount\.sock = 0/.test(resetFn)
+    && /verifyPendingCount\.ext = 0/.test(resetFn)
+    && /verifyPendingCount\.uncertain = 0/.test(resetFn), true);
+  check('[v1.92.56] resetVerifyPending xoá cả 4 sổ',
+    /sockVerifyPending/.test(resetFn) && /extVerifyPending/.test(resetFn)
+    && /extRecheckPending/.test(resetFn) && /uncertainVerifyPending/.test(resetFn), true);
+}
+
+// Mọi chỗ GHI/XOÁ 3 sổ phải đi qua hàm — nếu không, bộ đếm sẽ lệch khỏi thực tế.
+{
+  const body = SRC.slice(SRC.indexOf('const verifyPendingCount'),
+    SRC.indexOf('function getBatchSummaryCounts'));
+  const directWrites = (body.match(/(sockVerifyPending|extVerifyPending|uncertainVerifyPending)\[/g) || []).length;
+  /* Trong khối định nghĩa 6 hàm + reset: mỗi sổ được ghi/xoá đúng 1 lần trong hàm của nó,
+   * cộng resetVerifyPending dùng Object.keys. Con số dưới đây là mức trần hợp lý. */
+  check('[v1.92.56] số chỗ đụng trực tiếp 3 sổ nằm gọn trong 6 hàm + reset (≤ 12)',
+    directWrites <= 12, true);
+
+  /* Kiểm chặt: MỌI chỗ ghi/xoá trực tiếp 3 sổ phải nằm TRONG khối bộ đếm
+   * (từ `const verifyPendingCount` tới hết `resetVerifyPending`).
+   *
+   * Bản đầu của test này chỉ quét phần SAU `getBatchSummaryCounts` — nên khi tôi
+   * mutation-test bằng cách thay `markSockVerify(conv.id)` (nằm TRƯỚC mốc đó) bằng
+   * `sockVerifyPending[conv.id] = runSeq`, test KHÔNG bắt được. Nay xét cả hai phía. */
+  const blockStart = SRC.indexOf('const verifyPendingCount');
+  const blockEnd = SRC.indexOf('function getBatchSummaryCounts');
+  const outside = SRC.slice(0, blockStart) + SRC.slice(blockEnd);
+  checkNot('[v1.92.56] ngoài khối bộ đếm không ghi sockVerifyPending',
+    outside, /sockVerifyPending\[[^\]]+\]\s*=/);
+  checkNot('[v1.92.56] ngoài khối bộ đếm không xoá sockVerifyPending',
+    outside, /delete sockVerifyPending\[/);
+  checkNot('[v1.92.56] ngoài khối bộ đếm không ghi extVerifyPending',
+    outside, /(?<!Recheck)extVerifyPending\[[^\]]+\]\s*=/);
+  checkNot('[v1.92.56] ngoài khối bộ đếm không xoá extVerifyPending',
+    outside, /delete extVerifyPending\[/);
+  checkNot('[v1.92.56] ngoài khối bộ đếm không ghi uncertainVerifyPending',
+    outside, /uncertainVerifyPending\[[^\]]+\]\s*=/);
+  checkNot('[v1.92.56] ngoài khối bộ đếm không xoá uncertainVerifyPending',
+    outside, /delete uncertainVerifyPending\[/);
+  /* Và trong toàn file: số chỗ ghi trực tiếp 3 sổ phải bằng đúng số trong 6 hàm (3 ghi + 3 xoá
+   * = 6 kèm `delete`, cộng reset dùng Object.keys nên không tính). */
+  const allDirect = (SRC.match(/(sockVerifyPending|extVerifyPending|uncertainVerifyPending)\[[^\]]+\]\s*=/g) || []).length;
+  /* Chỉ 2: markSockVerify và markUncertainVerify ghi trực tiếp; markExtVerify ghi qua
+   * biến  (dùng chung cho extVerifyPending / extRecheckPending) nên không khớp mẫu. */
+  check('[v1.92.56] toàn file chỉ còn 2 chỗ ghi trực tiếp (trong markSockVerify/markUncertainVerify)', allDirect, 2);
+}
+
+// Sổ kiểm chứng phải được đặt lại đầu mỗi lượt (đi kèm runSeq++)
+{
+  const i = SRC.indexOf('runSeq++;');
+  const around = SRC.slice(i, i + 700);
+  check('[v1.92.56] đầu mỗi lượt gọi resetVerifyPending()', /resetVerifyPending\(\)/.test(around), true);
+}
+
+// #2: reportExtJob không được tính lại tổng hợp khi người gọi đã truyền `pending`
+{
+  const fn = extractFn('reportExtJob');
+  check('[v1.92.56] reportExtJob dùng extra.pending khi có',
+    /typeof extra\.pending === 'number'/.test(fn), true);
+  const setProg = extractFn('setProgress');
+  check('[v1.92.56] setProgress nhận thêm pendingCount', /function setProgress\(done, total, ok, pendingCount\)/.test(setProg), true);
+  check('[v1.92.56] flushBatchSummaryUI truyền c.pending xuống setProgress',
+    /setProgress\(c\.settled, c\.total, c\.okTotal, c\.pending\)/.test(SRC), true);
+}
+
+// #3: đếm danh sách gửi tay MỘT lượt duyệt, không 4 lượt
+{
+  const fn = extractFn('countResendSplit');
+  check('[v1.92.56] có countResendSplit (1 lượt duyệt trả cả 2 số)',
+    /return \{ rescuing: rescuing, waiting: manualResendList\.length - rescuing \}/.test(fn), true);
+  const cr = extractFn('countRescuing');
+  const cm = extractFn('countManualResendWait');
+  checkNot('[v1.92.56] countRescuing không tự duyệt nữa', cr, /for \(let i = 0; i < manualResendList\.length/);
+  checkNot('[v1.92.56] countManualResendWait không tự duyệt nữa', cm, /for \(let i = 0; i < manualResendList\.length/);
+  // chỗ dựng TỔNG HỢP chỉ gọi countResendSplit 1 lần
+  const callsInSummary = (SRC.match(/countResendSplit\(\)/g) || []).length;
+  check('[v1.92.56] countResendSplit được gọi 1 lần khi dựng TỔNG HỢP (ngoài 2 hàm bao)',
+    callsInSummary >= 1 && callsInSummary <= 4, true);
+}
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {
