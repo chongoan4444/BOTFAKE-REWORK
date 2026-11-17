@@ -198,7 +198,14 @@
         accessToken: token,
         onProgress: function (n) { emit('tick', { t: 'loading', items: n }); },
       });
-      if (!got.ok) return { ok: false, items: got.items || [], error: got.error };
+      /* `ok:false` khi có page lỗi. Nếu ĐÃ tải được phần nào thì vẫn đi tiếp nhưng
+       * BÁO RÕ — không im lặng gửi thiếu, cũng không vứt công đã tải. */
+      if (!got.ok && !(got.items && got.items.length)) {
+        return { ok: false, items: 0, sent: 0, error: (got.errors && got.errors[0]) || got.error || 'tải danh sách thất bại' };
+      }
+      if (!got.ok) {
+        emit('log', { kind: 'noack', msg: 'Tải THIẾU: ' + (got.errors || []).join(' · ') + ' — vẫn đi tiếp với ' + got.items.length + ' chat' });
+      }
 
       /* Gắn is_record_ctx_7_days Ở MAIN THREAD (cần Redux) — worker không tự tính được. */
       var list = LL.decorate(got.items);

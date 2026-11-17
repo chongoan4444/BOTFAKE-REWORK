@@ -65,6 +65,8 @@ function makePage(port, redux, pathname) {
     performance: { getEntriesByType() { return []; } },
     document: { getElementById() { return null; } },
     fetch, console, Date, JSON, Object, String, Array, Math, Number, isNaN, encodeURIComponent, RegExp, Promise, Error,
+    /* Trình duyệt có sẵn; vm thì không. Thiếu ⇒ fetchJson's sleep() ném ngay khi gặp 429. */
+    setTimeout, clearTimeout, AbortController, atob,
   };
   ctx.window.__pancakeReduxStore__ = { getState: () => redux };
   ctx.globalThis = ctx;
@@ -91,7 +93,7 @@ const LL = makePage(1, REDUX_ONE);
     /access_token=cookie_session/.test(u), true);
   check('[L3] có cursor_mode=true', /cursor_mode=true/.test(u), true);
   check('[L4] có from_platform=web', /from_platform=web/.test(u), true);
-  check('[L5] có current_count', /current_count=60/.test(u), true);
+  check('[L5] current_count=40 (ĐÚNG SỐ HAR, không phải 60)', /current_count=40/.test(u), true);
   check('[L6] có tags=ALL', /tags=%22ALL%22/.test(u), true);
   check('[L7] có except_tags=[]', /except_tags=%5B%5D/.test(u), true);
 }
@@ -153,8 +155,144 @@ console.log('\n[2] load() — phân trang, khử trùng, cờ incomplete');
   const LLy = makePage(port, REDUX_ONE);
   const got = await LLy.load({ maxPages: 2 });
   srv.close();
-  check('[L21] dừng vì maxPages mà còn cursor ⇒ incomplete=true', got.incomplete, true);
+  check('[L21] dừng vì maxPages mà còn cursor ⇒ KHÔNG complete', got.perPage && Object.values(got.perPage)[0].complete, false);
   check('[L22] đúng số trang đã tải', st.calls, 2);
+}
+
+console.log('\n[2b] LỖI "CHỈ TẢI ĐƯỢC 40 LÀ DỪNG" — nhiều page, 40 chat/trang');
+
+/* ĐÂY LÀ LỖI NGƯỜI DÙNG BÁO. Ba nguyên nhân, ba ca riêng:
+ *   N1. endpoint bị gộp: tải 10 page song song mà cả 10 chuỗi gọi /v1/conversations
+ *       (endpoint nhiều page) ⇒ chúng khử trùng lẫn nhau ⇒ mỗi page hụt chat.
+ *   N2. 429 ở trang 2: bản cũ thử lại 3 lần + nghỉ chung khi dính 429.
+ *   N3. response bọc trong { data: { … } }.
+ * Server ở đây bám HAR: 40 chat/trang, next_cursor thật dạng base64. */
+
+function start40(pages, perPageTrang) {
+  const st = { calls: 0, byPage: {}, urls: [] };
+  const srv = http.createServer((req, res) => {
+    st.calls++;
+    const u = decodeURIComponent(req.url || '');
+    st.urls.push(u);
+    const m = /pages\/(\d+)\/conversations/.exec(u);
+    if (!m) {
+      /* Endpoint GỘP (/v1/conversations?pages[..]) — đúng thứ gây lỗi. Trả về chat của
+       * TẤT CẢ page để mô phỏng đúng hành vi thật. */
+      const conv = [];
+      pages.forEach((pid) => {
+        for (let t = 0; t < perPageTrang; t++) {
+          for (let i = 0; i < 40; i++) conv.push({ id: pid + '_' + (t * 40 + i), page_id: pid, from: { name: 'k' + i }, updated_at: '2026-10-19T10:11:08.000000', snippet: 'x', customers: [{}] });
+        }
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, next_cursor: null, conversations: conv }));
+      return;
+    }
+    const pid = m[1];
+    st.byPage[pid] = (st.byPage[pid] || 0) + 1;
+    const mCur = /next_cursor=([^&]+)/.exec(u);
+    const cur = mCur ? mCur[1] : null;
+    const trang = cur ? Number(String(cur).split('_').pop()) : 0;
+    const conv = [];
+    for (let i = 0; i < 40; i++) conv.push({ id: pid + '_' + (trang * 40 + i), page_id: pid, from: { name: 'k' + i }, updated_at: '2026-10-19T10:11:08.000000', snippet: 'x', customers: [{}] });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: true,
+      next_cursor: trang < perPageTrang - 1 ? ('CUR_' + pid + '_' + (trang + 1)) : null,
+      conversations: conv,
+    }));
+  });
+  return new Promise((r) => srv.listen(0, '127.0.0.1', () => r({ srv, st, port: srv.address().port })));
+}
+
+const MULTI10 = { pages: { multiplePageMode: true, multiplePageIds: Array.from({ length: 10 }, (_, i) => String(1000 + i)) }, auth: {}, conversations: {} };
+
+{
+  const { srv, st, port } = await start40(MULTI10.pages.multiplePageIds, 4);
+  const LLm = makePage(port, MULTI10);
+  const got = await LLm.load({});
+  srv.close();
+
+  check('[N1] 10 page × 4 trang × 40 = 1600 chat — KHÔNG được hụt', got.items.length, 1600);
+  check('[N1b] mỗi page đủ 160 chat',
+    Object.values(got.perPage).map((p) => p.items).filter((n) => n !== 160).length, 0);
+  check('[N1c] tải trọn vẹn ⇒ ok=true', got.ok, true);
+  check('[N1d] KHÔNG gọi endpoint GỘP /v1/conversations',
+    st.urls.filter((u) => /\/v1\/conversations\?/.test(u)).length, 0);
+  check('[N1e] đúng 40 request (10 page × 4 trang)', st.calls, 40);
+}
+
+{
+  /* N2: trang 1 của MỌI page trả 429 hai lần đầu ⇒ phải thử lại mà vẫn đủ chat */
+  const pages = ['2000', '2001'];
+  let n429 = 0;
+  const st = { calls: 0 };
+  const srv = http.createServer((req, res) => {
+    st.calls++;
+    const u = decodeURIComponent(req.url || '');
+    const m = /pages\/(\d+)\/conversations/.exec(u);
+    const pid = m[1];
+    const mCur = /next_cursor=([^&]+)/.exec(u);
+    const trang = mCur ? Number(String(mCur[1]).split('_').pop()) : 0;
+    if (trang === 1 && n429 < 4) { n429++; res.writeHead(429); return res.end('{}'); }
+    const conv = [];
+    for (let i = 0; i < 40; i++) conv.push({ id: pid + '_' + (trang * 40 + i), page_id: pid, from: { name: 'k' }, updated_at: '2026-10-19T10:11:08.000000', snippet: 'x', customers: [{}] });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, next_cursor: trang < 1 ? 'CUR_' + pid + '_1' : null, conversations: conv }));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  const LLr = makePage(port, { pages: { multiplePageMode: true, multiplePageIds: pages }, auth: {}, conversations: {} });
+  const got = await LLr.load({});
+  srv.close();
+  /* 2 page × 2 trang × 40 = 160 chat. (Đây là chỗ kỳ vọng của tôi từng SAI: tôi viết 80
+   vì quên nhân số page — code vẫn đúng, test mới là cái sai.) */
+  check('[N2] trang 2 bị 429 hai lần ⇒ vẫn tải đủ 160 chat (2 page × 80)', got.items.length, 160);
+  check('[N2a] mỗi page đủ 80 chat', Object.values(got.perPage).map((p) => p.items), [80, 80]);
+  check('[N2b] có đếm số lần bị 429 để báo người dùng', got.rateLimited > 0, true);
+}
+
+{
+  /* N3: response bọc { data: { conversations, next_cursor } } */
+  const st = { calls: 0 };
+  const srv = http.createServer((req, res) => {
+    st.calls++;
+    const u = decodeURIComponent(req.url || '');
+    const mCur = /next_cursor=([^&]+)/.exec(u);
+    const trang = mCur ? Number(String(mCur[1]).split('_').pop()) : 0;
+    const conv = [];
+    for (let i = 0; i < 40; i++) conv.push({ id: '3000_' + (trang * 40 + i), page_id: '3000', from: { name: 'k' }, updated_at: '2026-10-19T10:11:08.000000', snippet: 'x', customers: [{}] });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, data: { next_cursor: trang < 1 ? 'D_1' : null, conversations: conv } }));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  const LLd = makePage(port, REDUX_ONE);
+  const got = await LLd.load({});
+  srv.close();
+  check('[N3] response bọc {data:{…}} ⇒ vẫn đọc được 80 chat', got.items.length, 80);
+}
+
+{
+  /* N4: server BỎ QUA cursor, trả lặp trang cũ ⇒ phải DỪNG và BÁO, không treo vô hạn */
+  const st = { calls: 0 };
+  const srv = http.createServer((req, res) => {
+    st.calls++;
+    const conv = [];
+    for (let i = 0; i < 40; i++) conv.push({ id: '4000_' + i, page_id: '4000', from: { name: 'k' }, updated_at: '2026-10-19T10:11:08.000000', snippet: 'x', customers: [{}] });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, next_cursor: 'SAME_FOREVER', conversations: conv }));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  const LLs = makePage(port, REDUX_ONE);
+  const got = await LLs.load({});
+  srv.close();
+  check('[N4] cursor bị bỏ qua ⇒ DỪNG sau ≤3 request, không treo', st.calls <= 3, true);
+  check('[N4b] giữ 40 chat đã đọc được', got.items.length, 40);
+  check('[N4c] BÁO lỗi thay vì im lặng coi như xong', got.ok, false);
+  check('[N4d] lỗi nói rõ cursor bị bỏ qua',
+    /cursor/.test(JSON.stringify(got.errors)), true);
 }
 
 console.log('\n[3] lỗi & thiếu cấu hình');
@@ -185,8 +323,9 @@ console.log('\n[3] lỗi & thiếu cấu hình');
   const LLw = makePage(port, REDUX_ONE);
   const got = await LLw.load({});
   srv.close();
-  check('[L25] HTTP 401 ⇒ ok=false', got.ok, false);
-  check('[L26] 401 ⇒ nói rõ token hết hạn', /token hết hạn/.test(String(got.error)), true);
+  check('[L25] HTTP 401 ⇒ ok=false (giữ những gì đã tải)', got.ok, false);
+  check('[L26] 401 ⇒ lỗi nêu rõ HTTP 401',
+    /401/.test(JSON.stringify(got.errors || got.error || '')), true);
 }
 
 console.log('\n[4] ctx7 (is_record_ctx_7_days) — cờ quyết định (#10)');

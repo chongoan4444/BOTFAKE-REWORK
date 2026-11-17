@@ -4813,3 +4813,34 @@ Bản cài: `node worker-send/build.mjs` → `dist/worker-send.install.js` (57,7
 console trang Pancake, rồi `BOTFAKE_WS.run({text, dryRun:true})` để chạy thử.
 
 Mutation-test: bỏ hook ⇒ H2/H3 đỏ · bỏ cờ ctx7 ⇒ I22 đỏ · URL bịa ⇒ I18 đỏ.
+
+### 91.10 LỖI "CHỈ TẢI ĐƯỢC 40 LÀ DỪNG" — 3 nguyên nhân gốc (đã sửa, có test)
+
+Người dùng báo: *"tải danh sách còn lỗi chỉ tải được 40 là dừng"*. Đối chiếu HAR
+(`loaddanhsach.har` #8, `guikhachcu.har` #26): **server trả 40 chat/trang kèm `next_cursor`**,
+`current_count` thật của app là **40** (bản trước tôi để 60 — sai).
+
+**NGUYÊN NHÂN 1 — endpoint bị GỘP (nặng nhất).** `buildListUrl` tính
+`multi = !!pgs.multiplePageMode` mà **bỏ qua `singlePageId`**. Khi tải nhiều page song song,
+cả 10 chuỗi đều gọi `/v1/conversations?pages[…]` (endpoint gộp) rồi **khử trùng lẫn nhau**
+⇒ mỗi page hụt chat. Đo được: **10 page × 4 trang × 40 = 440/1600 chat**, mỗi page 80/160.
+Sửa: `multi = !opts.singlePageId && !!pgs.multiplePageMode`. Sau sửa: **1600/1600**.
+
+**NGUYÊN NHÂN 2 — không thử lại khi 429.** Bản trước: 1 lần fetch, `if (!res.ok) return lỗi`
+⇒ trang 2 dính 429 là **dừng LUÔN ở 40 chat**. Bản cũ (`fetchJson`, dòng 1445) thử lại **3 lần**,
+nghỉ `400·t` ms, timeout 15 s, và có **cơn 429 dùng chung nghỉ 2,5 s** (dòng 1773). Nay làm lại
+đúng: `fetchJson` + `waitRateLimit()` + `note429()`, đếm `rateLimited` để báo người dùng.
+
+**NGUYÊN NHÂN 3 — chỉ đọc 1 dạng response.** Bản cũ (dòng 9590) đọc **cả**
+`data.conversations` **và** `data.data.conversations`; bản trước chỉ đọc vế đầu ⇒ gặp dạng bọc
+trả **0 chat mà vẫn `ok:true`**.
+
+**HAI LỖI PHỤ CŨNG LÀ LỖI THẬT:**
+- `loadOneChain._stall` — biến đếm đặt trên **function**, nên 10 page chạy song song **dùng chung**
+  ⇒ page này bị page kia đẩy lên 2 ⇒ báo lỗi oan. Nay là biến cục bộ.
+- `load()` luôn trả `ok:true` dù có page lỗi ⇒ panel coi là thành công, chỉ hiện "0 chat" mà
+  không nói vì sao. Nay `ok = errors.length === 0`, vẫn trả `items` đã tải được.
+
+**Test khoá: N1–N4** (10 page/40 chat/trang/1600 chat · 429 hai lần · `{data:{}}` · cursor bị bỏ qua).
+Mutation: trả `multi` về tính từ Redux ⇒ N1b/N1d/N1e đỏ; bỏ thử lại 429 ⇒ N2/N2a/N2b đỏ;
+bỏ đọc `{data:{}}` ⇒ N3 đỏ.

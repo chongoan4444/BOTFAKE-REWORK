@@ -53,7 +53,25 @@ const VERSION = (() => {
   catch (e) { return { base: '?', build: '?' }; }
 })();
 
-const out = `/* ============================================================================
+const out = `// ==UserScript==
+// @name         BOTFAKE — Gửi bằng Worker
+// @namespace    botfake-worker-send
+// @version      ${VERSION.base}-${VERSION.build}
+// @description  Gửi hàng loạt Pancake, phần điều phối chạy trong Web Worker
+// @match        https://pancake.vn/*
+// @match        https://*.pancake.vn/*
+// @match        https://pages.fm/*
+// @match        https://*.pages.fm/*
+// @match        https://pancake.ph/*
+// @match        https://pancake.id/*
+// @match        https://pancake.in/*
+// @match        https://pancake.biz/*
+// @match        https://socialos.vip/*
+// @grant        none
+// @run-at       document-start
+// ==/UserScript==
+
+/* ============================================================================
  * BOTFAKE · GỬI BẰNG WORKER — bản cài 1 file
  * Sinh tự động bởi worker-send/build.mjs — ĐỪNG SỬA TAY.
  * Gốc: ${VERSION.base}-${VERSION.build}
