@@ -541,6 +541,78 @@ check('đóng ngân sách ghi lại % để in vào log',
   check('trần cũ 200 ca vẫn còn tác dụng', b3.closed, true);
 }
 
+// 24) [v1.92.47] BÓC TIỀN TỐ `for (;;);` TRƯỚC KHI JSON.parse — lỗi parse GraphQL của
+//     extension Pancake v2 (network-log.har 90/90, network-log2.har 19/19 phản hồi gửi đều
+//     có prefix). Không bóc thì `Unexpected non-whitespace character after JSON` ⇒
+//     `Cannot read properties of null (reading 'error')` ⇒ CANNOT GET GLOBAL ID.
+{
+  const F = new Function(extractFn('stripJsonPrefix') + '\nreturn stripJsonPrefix;')();
+  // chuỗi THẬT lấy nguyên văn từ network-log2.har (entry 35)
+  const real = 'for (;;);{"__ar":1,"error":1545041,"errorSummary":"Kh\u00f4ng g\u1eedi \u0111\u01b0\u1ee3c",'
+    + '"errorDescription":"Ng\u01b0\u1eddi n\u00e0y hi\u1ec7n kh\u00f4ng c\u00f3 m\u1eb7t.","isNotCritical":1,'
+    + '"rid":"Aw40Lx-ryPMw2lqvbj2As_Y","payload":null,"lid":"7708931259765236803"}';
+  let parsed = null;
+  try { parsed = JSON.parse(F(real)); } catch (e) { parsed = 'THROW'; }
+  check('có prefix for (;;); ⇒ parse được (ca 1545041 thật)', parsed && parsed.error, 1545041);
+  check('prefix bị bóc hết, không còn ký tự lạ', String(F(real)).charAt(0), '{');
+  check('biến thể không space "for(;;);" cũng bóc', JSON.parse(F('for(;;);{"a":1}')).a, 1);
+  // JSON hợp lệ KHÔNG bị đụng: đây là đường chính của pancake.vn/api/v1
+  check('JSON sạch giữ nguyên', F('{"success":true,"id":"1_2"}'), '{"success":true,"id":"1_2"}');
+  check('JSON sạch có khoảng trắng đầu vẫn parse đúng', JSON.parse(F('\n  {"ok":1}')).ok, 1);
+  // một phản hồi THẬT của /api/graphqlbatch/ có KHỐI JSON THỨ HAI nối sau `\r\n`
+  // (47/47 phản hồi trong network-log2.har) — bóc prefix KHÔNG cứu được ca này, nên ghi
+  // nhận đúng giới hạn thay vì giả vờ đã vá.
+  const twoBlocks = '{"__q0__":{"data":{}}}\r\n   {"successful_results":1,"error_results":0}';
+  let twoOk = true;
+  try { JSON.parse(F(twoBlocks)); } catch (e) { twoOk = false; }
+  check('2 khối JSON nối nhau ⇒ vẫn KHÔNG parse trần được (giới hạn đã biết)', twoOk, false);
+}
+
+// 25) [v1.92.47] CẦU DAO ĐƯỜNG DÒ GLOBAL ID QUA EXTENSION.
+//     Hình dạng lỗi lấy từ log console Pancake v2: cùng một thread id trả "không có gid"
+//     lặp lại (4 thread × 2 lần) mà extension không hề nhớ ⇒ thử lại y nguyên.
+{
+  const mkB = () => ({ noGid: 0, sameThread: 0, lastThread: '', closed: false, NO_GID_MAX: 40, SAME_THREAD_MAX: 3 });
+  const note = (b, tid) => {
+    if (b.closed) return;
+    const t = String(tid || '');
+    b.noGid++;
+    if (t && t === b.lastThread) b.sameThread++;
+    else { b.lastThread = t; b.sameThread = t ? 1 : 0; }
+    if (b.noGid < b.NO_GID_MAX && b.sameThread < b.SAME_THREAD_MAX) return;
+    b.closed = true;
+  };
+
+  const a = mkB();
+  note(a, '1515207651668552');
+  check('thread hỏng 1 lần ⇒ chưa đóng (1 lần có thể là nhiễu)', a.closed, false);
+  note(a, '1515207651668552');
+  check('thread hỏng 2 lần ⇒ vẫn chưa đóng', a.closed, false);
+  note(a, '1515207651668552');
+  check('CÙNG thread hỏng 3 lần ⇒ đóng ngay, không chờ 40 ca', a.closed, true);
+
+  const b = mkB();
+  for (let i = 0; i < 39; i++) note(b, '100000000000' + i);
+  check('39 ca khác thread ⇒ còn mở', b.closed, false);
+  note(b, 'thread-khac');
+  check('40 ca "không có gid" ⇒ đóng', b.closed, true);
+
+  // ca Ext QUÁ HẠN không được tính vào cầu dao: nó là "chưa rõ", không phải "trả lời không gid"
+  const c = mkB();
+  for (let i = 0; i < 5; i++) note(c, '');
+  check('timeout/không threadId không tự đóng cầu dao', c.closed, false);
+
+  // chống hồi quy ở mức NGUỒN: cầu dao phải thật sự chặn đường dò, và phải được ghi nhận
+  check('nhánh dò Ext có bị chặn bởi cầu dao',
+    /hasExtFinder && threadId && gidExtFinderAllowed\(\)/.test(SRC), true);
+  check('ca "trả lời mà không có gid" có ghi vào cầu dao',
+    /noteGidFinderNoGid\(threadId\)/.test(SRC), true);
+  check('fetchJson bóc prefix trước khi parse',
+    /JSON\.parse\(stripJsonPrefix\(txt\)\)/.test(SRC), true);
+  check('ACK Socket cũng bóc prefix trước khi parse',
+    /JSON\.parse\(stripJsonPrefix\(g\.payload\)\)/.test(SRC), true);
+}
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {

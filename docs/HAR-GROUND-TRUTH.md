@@ -3757,3 +3757,69 @@ cho đúng lỗi này.
 
 **Test: 86 kịch bản** (`npm test`) — thêm 8 ca: 4 ca siết `isTransientServerError`, 4 ca ngân sách
 (29 ca còn mở / 30 ca đóng / cứu-được-thì-reset / trần 200 vẫn hiệu lực).
+
+---
+
+## §78 · network-log2.har — mẻ làn Ext thứ hai (73 entry) và cái nó xác nhận
+
+### §78.1 Số đo (đo bằng script trên HAR, không suy luận)
+
+| Chỉ số | network-log.har (mẻ 1) | network-log2.har (mẻ 2) |
+|---|---|---|
+| Thời điểm | 12:44:59–12:45:06 | 00:29:22–00:30:43 |
+| Tổng entry | 94 | 73 |
+| `POST /messaging/send/` | 90 | 19 |
+| Mã lỗi FB | `1545041` ×86, `1545012` ×4 | `1545041` ×19 |
+| HTTP status | 200 ×90 | 200 ×19 |
+| Có prefix `for (;;);` | **90/90** | **19/19** |
+| `payload: null` | 90/90 | 19/19 |
+| Đỉnh in-flight | 42 | 18 |
+| Tốc độ phát | 13,4 lệnh/s (90 / 6,74 s) | 8,8 lệnh/s (19 / 2,16 s) |
+| p50 / p90 / max | 990 / 1 417 / 2 134 ms | 852 / 1 149 / 1 378 ms |
+| fbid trùng | 2 (đều là ca `1545012`) | 0 |
+| Trường JSON của lỗi | `error`, `errorSummary`, `errorDescription`, `isNotCritical`/`transientError`, `payload`, `lid` | như mẻ 1 |
+
+**Kết luận 1 — `1545041` không phải "khách chết".** 6/19 ca của mẻ 2 khớp được với node hội thoại
+của CHÍNH HAR đó (`threadlist`), và cả 6 đều có `cannot_reply_reason: "MESSENGER_BLOCKEE"`;
+852/872 node còn lại là `null`. Trong cả HAR không có ca nào mang cờ đó mà FB lại nhận tin.
+⇒ `cannot_reply_reason == "MESSENGER_BLOCKEE"` là bằng chứng MÁY ĐỌC ĐƯỢC của ca `1545041`,
+chắc hơn việc đoán theo câu tiếng Việt. (13 ca còn lại không có node trong HAR — không kết luận.)
+
+**Kết luận 2 — vì sao extension trả lỗi hàng loạt.** Mọi phản hồi gửi đều là `for (;;);{...}`.
+Không bóc tiền tố ⇒ `Unexpected non-whitespace character after JSON` ⇒
+`Cannot read properties of null (reading 'error')` ⇒ `CANNOT GET GLOBAL ID` ⇒ gửi sai thread ⇒
+`1545041`. Chuỗi này là SUY LUẬN nối log console của extension với nội dung HAR — ta không có
+stack trace của extension, nên ghi rõ là suy luận.
+
+**Kết luận 3 — khối JSON thứ hai (chỉ mẻ 2 có).** 47/47 phản hồi `/api/graphqlbatch/` có dạng
+`{"__q0__":{…}}\r\n{spaces}{"successful_results":1,…}` — **hai** khối JSON nối nhau. `JSON.parse`
+trần ném đúng `Unexpected non-whitespace character after JSON … (line 2 column 1)` như trong log.
+Vị trí lỗi ~37 000–40 500 ký tự của log khớp độ dài các khối này (1 086–137 779 ký tự).
+
+**Kết luận 4 — vòng lặp phân trang vô hạn.** 63/63 lượt phân trang
+(`batch_name=MessengerGraphQLThreadlistFetcher`, `doc_id=38892042767077350`) đều gửi **cùng một**
+con trỏ `before=1794874125000`; có những cặp khối trùng nội dung 100 %, chỉ khác `__req`. Tức khối
+"load trang kế" nổ lỗi parse → bị thử lại y nguyên → con trỏ không bao giờ tiến.
+
+### §78.2 Vá ở 1.92.47 (W200.93) — chỉ những gì HAR/log chứng minh được
+
+| # | Sửa | Bằng chứng | Vì sao không phải "đoán" |
+|---|---|---|---|
+| 1 | `stripJsonPrefix()` bóc `for (;;);` / BOM / khoảng trắng đầu, áp cho `fetchJson` **và** ACK Socket | 90/90 + 19/19 phản hồi gửi có prefix | đếm trực tiếp trên HAR |
+| 2 | `gidBreaker` đóng đường dò global_id qua Extension: `NO_GID_MAX 40` hoặc `SAME_THREAD_MAX 3` | 4 thread hỏng lặp 2 lần trong log; 63/63 lượt phân trang lặp | hai nguồn độc lập cùng chỉ về "dò lại vô ích" |
+| 3 | Dòng TỔNG HỢP `🔒 Đã đóng đường dò global_id qua Extension (…)` | — | để lần sau đọc số được, không phải suy đoán |
+
+**Không sửa (và lý do):**
+- `extTry1545.PROBE/STREAK_MAX`: mẻ 2 **xác nhận** ngân sách đóng ở 30 ca là đúng (19/19 đều `1545041`).
+- Không hạ `extTimeoutMs()`: p90 mẻ 2 là 1 149 ms, max 1 378 ms — vẫn dưới sàn 2 500 ms.
+- Không tăng làn Ext: mẻ 2 đỉnh in-flight 18 với 19 lệnh, tức làn chưa đầy; nút cổ chai là FB từ chối.
+- `cannot_reply_reason == "MESSENGER_BLOCKEE"`: **chưa** đưa vào code vì cần xác nhận khoá này có
+  trong payload `pancake.vn/api/v1/.../messages` (11 HAR cũ chỉ có `"blocked"` trong `timings`) —
+  chưa có bằng chứng.
+
+### §78.3 Ca chống hồi quy (tools/test-verify.mjs, mục 24–25)
+- `for (;;);{"__ar":1,"error":1545041,…}` (nguyên văn HAR) ⇒ parse ra `error = 1545041`.
+- `for(;;);{...}` (không space) ⇒ vẫn bóc.
+- JSON sạch ⇒ **không đổi một byte** (đường `pancake.vn/api/v1`).
+- 2 khối JSON nối nhau ⇒ ghi nhận vẫn không parse trần được (giới hạn đã biết, không giả vờ đã vá).
+- Cầu dao: 3 lần CÙNG thread ⇒ đóng; 40 ca khác thread ⇒ đóng; không threadId (timeout) ⇒ **không** đóng.
