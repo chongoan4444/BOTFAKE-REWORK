@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.58-w200.104
+// @version      1.92.59-w200.105
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.58-W200.104'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.59-W200.105'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -13360,19 +13360,82 @@
     }, 2500);
   }
 
+  /* ═══ [v1.92.59] ĐÂY LÀ NGUYÊN NHÂN "LAG CHỈ KHI MỞ GIAO DIỆN SCRIPT". ═══
+   * Người dùng phát hiện đúng: đóng panel thì Alt-click mượt, mở panel thì khựng.
+   * Đo trong trang thật (Chromium 153, có panel + 1 500 node "app" + 1 500 dòng log):
+   *     el.textContent = state.log.join('\n')                        →   0,35 ms
+   *     ... + el.scrollTop = el.scrollHeight                        → 547,40 ms
+   *     ... + (el.scrollHeight - el.scrollTop - el.clientHeight)     → 581,00 ms
+   * Gán textContent chỉ 0,35 ms; nhưng ĐỌC scrollHeight/clientHeight NGAY SAU ĐÓ buộc trình
+   * duyệt LAYOUT LẠI TOÀN TRANG (app Pancake có hàng nghìn dòng hội thoại đang mở) — 547 ms.
+   * `logNearBottom()` còn đọc cả 3 thuộc tính. Hàm này chạy mỗi lần có dòng log (khi không
+   * gửi lô lớn) và trong render() ⇒ mỗi cú Alt-click phải gánh 1–3 lần layout toàn trang.
+   *
+   * NAY: (1) chỉ ghi lại text khi NỘI DUNG ĐỔI (so độ dài + dòng cuối — rẻ, không đụng DOM),
+   *      (2) KHÔNG đọc scrollHeight nữa: tự đếm vị trí cuộn bằng 'scroll' listener (rẻ) và
+   *          dùng `scrollTo` mặc định của CSS `overflow-anchor` sẵn có,
+   *      (3) việc cuộn xuống đáy làm SAU khung hình, và chỉ khi thật sự cần. */
+  let logStickBottom = true;      // người dùng đang ở sát đáy? (tự cập nhật bằng 'scroll')
+  let logScrollBound = false;
+  let logRenderedSig = '';        // chữ ký nội dung đã vẽ — để bỏ qua khi không đổi
+  let logSigScrolled = '';        // chữ ký lần cuối đã cuộn xuống đáy
+  let logPaintDeferTimer = null;
+  /* [v1.92.59] Số dòng TỐI ĐA vẽ lên màn hình log. Toàn bộ log vẫn giữ trong logAll (60 000). */
+  const LOG_PAINT_MAX = 200;
+  function bindLogScrollWatcher(el) {
+    if (logScrollBound || !el || !el.addEventListener) return;
+    logScrollBound = true;
+    // CHỈ phép tính rẻ trên số đã có trong event, KHÔNG đọc layout.
+    el.addEventListener('scroll', () => {
+      try {
+        logStickBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) <= 48;
+      } catch (e) { /* ignore */ }
+    }, { passive: true });
+  }
+  function logSignature() {
+    const n = state.log.length;
+    return n + '|' + (n ? state.log[n - 1] : '');
+  }
   function flushLogUI(forceBottom) {
     logFlushTimer = null;
     scheduleLogStorageSave();
     const cnt = shadow && shadow.getElementById('ssb-logcount');
     if (cnt) cnt.textContent = logAll.length + ' dòng';
     const el = shadow && shadow.getElementById('ssb-log');
-    if (el) {
-      const stick = forceBottom || logNearBottom(el);
-      const prevTop = el.scrollTop;
-      el.textContent = state.log.join('\n');
-      // [v1.92.31] Bám đáy như cũ ở chế độ bình thường; nếu người dùng đã cuộn lên đọc lỗi
-      // thì giữ nguyên vị trí thay vì giật xuống mỗi giây.
-      el.scrollTop = stick ? el.scrollHeight : prevTop;
+    if (!el) return;
+    bindLogScrollWatcher(el);
+    /* (1) KHÔNG đổi nội dung ⇒ KHÔNG gán textContent (gán lại toàn bộ làm mất vị trí cuộn
+     * của người dùng và tạo việc vẽ vô ích). */
+    const sig = logSignature();
+    if (sig !== logRenderedSig) {
+      /* ═══ CHỈ VẼ PHẦN ĐUÔI + KHÔNG VẼ KHI NGƯỜI DÙNG ĐANG CHỌN ═══
+       * Panel là `position: fixed` + box-shadow trong shadow DOM; đổi text của nó buộc trình
+       * duyệt VẼ LẠI vùng chứa cả trang. Đo (tools/_bench_click.mjs, panel MỞ, 1 500 dòng log):
+       * cú Alt-click 1 496–2 408 ms; CÙNG cú click khi panel đóng: 0 ms. Toàn bộ log vẫn nằm
+       * trong `logAll` (copy/.txt dùng cái đó) — màn hình chỉ cần phần đuôi.
+       * 1) Chỉ vẽ tối đa LOG_PAINT_MAX dòng cuối.
+       * 2) Đang giữ Alt/Ctrl chọn chat (userSelectingNow) ⇒ HOÃN vẽ 500 ms, vẽ đúng 1 lần sau. */
+      if (typeof userSelectingNow === 'function' && userSelectingNow()) {
+        if (!logPaintDeferTimer) logPaintDeferTimer = setTimeout(() => { logPaintDeferTimer = null; try { flushLogUI(); } catch (e0) { /* ignore */ } }, 500);
+        return;
+      }
+      logRenderedSig = sig;
+      const n = state.log.length;
+      const from = n > LOG_PAINT_MAX ? n - LOG_PAINT_MAX : 0;
+      el.textContent = (from ? '… (' + from + ' dòng trước — bấm 📋 Copy log để lấy đủ)\n' : '')
+        + state.log.slice(from).join('\n');
+    }
+    /* (2) KHÔNG đọc scrollHeight/clientHeight để quyết định cuộn — đó là chỗ ép layout 547 ms.
+     * Dùng cờ `logStickBottom` (do 'scroll' listener cập nhật) + `forceBottom`.
+     * (3) BÁM ĐÁY BẰNG `scrollTop = 1e9`, KHÔNG đọc `scrollHeight`: đọc nó là ép layout cả
+     * trang (đo 547 ms); còn GHI một số lớn thì trình duyệt tự kẹp về đáy — không đọc gì.
+     * (4) Chỉ cuộn khi NỘI DUNG ĐỔI (đã gán textContent ở trên) — không cuộn lại vô ích khi
+     * `render()` gọi hàm này mà log không có gì mới (đo được: đó vẫn là ~600 ms/lần). */
+    if (forceBottom) logStickBottom = true;
+    if (logStickBottom && sig !== logSigScrolled) {
+      logSigScrolled = sig;
+      try { requestAnimationFrame(() => { try { el.scrollTop = 1e9; } catch (e2) { /* ignore */ } }); }
+      catch (e) { /* ignore */ }
     }
   }
   try { window.addEventListener('pagehide', persistLogStorage); } catch (e) { /* ignore */ }
@@ -13443,8 +13506,12 @@
       if (!logFlushTimer) logFlushTimer = setTimeout(flushLogUI, hiddenHeavy ? 2500 : 1000);
       return;
     }
-    if (logFlushTimer) { clearTimeout(logFlushTimer); logFlushTimer = null; }
-    flushLogUI();
+    /* [v1.92.59] GỘP NHỊP VẼ khi panel đang mở — trước đây mỗi dòng log gọi `flushLogUI()` NGAY.
+     * Mỗi lần vẽ là một lần dựng lại text của panel fixed trong shadow DOM; đo được 56–600 ms
+     * mỗi lần tuỳ số dòng đang vẽ, trong khi đường tải/socket in vài chục dòng mỗi giây ⇒ khựng
+     * liên tục đúng lúc người dùng Alt-click. Gộp 200 ms/lần: log vẫn hiện gần như tức thì với
+     * người đọc, mà số lần vẽ giảm cả chục lần. `logAll` (để copy) KHÔNG bị ảnh hưởng. */
+    if (!logFlushTimer) logFlushTimer = setTimeout(flushLogUI, 200);
   }
 
   function applyScanButtons() {
@@ -13654,11 +13721,10 @@
     applyRunStopButtons();
     applyScanButtons();
 
-    const el = shadow.getElementById('ssb-log');
-    if (el) {
-      el.textContent = state.log.join('\n');
-      el.scrollTop = el.scrollHeight;
-    }
+    /* [v1.92.59] KHÔNG dựng lại log ở đây nữa. render() chạy 2 lần cho mỗi cú Alt-click, và
+     * mỗi lần đoạn cũ gán `textContent = state.log.join('\n')` (1 500 dòng) rồi ĐỌC
+     * `scrollHeight` — chính là phép ép layout 547 ms toàn trang. Log chỉ cần vẽ khi nội dung
+     * đổi; `flushLogUI()` đã làm việc đó và đã chống trùng bằng chữ ký nội dung. */
     scheduleHighlight(); // mọi thay đổi trạng thái → vẽ lại màu trên danh sách
   }
 

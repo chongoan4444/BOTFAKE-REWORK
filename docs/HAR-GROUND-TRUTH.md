@@ -5030,3 +5030,94 @@ quay lại `Object.keys`). Test 239 → **253 ca**.
 dòng) · `logNearBottom` đọc layout · `enrichRowWithRedux`/`cacheGidFromConvObj` trong
 `completeRange` (đường thứ hai của cú Alt thứ 2). Nếu vẫn khựng, đo tiếp bằng
 `tools/_bench_click.mjs` với `PATHS=1` và đọc đường gọi.
+
+---
+
+## §95 — "LAG CHỈ KHI MỞ GIAO DIỆN SCRIPT" (1.92.59)
+
+### Dữ kiện người dùng cung cấp (quyết định hướng chẩn đoán)
+
+> "tôi nhận ra nó chỉ lag khi tôi mở giao diện script, khi tôi đóng giao diện script thì alt
+> click nó không lag nữa"
+
+Một câu này phủ định toàn bộ số đo của §93–§94: harness cũ chạy với **panel ĐÓNG**, nên mọi
+"click 24 ms" trước đó **không đại diện** cho ca thật. Phải dựng harness **panel MỞ + log đầy**
+rồi mới được kết luận.
+
+### Tái hiện (trước khi sửa) — `tools/_bench_click.mjs`, 20 000 thread
+
+`PANEL=on LOGFULL=1` (1 500 dòng log) — đúng trạng thái sau một lô dài:
+
+| ca | cú Alt-click | CPU bận nền |
+|---|---|---|
+| panel MỞ + log 1 500 dòng | **1 784 / 2 336 ms** | 93,3–94,8 % |
+| panel MỞ + log rỗng | 24 ms | 5,8 % |
+| panel ĐÓNG + log 1 500 dòng | **0 ms** | 4,8 % |
+
+Cùng dữ liệu, cùng số dòng: **mở/đóng panel quyết định 2 336 ms hay 0 ms** ⇒ lỗi nằm ở đường
+**VẼ panel**, không phải đường tính toán.
+
+Profiler (`PATHS=1`) chỉ đích danh hai hàm: `render` 43,7 % + `flushLogUI` 35,9 %, còn
+`computeMatches` chỉ 1 lần/cú click.
+
+### Cơ chế đắt: ĐỌC `scrollHeight` sau khi gán `textContent`
+
+Đo trong trang có panel + 1 500 node "app" (`tools/_bench_log2.mjs`), 1 500 dòng log:
+
+```
+el.textContent = state.log.join('\n')                        →   0,35 ms
+... + el.scrollTop = el.scrollHeight                         → 547,40 ms
+... + (el.scrollHeight - el.scrollTop - el.clientHeight)     → 581,00 ms
+```
+
+Gán text chỉ 0,35 ms. **Đọc `scrollHeight`/`clientHeight` sau đó ép trình duyệt LAYOUT LẠI TOÀN
+TRANG** (app Pancake đang mở hàng nghìn dòng hội thoại) — 547 ms. `logNearBottom()` đọc cả 3
+thuộc tính. Đường cũ có **3 chỗ** cùng làm việc này:
+
+1. `render()` — cuối hàm: `el.textContent = state.log.join('\n')` + `el.scrollTop = el.scrollHeight`.
+   `render()` chạy **2 lần** trong một cú Alt-click.
+2. `flushLogUI()` — `logNearBottom(el)` rồi `el.scrollTop = el.scrollHeight`. Chạy **2–3 lần**/cú click.
+3. `logLine()` — mỗi dòng log gọi `flushLogUI()` **ngay** khi panel mở (chỉ gộp khi `sending && total > 200`).
+
+### Bốn sửa của 1.92.59
+
+| # | chỗ | sửa |
+|---|---|---|
+| 8 | `render()` | BỎ HẲN khối dựng lại log + `scrollTop`. Log chỉ vẽ khi nội dung đổi; `flushLogUI()` lo việc đó. |
+| 9 | `flushLogUI()` | Không đọc `scrollHeight`/`clientHeight`/`logNearBottom`. Bám đáy bằng **ghi** `scrollTop = 1e9` (ghi số thì trình duyệt tự kẹp, không đọc layout). Trạng thái "đang ở đáy" lấy từ `'scroll'` listener passive (`logStickBottom`), đặt trong `requestAnimationFrame`. |
+| 10 | `flushLogUI()` | Chống trùng bằng chữ ký nội dung (`độ dài | dòng cuối`) ⇒ `render()` gọi mà log không đổi thì **không ghi gì**. Chỉ vẽ tối đa `LOG_PAINT_MAX = 200` dòng cuối (toàn bộ log vẫn nằm trong `logAll` — nút "📋 Copy log" / "💾 .txt" dùng `logAll`). Đang giữ Alt/Ctrl chọn chat (`userSelectingNow()`) ⇒ **hoãn vẽ 500 ms**, vẽ đúng 1 lần sau. |
+| 11 | `logLine()` | Panel mở ⇒ gộp nhịp vẽ **200 ms/lần** thay vì vẽ ngay từng dòng. |
+
+### Đo lại 2 chiều (sau khi sửa)
+
+| ca | 1.92.58 | 1.92.59 |
+|---|---|---|
+| panel MỞ + log 1 500 dòng | **1 784 / 2 336 ms**, CPU 93,3–94,8 % | **16 / 16 ms**, CPU **12,5–13,7 %** |
+| panel ĐÓNG + log 1 500 dòng | 0 ms | **0 ms** (không thoái hoá) |
+| panel MỞ + log rỗng | 24 ms | **16 ms** |
+
+Nhanh hơn **112–146×** ở đúng ca người dùng báo; CPU bận nền giảm ~7 lần.
+
+### Kiểm đúng đắn (không chỉ nhanh)
+
+`tools/_check_log.mjs` — chạy nguyên bản userscript trong Chromium trên trang giả có
+`#conversationList` 40 dòng + Redux 200 conv:
+
+```
+paintedLines: 201        (200 dòng cuối + 1 dòng báo "… (1 300 dòng trước — bấm 📋 Copy log)")
+lastPainted : "DONG 1499" (đúng dòng mới nhất)
+hasFirst    : false       (dòng cũ nhất KHÔNG vẽ — đúng chủ ý)
+scrollAtBottom: true      (vẫn bám đáy)
+```
+
+Test khoá: **269 ca** (`npm test`). Mutation **7/7 bị bắt** (M1 `render` dựng lại log · M2
+`flushLogUI` đọc `scrollHeight` · M3 dùng `logNearBottom` · M4 `LOG_PAINT_MAX` 200→1 500 ·
+M5 bỏ chống trùng chữ ký · M6 bỏ hoãn khi đang chọn · M7 `logLine` vẽ ngay).
+
+Ba bẫy test đã mắc và đã vá trong đợt này:
+- Test chỉ khớp **tên biến** (`/LOG_PAINT_MAX/`) ⇒ mutation đổi giá trị vẫn xanh. Nay test
+  **chạy thật** `flushLogUI` trên DOM giả và **đọc hằng số từ mã**.
+- Test truyền **cứng** `200` vào hàm dựng lại ⇒ không kiểm gì trong mã. Nay đọc `LOG_PAINT_MAX`
+  từ `SRC`.
+- `flushLogUI` phụ thuộc closure (`bindLogScrollWatcher`, `logSignature`, `logStickBottom`…) ⇒
+  `new Function` phải bơm đủ; thiếu là `ReferenceError`, không phải "xanh".

@@ -1254,6 +1254,88 @@ check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
     check('[v1.92.58] màu target theo id của target/rangeStart/rangeEnd (như markOf cũ)',
       /markIds/.test(h) && /state\.rangeStart/.test(h) && /state\.rangeEnd/.test(h), true);
   }
+
+  /* ══════════════════════════════════════════════════════════════════════════════════════
+   * [v1.92.59] CA "LAG CHỈ KHI MỞ GIAO DIỆN SCRIPT" — khoá đúng 3 dòng gây khựng.
+   * Đo được (tools/_bench_click.mjs, panel MỞ, log 1 500 dòng, 20 000 thread):
+   *   bản 1.92.58: cú Alt-click 1 768 / 2 208 ms, CPU bận 90,9–94,8 %
+   *   bản 1.92.59: cú Alt-click    16 ms,          CPU bận 12,8–13,9 %
+   * (panel ĐÓNG: 0 ms ở cả hai bản ⇒ lỗi nằm ở đường VẼ panel, không phải đường tính.)
+   * ══════════════════════════════════════════════════════════════════════════════════════ */
+  {
+    const r = stripComments(extractFn('render'));
+    /* 1) render() KHÔNG được dựng lại text của log. Mỗi lần render là gán ~1 500 dòng rồi
+     * ĐỌC scrollHeight ⇒ ép layout toàn trang; đo 547–581 ms cho MỘT lần đọc.
+     * Test này bắt buộc phải chạy trên `stripComments` — bản đầu (nếu quên) sẽ khớp chính
+     * lời chú thích giải thích lỗi và luôn XANH. */
+    checkNot('[v1.92.59] render() không gán textContent cho log', r, /getElementById\('ssb-log'\)/);
+    check('[v1.92.59] render() vẫn tô lại màu danh sách', /scheduleHighlight\(\)/.test(r), true);
+
+    const f = stripComments(extractFn('flushLogUI'));
+    /* 2) KHÔNG đọc scrollHeight/clientHeight trong flushLogUI.
+     * Chỗ đọc layout là thứ đắt nhất: đo 547,40 ms (scrollTop = scrollHeight) và 581,00 ms
+     * (đọc scrollHeight/scrollTop/clientHeight) trên trang có panel + 1 500 node app. */
+    checkNot('[v1.92.59] flushLogUI không đọc scrollHeight (ép layout toàn trang)', f, /scrollHeight/);
+    checkNot('[v1.92.59] flushLogUI không đọc clientHeight', f, /clientHeight/);
+    checkNot('[v1.92.59] flushLogUI không gọi logNearBottom', f, /logNearBottom\s*\(/);
+    /* 3) CHẠY THẬT flushLogUI trên DOM giả — không chỉ khớp tên biến.
+     * Lần đầu tôi chỉ kiểm "/LOG_PAINT_MAX/.test(f)" nên mutation đổi 200 → 1 500 LỌT;
+     * và "/logRenderedSig/" nên mutation bỏ chống trùng (`if (true)`) cũng LỌT. */
+    {
+      /* ĐỌC HẰNG SỐ THẬT từ mã — lần đầu tôi truyền cứng 200 nên mutation 200→1 500 LỌT
+       * (test không hề kiểm giá trị trong mã, chỉ kiểm giá trị tôi tự bơm vào). */
+      const mMax = /const LOG_PAINT_MAX = (\d+);/.exec(SRC);
+      check('[v1.92.59] có hằng LOG_PAINT_MAX trong mã', !!mMax, true);
+      const PAINT = mMax ? Number(mMax[1]) : 1500;
+      check('[v1.92.59] LOG_PAINT_MAX ≤ 300 dòng (vẽ 1 500 dòng = 56–600 ms/lần)', PAINT <= 300, true);
+
+      const body = f;
+      const el = { textContent: '', scrollTop: 0, addEventListener() {} };
+      const mk = (n) => {
+        const log = [];
+        for (let i = 0; i < n; i++) log.push('DONG ' + i);
+        const state = { log };
+        const stats = { writes: 0 };
+        const shadow = { getElementById: (id) => (id === 'ssb-log' ? el : null) };
+        const fn = new Function('state', 'shadow', 'logAll', 'scheduleLogStorageSave',
+          'requestAnimationFrame', 'userSelectingNow', 'setTimeout', 'LOG_PAINT_MAX',
+          'bindLogScrollWatcher', 'logSignature', 'logStickBottom', 'logRenderedSig',
+          'logSigScrolled', 'logPaintDeferTimer',
+          body.replace(/^function flushLogUI\(forceBottom\) \{/, 'return function (forceBottom) {')
+            .replace(/\}$/, '};'));
+        const run = fn(state, shadow, log, () => {}, (cb) => cb(), () => false, () => 0, PAINT,
+          () => {}, () => state.log.length + '|' + (state.log.length ? state.log[state.log.length - 1] : ''),
+          true, '', '', null);
+        // đếm số lần GHI textContent
+        let txt = el.textContent;
+        Object.defineProperty(el, 'textContent', {
+          get: () => txt, set: (v) => { stats.writes++; txt = v; }, configurable: true,
+        });
+        return { run, stats, state, get text() { return txt; } };
+      };
+      const A = mk(1500);
+      A.run(false);
+      const painted = A.text.split('\n').length;
+      check(`[v1.92.59] flushLogUI vẽ ≤ ${PAINT}+2 dòng (phần đuôi + dòng báo cắt)`,
+        painted <= PAINT + 2, true);
+      check('[v1.92.59] flushLogUI vẫn vẽ ĐÚNG dòng cuối cùng', /DONG 1499$/.test(A.text), true);
+      check('[v1.92.59] flushLogUI báo rõ đã cắt bao nhiêu dòng', /1[0-9]{3} dòng trước/.test(A.text), true);
+      /* Chống trùng: nội dung không đổi ⇒ KHÔNG ghi lại textContent. */
+      A.run(false);
+      check('[v1.92.59] nội dung không đổi ⇒ không ghi lại textContent', A.stats.writes, 1);
+      /* Có dòng mới ⇒ ghi lại đúng 1 lần nữa. */
+      A.state.log.push('DONG MOI');
+      A.run(false);
+      check('[v1.92.59] có dòng mới ⇒ ghi lại 1 lần', A.stats.writes, 2);
+    }
+    check('[v1.92.59] flushLogUI hoãn vẽ khi người dùng đang giữ Alt chọn', /userSelectingNow\(\)/.test(f), true);
+    check('[v1.92.59] cuộn đáy bằng scrollTop = 1e9 (ghi số, không đọc layout)', /scrollTop\s*=\s*1e9/.test(f), true);
+
+    /* 4) logLine KHÔNG vẽ ngay từng dòng — phải gộp nhịp. */
+    const l = stripComments(extractFn('logLine'));
+    checkNot('[v1.92.59] logLine không gọi flushLogUI() đồng bộ từng dòng', l, /\n\s*flushLogUI\(\);/);
+    check('[v1.92.59] logLine gộp nhịp vẽ 200 ms', /setTimeout\(flushLogUI,\s*200\)/.test(l), true);
+  }
 }
 
 /* ------------------------------- kết quả ------------------------------- */

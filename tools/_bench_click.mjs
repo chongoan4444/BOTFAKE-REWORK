@@ -119,12 +119,25 @@ async function bench(tag, src) {
     }, 12000);
   }
 
+  /* ══ CHUẨN BỊ THEO CA ĐO ══
+   * LOGFULL=1 ⇒ nhồi 1 500 dòng vào state.log (đúng trạng thái sau một lô dài).
+   * PANEL=off  ⇒ ẩn panel (display:none) để so với PANEL=on. */
+  await page.evaluate(({ logFull, panelOff }) => {
+    const S = window.__SSB__.state;
+    if (logFull) {
+      S.log = [];
+      for (let i = 0; i < 1500; i++) S.log.push('[' + String(10 + (i % 12)) + ':00:' + String(i % 60).padStart(2, '0') + '] ' + 'dòng log thứ ' + i + ' — ✅ đã gửi chat 694078980461601_' + (300000 + i));
+    }
+    const host = document.getElementById('ssb-root');
+    if (panelOff && host) { host.style.display = 'none'; window.__SSB__.state.panelHiddenForBench = true; }
+  }, { logFull: process.env.LOGFULL === '1', panelOff: process.env.PANEL === 'off' });
+
   const cdp = await ctx.newCDPSession(page);
 
   // ── ĐO ĐÚNG CÚ CLICK: giữ Alt, click 1 dòng, đo khung hình dài nhất + hàm nào chạy
   async function altClickOnce(idx) {
     const box = await page.locator(`#conversationList > div:nth-child(${idx}) .conversation-list-item`).boundingBox();
-    await page.evaluate(() => { window.__lt = []; window.__clicks = []; window.__clickAt = performance.now(); });
+    await page.evaluate(() => { window.__lt = []; window.__clicks = []; window.__cnt = {}; window.__clickAt = performance.now(); });
     await cdp.send('Profiler.enable');
     await cdp.send('Profiler.setSamplingInterval', { interval: 100 });
     await cdp.send('Profiler.start');
@@ -135,6 +148,7 @@ async function bench(tag, src) {
     const { profile: p } = await cdp.send('Profiler.stop');
     const lt = await page.evaluate(() => window.__lt.map((x) => ({ d: x.d, rel: x.t - window.__clickAt })));
     const clicks = await page.evaluate(() => window.__clicks.slice());
+    const cnt = await page.evaluate(() => window.__cnt || {});
     const byId = new Map(p.nodes.map((n) => [n.id, n]));
     const dt = new Map();
     for (const id of p.samples) dt.set(id, (dt.get(id) || 0) + 1);
@@ -150,6 +164,7 @@ async function bench(tag, src) {
     const early = lt.filter((x) => x.rel < 150);        // NGAY LÚC CLICK — cái người dùng thấy
     const late = lt.filter((x) => x.rel >= 150);        // chạy nền về sau
     return {
+      cnt: await page.evaluate(() => window.__cnt || {}),
       longTask: early.length ? Math.max(...early.map((x) => x.d)) : 0,
       earlySum: early.reduce((a, b) => a + b.d, 0), earlyN: early.length,
       lateMax: late.length ? Math.max(...late.map((x) => x.d)) : 0,
@@ -164,6 +179,13 @@ async function bench(tag, src) {
         const out = [];
         const topSelf = [...self.entries()].filter(([k]) => !/^\(idle\)|^\(program\)|^\(garbage/.test(k)).slice(0, 3);
         for (const [name] of topSelf) {
+          const anyId = [...dt.entries()].filter(([nid]) => { const n = byId.get(nid); return n && ((n.callFrame || {}).functionName || '(anon)') === name; })[0];
+          if (anyId) {
+            const n0 = byId.get(anyId[0]); const f0 = n0.callFrame || {};
+            const par = parentOf.get(anyId[0]); const pn = par ? byId.get(par) : null;
+            const pf = pn ? (pn.callFrame || {}) : {};
+            out.push(`[self ${name}] dòng ${f0.lineNumber}:${f0.columnNumber} url=${String(f0.url || '').split('/').pop().slice(0, 18)} ← cha: ${pf.functionName || '(anon)'}:${pf.lineNumber}`);
+          }
           const id = [...dt.entries()].map(([nid, c]) => [nid, c]).find(([nid]) => {
             const n = byId.get(nid); return n && (n.callFrame || {}).functionName === name;
           });
@@ -208,6 +230,7 @@ async function bench(tag, src) {
   console.log(`\n── ${tag}  (threadMapping ${THREADS} thread)`);
   for (const [i, r] of runs.entries()) {
     console.log(`   click ${i + 1}: ⏱ SỰ KIỆN CLICK = ${r.clickDur.toFixed(0)} ms (xử lý JS ${r.clickProc.toFixed(0)} ms) · khung hình dài nhất ngay lúc click ${r.longTask.toFixed(0)} ms`);
+    console.log(`             số lần gọi trong cú click: ${JSON.stringify(r.cnt)}`);
     console.log(`             chạy nền sau đó: khung dài nhất ${r.lateMax.toFixed(0)} ms (${r.lateN} cái, tổng ${r.lateSum.toFixed(0)} ms) · CPU bận ${r.busyPct}%`);
     console.log(`             ${r.top.join(' · ')}`);
     if (process.env.PATHS) for (const pth of r.paths) console.log(`             ↳ ${pth}`);
