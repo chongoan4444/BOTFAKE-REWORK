@@ -1300,20 +1300,28 @@ check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
         const fn = new Function('state', 'shadow', 'logAll', 'scheduleLogStorageSave',
           'requestAnimationFrame', 'userSelectingNow', 'setTimeout', 'LOG_PAINT_MAX',
           'bindLogScrollWatcher', 'logSignature', 'logStickBottom', 'logRenderedSig',
-          'logSigScrolled', 'logPaintDeferTimer',
+          'logSigScrolled', 'logPaintDeferTimer', 'logWindowOpen',
           body.replace(/^function flushLogUI\(forceBottom\) \{/, 'return function (forceBottom) {')
             .replace(/\}$/, '};'));
+        const env = { open: true }; // gia lập: cửa sổ phóng to ĐANG mở / ĐANG đóng
         const run = fn(state, shadow, log, () => {}, (cb) => cb(), () => false, () => 0, PAINT,
           () => {}, () => state.log.length + '|' + (state.log.length ? state.log[state.log.length - 1] : ''),
-          true, '', '', null);
+          true, '', '', null, () => env.open);
         // đếm số lần GHI textContent
         let txt = el.textContent;
         Object.defineProperty(el, 'textContent', {
           get: () => txt, set: (v) => { stats.writes++; txt = v; }, configurable: true,
         });
-        return { run, stats, state, get text() { return txt; } };
+        return { run, stats, state, env, get text() { return txt; } };
       };
       const A = mk(1500);
+      /* ═══ [v1.92.60] ĐÓNG CỬA SỔ LOG ⇒ KHÔNG VẼ GÌ. Người dùng yêu cầu "bỏ luôn hiển thị log
+       * khi mở giao diện, chỉ cần xem log khi ấn nút phóng to". Nếu cờ này sai, mọi sửa về sau
+       * đều vô nghĩa: panel lại phải vẽ chữ mỗi lần có dòng log. */
+      A.env.open = false;
+      A.run(false);
+      check('[v1.92.60] log ĐÓNG ⇒ KHÔNG ghi textContent', A.stats.writes, 0);
+      A.env.open = true;
       A.run(false);
       const painted = A.text.split('\n').length;
       check(`[v1.92.59] flushLogUI vẽ ≤ ${PAINT}+2 dòng (phần đuôi + dòng báo cắt)`,
@@ -1335,6 +1343,53 @@ check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
     const l = stripComments(extractFn('logLine'));
     checkNot('[v1.92.59] logLine không gọi flushLogUI() đồng bộ từng dòng', l, /\n\s*flushLogUI\(\);/);
     check('[v1.92.59] logLine gộp nhịp vẽ 200 ms', /setTimeout\(flushLogUI,\s*200\)/.test(l), true);
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════════════════
+   * [v1.92.60] "BỎ LUÔN HIỂN THỊ LOG KHI MỞ GIAO DIỆN — chỉ xem khi bấm Phóng to"
+   * + "khi đóng log thì hiện tiến trình trên hình thu nhỏ: số gửi thành công/tổng số".
+   * Đo sau khi sửa (tools/_bench_click.mjs, panel MỞ, log 1 500 dòng):
+   *   1.92.58: 1 624 / 2 424 ms, CPU 91,7–94 %  →  1.92.60: 16 ms, CPU 4,7 %.
+   * ══════════════════════════════════════════════════════════════════════════════════════ */
+  {
+    /* 1) Khung log KHÔNG được nằm trong panel — phải bị ẩn, chỉ hiện trong cửa sổ phóng to. */
+    check('[v1.92.60] khung log nằm trong #ssb-logwrap ẩn (display:none)',
+      /id="ssb-logwrap" style="display:none"/.test(SRC), true);
+    checkNot('[v1.92.60] panel không còn khung log hiện ngay sau bảng tổng hợp',
+      SRC, /<div class="summary-box" id="ssb-summary"><\/div>\s*<div class="log"/);
+
+    const lw = stripComments(extractFn('logWindowOpen'));
+    check('[v1.92.60] logWindowOpen chỉ đúng khi CỬA SỔ LOG đang mở',
+      /floatWins\.ssb_win_log/.test(lw), true);
+
+    const f60 = stripComments(extractFn('flushLogUI'));
+    check('[v1.92.60] flushLogUI thoát NGAY khi cửa sổ log đóng',
+      /if \(!logWindowOpen\(\)\) return;/.test(f60), true);
+
+    /* 2) Dải tiến trình thu nhỏ: có, gắn vào render() và flushBatchSummaryUI(), và KHÔNG
+     *    ghi DOM khi số không đổi (nếu không, nó tự biến thành nguồn lag mới). */
+    const mini = stripComments(extractFn('updateMiniProgressUI'));
+    check('[v1.92.60] updateMiniProgressUI tồn tại và hiện "✅ ok/total"',
+      /'✅ ' \+ ok \+ '\/' \+ total/.test(mini), true);
+    check('[v1.92.60] updateMiniProgressUI bỏ qua khi số không đổi (chữ ký)',
+      /if \(sig === miniPainted\) return;/.test(mini), true);
+    check('[v1.92.60] updateMiniProgressUI cập nhật cả badge trên BÓNG LOGO (panel thu nhỏ)',
+      /ssb-bubble-badge/.test(mini), true);
+
+    const r60 = stripComments(extractFn('render'));
+    check('[v1.92.60] render() cập nhật dải tiến trình', /updateMiniProgressUI\(\)/.test(r60), true);
+    const fb = stripComments(extractFn('flushBatchSummaryUI'));
+    check('[v1.92.60] bảng tổng hợp và dải tiến trình dùng CÙNG nguồn số',
+      /updateMiniProgressUI\(\)/.test(fb), true);
+
+    /* 3) Nút Phóng to phải VẼ log trước khi mở (nếu không: khung trống). */
+    check('[v1.92.60] nút Phóng to vẽ log ngay trước khi mở cửa sổ',
+      /if \(!wasOpen\) \{ try \{ logRenderedSig = ''; flushLogUI\(true\); \}/.test(stripComments(SRC)), true);
+
+    /* 4) Ghi localStorage sau F5 chỉ 300 dòng (104 KB → 20 KB; 1,03 → 0,10 ms/lần). */
+    const pl = stripComments(extractFn('persistLogStorage'));
+    check('[v1.92.60] persistLogStorage chỉ lưu 300 dòng gần nhất',
+      /state\.log\.slice\(-300\)/.test(pl), true);
   }
 }
 

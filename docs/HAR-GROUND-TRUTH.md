@@ -5121,3 +5121,67 @@ Ba bẫy test đã mắc và đã vá trong đợt này:
   từ `SRC`.
 - `flushLogUI` phụ thuộc closure (`bindLogScrollWatcher`, `logSignature`, `logStickBottom`…) ⇒
   `new Function` phải bơm đủ; thiếu là `ReferenceError`, không phải "xanh".
+
+---
+
+## §96 — BỎ KHUNG LOG KHỎI PANEL + DẢI TIẾN TRÌNH THU NHỎ (1.92.60)
+
+### Yêu cầu của người dùng
+
+> "tôi có cảm giác đúng, khi mở giao diện thì làm gì cũng lag, đóng lại thì ok… bỏ luôn hiển
+> thị log khi mở giao diện, chỉ cần xem log khi ấn vào nút phóng to log, thêm chức năng khi
+> đóng log thì sẽ hiển thị tiến trình gửi trên hình thu nhỏ luôn — kiểu số gửi thành công/tổng
+> số trong danh sách gửi"
+
+1.92.59 đã cắt phần lớn (2 424 → 16 ms) nhưng vẫn còn một khung log đang tồn tại trong panel,
+chỉ là được vẽ ít hơn. Nay **bỏ hẳn khỏi panel**: khung log chỉ sống trong cửa sổ "⛶ Phóng to".
+
+### Năm sửa của 1.92.60
+
+| # | chỗ | sửa |
+|---|---|---|
+| 12 | HTML panel | Khung `.log` chuyển vào `#ssb-logwrap` với `style="display:none"`. Panel KHÔNG còn phần tử log hiển thị; chỉ khi bấm "⛶ Phóng to" khung mới được `toggleFloat` đưa ra cửa sổ nổi. |
+| 13 | `flushLogUI()` | Thoát ngay ở dòng đầu nếu `!logWindowOpen()` ⇒ ngoài lúc mở cửa sổ log, đường log **không ghi một byte nào vào DOM**. `logAll` (📋 Copy / 💾 .txt) không đổi. |
+| 14 | Nút "⛶ Phóng to" | Vẽ log NGAY TRƯỚC khi mở (không thì khung trống), và vẽ lại + cuộn đáy sau khi mở. Thu nhỏ ⇒ ngừng vẽ. |
+| 15 | `updateMiniProgressUI()` (mới) | Dải tiến trình thay chỗ khung log: `✅ 64/137 · còn 70 · ❌ 3 · 47%` + thanh %. Nguồn số = `summaryCounters` như bảng tổng hợp. Chưa gửi lô nào ⇒ hiện số chat ĐANG CHỌN. **Chống trùng bằng chữ ký** — `render()` gọi 2 lần/cú click mà chỉ so chuỗi. Cùng hàm cập nhật **badge trên bóng logo** (panel thu nhỏ): `64/137`. |
+| 16 | `persistLogStorage()` | Chỉ lưu 300 dòng gần nhất thay vì 1 500. Đo: `JSON.stringify(1 500 dòng = 104 KB) + setItem` = **1,03 ms/lần, ghi mỗi 1 s**; với 300 dòng = **0,10 ms** (nhanh 10×). |
+
+### Đo lại (panel MỞ, log 1 500 dòng, 20 000 thread)
+
+| bản | cú Alt-click | khung hình dài nhất sau click | CPU bận nền |
+|---|---|---|---|
+| 1.92.58 | 1 624 / 2 424 ms | 568–597 ms | 91,7–94 % |
+| 1.92.59 | 16 / 16 ms | 79–83 ms | 12,7–14,6 % |
+| **1.92.60** | **16 / 16 ms** | **0 ms** | **4,7–5,4 %** |
+
+CPU bận nền khi panel MỞ nay **bằng đúng lúc panel ĐÓNG (4,4–5,2 %)** — đúng câu "mở giao diện
+thì làm gì cũng lag" đã hết.
+
+### Kiểm đúng đắn (`tools/_check_mini.mjs`, chạy nguyên bản userscript trong Chromium)
+
+```
+hasMini                true
+logHiddenInPanel       true
+miniInitial            "✅ 0/0 | chưa chọn chat nào"
+miniAfterSelect        "✅ 0/0 | 3 chat đang chọn — chưa gửi"
+miniSending            "✅ 4/10 | còn 6 · 40% | width=40%"
+miniDone               "✅ 8/10 | XONG · ❌ 2 · 80% | width=80% | class=mini done"
+logNotPaintedWhileClosed   true      ← 50 dòng log mới, khung log KHÔNG đổi
+logPaintedWhenZoomed       true      ← bấm Phóng to: hiện đủ 59 dòng
+logNotPaintedAfterCollapse true      ← thu nhỏ: 20 dòng mới, KHÔNG vẽ
+bubbleBadge            "block · 5/10 · bubble-badge busy"
+bubbleBadgeDone        "block · 10/10 · bubble-badge"
+```
+
+Ảnh chụp bằng mắt: `tools/_shot_panel.png` (dải `✅ 64/137 · còn 70 · ❌ 3 · 47%`),
+`tools/_shot_logzoom.png` (cửa sổ LOG nổi 640×480), `tools/_shot_bubble.png` (bóng logo + `64/137`).
+
+Test: **281 ca** (`npm test`). Mutation **7/7 bị bắt** (M8 log hiện lại trong panel · M9 vẽ khi
+log đóng · M10 mini ghi DOM mỗi lần · M11 render không cập nhật mini · M12 bỏ badge bóng logo ·
+M13 lưu lại 1 500 dòng · M14 nút phóng to không vẽ trước).
+
+### Ghi chú triển khai
+
+- `window.__SSB__` mở thêm `render`, `logLine`, `logAll`, `batchStats`, `summaryCounters`,
+  `flushBatchSummaryUI`, `updateMiniProgressUI` để công cụ kiểm gọi đúng hàm thật.
+- Đệm chú thích HTML trong template literal: **không dùng dấu backtick** (đã một lần làm vỡ cú pháp).
