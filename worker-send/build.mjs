@@ -15,8 +15,8 @@ import vm from 'node:vm';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
-const OUT_DIR = path.join(ROOT, 'dist');
-const OUT = path.join(OUT_DIR, 'worker-send.install.js');
+const OUT_DIR = HERE;              // đặt NGAY CẠNH build.mjs — không đụng dist/ (bị gitignore)
+const OUT = path.join(OUT_DIR, 'cai-dat.js');
 
 const rd = (f) => readFileSync(path.join(HERE, f), 'utf8');
 
@@ -54,25 +54,22 @@ const VERSION = (() => {
 })();
 
 const out = `/* ============================================================================
- * BOTFAKE · WORKER-SEND — BẢN CÀI MỘT FILE
+ * BOTFAKE · GỬI BẰNG WORKER — bản cài 1 file
  * Sinh tự động bởi worker-send/build.mjs — ĐỪNG SỬA TAY.
- * Nguồn: worker-send/{engine.mjs,worker.js,bridge.js,loadlist.js}
  * Gốc: ${VERSION.base}-${VERSION.build}
  * ============================================================================
  *
- * CÁCH DÙNG (2 bước):
- *   1. Mở trang Pancake (pages.fm hoặc pancake.vn), để trang tải xong danh sách chat.
- *   2. F12 → Console → dán TOÀN BỘ file này → Enter.
- *
- *   Sau khi dán, dùng:
- *     BOTFAKE_WS.help()                                  // xem hướng dẫn
- *     BOTFAKE_WS.run({ text: 'Xin chào', dryRun: true }) // CHẠY THỬ, không gửi
- *     BOTFAKE_WS.run({ text: 'Xin chào' })               // GỬI THẬT
+ * DÙNG:
+ *   1. Mở trang Pancake (pages.fm hoặc pancake.vn), đợi danh sách chat hiện ra.
+ *   2. F12 → Console → dán toàn bộ file này → Enter.
+ *   3. Nút "⚡ GỬI BẰNG WORKER" hiện ở góc dưới phải. Bấm vào.
  * ============================================================================ */
 (function botfakeWorkerSendInstall() {
   'use strict';
   if (window.__BOTFAKE_WS_INSTALLED__) {
-    console.warn('[BOTFAKE-WS] đã nạp rồi — dùng BOTFAKE_WS.help()');
+    var old = document.getElementById('bws-root');
+    if (old) { old.style.display = 'block'; }
+    console.warn('[BOTFAKE-WS] đã nạp rồi — nút đang ở góc dưới phải');
     return;
   }
   window.__BOTFAKE_WS_INSTALLED__ = true;
@@ -80,7 +77,6 @@ const out = `/* ================================================================
   var ENGINE_SRC = ${asStringLiteral(engine)};
   var WORKER_SRC = ${asStringLiteral(worker)};
 
-  /* Nạp cầu nối + bộ tải danh sách (2 IIFE, gắn vào window). */
   ${bridge}
 
   ${loadlist}
@@ -90,55 +86,196 @@ const out = `/* ================================================================
   B.setSources(ENGINE_SRC, WORKER_SRC);
   B.setConfig({ mainCap: 96 });
 
-  B.on('log', function (r) {
-    if (!r) return;
-    if (r.kind === 'ok' || r.kind === 'info') console.log('%c[WS]', 'color:#3a3', r.msg || r);
-    else if (r.kind === 'rejected') console.warn('%c[WS từ chối]', 'color:#e80', r.msg || r);
-    else console.warn('%c[WS CHƯA RÕ]', 'color:#c00', r.msg || r);
-  });
-  B.on('done', function (m) {
-    B.terminate();
-    var s = (m && m.stats) || {};
-    console.log('%c[BOTFAKE-WS] XONG', 'font-weight:bold;color:#06c',
-      '\\n  bắn: ' + (s.n || 0) + ' · ok: ' + (s.ok || 0) + ' · từ chối: ' + (s.fail || 0)
-      + ' · CHƯA RÕ: ' + (s.uncertain || 0) + ' · chặn trùng: ' + (s.dupBlocked || 0));
-    if (s.uncertain) {
-      console.warn('[BOTFAKE-WS] ' + s.uncertain + ' chat CHƯA RÕ (server không trả lời).'
-        + ' TUYỆT ĐỐI không bấm chạy lại toàn bộ — sẽ gửi trùng. Kiểm tay các chat đó.');
+  /* ============================ GIAO DIỆN ============================
+   * Chỉ 1 khung nhỏ, 3 dòng, 2 nút. Không có bảng chọn chat, không tag, không
+   * lịch gửi — bản này chỉ để ĐO đường gửi mới, không phải bản thay thế. */
+  var CSS = [
+    '#bws-root{position:fixed;right:16px;bottom:16px;z-index:2147483000;width:320px;',
+    'font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#111;',
+    'background:#fff;border:1px solid #d5d9e0;border-radius:10px;',
+    'box-shadow:0 8px 28px rgba(0,0,0,.18);overflow:hidden}',
+    '#bws-root *{box-sizing:border-box}',
+    '#bws-head{display:flex;align-items:center;gap:8px;padding:8px 10px;background:#0b63d6;color:#fff}',
+    '#bws-head b{font-size:13px;flex:1}',
+    '#bws-head button{background:rgba(255,255,255,.18);border:0;color:#fff;border-radius:6px;',
+    'padding:2px 8px;cursor:pointer;font-size:12px}',
+    '#bws-body{padding:10px;display:flex;flex-direction:column;gap:8px}',
+    '#bws-text{width:100%;min-height:64px;resize:vertical;padding:7px 8px;border:1px solid #cfd6e0;',
+    'border-radius:7px;font:13px/1.4 inherit}',
+    '#bws-info{font-size:12px;color:#556;min-height:16px}',
+    '#bws-row{display:flex;gap:8px}',
+    '#bws-row button{flex:1;padding:8px 10px;border:0;border-radius:7px;cursor:pointer;',
+    'font-weight:600;font-size:13px}',
+    '#bws-load{background:#e8eef8;color:#0b4ea2}',
+    '#bws-send{background:#0b63d6;color:#fff}',
+    '#bws-send:disabled,#bws-load:disabled{opacity:.45;cursor:default}',
+    '#bws-stop{background:#f3e8e8;color:#a11}',
+    '#bws-log{max-height:120px;overflow:auto;font:12px/1.4 ui-monospace,Menlo,monospace;',
+    'background:#f6f8fb;border-radius:6px;padding:6px;color:#334}',
+    '#bws-log div{padding:1px 0;word-break:break-word}',
+    '#bws-log .ok{color:#137a2f}#bws-log .bad{color:#a11}#bws-log .warn{color:#9a6700}',
+  ].join('');
+
+  function el(tag, id, txt) {
+    var e = document.createElement(tag);
+    if (id) e.id = id;
+    if (txt != null) e.textContent = txt;
+    return e;
+  }
+
+  var root, taText, inf, logBox, btnLoad, btnSend, btnStop;
+
+  function logLine(kind, txt) {
+    if (!logBox) return;
+    var d = el('div', null, txt);
+    if (kind === 'ok') d.className = 'ok';
+    else if (kind === 'rejected') d.className = 'bad';
+    else if (kind === 'noack') d.className = 'warn';
+    logBox.appendChild(d);
+    while (logBox.childNodes.length > 200) logBox.removeChild(logBox.firstChild);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  function setInfo(t) { if (inf) inf.textContent = t; }
+
+  function buildUI() {
+    var st = el('style'); st.textContent = CSS; document.head.appendChild(st);
+
+    root = el('div', 'bws-root');
+    var head = el('div', 'bws-head');
+    head.appendChild(el('b', null, 'Gửi bằng Worker'));
+    var min = el('button', null, '—');
+    min.title = 'Thu nhỏ';
+    var close = el('button', null, '✕');
+    close.title = 'Ẩn (dán lại file để hiện)';
+    head.appendChild(min); head.appendChild(close);
+    root.appendChild(head);
+
+    var body = el('div', 'bws-body');
+
+    taText = el('textarea', 'bws-text');
+    taText.placeholder = 'Nội dung sẽ gửi cho TẤT CẢ chat đã tải…';
+    body.appendChild(taText);
+
+    inf = el('div', 'bws-info', 'Bấm "Tải danh sách" để bắt đầu.');
+    body.appendChild(inf);
+
+    var row = el('div', 'bws-row');
+    btnLoad = el('button', 'bws-load', '⟳ Tải danh sách');
+    btnSend = el('button', 'bws-send', '⚡ Gửi');
+    btnSend.disabled = true;
+    row.appendChild(btnLoad); row.appendChild(btnSend);
+    body.appendChild(row);
+
+    var row2 = el('div', 'bws-row');
+    btnStop = el('button', 'bws-stop', '⏹ Dừng');
+    btnStop.disabled = true;
+    row2.appendChild(btnStop);
+    body.appendChild(row2);
+
+    logBox = el('div', 'bws-log');
+    body.appendChild(logBox);
+
+    root.appendChild(body);
+    document.body.appendChild(root);
+
+    min.onclick = function () {
+      body.style.display = body.style.display === 'none' ? 'flex' : 'none';
+    };
+    close.onclick = function () { root.style.display = 'none'; };
+  }
+
+  /* ------------------------------- HÀNH ĐỘNG ------------------------------- */
+
+  var loaded = null;   // danh sách đã tải (có cờ ctx7)
+  var busy = false;
+
+  function setBusy(b) {
+    busy = b;
+    btnLoad.disabled = b;
+    btnStop.disabled = !b;
+    btnSend.disabled = b || !loaded || !loaded.length;
+  }
+
+  async function doLoad() {
+    if (busy) return;
+    setBusy(true);
+    setInfo('Đang tải danh sách chat…');
+    logBox.innerHTML = '';
+    try {
+      var LL = window.__BOTFAKE_WS_LOADLIST__;
+      var token = LL.getToken();
+      if (!token) throw new Error('Không tìm thấy access_token — tải lại trang Pancake rồi thử lại');
+      B.setConfig({ apiBase: LL.apiBase(), accessToken: token });
+      var got = await LL.load({
+        maxPages: 200,
+        onProgress: function (n) { setInfo('Đã tải ' + n + ' chat…'); },
+      });
+      if (!got.ok) throw new Error(got.error || 'tải thất bại');
+      loaded = LL.decorate(got.items);
+      var withCtx = loaded.filter(function (x) { return x.isRecordCtx7Days; }).length;
+      setInfo(loaded.length + ' chat' + (got.incomplete ? ' (CHƯA HẾT — còn dữ liệu)' : '')
+        + ' · bật cờ 7 ngày: ' + withCtx);
+      btnSend.disabled = !loaded.length;
+    } catch (e) {
+      setInfo('LỖI: ' + (e && e.message || e));
+      logLine('bad', String(e && e.message || e));
+    } finally {
+      setBusy(false);
     }
+  }
+
+  async function doSend() {
+    if (busy || !loaded) return;
+    var text = String(taText.value || '');
+    if (!text.trim()) { setInfo('Chưa nhập nội dung'); taText.focus(); return; }
+    var n = loaded.length;
+    if (!window.confirm('Gửi tin này cho ' + n + ' chat?\\n\\n' + text.slice(0, 120))) return;
+
+    setBusy(true);
+    logBox.innerHTML = '';
+    setInfo('Đang gửi ' + n + ' chat…');
+    B.start();
+    B.send(loaded.map(function (c) {
+      return { id: c.id, pageId: c.pageId, name: c.name, text: text, isRecordCtx7Days: c.isRecordCtx7Days };
+    }), 96);
+  }
+
+  B.on('done', function (m) {
+    var s = (m && m.stats) || {};
+    setInfo('XONG — bắn ' + (s.n || 0) + ' · ok ' + (s.ok || 0) + ' · từ chối ' + (s.fail || 0)
+      + ' · CHƯA RÕ ' + (s.uncertain || 0));
+    logLine('ok', 'XONG: ok ' + (s.ok || 0) + '/' + (s.n || 0)
+      + (s.uncertain ? ' · ' + s.uncertain + ' CHƯA RÕ (đừng chạy lại toàn bộ!)' : ''));
+    if (s.uncertain) logLine('noack', 'CẢNH BÁO: ' + s.uncertain + ' chat chưa rõ đã gửi hay chưa. Kiểm tay.');
+    setBusy(false);
+    B.terminate();
   });
-  B.on('error', function (e) { console.error('[BOTFAKE-WS] lỗi', e); });
+  B.on('error', function (e) { logLine('bad', 'lỗi: ' + (e && e.message || e)); setBusy(false); });
 
-  window.BOTFAKE_WS = {
-    help: function () {
-      console.log([
-        'BOTFAKE WORKER-SEND — đường gửi chạy trong Web Worker (CPU tab ~0)',
-        '',
-        '  BOTFAKE_WS.run({ text: "…", dryRun: true })   xem danh sách, KHÔNG gửi',
-        '  BOTFAKE_WS.run({ text: "…" })                 gửi thật',
-        '  BOTFAKE_WS.run({ text: "…", limit: 8 })       giới hạn 8 luồng song song',
-        '  BOTFAKE_WS.run({ text: "…", maxPages: 5 })    chỉ tải 5 trang danh sách',
-        '  BOTFAKE_WS.stats()                            số đo hiện tại',
-        '  BOTFAKE_WS.results()                          chat nào OK / chat nào CHƯA RÕ',
-        '  BOTFAKE_WS.stop()                             dừng',
-        '',
-        'LƯU Ý: đường này dùng API (không phải Socket) — chậm hơn bản cũ.',
-        '      Nó KHÔNG thay thế bản 1.92.55; dùng để đo CPU/ACK trong lúc bản cũ chạy.',
-      ].join('\\n'));
-    },
-    run: function (opts) { return B.run(opts); },
-    stats: function () { return B.stats(); },
-    results: function () { return B.results(); },
-    stop: function () { return B.stop(); },
-    bridge: B,
-  };
+  /* THỨ TỰ QUAN TRỌNG: phải VẼ GIAO DIỆN trước, rồi mới gán sự kiện — vì nút chỉ
+   * tồn tại sau buildUI(). Bản trước gán trước khi vẽ ⇒ btnLoad là undefined ⇒
+   * TypeError ngay khi dán file, và biểu hiện ra ngoài chỉ là "không thấy nút nào".
+   * Test [I5]–[I9] bắt đúng lỗi này. */
+  function wire() {
+    buildUI();
+    btnLoad.onclick = doLoad;
+    btnSend.onclick = doSend;
+    btnStop.onclick = function () { B.stop(); logLine('warn', 'đã bấm dừng'); setBusy(false); };
+  }
 
-  console.log('%c[BOTFAKE-WS] đã nạp ✓', 'color:#06c;font-weight:bold',
-    '— gõ BOTFAKE_WS.help() để xem cách dùng. Chạy thử trước: ...run({text:"…", dryRun:true})');
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', wire);
+  } else {
+    wire();
+  }
+
+  window.BOTFAKE_WS = { bridge: B, load: function () { return doLoad(); } };
+  console.log('%c[BOTFAKE-WS] đã nạp ✓', 'color:#0b63d6;font-weight:bold',
+    '— nút "Gửi bằng Worker" ở góc dưới phải màn hình');
 })();
 `;
 
-mkdirSync(OUT_DIR, { recursive: true });
 writeFileSync(OUT, out, 'utf8');
 
 /* Kiểm lần cuối: file sinh ra phải parse được ở cấp cao nhất. */
@@ -149,6 +286,6 @@ catch (e) {
 }
 
 const kb = (Buffer.byteLength(out, 'utf8') / 1024).toFixed(1);
-console.log('✓ worker-send/build → dist/worker-send.install.js (' + kb + ' KB)');
+console.log('✓ worker-send/build → worker-send/cai-dat.js (' + kb + ' KB)');
 console.log('  · bundle worker đã kiểm parse');
 console.log('  · file cài đã kiểm parse');
