@@ -4444,3 +4444,77 @@ kiểm cổng, không đổi ngưỡng nào**.
 | `slot thoát ≤75% cap` | không có số | nếu **0 lần** ⇒ giả thuyết 87.3 đúng |
 | `chi tiết giữ cổng` | không có số | cứng/mềm/tiến độ phải cộng xấp xỉ `giữ cổng` |
 | pha giữa | 32,66/s | ≥ 40/s (với lô không ảnh: đã đạt 127/s) |
+
+---
+
+## §88 — LÔ 8 509: BA LỖI ĐO ĐƯỢC + XẺ "CÒN LẠI" (1.92.53)
+
+Tiếp §87. Lượt này **không đổi nhánh gửi nào**; chỉ sửa một lỗi đếm và thêm số đo.
+
+### 88.1 SỐ HỌC CHỨNG MINH "CHỜ 662" LÀ SỐ ẢO
+
+Lô 12:24: PHÁT 260,5 s · 8 509 lệnh · main cap 192 · `giữ slot 5 741 ms/chat`.
+
+| | |
+|---|---|
+| 192 slot × 260,5 s | 50 016 slot-giây |
+| ÷ 8 509 chat | **5 879 ms/chat = SÀN CỨNG** (không chat nào có thể giữ slot ít hơn, tính trung bình) |
+| log in | **5 741** < 5 879 |
+
+⇒ Hai số **không cùng mẫu số**: `slotN` chỉ tăng sau `sendOneAndLog` trả về; ca bị chặn/hoãn/comment vẫn giữ slot mà không cộng vào `slotN`. Và **"chờ 662" nằm TRONG "còn lại 5 741", không cộng thêm**. Đọc `662 + 0 + 5 741` như 3 phần độc lập là **sai** — đây là chỗ dễ đọc nhầm thứ ba của dòng log đó (hai chỗ trước: §86 đơn vị, §87.2a cap).
+
+### 88.2 `chờ slot` GẦN NHƯ CHẮC CHẮN CŨNG LÀ SỐ ẢO
+
+`releaseMainSlot()` (dòng ~11080): khi có người chờ, nó **chuyền slot trực tiếp**
+(`mainSlotWaiters.shift()(true)`, `inFlightMainCount` không đổi). Nhưng `_tAcq0` được lấy
+**trước** `await acquireMainSlot()`, nên ca được chuyền vẫn đo được vài ms khởi tạo promise ⇒
+cộng dồn thành 662 ms/chat dù **không ai thật sự xếp hàng**.
+Nay tách `slotAcqN` = số ca phải chờ **thật** (> 0 ms). **Nếu lô sau ra `0 ca` thì 662 ms là số ảo.**
+
+### 88.3 `🚫 n lần API bị chặn ngoài cửa sổ 24h` LÀ LỖI ĐẾM — ĐÃ SỬA
+
+`windowClosed` **chưa bao giờ được gán** trong toàn bộ file (0 chỗ gán, 2 chỗ đọc: dòng 7309 và
+10948) ⇒ luôn `undefined` ⇒ tổng chỉ có thể là **0 hoặc 1** (1 do `windowBlocked++` ở dòng 3379).
+Log in đúng **`🚫 1 lần`**.
+
+Nhưng đếm trong cùng log: **375 ca ❌** `api: (#10) ngoài 24h` + **167 ca ❌** `api: (#551) không có mặt`
+⇒ **≥ 542 ca** thật. Sai gấp 500 lần.
+
+**Đã sửa**: `windowClosed: isWindowClosedError(tried.join(' | '))` trong kết quả cuối của `sendOne`.
+Chỉ **đọc thêm**, không đổi nhánh gửi/bù.
+
+### 88.4 SỐ CA ❌ KHÔNG PHẢI 786 LỖI CẦN SỬA CODE
+
+`#10 ngoài 24h` (375 ca) và `#551 không có mặt` (167 ca) là **FB từ chối, không kênh nào gửi được**.
+`Extension không gửi được (1545041)` (23 ca) cùng loại. Cộng ~565/786 ⇒ **~72 % số ❌ là bất khả**,
+không phải lỗi phần mềm. Đây là lý do **không** được lấy 786 làm thước đo chất lượng.
+
+### 88.5 BA SỐ ĐO MỚI (chỉ đo, không đổi hành vi)
+
+| số | nghĩa | trả lời câu hỏi |
+|---|---|---|
+| `phải chờ slot n ca · TB x ms` | số ca **thật sự** xếp hàng chờ slot | `chờ 662` có thật không |
+| `dò gid n ca · TB x ms` | thời gian `resolveGlobalId` | 555 ca "lần dò chưa ra" tốn bao nhiêu ms |
+| `chuẩn bị ctx (không tính bind)` | `slotPrepMs − prepBindMs` | tách bind ảnh ra khỏi phần chuẩn bị |
+
+Ba số này + `📷 bind fbId` + `giữ cổng` **phải cộng xấp xỉ `còn lại`**. Phần dôi ra = CPU bị bóp.
+
+### 88.6 ĐIỀU ĐÃ KIỂM VÀ THẤY KHÔNG PHẢI VẤN ĐỀ
+
+- **ACK không nằm trong slot.** `ctx.sockFired` trả về ngay sau `await slotStartedPromise`;
+  `finalizeSockBg` xử lý ACK ở nền. Nên đừng tìm "chờ ACK" trong `còn lại`.
+- **`extPrepLane` không phải làn hẹp**: `PREP_PARALLEL_EXT = 160` (dòng 6010) trên 192 slot.
+- **`photoUploadLane` 96 làn**: cũng không chặn, vì slot thường đã có `ctx.nonReusableFbId`;
+  nhánh upload lại chỉ chạy khi chưa có.
+- **Âm thanh giữ tab ĐANG CHẠY**: log **0 lần** `⚠ Âm giữ tab chưa chạy` ⇒ cách C (mở khoá audio)
+  **không còn gì để sửa**.
+
+### 88.7 CÒN LẠI PHẢI LÀM (chưa làm lượt này)
+1. **Cách A** — đưa POST `/contents/facebook` qua service worker khi tab ẩn. **Đã tìm ra chỗ chặn**:
+   `swFetchJson` dựng body bằng `formFromObj` (background.js dòng 341, `headers` chỉ có `Accept`)
+   trong khi API bind **đòi JSON + `Content-Type: application/json`** (dòng 5786). Muốn làm phải:
+   thêm cờ `jsonBody` cho `BOTFAKE_BG_FETCH`, fallback về `fetch` trên trang khi SW lỗi,
+   và kiểm `fb_ids` trả về đúng thứ tự. **Rủi ro: mất fbId ⇒ không gửi được tin.**
+2. **Gom bind ảnh theo page** thay vì theo chat (8 186 → ~960). Lợi ích lớn hơn A nhưng
+   phải chứng minh được `content_ids` dùng lại được cho nhiều `conv_id` — **chưa có bằng chứng**,
+   trong khi code hiện tại ghi rõ *"tuyệt đối KHÔNG dùng lại fbId is_reusable=false của A cho B"*.

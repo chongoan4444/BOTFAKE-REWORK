@@ -901,6 +901,38 @@ check('chú thích fast-path KHÔNG còn nói "BỎ QUA HOÀN TOÀN extPrepLane"
 check('có ghi rõ bind ảnh nằm TRONG slot và số đo 842 / 5 741',
   /842\/5 741|842 \/ 5 741|842ms/.test(SRC) || /842/.test(SRC), true);
 
+/* ------------- [v1.92.53] BA VÁ TỪ LÔ 8 509: ĐO THẬT THAY VÌ ĐOÁN ------------- */
+
+/* (13) `windowClosed` PHẢI ĐƯỢC GÁN TỪ CHUỖI LỖI CUỐI.
+ * Bằng chứng: lô 12:24 có 375 ca ❌ "(#10) ngoài 24h" + 167 ca ❌ "(#551) không có mặt"
+ * nhưng TỔNG HỢP in "🚫 1 lần" ⇒ hai chỗ đọc `r.windowClosed` (7309, 10948) chưa từng
+ * thấy giá trị true vì trước bản này KHÔNG nơi nào gán nó. */
+check('windowClosed được gán trong kết quả cuối của sendOne',
+  /windowClosed: isWindowClosedError\(tried\.join\(' \| '\)\)/.test(SRC), true);
+check('KHÔNG còn chỗ đọc r.windowClosed mà không có nguồn gán',
+  (SRC.match(/windowClosed/g) || []).length >= 3, true);
+
+/* (14) "CHỜ SLOT" PHẢI ĐO ĐÚNG CHỖ (chỉ đếm ca thật sự phải xếp hàng).
+ * Lô 12:24 in `chờ 662 ms/chat` nhưng `releaseMainSlot()` chuyền slot TRỰC TIẾP cho người
+ * chờ kế (shift → resolve(true), inFlightMainCount không đổi) ⇒ ca được chuyền không có ms. */
+check('đo số ca PHẢI CHỜ slot (slotAcqN) tách khỏi tổng thời gian chờ',
+  /if \(_w > 0\) \{[^}]*waveDiag\.slotAcqN\+\+; waveDiag\.slotAcqPosMs \+= _w;/.test(SRC), true);
+check('có in "phải chờ slot" kèm số ca (0 ca nghĩa là số "chờ 662" cũ là số ảo)',
+  /' · phải chờ slot ' \+ \(waveDiag\.slotAcqN/.test(SRC), true);
+
+/* (15) XẺ "CÒN LẠI" — phải đo được dò gid + chuẩn bị ctx, không tính trùng bind ảnh.
+ * Số học lô 12:24: 192 slot × 260,5 s = 50 016 slot-giây ÷ 8 509 chat = SÀN 5 879 ms/chat,
+ * nhưng log in 5 741 ⇒ "chờ" nằm TRONG "còn lại" chứ không cộng thêm. Muốn biết 4 237 ms
+ * còn lại là gì thì phải có số của khâu dò gid. */
+check('đo riêng khâu dò global_id (prepGidMs)',
+  /waveDiag\.prepGidN\+\+; waveDiag\.prepGidMs \+= Math\.max\(0, Date\.now\(\) - _tGid0\)/.test(SRC), true);
+check('đo riêng khâu bind ảnh trong prepareDirectCtx (prepBindMs)',
+  /waveDiag\.prepBindN\+\+; waveDiag\.prepBindMs \+= _b/.test(SRC), true);
+check('"chuẩn bị ctx" trừ bind ra để không đếm 2 lần',
+  /Math\.max\(0, waveDiag\.slotPrepMs - waveDiag\.prepBindMs\) \/ waveDiag\.slotN/.test(SRC), true);
+check('có in "dò gid" trong dòng GIỮ SLOT',
+  /' · dò gid ' \+ \(waveDiag\.prepGidN/.test(SRC), true);
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {

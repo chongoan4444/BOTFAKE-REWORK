@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.52-w200.98
+// @version      1.92.53-w200.99
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.52-W200.98'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.53-W200.99'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -7092,7 +7092,12 @@
       ctx.threadResolved = true;
     }
     if (!ctx.gidResolved && ctx.threadId) {
+      const _tGid0 = Date.now();
       ctx.gid = await resolveGlobalId(full, ctx.threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
+      /* [v1.92.53] ĐO RIÊNG KHÂU DÒ global_id — đây là phần còn lại lớn nhất chưa có số trong
+       * "còn lại 5 741 ms" của lô 8 509 (555 ca "lần dò chưa ra", Ext p90 0 ms → timeout 7 000 ms).
+       * Chỉ ĐO, không đổi đường dò. */
+      try { waveDiag.prepGidN++; waveDiag.prepGidMs += Math.max(0, Date.now() - _tGid0); } catch (eG) { /* ignore */ }
       if (ctx.deferredToExt) {
         recycleUnusedFbId(pageId, ctx);
         return ctx;
@@ -7106,7 +7111,11 @@
       return ctx;
     }
     if (photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds && canSend) {
+      const _tBind0 = Date.now();
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
+      /* [v1.92.53] TÁCH BIND ẢNH RA KHỎI KHỐI "CHUẨN BỊ" — để lần sau trả lời được
+       * "5 741 ms giữ slot gồm những gì" bằng số, không phải bằng suy đoán. */
+      try { const _b = Math.max(0, Date.now() - _tBind0); waveDiag.prepBindN++; waveDiag.prepBindMs += _b; } catch (eB) { /* ignore */ }
       if (up && up.ok && up.fbId) ctx.nonReusableFbId = up.fbId;
       if (up && up.ok && up.fbIds && up.fbIds.length > 1) ctx.nonReusableFbIds = up.fbIds;
     }
@@ -7646,6 +7655,13 @@
       extOverloaded: sawExtOverload && !deliveredIds[conv.id],
       gidUnknown: !!(sawGidUnknown && !(ctx.gid && !ctx.gidFromPsid)),
       discoveryState: (ctx && ctx.gidDiscoveryState) || '',
+      /* [v1.92.53] `windowClosed` CHƯA BAO GIỜ ĐƯỢC GÁN ⇒ `🚫 n lần API bị chặn ngoài cửa sổ 24h`
+       * luôn in 0 hoặc 1. Bằng chứng số (lô 8 509, 12:24): 375 ca ❌ ghi
+       * "api: (#10) ngoài 24h | Ext: không gid | socket: không gid" và 167 ca ❌ ghi
+       * "api: (#551) không có mặt" ⇒ tổng ≥ 542 ca bị chặn cửa sổ, nhưng TỔNG HỢP in
+       * "🚫 1 lần". Hai chỗ đọc `r.windowClosed` (7309, 10948) chưa từng thấy giá trị true.
+       * Nay suy thẳng từ chuỗi lỗi cuối cùng — chỉ đọc thêm, KHÔNG đổi nhánh gửi/bù nào. */
+      windowClosed: isWindowClosedError(tried.join(' | ')),
       error: tried.join(' | '),
     };
   }
@@ -8229,6 +8245,25 @@
     // tách được thời gian đó nằm ở đâu ⇒ mọi phỏng đoán đều là đoán. Nay tách 3 phần:
     //   chờ slot · chuẩn bị (ctx/tên/ảnh) · bản thân lần gọi kênh (gid + publish + ACK chờ).
     slotN: 0, slotAcquireMs: 0, slotHoldMs: 0, slotPrepMs: 0,
+    /* [v1.92.53] XẺ "CÒN LẠI" THÀNH 3 PHẦN — LÔ 8 509 KHÔNG ĐÓNG ĐƯỢC BẰNG 2 CON SỐ.
+     * Lô 12:24 in `chờ 662 · chuẩn bị 0 · còn lại 5 741 · tổng 5 741`. Đối chiếu vật lý:
+     *   PHÁT = 260,5 s cho 8 509 lệnh = 21,10 lệnh giây-gốc; 21,10 × 5 741 ms = 121 slot luôn bận.
+     *   Chỉ 192 slot × 260,5 s = 50 016 slot-giây ⇒ 8 509 chat ⇒ **sàn cứng 5 879 ms/chat**.
+     *   Nhưng giữ slot in ra 5 741 < 5 879 ⇒ 2 số KHÔNG cùng một mẫu số: `slotN` chỉ tăng sau
+     *   `sendOneAndLog`, còn chat bị chặn/hoãn theo lô nền/comment thì vẫn giữ slot mà không
+     *   cộng vào `slotN`. Vì vậy "chờ 662" thực chất nằm TRONG "còn lại", không phải cộng thêm.
+     * ĐÃ KIỂM TRONG CODE: ACK KHÔNG nằm trong slot. Nhánh `ctx.sockFired` (dòng ~5237) trả về
+     * ngay sau `await slotStartedPromise`; `finalizeSockBg` xử lý ACK ở NỀN. Vì vậy đừng đi tìm
+     * "chờ ACK" trong `còn lại` — phải chia theo phần TRƯỚC khi publish.
+     * Nay đo 3 lát cắt của đúng khoảng "giữ slot → sendOneAndLog trả về":
+     *   prepGidMs       = dò/cứu global_id (phần đắt nhất của prepareDirectCtx)
+     *   prepBindMs      = bind fbId ảnh (is_reusable=false) bên trong prepareDirectCtx
+     *   slotAcqN/acqPos = số lần PHẢI CHỜ slot + tổng ms chờ. `chờ 662` của lô 8 509 gần như
+     *                     chắc chắn SAI: `releaseMainSlot()` chuyền slot trực tiếp cho người
+     *                     chờ kế (shift → resolve(true), biến đếm không đổi) nên ca phải xếp
+     *                     hàng mới có ms. Nếu lô sau vẫn ra 0 thì con số cũ là số ảo.
+     * Ba số này + `bind fbId` + `giữ cổng` phải xấp xỉ `còn lại`; phần dôi ra là CPU bị bóp. */
+    prepGidMs: 0, prepGidN: 0, prepBindMs: 0, prepBindN: 0, slotAcqN: 0, slotAcqPosMs: 0,
   };
 
   /* ===== [v1.92.28] TỈ LỆ FB TỪ CHỐI TRÊN CỬA SỔ GẦN NHẤT =====
@@ -8807,6 +8842,17 @@
               + ' · còn lại ' + Math.round(Math.max(0, waveDiag.slotHoldMs - waveDiag.slotPrepMs) / waveDiag.slotN)
               + ' · tổng ' + Math.round(waveDiag.slotHoldMs / waveDiag.slotN)
               + ' (n=' + waveDiag.slotN + ' lần giữ slot)'
+              /* [v1.92.53] XẺ "CÒN LẠI" — ba số dưới đây phải cộng lại xấp xỉ `còn lại`.
+               * `phải chờ slot` in CẢ số lần (n) vì nếu n = 0 thì con số "chờ 662" của lô 8 509
+               * là số ẢO, không phải chuyện nhỏ (xem chú thích ở waveDiag.slotAcqN). */
+              + ' · phải chờ slot ' + (waveDiag.slotAcqN
+                ? waveDiag.slotAcqN + ' ca · TB ' + Math.round(waveDiag.slotAcqPosMs / waveDiag.slotAcqN) + 'ms'
+                : '0 ca')
+              + ' · dò gid ' + (waveDiag.prepGidN
+                ? waveDiag.prepGidN + ' ca · TB ' + Math.round(waveDiag.prepGidMs / waveDiag.prepGidN) + 'ms'
+                : '0 ca')
+              + ' · chuẩn bị ctx (không tính bind) '
+                + Math.round(Math.max(0, waveDiag.slotPrepMs - waveDiag.prepBindMs) / waveDiag.slotN) + 'ms'
               /* [v1.92.49] SỐ ĐO KHÂU ẢNH — để lần sau khỏi suy đoán "3 406 ms còn lại" là gì.
                * Mỗi chat có ảnh phải bind fbId riêng (is_reusable=false) TRƯỚC khi bắn. */
               + (photoUpStats.n
@@ -11383,6 +11429,12 @@
             const _tAcq0 = Date.now();
             const gotMainSlot = await acquireMainSlot();
             if (!gotMainSlot) return null;
+            /* [v1.92.53] ĐO ĐÚNG CHỖ CHỜ SLOT. `_tAcq0 → sau acquireMainSlot` là TOÀN BỘ thời gian
+             * chờ, kể cả khi slot được CHUYỀN TRỰC TIẾP (releaseMainSlot → shift → resolve(true)),
+             * ca không phải chờ vẫn ra ~0 ms. Vì vậy chỉ cộng vào `slotAcqPosMs` khi thực sự > 0;
+             * `slotAcqN` đếm số ca PHẢI CHỜ (khác 0). Nếu lô sau `slotAcqN` = 0 thì "chờ slot"
+             * không phải nút cổ chai — đúng như suy ra từ `releaseMainSlot()`. */
+            { const _w = Date.now() - _tAcq0; if (_w > 0) { try { waveDiag.slotAcqN++; waveDiag.slotAcqPosMs += _w; } catch (eA) { /* ignore */ } } }
             try {
               let r;
               const _tHold0 = Date.now();
