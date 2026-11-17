@@ -3877,3 +3877,38 @@ cursor ⇒ **không nhích**, dừng và đánh dấu thiếu (thà thiếu còn
 - 62 lần 429 liên tiếp ⇒ tổng nghỉ > 155 s (bản cũ) — tức bản mới nghỉ ĐỦ LÂU để cơn dứt.
 - 100 trang lỗi **không** ăn vào trần 1500 trang.
 - Dịch cursor: mốc đúng ±0, `keyStr` giữ nguyên, cursor rác ⇒ `null` (không bịa), lùi quá mốc 0 ⇒ `null`.
+
+---
+
+## §80 · "Ấn tải phát dừng luôn, chả chạy được tí nào" — 5 chỗ chặn lượt tải
+
+### §80.1 Nguyên nhân đọc được từ code (không phải suy đoán)
+
+| # | Chỗ | Tại sao làm lượt tải chết ngay |
+|---|---|---|
+| 1 | `scanFullList` nhánh `!(api && api.ok && api.rows.length)` | Trước đây: gán `state.allRows = prevAllRows` ⇒ **vứt** đúng phần `syncLiveRows` vừa đổ vào. Không có chat ⇒ nút trở lại "⚡ Tải danh sách" như chưa bấm gì |
+| 2 | `loadListViaApi` không có `try/catch` | Một exception giữa vòng lặp ⇒ thoát hàm, `api` = `undefined`, rơi vào nhánh (1) ⇒ **mất trắng**, chỉ in 1 dòng ⚠ |
+| 3 | `consecFail >= 3 ⇒ truncated; break` (thêm ở 1.92.48) | 3 trang lỗi liền là **chuyện thường** khi server bóp (mỗi trang `fetchJson` đã cố 3 lần) ⇒ dừng cả lượt, đây là nguyên nhân TRỰC TIẾP của "dừng luôn" |
+| 4 | `rlNote429` bị gọi 3 lần cho **một** trang | `fetchJson` tự thử 3 lần, mỗi lần 429 đều gọi `rlNote429` ⇒ `streak` nhảy 3 bậc cho trang ĐẦU TIÊN ⇒ nghỉ 10 s ngay (bản 1.92.48 nhân đôi) |
+| 5 | `finally` của `scanFullList` | Nếu 0 chat + không có lỗi, nút về "⚡ Tải danh sách" và **không nói gì** ⇒ người dùng không biết đã chạy hay chưa |
+
+### §80.2 Vá ở 1.92.49 (W200.95)
+
+| # | Sửa |
+|---|---|
+| 1 | `loadListViaApi` bọc `try/catch`, trả `{ ok:false, error, rows: phần đã có }` — lỗi không còn giết im lặng |
+| 2 | Nhánh lỗi **giữ** `state.allRows` đã đồng bộ: "🟡 … GIỮ N chat đã tải được. Gửi phần này vẫn được; *chọn tất cả* bị chặn cho tới khi tải đủ" |
+| 3 | **BỎ** luật "3 trang lỗi liền ⇒ dừng". Chỉ thôi khi **ngân sách 40 lần thử lại** cạn |
+| 4 | `rlNote429` gộp 3 lần thử của cùng một trang thành **1 bậc** (cờ `rl.pageAt`, cửa sổ 4 s) |
+| 5 | Bậc nghỉ cố định đọc được: **2,5 → 4 → 6 → 8 s**, sau đó +1,5 s/lần, trần **15 s** (bản 1.92.48: 2,5 → 5 → 10 s ⇒ quá tay) |
+| 6 | Kết thúc lượt mà 0 chat ⇒ in rõ 3 việc cần kiểm tra (đăng nhập / token / bộ lọc) và đổi nút thành "⚠ Tải 0 chat — bấm tải lại" |
+
+**Không đổi:** trần 1500 trang tách khỏi 40 lần thử lại; sổ trang lỗi + tải bù đúng cursor; W200.88
+(chỉ ⚡ phát `next_cursor`); "chọn tất cả" vẫn bị chặn khi danh sách chưa đầy.
+
+### §80.3 Ca chống hồi quy (mục 26 cập nhật + mục 28)
+- Bậc nghỉ: 2,5 / 4 / 6 / 9,5 / 15 s (trần), không vượt 15 s.
+- Lỗi khâu tải + đã có 120 chat ⇒ `partial` (không phải `empty`).
+- 3 trang lỗi liền mà còn ngân sách ⇒ **không** dừng; cạn ngân sách mới dừng.
+- 3 lần 429 trong CÙNG trang ⇒ `streak = 1`; quá 4 s sang trang khác ⇒ `streak = 2`.
+- Không còn chuỗi `consecFail >= 3` trong nguồn; có chuỗi "Lượt tải kết thúc mà KHÔNG lấy được chat nào".

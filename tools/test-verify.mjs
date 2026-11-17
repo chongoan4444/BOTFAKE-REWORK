@@ -620,16 +620,21 @@ check('đóng ngân sách ghi lại % để in vào log',
 //     (c) lần thử lại KHÔNG được ăn vào trần số trang.
 {
   // (a)+(b) mô phỏng đúng công thức trong rlNote429
+  const RL_STEPS = [2500, 4000, 6000, 8000];
   const waitFor = (streak) => {
-    const base = Math.min(10000, 2500 * Math.pow(2, Math.min(2, streak - 1)));
-    const extra = streak > 3 ? Math.min(10000, (streak - 3) * 1500) : 0;
-    return Math.min(20000, base + extra);
+    const base = RL_STEPS[Math.min(RL_STEPS.length - 1, streak - 1)];
+    const extra = streak > 4 ? Math.min(7000, (streak - 4) * 1500) : 0;
+    return Math.min(15000, base + extra);
   };
-  check('429 lần 1 ⇒ nghỉ 2,5 s (như bản cũ)', waitFor(1), 2500);
-  check('429 lần 2 ⇒ nghỉ 5 s', waitFor(2), 5000);
-  check('429 lần 3 ⇒ nghỉ 10 s', waitFor(3), 10000);
-  check('429 lần 5 ⇒ nghỉ 13 s (không vượt trần)', waitFor(5), 13000);
-  check('429 lần 40 ⇒ chặn ở trần 20 s', waitFor(40), 20000);
+  /* [v1.92.48b] BẢNG NGHỈ SAU KHI NGƯỜI DÙNG BÁO "ẤN TẢI PHÁT DỪNG LUÔN".
+   * Bản 1.92.48 nhân đôi (2,5/5/10 s) và còn đếm gộp 3 lần thử của fetchJson thành 3 bậc
+   * ⇒ trang lỗi ĐẦU TIÊN đã bị nghỉ 10 s. Nay: 1 bậc/trang, nhích nhẹ, trần 15 s. */
+  check('429 lần 1 ⇒ nghỉ 2,5 s', waitFor(1), 2500);
+  check('429 lần 2 ⇒ nghỉ 4 s (không nhảy 5 s)', waitFor(2), 4000);
+  check('429 lần 3 ⇒ nghỉ 6 s', waitFor(3), 6000);
+  check('429 lần 5 ⇒ nghỉ 9,5 s', waitFor(5), 9500);
+  check('không bao giờ vượt trần 15 s', waitFor(99), 15000);
+  check('429 lần 40 ⇒ chặn ở trần 15 s', waitFor(40), 15000);
 
   // tổng thời gian nghỉ của 62 lần 429 LIÊN TIẾP (đúng log 09:19–09:22) phải BÉ HƠN
   // số lần × 2,5 s cộng dồn kiểu cũ chỉ khi... không, nó PHẢI LỚN HƠN — điều cần kiểm là
@@ -688,6 +693,47 @@ check('đóng ngân sách ghi lại % để in vào log',
   check('tải bù gọi lại từ đúng cursor đã lưu', /resumeCursor: ep\.cursor/.test(SRC), true);
   check('tải bù không bị ép sang nhánh lọc tag', /!opts\.maxPages \|\| !!opts\.resumeCursor/.test(SRC), true);
   check('trần trang tách khỏi lần thử', /guard\+\+;\s*\/\/ \[v1\.92\.48\] trần 1500/.test(SRC), true);
+}
+
+// 28) [v1.92.48b] "ẤN TẢI PHÁT DỪNG LUÔN" — ba nguyên nhân đã sửa, mỗi cái một ca test.
+//     (a) loadListViaApi ném lỗi ⇒ scanFullList mất trắng phần đã đồng bộ
+//     (b) 3 trang lỗi liền ⇒ dừng cả lượt tải (quá dễ kích hoạt khi server bóp)
+//     (c) 1 trang lỗi bị đếm thành 3 bậc 429 (fetchJson tự thử 3 lần)
+{
+  // (a) mô phỏng: đã đồng bộ được 120 chat, rồi khâu tải ném lỗi
+  const keepPartial = (synced, apiOk) => (apiOk ? 'full' : (synced > 0 ? 'partial' : 'empty'));
+  check('khâu tải ném lỗi + đã có 120 chat ⇒ GIỮ phần đã tải', keepPartial(120, false), 'partial');
+  check('khâu tải ném lỗi + 0 chat ⇒ báo lỗi rõ', keepPartial(0, false), 'empty');
+  check('khâu tải OK ⇒ dùng danh sách đầy đủ', keepPartial(120, true), 'full');
+
+  // (b) 3 trang lỗi liền KHÔNG được làm dừng lượt: chỉ khi ngân sách thử lại cạn
+  const simTries = (failsInRow, retryLeft) => {
+    let left = retryLeft, attempts = 0, stopped = false;
+    for (let i = 0; i < failsInRow; i++) {
+      attempts++;
+      if (left > 0) { left--; continue; }   // còn ngân sách ⇒ thử lại chính trang đó
+      stopped = true; break;
+    }
+    return { stopped, attempts };
+  };
+  check('3 trang lỗi liền nhưng còn ngân sách ⇒ KHÔNG dừng', simTries(3, 40).stopped, false);
+  check('ngân sách cạn ⇒ mới dừng', simTries(45, 40).stopped, true);
+
+  // (c) mỗi lần gọi rlNote429 trong cùng một trang không được cộng bậc
+  const note429 = (st, now) => {
+    if (st.pageAt && now - st.pageAt < 4000) return st;   // gộp
+    st.pageAt = now; st.streak++; return st;
+  };
+  const st = { pageAt: 0, streak: 0 };
+  note429(st, 1000); note429(st, 1200); note429(st, 1400);  // 3 lần thử của fetchJson
+  check('3 lần 429 trong CÙNG trang ⇒ chỉ 1 bậc nghỉ', st.streak, 1);
+  note429(st, 6000);
+  check('sang trang khác (quá 4 s) ⇒ tính bậc mới', st.streak, 2);
+
+  // chống hồi quy mức nguồn
+  check('có bao try/catch cho khâu tải', /loadListViaApi = async function \(onProgress, opts\) \{\n\s+loadListViaApi\.__progress/.test(SRC), true);
+  check('không còn dừng vì "3 trang LIÊN TIẾP lỗi"', /consecFail >= 3/.test(SRC), false);
+  check('nhánh 0 chat có nói rõ nguyên nhân', /Lượt tải kết thúc mà KHÔNG lấy được chat nào/.test(SRC), true);
 }
 
 /* ------------------------------- kết quả ------------------------------- */

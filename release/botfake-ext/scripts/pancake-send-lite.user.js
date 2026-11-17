@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.48-w200.94
+// @version      1.92.49-w200.95
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.48-W200.94'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.49-W200.95'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1765,8 +1765,22 @@
   /* [v1.92.48] đổi từ `async function` sang biểu thức: phần TẢI BÙ TRANG LỖI (cuối
    * loadSequentialOrStitch) cần gọi lại chính hàm này để tiếp tục từ đúng cursor đã lưu.
    * Luồng gốc của lần tải bù là 1 chuỗi `next_cursor` duy nhất ⇒ tự nó đã tuần tự. */
-  let loadListViaApi = null;
+  let loadListCore = null;
+  /* [v1.92.48b] BỌC LẠI ĐỂ LỖI KHÔNG LÀM CHẾT IM LẶNG NỬA LƯỢT.
+   * Người dùng báo "ấn tải phát dừng luôn" — tức có ca ném lỗi giữa vòng lặp tải, không in gì.
+   * Nay mọi exception trong khâu tải trả về `{ ok:false, error }` kèm SỐ CHAT ĐÃ LẤY được
+   * (xem `__partialRows`) để `scanFullList` vẫn dùng được phần đã tải thay vì mất trắng. */
   loadListViaApi = async function (onProgress, opts) {
+    loadListViaApi.__progress = onProgress || null;   // [v1.92.48b] để nơi gọi cứu được phần đã tải
+    try {
+      return await loadListCore(onProgress, opts);
+    } catch (e) {
+      const msg = (e && e.name ? e.name + ': ' : '') + ((e && e.message) || e);
+      try { logLine('⛔ Khâu tải danh sách ném lỗi: ' + msg + ' — giữ phần đã tải.'); } catch (e2) { /* ignore */ }
+      return { ok: false, error: 'Lỗi khâu tải: ' + msg, rows: (loadListViaApi.__partialRows || []) };
+    }
+  };
+  loadListCore = async function (onProgress, opts) {
     const token = getToken();
     if (!token) return { ok: false, error: 'Không lấy được access token' };
     const startedAt = Date.now();
@@ -1810,7 +1824,8 @@
       streak: 0,      // [v1.92.48] số 429 LIÊN TIẾP (reset khi có phản hồi thành công)
       gapMs: 0,       // [v1.92.48] nhịp chờ giữa hai trang khi đã từng dính 429
       waitTotalMs: 0, // [v1.92.48] tổng thời gian đã nghỉ vì 429 (in ra để đối chiếu)
-      lastWaitMs: 0 };
+      lastWaitMs: 0,
+      pageAt: 0 };    // [v1.92.48b] mốc trang đang gặp 429 — gộp 3 lần thử của fetchJson thành 1
     const rlNote429 = () => {
       rl.hits++;
       /* [v1.92.48] NGHỈ CHUNG PHẢI DÀI DẦN KHI CƠN 429 KHÔNG DỨT.
@@ -1820,10 +1835,27 @@
        * định thì server còn bóp thì vòng lặp còn quay lại đúng nhịp đó.
        * Nay: 2,5 s → 5 → 7,5 → 10 s (trần), rồi mỗi lần chờ thêm một nhịp 1,5 s (trần 20 s) nếu
        * vẫn dính tiếp. Chuỗi reset khi có phản hồi THÀNH CÔNG, nên cơn ngắn không bị phạt. */
+      /* [v1.92.48b] `fetchJson` đã tự thử 3 lần cho MỘT trang; mỗi lần trong đó cũng gọi vào đây.
+       * Đếm gộp như vậy thì 1 trang lỗi ⇒ streak nhảy 3 bậc ⇒ nghỉ vọt lên 10 s ngay từ trang
+       * đầu, đúng hiện tượng "ấn tải phát dừng". Nay chỉ đếm 1 lần cho mỗi trang (cờ `rl.pageAt`). */
+      const nowTick = Date.now();
+      if (rl.pageAt && nowTick - rl.pageAt < 4000) {
+        rl.hits++;                     // vẫn đếm tổng số 429 để in ra
+        rl.pauseUntil = Math.max(rl.pauseUntil, nowTick + Math.min(4000, 400));
+        return;
+      }
+      rl.pageAt = nowTick;
       rl.streak = (rl.streak || 0) + 1;
-      const base = Math.min(10000, 2500 * Math.pow(2, Math.min(2, rl.streak - 1)));
-      const extra = rl.streak > 3 ? Math.min(10000, (rl.streak - 3) * 1500) : 0;
-      const waitMs = Math.min(20000, base + extra);
+      /* [v1.92.48b] 2,5 → 4 → 6 → 8 s rồi +1,5 s/lần (trần 15 s). Bản 1.92.48 nhân đôi lên
+       * 10 s sau 3 lần ⇒ với ~10 trang là mất cả phút chỉ để nghỉ. Đây là tăng DẦN nhưng không
+       * nhân đôi: đủ để server nhả, không đủ để "ấn tải phát dừng". */
+      /* BẬC NGHỈ CỐ ĐỊNH, đọc được ngay: 2,5 → 4 → 6 → 8 s, sau đó +1,5 s/lần (trần 15 s).
+       * Không dùng công thức nhân đôi: bản 1.92.48 nhân đôi nên ngay trang lỗi thứ 3 đã nghỉ
+       * 10 s ⇒ người dùng thấy như "ấn tải phát dừng". */
+      const RL_STEPS = [2500, 4000, 6000, 8000];
+      const base = RL_STEPS[Math.min(RL_STEPS.length - 1, rl.streak - 1)];
+      const extra = rl.streak > 4 ? Math.min(7000, (rl.streak - 4) * 1500) : 0;
+      const waitMs = Math.min(15000, base + extra);
       rl.pauseUntil = Date.now() + waitMs;
       rl.lastWaitMs = waitMs;
       rl.waitTotalMs = (rl.waitTotalMs || 0) + waitMs;
@@ -2245,6 +2277,10 @@
           seg0.errRetry = (seg0.errRetry || 0) + 1;
           consecFail++;
           if (seg0.errRetry === 1) logLine('⏸ Tải bị gián đoạn (' + (res.error || 'lỗi') + ') ở ' + seg0.items.length + ' chat — đang tự thử lại…');
+          /* [v1.92.48b] LUÔN THỬ LẠI TRANG ĐANG ĐỨNG nếu còn ngân sách — không dừng ở "3 trang
+           * liền lỗi". Người dùng báo "ấn tải phát dừng luôn": 3 lần lỗi liên tiếp là chuyện
+           * BÌNH THƯỜNG khi server bóp (fetchJson đã cố 3 lần, rồi tới đây), dừng ở đó thì lượt
+           * tải chết ngay từ đầu. Chỉ khi `retryLeft` CẠN mới thôi. */
           if (seg0.errRetry <= 6 && retryLeft > 0) {
             retryLeft--;
             await sleepUntil(Date.now() + (rl.lastWaitMs || 2500));
@@ -2254,12 +2290,6 @@
            * Chat của trang này KHÔNG bị coi là đã tải (sổ còn đó để quay lại), nên không có
            * chat nào bị bỏ im lặng. */
           errorPages.push({ cursor: seg0.cursor, after: seg0.items.length, tries: seg0.errRetry });
-          if (consecFail >= 3) {
-            logLine('⛔ 3 trang LIÊN TIẾP lỗi (' + (res.error || '?') + ') — server đang bóp; dừng tải để không phí request. '
-              + 'Đã giữ ' + seg0.items.length + ' chat; ' + errorPages.length + ' trang vào sổ chờ tải bù.');
-            seg0.truncated = true;
-            break;
-          }
           /* MỐC CỦA TRANG KẾ: cursor của trang hỏng trỏ tới mốc `before` MÀ TA VỪA LẤY ĐƯỢC
            * (tức trang kế đã bắt đầu ở đúng mốc đó) ⇒ phải lùi thêm ÍT NHẤT một khoảng bằng độ
            * trải của một trang, nếu không server trả lại chính trang vừa lỗi. Dùng độ trải đo
@@ -2269,9 +2299,9 @@
           const skippedHere = { cursor: seg0.cursor, after: seg0.items.length, tries: seg0.errRetry, jumpMs: jump };
           if (!nextCursor) {
             errorPages.push(skippedHere);
-            logLine('⚠ Trang lỗi (' + (res.error || '?') + ') và KHÔNG dịch được cursor — dừng để không bỏ sót chat. '
-              + 'Đã giữ ' + seg0.items.length + ' chat.');
-            seg0.truncated = true;
+            logLine('⚠ Trang lỗi (' + (res.error || '?') + ') và KHÔNG dịch được cursor — dừng đường chính, '
+              + 'giữ ' + seg0.items.length + ' chat; ' + errorPages.length + ' trang vào sổ chờ tải bù.');
+            seg0.cursor = null;   // thoát vòng lặp nhưng KHÔNG đánh dấu "hết cursor"
             break;
           }
           errorPages.push(skippedHere);
@@ -2588,6 +2618,20 @@
           render();
           return;
         }
+        /* [v1.92.48b] `api.rows` rỗng KHÔNG có nghĩa là chưa lấy được chat nào: `syncLiveRows`
+         * đã đổ dần vào `state.allRows`. Giữ lại thay vì xoá trắng. */
+        const keepN = (state.allRows && state.allRows.size) || 0;
+        if (keepN > 0) {
+          state.allRowsPartial = true;
+          state.listIncomplete = true;
+          logLine('🟡 Tải 2 lần vẫn thiếu cursor nhưng ĐÃ có ' + keepN
+            + ' chat — giữ lại, gửi phần này vẫn được ("chọn tất cả" bị chặn).');
+          setBtn('⚡ Tải danh sách (' + keepN + ' chat · còn thiếu)');
+          setScanProgress(keepN, null);
+          computeMatches();
+          render();
+          return;
+        }
         state.allRows = prevAllRows || null;
         state.allRowsPartial = prevAllRowsPartial;
         logLine('⛔ Tải 2 lần vẫn chưa hết cursor (0 chat lấy được) — bấm ⚡ lại.');
@@ -2596,11 +2640,32 @@
         return;
       }
       if (!(api && api.ok && api.rows.length)) {
+        /* [v1.92.48b] "ẤN TẢI PHÁT DỪNG LUÔN" — vá đúng chỗ này.
+         * `syncLiveRows` đã đổ dần chat vào `state.allRows` trong lúc tải. Bản cũ không đụng tới
+         * nó ở nhánh lỗi, nên nếu `loadListViaApi` ném/không trả rows thì TOÀN BỘ số đã tải bị
+         * vứt (hoặc đè bằng `prevAllRows`), người dùng chỉ thấy một dòng ⚠ rồi im.
+         * Nay: đếm số đã đồng bộ được, nếu > 0 thì GIỮ và dùng được ngay (đánh dấu CHƯA ĐẦY ĐỦ
+         * để "chọn tất cả" vẫn bị chặn như W200.88 — nhưng gửi phần đã chọn thì được). */
+        const partialN = (state.allRows && state.allRows.size) || 0;
+        if (partialN > 0) {
+          state.allRowsPartial = true;
+          state.listIncomplete = true;
+          let oKeep = 0;
+          state.allRows.forEach((v) => { v.order = oKeep++; });
+          logLine('🟡 ' + ((api && api.error) || 'Tải API lỗi') + ' — GIỮ ' + partialN
+            + ' chat đã tải được. Gửi phần này vẫn được; "chọn tất cả" bị chặn cho tới khi tải đủ.');
+          setBtn('⚡ Tải danh sách (' + partialN + ' chat · còn thiếu)');
+          setScanProgress(partialN, null);
+          computeMatches();
+          render();
+          return;
+        }
         if (prevAllRows && prevAllRows.size) {
           state.allRows = prevAllRows;
           state.allRowsPartial = prevAllRowsPartial;
         }
-        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại'));
+        logLine('⚠ ' + ((api && api.error) || 'Tải API thất bại')
+          + ' — chưa lấy được chat nào. Kiểm tra tab Pancake còn đăng nhập + bấm ⚡ lại.');
         setBtn('⚠ Tải API lỗi — bấm tải lại');
         return;
       }
@@ -2646,6 +2711,13 @@
         setBtn('⚡ Tải danh sách (' + state.allRows.size + ' chat)');
       } else if (btn) {
         setBtn('⚡ Tải danh sách');
+      }
+      /* [v1.92.48b] Lượt tải KẾT THÚC mà 0 chat + không có lỗi rõ ràng ⇒ nói thẳng ra thay vì
+       * để nút trở về trạng thái như chưa bấm gì ("ấn tải phát dừng luôn, chả chạy được tí nào"). */
+      if (!state.sending && !(state.allRows && state.allRows.size) && btn && !state.listIncomplete) {
+        logLine('⚠ Lượt tải kết thúc mà KHÔNG lấy được chat nào — kiểm tra: (1) tab Pancake đã đăng nhập, '
+          + '(2) token còn hạn (F5 trang Pancake rồi thử lại), (3) bộ lọc đang bật có thể không khớp chat nào.');
+        setBtn('⚠ Tải 0 chat — bấm tải lại');
       }
     }
   }
