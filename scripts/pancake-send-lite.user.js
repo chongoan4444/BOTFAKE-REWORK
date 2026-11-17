@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.49-w200.95
+// @version      1.92.50-w200.96
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.49-W200.95'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.50-W200.96'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5282,6 +5282,15 @@
               const hasExt1545 = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
               if (hasExt1545 && extFallback1545Allowed()) {
                 extTry1545.tried++;
+                /* [v1.92.50] ĐÁNH DẤU CA NÀY ĐỂ CẦU DAO EXT ĐÓNG ĐƯỢC — LỖI BỊ SÓT Ở 1.92.49.
+                 * Sổ 11:34 (9 242 chat): dồn sang Ext 3 280 ca, Ext trả "Người này hiện không có
+                 * mặt" cho 3 122 ca, mà KHÔNG có dòng 🔒 nào ⇒ ngân sách chưa từng đóng.
+                 * Gốc: noteExt1545Outcome() chỉ ghi khi `conv.__extFallback1545 === true`
+                 * (dòng 9101/9110/9114/9123), nhưng cờ đó chỉ được set ở nhánh FB-báo-1545041
+                 * (dòng 7546/7557). Nhánh NÀY tăng `tried` mà không set cờ ⇒ 3 280 ca "vô hình"
+                 * với bộ đếm ⇒ streak đứng 0 ⇒ PROBE 200 và STREAK_MAX 30 đều không bao giờ chạm.
+                 * Nay set cờ: tốn thêm 0 lệnh, chỉ cho bộ đếm nhìn thấy đúng ca nó đang đo. */
+                conv.__extFallback1545 = true;
                 scheduleBuRetry(conv, text, photo, nm,
                   'Socket bị FB từ chối (ngân sách thử lại Socket đã đóng)', ['socket'],
                   { ambiguous: false, fromUncertain: true, via: 'socket', sentAt: Date.now() });
@@ -8424,6 +8433,7 @@
   // Log 19:01→19:04 (10672 tin): phát lệnh xong 19:01:29 nhưng mãi 19:04:25 mới chốt vì
   // 16 ca đọc-lại giữ lượt suốt 176s, trong khi kết quả cuối vẫn là "thấy tin 0". Đọc lại
   // là việc phụ trợ — để nó chạy nền, không bắt người dùng chờ.
+  const tailSeen = {}; // [v1.92.50] convId → đã đếm vào "đuôi chờ xác nhận" của lượt này
   const extRecheckPending = {}; // convId → runSeq đang đọc lại (không giữ lượt)
   const uncertainVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng ca "không rõ kết quả" (API timeout/5xx)
   const extTimeoutStats = { timeout: 0, skipped: 0, found: 0, notFound: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
@@ -8438,7 +8448,14 @@
      * cái đuôi đó dài bao nhiêu và do ca nào giữ ⇒ mọi tối ưu đều là đoán. Ghi mốc phát lệnh
      * ở đây, chốt độ dài ở markDelivered/clearBgPending. */
     pendingBg[conv.id] = { at: Date.now(), name: conv.name || conv.id, via: via || '' };
-    sendDiag.tailChats = (sendDiag.tailChats || 0) + 1;
+    /* [v1.92.50] ĐẾM THEO CHAT, KHÔNG ĐẾM LẦN GỌI. Log 11:34 in "⏳ Đuôi chờ xác nhận: 9 263 ca
+     * vào sổ chờ" trong khi lô chỉ có 9 242 lệnh — nhiều hơn số chat là bất khả. Gốc: một chat đi
+     * qua 2 chuỗi bù (⏳ rồi 🛟 rồi ❌) gọi noteBgPending 2–3 lần ⇒ cộng dồn. Nay chỉ đếm chat MỚI
+     * (chưa có trong pendingBg và chưa từng vào sổ ở lượt này). */
+    if (!tailSeen[conv.id]) {
+      tailSeen[conv.id] = 1;
+      sendDiag.tailChats = (sendDiag.tailChats || 0) + 1;
+    }
     if (!bgWatchdogTimer) bgWatchdogTimer = bgClock.every(5000, sweepBgPending);
   }
   function clearBgPending(convId) {
@@ -8723,15 +8740,22 @@
           + ' · backoff chậm/no-ACK ' + SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD + '/' + SOCKET_LANE_NOACK_BACKOFF_THRESHOLD
           + ' · peak API waiting ' + waveDiag.maxApiWaiting
           + (waveDiag.slotN
-            ? ' · ⏱ GIỮ SLOT TB chờ ' + Math.round(waveDiag.slotAcquireMs / waveDiag.slotN)
-              + 'ms · chuẩn bị ' + Math.round(waveDiag.slotPrepMs / waveDiag.slotN)
-              + 'ms · còn lại ' + Math.round(Math.max(0, waveDiag.slotHoldMs - waveDiag.slotPrepMs) / waveDiag.slotN)
-              + 'ms (n=' + waveDiag.slotN + ')'
+            /* [v1.92.50] NHÃN ĐƠN VỊ BẮT BUỘC — bốn số dưới đây là ms/chat TRUNG BÌNH, không phải
+             * tổng thời gian của lượt. Log 11:34 in "còn lại 3 855ms" cạnh "⏱ Phát lệnh 296,8s" nên
+             * rất dễ đọc thành tổng (chính vì vậy một báo cáo trước đã kết luận nhầm là số tích luỹ).
+             * Nay ghi rõ "ms/chat" + "tổng" và n (số LẦN giữ slot của lượt này, không phải số chat —
+             * ở lô 11:34 hai số đó tình cờ bằng nhau vì 1 chat giữ slot 1 lần).
+             * Đọc đúng: giữ slot TB × (số chat ÷ main cap) ≈ thời gian phát của lô. */
+            ? ' · ⏱ GIỮ SLOT (ms/chat): chờ ' + Math.round(waveDiag.slotAcquireMs / waveDiag.slotN)
+              + ' · chuẩn bị ' + Math.round(waveDiag.slotPrepMs / waveDiag.slotN)
+              + ' · còn lại ' + Math.round(Math.max(0, waveDiag.slotHoldMs - waveDiag.slotPrepMs) / waveDiag.slotN)
+              + ' · tổng ' + Math.round(waveDiag.slotHoldMs / waveDiag.slotN)
+              + ' (n=' + waveDiag.slotN + ' lần giữ slot)'
               /* [v1.92.49] SỐ ĐO KHÂU ẢNH — để lần sau khỏi suy đoán "3 406 ms còn lại" là gì.
                * Mỗi chat có ảnh phải bind fbId riêng (is_reusable=false) TRƯỚC khi bắn. */
               + (photoUpStats.n
                 ? ' · 📷 bind fbId: ' + photoUpStats.n + ' ca · TB ' + Math.round(photoUpStats.ms / photoUpStats.n)
-                  + 'ms · max ' + photoUpStats.max + 'ms · lỗi ' + photoUpStats.fail
+                  + 'ms/ca · max ' + photoUpStats.max + 'ms · lỗi ' + photoUpStats.fail
                 : '')
             : '')
           + ' · giữ cổng (bay/retry/ext/api) ' + waveDiag.gateBlockInflight + '/' + waveDiag.gateBlockRetry
@@ -10435,6 +10459,21 @@
      * số TÍCH LUỸ, đọc lên hiểu sai hoàn toàn là "lô này vừa dò 2 768 ca". Nay reset như mọi
      * bộ đếm khác; giữ `closed` của lượt trước (nếu Ext đã bị chặn thì không phải dò lại). */
     extTry1545.tried = 0; extTry1545.saved = 0; extTry1545.streak = 0; extTry1545.unknown = 0;
+    /* [v1.92.50] `photoUpStats` LÀ SỐ TÍCH LUỸ GIỮA CÁC LƯỢT — ĐÃ KIỂM CHỨNG, ĐO RA SAI.
+     * Lô 2 413 chat (11:30) in "📷 12 362 ca · TB 1 312 ms · max 9 480 ms · lỗi 0";
+     * lô 9 242 chat (11:34) in ĐÚNG Y NGUYÊN 12 362 / 1 312 / 9 480 / 0. Hai lô khác số chat,
+     * khác câu, khác ảnh ⇒ không thể trùng cả 4 số. Gốc: `photoUpStats` (dòng 5750) không nằm
+     * trong `sendDiag`/`waveDiag` nên vòng reset chung bên dưới KHÔNG chạm tới ⇒ cộng dồn mãi.
+     * (Kèm `tailSeen` của bộ đếm đuôi — xem noteBgPending: 9 263 > 9 242 lệnh.)
+     *
+     * GHI CHÚ ĐÍNH CHÍNH: có một báo cáo trước nói `waveDiag.slot*` cũng tích luỹ — SAI.
+     * `waveDiag` đã được reset đủ khoá ở `Object.keys(waveDiag).forEach((k) => { waveDiag[k] = 0; })`
+     * (dòng dưới). Vấn đề thật của dòng GIỮ SLOT chỉ là ĐƠN VỊ/ĐỌC SAI (ms/chat bị đọc thành
+     * tổng, và "n" bị in mà không nói là số lần giữ slot) ⇒ đã sửa bằng nhãn ở phần in, không
+     * cần reset thêm. Giữ reset dưới đây cho chắc, không hại gì. */
+    photoUpStats.n = 0; photoUpStats.ms = 0; photoUpStats.max = 0; photoUpStats.fail = 0;
+    try { Object.keys(tailSeen).forEach((k) => delete tailSeen[k]); } catch (eTs) { /* ignore */ }
+    waveDiag.slotN = 0; waveDiag.slotAcquireMs = 0; waveDiag.slotPrepMs = 0; waveDiag.slotHoldMs = 0;
     extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
     extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
     extSendCtl.probeInFlight = false; // lượt mới không được kẹt bởi thăm dò của lượt cũ đã dừng
@@ -11331,6 +11370,14 @@
         await Promise.all(allMainPromises);
       } finally {
         mainWavesLoopDone = true;
+        /* [v1.92.50] MỐC PHÁT XONG = LÚC CỔNG WAVE CUỐI MỞ, KHÔNG PHẢI LÚC ĐUÔI CHẠY HẾT.
+         * Log 11:34 in "PHÁT 9 242 lệnh trong 296,8s = 31,14/giây" trong khi 19 cổng wave đã mở
+         * hết lúc 11:37:34 (166 s) — 131 s sau đó chỉ để chốt ~2 chat/s ở đuôi (Ext/kiểm chứng).
+         * Gốc: dispatchEndedAt được đặt MỘT LẦN ở sendToAll (dòng 11425), SAU `await Promise.all(
+         * [...socketWorkers, ...extensionWorkers])` ⇒ đã gồm cả đuôi. Nay đóng dấu ngay khi vòng
+         * wave xong; sendToAll giữ nguyên dấu sớm hơn (nếu có) thay vì ghi đè.
+         * Hệ quả đọc số: "PHÁT …/s" = tốc độ thật của khâu phát; "đuôi xác nhận" = phần còn lại. */
+        if (!batchStats.dispatchEndedAt) batchStats.dispatchEndedAt = Date.now();
         if (state.stopRequested) {
           socketCoolTimers.forEach((item, timerId) => {
             try { if (typeof timerId === 'function') timerId(); } catch (e) { /* ignore */ }
@@ -11388,7 +11435,9 @@
     }
 
     batchStats.loopFinished = true;
-    batchStats.dispatchEndedAt = Date.now(); // [v1.92.10] mốc phát xong — tách khỏi đuôi xác nhận
+    // [v1.92.50] KHÔNG ghi đè mốc đã đóng ở cuối vòng wave (xem runGroupWaves200.finally) — mốc
+    // đó mới là lúc PHÁT xong; ghi đè ở đây (sau khi đuôi chạy hết) làm "PHÁT …/s" bị tính cả đuôi.
+    if (!batchStats.dispatchEndedAt) batchStats.dispatchEndedAt = Date.now();
     // Chưa chốt idle ở đây: còn tin đang xác nhận/bù ở nền — overlay giữ nguyên tới khi
     // markSendIdleIfSettled() chốt xong (pending = 0) mới ẩn
     try {

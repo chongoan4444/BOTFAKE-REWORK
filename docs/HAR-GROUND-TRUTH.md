@@ -4193,3 +4193,97 @@ Nếu nó nhỏ ⇒ thời gian nằm ở cổng chờ ACK, phải xem lại `ac
 | `Socket/page limits cuối` | `[384×1]` | **`[256×1]`** (hoặc thấp hơn nếu ACK chậm) |
 | dòng `📷 bind fbId` | không có | **có**, kèm TB/max |
 | phát lệnh pha giữa | 30,22/s | ≥ 40/s (chưa hứa đạt — xem 84.5) |
+
+---
+
+## §85 — LÔ 9 242 CHAT (11:34:48→11:39:49, bản 1.92.49-W200.95): BỐN CHỖ ĐO SAI ĐÃ SẬP
+
+Nguồn: file `botfake-log-20261117-114016.txt` — Mục 1 (389 dòng) + Mục 2 (16 072 dòng sổ
+kiểm chứng, 9 242 chat, có timestamp từng ca). Mọi số dưới đây tính TỪ SỔ, không suy luận.
+
+### 85.1 Kết quả lô
+
+| chỉ số | 2 413 chat (11:30) | **9 242 chat (11:34)** |
+|---|---|---|
+| phát lệnh (số in ra) | 85,67/s | **31,14/s** |
+| ✅ thành công | 1 486 (61,6 %) | **5 696 (61,6 %)** |
+| ❌ / ⚠ | 910 / 17 | **3 387 / 159** |
+| `ACK muộn đã phân xử` | 0 | **3** (trước 1.92.49 là 6 785) |
+| `Socket/page limits cuối` | `[256×1]` | **`[256×1]`** ✅ |
+| `bỏ nới lane` | 0 | **0** ✅ |
+| gửi trùng | 0 | **0** ✅ (không chat nào vừa ✅ vừa ❌) |
+
+Tỉ lệ thành công **giống hệt** lô trước (61,6 % / 61,6 %) ⇒ code không xấu đi; khác biệt
+tốc độ là do **quy mô** (2 413 chat vừa đủ 5 wave nên không chạm trần; 9 242 chat có 19 wave).
+
+Tốc độ chốt thật theo cửa sổ 10 s (tính từ sổ):
+`11:34:50 70,5/s · 11:35:20 63,8/s · 11:36:00 61,4/s · 11:36:20 43,2/s · 11:37:30 38,9/s · 11:37:40 0,2/s`.
+
+### 85.2 BỐN CHỖ ĐO SAI (đã vá ở 1.92.50-W200.96)
+
+**(1) Nhánh 5284 thiếu cờ ⇒ cầu dao Ext không bao giờ đóng.** Lô dồn **3 280 ca** sang Ext,
+Ext trả `"Người này hiện không có mặt"` cho **3 122 ca**, mà KHÔNG có dòng `🔒` nào.
+Gốc: `noteExt1545Outcome()` chỉ ghi khi `conv.__extFallback1545 === true`, mà cờ đó chỉ được
+set ở nhánh FB-báo-1545041 (dòng 7546/7557). Nhánh "ngân sách Socket đã đóng → bù Ext"
+tăng `tried` mà **không set cờ** ⇒ 3 280 ca vô hình với bộ đếm ⇒ `streak` đứng 0 ⇒
+`PROBE 200` và `STREAK_MAX 30` đều không chạm. Đây là **lỗi để sót của 1.92.49**.
+Vá: `conv.__extFallback1545 = true;` ngay sau `extTry1545.tried++`.
+
+**(2) `photoUpStats` là số TÍCH LUỸ.** Lô 2 413 chat in `📷 12 362 ca · TB 1 312 · max 9 480 ·
+lỗi 0`; lô 9 242 chat in **đúng y nguyên 4 số** ⇒ không thể là số của lượt. Gốc: `photoUpStats`
+là object riêng, KHÔNG phải khoá của `sendDiag`/`waveDiag` ⇒ hai vòng reset chung bỏ sót.
+Vá: reset riêng đầu mỗi lượt.
+
+**(3) `Đuôi chờ xác nhận: 9 263 ca` > 9 242 lệnh — bất khả.** `sendDiag.tailChats` cộng dồn
+theo LẦN GỌI `noteBgPending`, mà một chat đi 2–3 chuỗi bù (`⏳ → 🛟 → ❌`) bị gọi 2–3 lần.
+Vá: `tailSeen` — chỉ đếm chat mới.
+
+**(4) `PHÁT 9 242 lệnh trong 296,8 s` gộp cả đuôi.** 19 cổng wave mở hết lúc **11:37:34**
+(= 166 s); 131 s sau đó chỉ chốt thêm ~2 chat/s. Gốc: `dispatchEndedAt` đặt sau
+`await Promise.all([...socketWorkers, ...extensionWorkers])`. Vá: đóng dấu ở cuối vòng wave,
+`sendToAll` không ghi đè. Đọc số sau vá: `PHÁT …/s` = tốc độ khâu phát thật.
+
+### 85.3 ĐÍNH CHÍNH MỘT KẾT LUẬN SAI CỦA BÁO CÁO TRƯỚC
+
+Báo cáo trước nói `waveDiag.slotN/slotAcquireMs/slotPrepMs/slotHoldMs` **tích luỹ giữa các lượt**.
+**SAI**: `waveDiag` đã được reset đủ khoá bằng `Object.keys(waveDiag).forEach((k) => { waveDiag[k] = 0; })`.
+Số `n=9 242` trùng số chat chỉ vì mỗi chat giữ slot đúng 1 lần ở lô này.
+Vấn đề thật của dòng `⏱ GIỮ SLOT` là **đơn vị/đọc sai**: `chờ 571 · còn lại 3 855` là **ms/chat**,
+in cạnh `⏱ Phát lệnh 296,8 s` nên rất dễ đọc thành tổng. Vá bằng nhãn `(ms/chat)` + `· tổng` +
+`(n=… lần giữ slot)`, không phải bằng reset (reset vẫn giữ cho chắc, vô hại).
+
+### 85.4 NÚT CỔ CHAI THẬT CỦA LÔ: 3 122 LỆNH EXT CHẾT, NẰM NGOÀI MỌI LÀN
+
+Bằng số từ sổ: 3 122 chat có chuỗi `⏳ → 🛟 → ❌ "Người này hiện không có mặt"`.
+Trễ `🛟 → ❌`: **p50 50 ms · p90 75 ms · max 84 ms** ⇒ Extension trả lời gần như tức thì
+rồi từ chối; 3 122 lệnh này không sinh ra tin nào. Thời điểm dồn: **+70 s → +160 s**, trùng khít
+lúc tốc độ rơi 61 → 39 chat/s.
+
+Đối chiếu code: `extBacklogQueue` do `runExtWorker` phục vụ — **không đi qua `pageLane`,
+không qua `acquireMainSlot`**; `WAVE_EXT_WORKERS = 128` nhưng trần thật của Extension
+~13,4 lệnh/s (HAR, §đã ghi ở dòng 6005) ⇒ **128 worker đâm vào cống 13,4/s**:
+3 122 ÷ 13,4 ≈ 233 s xếp hàng để nhận 3 122 câu từ chối.
+
+### 85.5 CHỖ CHƯA KẾT LUẬN ĐƯỢC (đừng kết luận bằng suy luận)
+
+1. **4 426 ms "còn lại" mỗi slot (chờ 571 + còn lại 3 855)** là khâu nào: bind ảnh / chờ
+   `pageLane` (192 slot đâm 256 ghế) / chờ `gidExtLane` 1,5 s khi `can_inbox=false`.
+   Với lô này chỉ có số `📷 12 362 ca · TB 1 312 ms` nhưng số đó **tích luỹ** ⇒ không dùng được.
+   Lô sau (bản 1.92.50) mới có `📷` đúng của lượt + nhãn `ms/chat` ⇒ mới so được.
+2. **Vì sao tốc độ rơi đúng lúc dồn Ext**: tương quan rất mạnh nhưng chưa tách được nguyên nhân
+   (Ext làn riêng không chiếm slot main ⇒ nghi CPU/tab hoặc tranh chấp `pageLane`). Cần số.
+3. `Ext quá hạn 0` + `muộn-mà-lỗi 108` + `⚠ Không rõ 17` (sổ ghi 158 ⚠) — lệch 141 ca, chưa
+   đối chiếu được từng ca.
+
+### 85.6 TIÊU CHÍ NGHIỆM THU LÔ SAU (bản 1.92.50-W200.96)
+
+| số | lô 9 242 (1.92.49) | lô sau phải đạt |
+|---|---|---|
+| gửi trùng | 0 | **0** |
+| `Socket bị né` / `im lặng THẬT` | 0 / 0 | **0 / 0** |
+| `Dò Ext: thử N · cứu 0` | 3 280, **không có chữ ĐÓNG** | phải có **`🔒 Đóng ngân sách`** sau ≤ 30 ca liên tiếp |
+| lệnh Ext chết (ca dồn-Ext) | 3 122 | **≤ 200** (đóng sau 30 ca ⇒ phần còn lại vào danh sách gửi tay) |
+| `📷 bind fbId: N ca` | 12 362 (tích luỹ) | **= số chat có ảnh của lô** |
+| `⏱ GIỮ SLOT (ms/chat)` | không có nhãn | **có nhãn**, và `chờ + chuẩn bị + còn lại = tổng` |
+| `⏳ Đuôi chờ xác nhận: N ca` | 9 263 (> số lệnh) | **≤ số chat của lô** |
+| `⚡ PHÁT …/s` | 31,14/s (gộp đuôi) | số phát thật, tách khỏi `đuôi xác nhận` |

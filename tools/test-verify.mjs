@@ -776,6 +776,78 @@ check('có bộ đo riêng cho khâu upload/bind ảnh',
 check('số đo bind ảnh được in trong dòng ⏱ GIỮ SLOT',
   /📷 bind fbId: ' \+ photoUpStats\.n/.test(SRC), true);
 
+/* ------------- [v1.92.50] BỐN CHỖ ĐO SAI ĐÃ SẬP Ở LÔ 9 242 CHAT -------------
+ * Tất cả đều lộ ra bằng SỐ trong sổ 11:34, không phải bằng suy luận.
+ */
+
+/* (5) NHÁNH "NGÂN SÁCH SOCKET ĐÃ ĐÓNG → BÙ EXT" PHẢI ĐÁNH DẤU CA.
+ * Sổ 11:34: dồn 3 280 ca sang Ext, Ext trả "Người này hiện không có mặt" 3 122 ca, mà KHÔNG
+ * có dòng 🔒 nào. Gốc: nhánh 5284 tăng extTry1545.tried mà không set conv.__extFallback1545,
+ * nên noteExt1545Outcome() (chỉ ghi khi cờ bật) không bao giờ chạy. */
+{
+  const seg = SRC.slice(SRC.indexOf('if (hasExt1545 && extFallback1545Allowed()) {'),
+                        SRC.indexOf('if (hasExt1545 && !extFallback1545Allowed()) {'));
+  check('nhánh 5284 có set cờ __extFallback1545 (thiếu cờ ⇒ cầu dao Ext không bao giờ đóng)',
+    /conv\.__extFallback1545 = true;/.test(seg), true);
+  check('nhánh 5284 vẫn tăng extTry1545.tried như cũ',
+    /extTry1545\.tried\+\+;/.test(seg), true);
+}
+/* Test hành vi: set cờ RỒI ghi nhận ⇒ sổ phải đóng sau 30 ca. */
+{
+  const { extTry1545, noteExt1545Outcome } = newExtBudget();
+  const conv = {};
+  for (let i = 0; i < 30; i++) {
+    conv.__extFallback1545 = true;      // đúng việc nhánh 5284 làm
+    if (conv.__extFallback1545) noteExt1545Outcome('blocked');
+  }
+  check('30 ca dồn-Ext bị Ext chặn, có cờ ⇒ ĐÓNG ngân sách (lô 9 242 thiếu 3 250 lệnh vì đây)',
+    extTry1545.closed, true);
+}
+
+/* (6) HAI BỘ ĐO PHẢI RESET ĐẦU MỖI LƯỢT.
+ * photoUpStats: 2 lô khác nhau in y nguyên 12 362 / 1 312 / 9 480 / 0 ⇒ số tích luỹ.
+ * waveDiag.slot*: in "n=9 242" cho lô 9 242 chat sau 19 cổng wave ⇒ đơn vị lẫn. */
+check('photoUpStats được reset đầu mỗi lượt (log in số cũ 12 362 cho lô khác)',
+  /photoUpStats\.n = 0; photoUpStats\.ms = 0; photoUpStats\.max = 0; photoUpStats\.fail = 0;/.test(SRC), true);
+/* ĐÍNH CHÍNH: waveDiag.slot* THỰC RA ĐÃ được reset qua vòng chung `Object.keys(waveDiag)`.
+ * Báo cáo trước nói nó tích luỹ là SAI. Vấn đề thật chỉ là nhãn đơn vị ⇒ test bám đúng điều đó. */
+check('waveDiag được reset đủ khoá qua vòng chung (đính chính: báo cáo trước nói sai chỗ này)',
+  /Object\.keys\(waveDiag\)\.forEach\(\(k\) => \{ waveDiag\[k\] = 0; \}\);/.test(SRC), true);
+/* photoUpStats là object RIÊNG (không phải khoá của sendDiag/waveDiag) ⇒ hai vòng reset chung
+ * `Object.keys(sendDiag)` / `Object.keys(waveDiag)` KHÔNG chạm tới nó ⇒ cộng dồn qua các lượt.
+ * Đây là gốc của việc hai lô khác nhau in y nguyên 12 362 / 1 312 / 9 480 / 0. */
+{
+  const objStart = SRC.indexOf('const sendDiag = {');
+  const objEnd = SRC.indexOf('const waveDiag = {');
+  const diagBlock = SRC.slice(objStart, objEnd);
+  check('photoUpStats KHÔNG phải khoá của sendDiag (nên vòng reset chung bỏ sót)',
+    /photoUpStats:/.test(diagBlock), false);
+  check('photoUpStats KHÔNG phải khoá của waveDiag',
+    /photoUpStats:/.test(SRC.slice(objEnd, SRC.indexOf('};', SRC.indexOf('slotN: 0, slotAcquireMs')))), false);
+  check('vì vậy phải có lệnh reset RIÊNG cho photoUpStats',
+    /photoUpStats\.n = 0; photoUpStats\.ms = 0; photoUpStats\.max = 0; photoUpStats\.fail = 0;/.test(SRC), true);
+}
+check('dòng GIỮ SLOT có NHÃN ĐƠN VỊ "ms/chat" (đọc cạnh 296,8s rất dễ hiểu sai thành tổng)',
+  /GIỮ SLOT \(ms\/chat\)/.test(SRC), true);
+check('dòng GIỮ SLOT nói rõ n là SỐ LẦN GIỮ SLOT, không phải số chat',
+  /n=' \+ waveDiag\.slotN \+ ' lần giữ slot/.test(SRC), true);
+
+/* (7) ĐUÔI CHỜ XÁC NHẬN ĐẾM THEO CHAT.
+ * Log 11:34 in "9 263 ca vào sổ chờ" trong khi lô chỉ có 9 242 lệnh — nhiều hơn số chat là
+ * bất khả. Gốc: một chat đi 2–3 chuỗi bù thì noteBgPending bị gọi 2–3 lần. */
+check('tailChats chỉ đếm chat MỚI (có sổ tailSeen), không cộng dồn theo lần gọi',
+  /if \(!tailSeen\[conv\.id\]\) \{/.test(SRC), true);
+check('tailSeen được reset đầu mỗi lượt',
+  /Object\.keys\(tailSeen\)\.forEach/.test(SRC), true);
+
+/* (8) MỐC PHÁT XONG KHÔNG ĐƯỢC GỒM ĐUÔI.
+ * Log 11:34 in "PHÁT 9 242 lệnh trong 296,8s" trong khi 19 cổng wave mở hết lúc 166 s.
+ * Gốc: dispatchEndedAt đặt sau await Promise.all([...socketWorkers, ...extensionWorkers]). */
+check('mốc phát xong đóng ở cuối vòng WAVE (trước khi chạy đuôi)',
+  /if \(!batchStats\.dispatchEndedAt\) batchStats\.dispatchEndedAt = Date\.now\(\);/.test(SRC), true);
+check('sendToAll KHÔNG ghi đè mốc đã đóng (ghi đè ⇒ tính cả đuôi 131 s vào PHÁT …/s)',
+  (SRC.match(/if \(!batchStats\.dispatchEndedAt\) batchStats\.dispatchEndedAt = Date\.now\(\);/g) || []).length, 2);
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {
