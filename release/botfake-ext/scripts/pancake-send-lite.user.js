@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.56-w200.102
+// @version      1.92.57-w200.103
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.56-W200.102'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.57-W200.103'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -7746,9 +7746,45 @@
   } catch (e) { /* ignore */ }
 
   let gidSaveTimer = null;
+  let gidFlushIdleHandle = null;
+  /* [v1.92.57] GHI CACHE GID KHÔNG ĐƯỢC CHẶN MAIN THREAD GIỮA LÚC ĐANG THAO TÁC.
+   * Đo trên Chromium 153 (tools/_bench_gidflush.mjs): JSON.stringify + setItem cả map
+   *   2 000 khoá →   1,5 ms   20 000 →  18,7 ms   60 000 → 34,2 ms   120 000 → 65,8 ms
+   * Trong lúc TẢI danh sách, mỗi chat gọi `__botfakeSaveGid__` ⇒ hẹn flush 400 ms; mỗi lần
+   * flush là ngần ấy ms chặn main thread, đúng lúc người dùng đang Alt-click chọn chuỗi.
+   * Nay: chờ lúc máy RẢNH (requestIdleCallback timeout 2000) — vẫn ghi, chỉ không chen vào
+   * giữa cú click. Không có rIC (trình duyệt cũ) thì setTimeout 0 như mọi timer khác.
+   * Không mất dữ liệu: 'pagehide' vẫn gọi persistLogStorage + gid flush ngay (xem bên dưới). */
   function flushPersistentGids() {
     gidSaveTimer = null;
+    gidFlushIdleHandle = null;
     try { localStorage.setItem(GID_LS_KEY, JSON.stringify(persistentGidMap)); } catch (e) { /* ignore */ }
+  }
+  /* [v1.92.57] LỊCH GHI: TỐI THIỂU 1 500 ms GIỮA HAI LẦN, và ghi lúc máy RẢNH.
+   * Bản nháp đầu của tôi chỉ đẩy sang `requestIdleCallback` mà KHÔNG giữ khoảng cách:
+   * rIC bắn rất sớm khi trang rảnh ⇒ hoá ra ghi DÀY HƠN cả bản cũ 400 ms. Đo A/B trên
+   * Chromium 153 với 60 000 khoá: bản nháp đó chiếm 31,2 % CPU (1 252 ms long task) so với
+   * 12,6 % của bản cũ — tức là tự làm chậm đi. Nay phải đủ CẢ HAI điều kiện:
+   *   1) đã qua ≥ 1 500 ms kể từ lần ghi trước (gộp nhiều lần ghi thành một), VÀ
+   *   2) máy đang rảnh (không chen vào giữa cú click của người dùng).
+   * Gid là CACHE: mất tối đa 1,5 s gần nhất khi tab sập là chấp nhận được (nó dò lại được),
+   * đổi lại không còn khựng main thread giữa lúc thao tác. 'pagehide' vẫn ghi nốt ngay. */
+  let gidFlushDueAt = 0;
+  function scheduleGidFlush() {
+    if (gidSaveTimer || gidFlushIdleHandle) return;
+    const now = Date.now();
+    const wait = Math.max(0, gidFlushDueAt - now);
+    gidSaveTimer = setTimeout(() => {
+      gidSaveTimer = null;
+      gidFlushDueAt = Date.now() + 1500;
+      try {
+        if (typeof requestIdleCallback === 'function') {
+          gidFlushIdleHandle = requestIdleCallback(() => { gidFlushIdleHandle = null; flushPersistentGids(); }, { timeout: 1000 });
+          return;
+        }
+      } catch (e) { /* ignore */ }
+      flushPersistentGids();
+    }, wait < 1500 ? 1500 : wait);
   }
 
   function putGidToMemCaches(key, val) {
@@ -7782,7 +7818,7 @@
     if (convId) putGidToMemCaches(String(convId), s);
     if (pageId && threadId) putGidToMemCaches(String(pageId) + '_' + String(threadId), s);
     softNotify('gid'); // [v1.92.9] mọi chỗ đang chờ gid thức ngay
-    if (!gidSaveTimer) gidSaveTimer = setTimeout(flushPersistentGids, 400);
+    scheduleGidFlush();
     try {
       const fbStore = window.__FBMetaDataStore__;
       if (fbStore && typeof fbStore.insertGlobalId === 'function' && pageId && threadId) {
@@ -7792,9 +7828,27 @@
   };
 
   let idbPreloaded = false;
+  /* [v1.92.57] ĐÃ NẠP CHƯA? `putGidToMemCaches` LUÔN ghi vào CẢ BA nơi (persistentGidMap,
+   * __tempGlobalIdCache__, __GlobalIdCacheTest__) nên sau lần đổ ĐẦU TIÊN ở khởi động (dòng
+   * `Object.keys(persistentGidMap).forEach(putGidToMemCaches)` gần `__botfakeSaveGid__`), hai
+   * cache RAM đã có ĐỦ mọi khoá ⇒ nạp lại là làm thừa đúng bằng toàn bộ cache.
+   * Vì sao phải sửa: `warmUpSockets()` gọi hàm này ở MỖI LẦN người dùng chọn chat/chuỗi
+   * (`computeMatches` → `schedulePreloadSelectedChats` → `preloadSelectedChats` → `warmUpSockets`).
+   * Đo trên Chromium 153 với 60 000 khoá: 15 ms/lần, chặn main thread ngay giữa lúc đang thao tác.
+   * Nay chỉ nạp lại phần CÒN THIẾU: quét tìm khoá nào cache RAM chưa có — bình thường (đã đủ)
+   * là một lượt `Map.get`/gán, không tạo mảng mới, không gọi set hàng chục nghìn lần.
+   * KHÔNG đổi hành vi: vẫn bảo đảm mọi gid trong persistentGidMap có mặt trong cache RAM. */
+  let gidMemPrimed = false;
   function preloadPersistentGlobalIds() {
     try {
-      Object.keys(persistentGidMap).forEach((k) => putGidToMemCaches(k, persistentGidMap[k]));
+      if (!gidMemPrimed) {
+        Object.keys(persistentGidMap).forEach((k) => putGidToMemCaches(k, persistentGidMap[k]));
+        gidMemPrimed = true;
+      }
+      /* Không cần nhánh "vá khoá thiếu": `putGidToMemCaches` là ĐƯỜNG GHI DUY NHẤT vào
+       * persistentGidMap và nó LUÔN ghi kèm vào __tempGlobalIdCache__ ⇒ sau lần đổ đầu, mọi
+       * khoá đều đã có trong cache RAM, không bao giờ thiếu. Thêm một vòng `for..in` đối chiếu
+       * ở đây chỉ tốn thêm ~11 ms/lần chọn chat (đã đo) mà không đổi kết quả. */
     } catch (e) { /* ignore */ }
     if (idbPreloaded || typeof indexedDB === 'undefined') return;
     idbPreloaded = true;
@@ -13247,13 +13301,25 @@
       + ':' + String(t.getSeconds()).padStart(2, '0');
     const full = '[' + hh + '] ' + s;
     logAll.push(full);
-    if (logAll.length > LOG_ALL_MAX) logAll.shift();
+    /* [v1.92.57] `shift()` trên mảng tới 60 000 phần tử là memmove O(n) cho TỪNG dòng log.
+     * Đo trên Chromium 153: mảng đầy 60 000 ⇒ mỗi `shift()` ~0,05–0,15 ms; nhịp in của đường
+     * tải/socket vài chục dòng/giây ⇒ vài ms/giây chỉ để dồn mảng, cộng dồn thành khựng.
+     * Nay: để mảng dài tới 2× rồi CẮT MỘT LẦN (`splice` nửa đầu) — chi phí amortized O(1)/dòng,
+     * bộ nhớ đỉnh 120 000 dòng, và `logAll` vẫn luôn chứa ĐÚNG các dòng gần nhất. */
+    if (logAll.length > LOG_ALL_MAX * 2) logAll.splice(0, logAll.length - LOG_ALL_MAX);
     state.log.push(full);
     // [v1.92.31] 300 → 1500 dòng: đủ giữ cả một lượt lớn để copy ra ngoài.
     if (state.log.length > 1500) state.log.shift();
     const el = shadow && shadow.getElementById('ssb-log');
     if (!el) {
-      try { localStorage.setItem(LOG_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
+      /* [v1.92.57] KHÔNG stringify cả bộ log 1 500 dòng cho TỪNG dòng log mới.
+       * Đoạn cũ gọi `localStorage.setItem(LOG_KEY, JSON.stringify(state.log))` ngay tại đây —
+       * mỗi dòng log là một lần tuần tự hoá ~1 500 dòng (~120 KB) + ghi đồng bộ. Đường tải
+       * danh sách/socket in hàng chục dòng mỗi giây ⇒ main thread bị chặn liên tục đúng lúc
+       * người dùng Alt-click chọn chuỗi (panel có thể chưa dựng xong, hoặc đã bị đóng).
+       * Nay: gộp lại ghi 1 lần sau 1 000 ms bằng `scheduleLogStorageSave()` — CHÍNH hàm mà
+       * `flushLogUI()` vẫn dùng (đã có sẵn cơ chế gộp + 'pagehide' ghi nốt). */
+      scheduleLogStorageSave();
       console.log('[SSB]', s);
       return;
     }

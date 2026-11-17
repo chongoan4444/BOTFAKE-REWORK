@@ -4914,3 +4914,64 @@ tiếp vào sổ ⇒ đỏ.
 | `getPageSocketLaneStats` 6668 | dựng thống kê mỗi lần cấp/nhả slot (chặn 100 ms) | nhỏ |
 | `highlightRows` 1209 | quét cả danh sách, 5 `querySelector`/dòng | chỉ khi có list |
 | `logAll.shift()` / `auditRows.shift()` | O(n) memmove khi mảng 60 000 đầy | nhỏ, liên tục |
+
+---
+
+## §93 — LAG NGAY Ở ĐOẠN "ALT CHỌN CHUỖI" (1.92.57): ĐO BẰNG CHROMIUM THẬT
+
+Người dùng: *"vẫn lag lắm, lag ngay cả ở đoạn alt chọn chuỗi"*. Đây là lần đầu chỉ đích
+danh một thao tác ⇒ đo được đúng chỗ, không phải suy luận.
+
+### 93.1 CÁCH ĐO (khác hẳn các lần trước)
+
+Lần trước tôi chỉ trích hàm ra chạy bằng Node — sai môi trường. Nay dựng **Chromium thật
+trong sandbox** (`@sparticuz/chromium`, Chromium 153, kèm libnspr4/nss3 giải nén riêng),
+nạp **nguyên bản** `scripts/pancake-send-lite.user.js` vào một trang giả lập app Pancake
+(40 dòng DOM + Redux 12 000 hội thoại + cache 60 000 global_id), rồi dùng **CDP Profiler**
+đo self-time từng hàm. Công cụ giữ lại: `tools/_bench_ab.mjs`, `tools/_bench_alt3.mjs`,
+`tools/_bench_gidflush.mjs`. So sánh A/B **cùng một harness**, 4 lượt.
+
+### 93.2 KẾT QUẢ A/B (4 lượt, ổn định)
+
+| | 1.92.56 | 1.92.57 |
+|---|---|---|
+| main thread bận | 18,3–19,4 % | **8,6–9,3 %** |
+| long task (tổng) | 508–641 ms | **260–291 ms** |
+| `flushPersistentGids` | 6,0 % | **1,6 %** |
+| `preloadPersistentGlobalIds` | 2,1 % | **0 %** |
+
+### 93.3 BỐN LỖI ĐÃ SỬA (mỗi lỗi đều có số)
+
+| # | chỗ | vấn đề đo được | sửa |
+|---|---|---|---|
+| 1 | `preloadPersistentGlobalIds` (7795) | `warmUpSockets()` gọi nó **mỗi lần chọn chat/chuỗi**; nó `Object.keys(persistentGidMap).forEach(putGidToMemCaches)` — 60 000 khoá = **15 ms/lần** | cờ `gidMemPrimed`: chỉ đổ cache RAM một lần lúc khởi động |
+| 2 | `flushPersistentGids` (7750) | `JSON.stringify` + `setItem` **toàn bộ** map: 2 000 khoá 1,5 ms · 20 000 → 18,7 ms · **60 000 → 34,2 ms** · 120 000 → 65,8 ms, chạy mỗi 400 ms | `scheduleGidFlush()`: gộp + **≥1 500 ms** giữa hai lần + ghi lúc `requestIdleCallback` |
+| 3 | `logLine` khi chưa có panel (13173) | `setItem(LOG_KEY, JSON.stringify(state.log))` cho **từng** dòng log (~1 500 dòng ≈ 120 KB) | `scheduleLogStorageSave()` (gộp 1 000 ms; `pagehide` ghi nốt) |
+| 4 | `logLine` → `logAll.shift()` (13161) | `shift()` trên mảng tới 60 000 = memmove O(n) mỗi dòng | để mảng tới 2× rồi `splice` nửa đầu một lần |
+
+### 93.4 BẪY ĐÃ TỰ MẮC — ghi lại để không lặp
+
+- **Bản nháp #1 của tôi làm CHẬM ĐI**: chỉ đẩy flush sang `requestIdleCallback` mà không giữ
+  khoảng cách ⇒ rIC bắn sớm khi trang rảnh ⇒ ghi **dày hơn** bản cũ 400 ms. Đo lại A/B:
+  `flushPersistentGids` **12,6 % → 31,2 %**, long task 823 → **2 252 ms**. Đã thêm mốc 1 500 ms.
+  → *Không được coi "chuyển sang idle" là xong; phải đo lại bằng cùng harness.*
+- **Benchmark đầu của tôi sai**: server giả trả `next_cursor` mãi không hết ⇒ userscript tải
+  liên tục trong lúc đo ⇒ số liệu nhiễu. Phải chờ `state.scanning === false` rồi mới đo.
+- **Test khớp chú thích, không khớp code**: hai test mới (mốc `1500`, `setItem(LOG_KEY)`) khớp
+  ngay lời chú thích tôi vừa viết ⇒ mutation vẫn xanh. Đã thêm `stripComments()` và cho cả
+  hai test chạy trên code đã bóc chú thích. **5/5 mutation giờ đều bị bắt.**
+
+### 93.5 ĐIỀU ĐÃ BỊ BÁC BỎ BẰNG SỐ (đừng sửa lại)
+
+| giả thuyết | số đo | kết luận |
+|---|---|---|
+| `highlightRows()` quét 5 `querySelector`/dòng | 40 dòng 0,40 ms · 200 → 1,26 ms · 500 → 3,04 ms · 1 000 → 8,00 ms | **không phải thủ phạm** |
+| `render()` dựng lại HTML cả checklist | **panel KHÔNG có `#ssb-list`** ⇒ nhánh đó là CODE CHẾT; render() thật 4–5 ms | không phải thủ phạm |
+| `computeMatches()` trên chuỗi 12 000 chat | **12 ms** (enrichRowWithRedux 31 %, push 16 %) | đắt nhưng chưa đủ gây lag |
+| Alt+Click khi ĐÃ tải danh sách | main thread bận **2 %**, 0 long task | đường này nhẹ |
+| Alt+Click khi CHƯA tải (tự tải API) | bận **32 %**, long task 115 ms; profiler: `flushPersistentGids` 5,4 % + `putGidToMemCaches` 3,0 % + `fetchJson` 3,4 % | đúng chỗ người dùng kêu |
+
+**Ghi chú kỹ thuật:** `#ssb-list` không tồn tại trong panel ⇒ ~40 dòng dựng HTML checklist +
+`state.listKey` trong `render()` là code chết; `getBotChecklistElement()` luôn trả `null`.
+Chưa xoá (không phải nguyên nhân lag, và xoá cần rà lại nhánh Ctrl+click) — ghi ở đây để
+lần sau không mất công đo lại.

@@ -33,6 +33,14 @@ function extractFn(name) {
   throw new Error(`hàm ${name} không cân ngoặc`);
 }
 
+/** Bỏ chú thích // và /* *\/ để test khớp CODE thật, không khớp lời chú thích.
+ *  (Đã mắc lỗi này 2 lần: test khớp chính chú thích của bản sửa ⇒ mutation vẫn xanh.) */
+function stripComments(src) {
+  return String(src)
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|\s)\/\/[^\n]*/g, ' ');
+}
+
 const code = [
   extractFn('normalizeMsgText'),
   extractFn('attachmentMatches'),
@@ -1105,6 +1113,66 @@ check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
   const callsInSummary = (SRC.match(/countResendSplit\(\)/g) || []).length;
   check('[v1.92.56] countResendSplit được gọi 1 lần khi dựng TỔNG HỢP (ngoài 2 hàm bao)',
     callsInSummary >= 1 && callsInSummary <= 4, true);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * [v1.92.57] KHOÁ 4 LỖI HIỆU NĂNG ĐO ĐƯỢC (Chromium 153, tools/_bench_ab.mjs)
+ * A/B 4 lượt: main thread bận 18,3–19,4% → 8,6–9,3% · long task 508–641 ms → 260–291 ms
+ * ══════════════════════════════════════════════════════════════════════════════ */
+{
+  /* 1) preloadPersistentGlobalIds KHÔNG được duyệt lại toàn bộ cache mỗi lần gọi.
+   *    warmUpSockets() gọi hàm này MỖI LẦN chọn chat/chuỗi ⇒ 60 000 khoá = 15 ms/lần. */
+  {
+    const src = extractFn('preloadPersistentGlobalIds');
+    check('[v1.92.57] preloadPersistentGlobalIds có cờ đã nạp (gidMemPrimed)',
+      /gidMemPrimed/.test(src), true);
+    check('[v1.92.57] preloadPersistentGlobalIds chỉ đổ cache ở lần đầu',
+      /if \(!gidMemPrimed\)[\s\S]*gidMemPrimed = true/.test(src), true);
+    checkNot('[v1.92.57] preloadPersistentGlobalIds không còn for..in đối chiếu mỗi lần gọi',
+      src, /for \(const k in persistentGidMap\)/);
+    const wu = extractFn('warmUpSockets');
+    check('[v1.92.57] warmUpSockets vẫn nạp cache gid', /preloadPersistentGlobalIds\(\)/.test(wu), true);
+  }
+
+  /* 2) flushPersistentGids phải HẸN qua scheduleGidFlush có khoảng cách tối thiểu. */
+  {
+    const iSave = SRC.indexOf('window.__botfakeSaveGid__ = function');
+    const save = SRC.slice(iSave, iSave + 1200);
+    checkNot('[v1.92.57] __botfakeSaveGid__ không ghi localStorage đồng bộ',
+      save, /setItem\(\s*GID_LS_KEY/);
+    check('[v1.92.57] __botfakeSaveGid__ hẹn ghi qua scheduleGidFlush',
+      /scheduleGidFlush\(\)/.test(save), true);
+    /* ĐIỀU KIỆN SỐNG CÒN: phải có mốc 1 500 ms. Bản nháp đầu chỉ đẩy sang requestIdleCallback
+     * mà không giữ khoảng cách ⇒ ghi DÀY hơn bản cũ, CPU flushPersistentGids 12,6% → 31,2%.
+     * PHẢI bỏ chú thích trước khi khớp: bản đầu của test này khớp `1500` ngay trong lời chú
+     * thích nên mutation "đổi thành }, 0)" vẫn XANH — test rỗng. */
+    const sch = stripComments(extractFn('scheduleGidFlush'));
+    check('[v1.92.57] scheduleGidFlush giữ khoảng cách tối thiểu 1 500 ms (trong CODE, không phải chú thích)',
+      /1500/.test(sch), true);
+    check('[v1.92.57] KHÔNG đặt timer 0 ms cho flush', /\},\s*0\)/.test(sch), false);
+    check('[v1.92.57] flush vẫn ghi đủ map (không mất dữ liệu)',
+      /JSON\.stringify\(persistentGidMap\)/.test(extractFn('flushPersistentGids')), true);
+  }
+
+  /* 3) logLine khi KHÔNG có panel: không stringify cả bộ log cho từng dòng. */
+  {
+    /* Bỏ chú thích: lời chú thích của chính tôi CÓ nhắc `setItem(LOG_KEY, ...)` nên bản đầu
+     * của test khớp nhầm chú thích và mutation "trả lại stringify" vẫn XANH. */
+    const ll = stripComments(extractFn('logLine'));
+    checkNot('[v1.92.57] logLine không stringify state.log mỗi dòng khi thiếu panel (CODE)',
+      ll, /setItem\(\s*LOG_KEY/);
+    check('[v1.92.57] logLine dùng scheduleLogStorageSave khi thiếu panel',
+      /scheduleLogStorageSave\(\)/.test(ll), true);
+  }
+
+  /* 4) logAll: không shift() trên mảng 60 000 mỗi dòng — cắt lô theo ngưỡng 2×. */
+  {
+    checkNot('[v1.92.57] không còn logAll.shift()', SRC, /logAll\.shift\(\)/);
+    check('[v1.92.57] logAll cắt lô tại 2× LOG_ALL_MAX',
+      /logAll\.length > LOG_ALL_MAX \* 2\)\s*logAll\.splice/.test(SRC), true);
+    check('[v1.92.57] có hằng LOG_ALL_MAX', /LOG_ALL_MAX\s*=\s*\d+/.test(SRC), true);
+  }
 }
 
 /* ------------------------------- kết quả ------------------------------- */
