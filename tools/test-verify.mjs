@@ -1366,15 +1366,23 @@ check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
     check('[v1.92.60] flushLogUI thoát NGAY khi cửa sổ log đóng',
       /if \(!logWindowOpen\(\)\) return;/.test(f60), true);
 
-    /* 2) Dải tiến trình thu nhỏ: có, gắn vào render() và flushBatchSummaryUI(), và KHÔNG
-     *    ghi DOM khi số không đổi (nếu không, nó tự biến thành nguồn lag mới). */
+    /* 2) [v1.92.61] Số tiến trình chỉ nằm trên BADGE BÓNG LOGO (panel thu nhỏ). Trong panel
+     *    KHÔNG có dải tiến trình nào thêm — thanh #ssb-bar/#ssb-progstat dưới nút Chạy vẫn là
+     *    nơi hiện tiến trình như trước. Ô log bỏ trống cho gọn. */
     const mini = stripComments(extractFn('updateMiniProgressUI'));
-    check('[v1.92.60] updateMiniProgressUI tồn tại và hiện "✅ ok/total"',
-      /'✅ ' \+ ok \+ '\/' \+ total/.test(mini), true);
-    check('[v1.92.60] updateMiniProgressUI bỏ qua khi số không đổi (chữ ký)',
+    check('[v1.92.61] updateMiniProgressUI chỉ ghi vào badge bóng logo',
+      /ssb-bubble-badge/.test(mini) && !/ssb-mini\b/.test(mini), true);
+    check('[v1.92.61] badge hiện "ok/total" (số gửi thành công / tổng số)',
+      /\(ok \+ '\/' \+ total\)/.test(mini), true);
+    check('[v1.92.61] chưa gửi lô nào ⇒ badge hiện số chat đang chọn',
+      /chosen \+ ' chat'/.test(mini), true);
+    check('[v1.92.61] badge KHÔNG ghi DOM khi số không đổi (chữ ký)',
       /if \(sig === miniPainted\) return;/.test(mini), true);
-    check('[v1.92.60] updateMiniProgressUI cập nhật cả badge trên BÓNG LOGO (panel thu nhỏ)',
-      /ssb-bubble-badge/.test(mini), true);
+    checkNot('[v1.92.61] panel KHÔNG còn dải tiến trình #ssb-mini (người dùng không muốn thêm)',
+      SRC, /id="ssb-mini"/);
+    check('[v1.92.61] thanh tiến trình dưới nút Chạy vẫn còn nguyên',
+      /id="ssb-bar"/.test(SRC) && /id="ssb-progstat"/.test(SRC), true);
+    check('[v1.92.61] render() cập nhật badge', /updateMiniProgressUI\(\)/.test(stripComments(extractFn('render'))), true);
 
     const r60 = stripComments(extractFn('render'));
     check('[v1.92.60] render() cập nhật dải tiến trình', /updateMiniProgressUI\(\)/.test(r60), true);

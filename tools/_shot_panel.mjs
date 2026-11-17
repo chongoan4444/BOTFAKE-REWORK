@@ -33,6 +33,7 @@ await page.evaluate(() => {
   S.matches = Array.from({ length: 10 }, (_, i) => ({ id: '694078980461601_' + (200000 + i), checked: true, name: 'Khách ' + i }));
   const bs = window.__SSB__.batchStats; bs.total = 137; bs.loopFinished = false;
   window.__SSB__.summaryCounters.okApi = 64; window.__SSB__.summaryCounters.fail = 3;
+  window.__SSB__.batchStats.startedAt = Date.now() - 12000;
   for (let i = 0; i < 60; i++) window.__SSB__.logLine('✅ Đã gửi chat 694078980461601_' + (300000 + i));
   window.__SSB__.render();
   window.__SSB__.flushBatchSummaryUI();

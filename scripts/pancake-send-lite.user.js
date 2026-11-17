@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.60-w200.106
+// @version      1.92.61-w200.107
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.60-W200.106'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.61-W200.107'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -12158,18 +12158,6 @@
                        font-size: 11px; line-height: 1.45; color: #e2e8f0; display: none; word-break: break-word; }
         /* [v1.92.31] 150 → 340px: đủ nhìn ~20 dòng một lúc và copy được đoạn dài.
            Đệm dưới để dòng cuối không dính sát mép khi tự cuộn xuống. */
-        /* [v1.92.60] dải TIẾN TRÌNH THU NHỎ thay khung log lớn trong panel */
-        .mini { background: #0b1220; border: 1px solid #334155; border-radius: 8px; padding: 7px 9px;
-                display: flex; flex-direction: column; gap: 6px; }
-        .mini-top { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
-        .mini-ok { color: #4ade80; font-weight: 700; font-size: 13px; letter-spacing: .2px; }
-        .mini-sub { color: #94a3b8; font-size: 10.5px; flex: 1; text-align: right;
-                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .mini-bar { height: 6px; border-radius: 999px; background: #1e293b; overflow: hidden; }
-        .mini-bar > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg,#22c55e,#4ade80);
-                        transition: width .25s; }
-        .mini.busy .mini-bar > i { background: linear-gradient(90deg,#38bdf8,#4ade80); }
-        .mini.done .mini-bar > i { background: #22c55e; }
         .log { background: #0b1220; border: 1px solid #334155; border-radius: 8px; padding: 8px 8px 14px;
                min-height: 120px; max-height: min(340px, 42vh); overflow: auto; font-size: 10.5px; line-height: 1.55; color: #cbd5e1;
                white-space: pre-wrap; word-break: break-word; overscroll-behavior: contain; }
@@ -12320,22 +12308,12 @@
             </span>
           </div>
           <div class="summary-box" id="ssb-summary"></div>
-          <!-- [v1.92.60] TIẾN TRÌNH THU NHỎ — thay chỗ khung log lớn.
-               Người dùng: "khi mở giao diện thì làm gì cũng lag… bỏ luôn hiển thị log khi mở
-               giao diện, chỉ cần xem log khi ấn nút phóng to log". Mỗi lần vẽ khung log là một
-               lần trình duyệt phải LAYOUT/VẼ LẠI panel fixed (đo 547–581 ms cho một lần đọc
-               scrollHeight trên trang thật). Khung log nay KHÔNG nằm trong panel: nó ở trong
-               #ssb-logwrap bị display:none, và chỉ được đưa ra cửa sổ nổi khi bấm Phóng to.
-               Chỗ của nó là dải này: số đã gửi / tổng số, chỉ tốn 1 lần ghi text + 1 lần ghi
-               width khi số đổi. -->
-          <div class="mini" id="ssb-mini" title="Tiến trình lô đang gửi — bấm ⛶ Phóng to log để xem chi tiết từng dòng">
-            <div class="mini-top">
-              <span class="mini-ok" id="ssb-mini-ok">✅ 0/0</span>
-              <span class="mini-sub" id="ssb-mini-sub">chưa gửi lô nào</span>
-            </div>
-            <div class="mini-bar"><i id="ssb-mini-fill"></i></div>
-          </div>
-          <div id="ssb-logwrap" style="display:none"><div class="log" id="ssb-log"></div></div>
+          <!-- [v1.92.61] Ô LOG ĐÃ BỎ HẲN KHỎI PANEL — giao diện gọn lại đúng như người dùng yêu cầu:
+               "phần ô log bỏ đi sẽ làm giao diện gọn lại". Thanh tiến trình vẫn ở DƯỚI NÚT CHẠY
+               như trước (.prog #ssb-bar + #ssb-progstat, xem flushProgressUi). Log chỉ sống trong
+               cửa sổ "⛶ Phóng to log"; khi panel được THU NHỎ thành bóng logo thì số tiến trình
+               hiện trên badge của bóng (#ssb-bubble-badge). -->
+<div id="ssb-logwrap" style="display:none"><div class="log" id="ssb-log"></div></div>
         </div>
         <div class="rs" id="ssb-rs" title="Kéo góc này để đổi cỡ panel — đúp chuột để về mặc định"></div>
       </div>
@@ -13435,60 +13413,32 @@
     return !!(floatWins && floatWins.ssb_win_log);
   }
 
-  /* [v1.92.60] TIẾN TRÌNH THU NHỎ trong panel — thay khung log lớn.
-   * Chỉ ghi khi SỐ ĐỔI (so chuỗi nhãn đã vẽ), để render() 2 lần/cú click không tốn gì.
-   * Nội dung: số đã gửi / tổng số của LÔ ĐANG GỬI + phần còn lại + thanh %.
-   * Chưa gửi lô nào ⇒ hiện số chat ĐANG CHỌN trong danh sách gửi. */
+  /* ═══ [v1.92.61] SỐ TIẾN TRÌNH TRÊN BÓNG LOGO (khi panel THU NHỎ) ═══
+   * Người dùng: "ý là nó sẽ hiển thị tiến trình ở cái bong bóng thu nhỏ khi tôi thu nhỏ giao diện
+   * lại á, còn thanh tiến trình vẫn ở dưới nút chạy như trước đây, phần ô log bỏ đi sẽ làm giao
+   * diện gọn lại".
+   * ⇒ Trong panel: KHÔNG có dải tiến trình nào thêm (thanh sẵn có #ssb-bar/#ssb-progstat dưới nút
+   *   Chạy vẫn là nơi hiện tiến trình). Ô log: bỏ trống cho gọn.
+   * ⇒ Bóng logo: badge hiện "đã gửi / tổng số" của lô — nhìn thấy được cả khi panel đã thu nhỏ.
+   * Hàm này CHỈ ghi DOM khi SỐ ĐỔI (so chuỗi đã vẽ), nên gọi từ render() (2 lần/cú click) không
+   * làm cú Alt-click nặng thêm. */
   let miniPainted = '';
   function updateMiniProgressUI() {
-    const el = shadow && shadow.getElementById('ssb-mini');
-    if (!el) return;
+    const badge = shadow && shadow.getElementById('ssb-bubble-badge');
+    if (!badge) return;
     const ok = summaryCounters.okApi + summaryCounters.okExt + summaryCounters.okSocket;
     const total = batchStats.total || 0;
     const chosen = (state.matches || []).filter((m) => m && m.checked).length;
-    const fail = summaryCounters.fail;
-    const unsure = summaryCounters.unsure;
-    const skip = (batchStats.skippedPre || 0) + summaryCounters.skipLate;
-    const done = batchStats.loopFinished;
-    let label, sub, pct, cls;
-    if (!total) {
-      label = '✅ 0/0';
-      sub = chosen ? (chosen + ' chat đang chọn — chưa gửi') : 'chưa chọn chat nào';
-      pct = 0;
-      cls = '';
-    } else {
-      const pctNum = Math.min(100, Math.round((ok / total) * 100));
-      label = '✅ ' + ok + '/' + total;
-      pct = pctNum;
-      cls = done ? 'done' : 'busy';
-      const bits = [];
-      if (!done) bits.push('còn ' + Math.max(0, total - ok - fail - unsure - skip));
-      if (fail) bits.push('❌ ' + fail);
-      if (unsure) bits.push('⚠ ' + unsure);
-      if (skip) bits.push('🧹 ' + skip);
-      bits.push(pctNum + '%');
-      sub = (done ? 'XONG · ' : '') + bits.join(' · ');
-    }
-    const sig = label + '|' + sub + '|' + pct + '|' + cls + '|' + (done ? 1 : 0);
+    const done = !!batchStats.loopFinished;
+    const show = total > 0 || chosen > 0;
+    const text = total > 0 ? (ok + '/' + total) : (chosen + ' chat');
+    const sig = show ? (text + '|' + (done ? 'done' : 'busy')) : '';
     if (sig === miniPainted) return; // KHÔNG đụng DOM khi số không đổi
     miniPainted = sig;
-    const okEl = shadow.getElementById('ssb-mini-ok');
-    if (okEl) okEl.textContent = label;
-    const subEl = shadow.getElementById('ssb-mini-sub');
-    if (subEl) subEl.textContent = sub;
-    const fill = shadow.getElementById('ssb-mini-fill');
-    if (fill) fill.style.width = pct + '%';
-    el.className = 'mini' + (cls ? ' ' + cls : '');
-    /* Bóng logo (panel đã thu nhỏ): hiện đúng số đã gửi / tổng số. */
-    const badge = shadow.getElementById('ssb-bubble-badge');
-    if (badge) {
-      const show = total > 0 || chosen > 0;
-      badge.style.display = show ? 'block' : 'none';
-      if (show) {
-        badge.textContent = total > 0 ? (ok + '/' + total) : (chosen + ' chat');
-        badge.className = 'bubble-badge' + (done ? '' : ' busy');
-      }
-    }
+    if (!show) { badge.style.display = 'none'; return; }
+    badge.style.display = 'block';
+    badge.textContent = text;
+    badge.className = 'bubble-badge' + (done ? '' : ' busy');
   }
 
   let logStickBottom = true;      // người dùng đang ở sát đáy? (tự cập nhật bằng 'scroll')
@@ -13523,8 +13473,8 @@
      * Trước đây mỗi lần có dòng log, panel fixed phải vẽ lại ~200–1 500 dòng chữ ⇒ trình duyệt
      * layout/paint lại vùng chứa CẢ TRANG. Nay #ssb-log nằm trong #ssb-logwrap (display:none)
      * và chỉ được đưa ra cửa sổ nổi khi bấm ⛶ Phóng to log ⇒ ngoài lúc đó KHÔNG vẽ gì cả.
-     * `logAll` (để 📋 Copy / 💾 .txt) không đổi. Chỗ trống trong panel được thay bằng dải tiến
-     * trình #ssb-mini — xem updateMiniProgressUI(). */
+     * `logAll` (để 📋 Copy / 💾 .txt) không đổi. Panel KHÔNG có gì thay thế — ô log bỏ trống cho
+     * gọn; tiến trình vẫn hiện ở thanh dưới nút Chạy, và trên badge bóng logo khi thu nhỏ. */
     if (!logWindowOpen()) return;
     const el = shadow && shadow.getElementById('ssb-log');
     if (!el) return;

@@ -5185,3 +5185,47 @@ M13 lưu lại 1 500 dòng · M14 nút phóng to không vẽ trước).
 - `window.__SSB__` mở thêm `render`, `logLine`, `logAll`, `batchStats`, `summaryCounters`,
   `flushBatchSummaryUI`, `updateMiniProgressUI` để công cụ kiểm gọi đúng hàm thật.
 - Đệm chú thích HTML trong template literal: **không dùng dấu backtick** (đã một lần làm vỡ cú pháp).
+
+---
+
+## §97 — SỬA LẠI CHỖ HIỆN TIẾN TRÌNH (1.92.61) — người dùng đính chính yêu cầu
+
+> "tôi nhầm, ý là nó sẽ hiển thị tiến trình ở cái bong bóng thu nhỏ khi tôi thu nhỏ giao diện lại
+> á, còn thanh tiến trình vẫn ở dưới nút chạy như trước đây, phần ô log bỏ đi sẽ làm giao diện
+> gọn lại"
+
+1.92.60 đã hiểu sai: thêm dải `#ssb-mini` **trong** panel. Nay bỏ hẳn dải đó.
+
+| hiểu sai (1.92.60) | đúng (1.92.61) |
+|---|---|
+| Thêm dải tiến trình mới trong panel | **Bỏ** — không thêm phần tử nào vào panel |
+| — | Thanh tiến trình `#ssb-bar` + `#ssb-progstat` **dưới nút ▶ Chạy** giữ nguyên như trước |
+| Ô log bỏ đi được thay bằng dải | Ô log bỏ đi để **trống cho gọn**; panel kết thúc ở hàng `LOG · 📋 Copy log · 💾 .txt · ⛶ Phóng to` |
+| Badge bóng logo: có | Badge bóng logo: **đây mới là chỗ hiện số** khi panel thu nhỏ |
+
+`updateMiniProgressUI()` nay chỉ còn một việc: ghi badge `#ssb-bubble-badge` (chữ ký chống trùng
+giữ nguyên). Số lấy từ `summaryCounters` như bảng tổng hợp: `4/10` khi đang gửi (`busy`, viền
+xanh dương), `10/10` khi xong (viền xanh lá); chưa gửi lô nào ⇒ `3 chat`.
+
+### Kiểm (`tools/_check_mini.mjs`)
+
+```
+hasMiniPanelStrip        false      ← panel KHÔNG còn dải tiến trình
+hasProgressUnderRunBtn   true       ← thanh dưới nút Chạy vẫn còn
+logHiddenInPanel         true
+barUnderRunBtn           "40% · 40% · ✅ 4/10"    ← tiến trình ở đúng chỗ cũ
+badgeAfterSelect         "block · 3 chat · bubble-badge busy"
+badgeSending             "block · 4/10 · badge busy"
+badgeDone                "block · 8/10 · badge"
+sau khi thu nhỏ: bubbleVisible "block", panelHidden "none", badge "10/10"
+logNotPaintedWhileClosed / PaintedWhenZoomed / NotPaintedAfterCollapse: true/true/true
+```
+
+Ảnh: `tools/_shot_panel.png` (panel gọn, không còn ô log), `tools/_shot_logzoom.png`,
+`tools/_shot_bubble.png` (bóng logo + `64/137`).
+
+Đo lại hiệu năng (panel MỞ, log 1 500 dòng, 20 000 thread): **24 / 16 ms**, khung hình dài nhất
+**0 ms**, CPU bận **4,7–5,2 %** — không thoái hoá so với 1.92.60.
+
+Test **285 ca**. Mutation **4/4 bị bắt** (M15 thêm lại dải vào panel · M16 badge ghi DOM mỗi lần ·
+M17 badge hiện số chat thay vì ok/total · M18 render không cập nhật badge).

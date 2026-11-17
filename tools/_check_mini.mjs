@@ -29,12 +29,14 @@ const out = await page.evaluate(async () => {
   const sr = document.getElementById('ssb-root').shadowRoot;
   const S = window.__SSB__.state;
   const R = {};
-  const mini = sr.getElementById('ssb-mini');
+  const mini = sr.getElementById('ssb-mini'); // [v1.92.61] phải là null
   const logEl = sr.getElementById('ssb-log');
   const wrap = sr.getElementById('ssb-logwrap');
-  R.hasMini = !!mini;
+  R.hasMiniPanelStrip = !!mini;                       // mong đợi: false
+  R.hasProgressUnderRunBtn = !!sr.getElementById('ssb-bar') && !!sr.getElementById('ssb-progstat');
   R.logHiddenInPanel = wrap ? wrap.style.display === 'none' : 'khong-co-wrap';
-  R.miniInitial = sr.getElementById('ssb-mini-ok').textContent + ' | ' + sr.getElementById('ssb-mini-sub').textContent;
+  const badge0 = sr.getElementById('ssb-bubble-badge');
+  R.badgeInitial = badge0.style.display + ' · ' + badge0.textContent;
 
   // 1) CHỌN 3 chat ⇒ dải phải hiện "3 chat đang chọn"
   S.matches = [
@@ -43,23 +45,22 @@ const out = await page.evaluate(async () => {
     { id: '694078980461601_200002', checked: true, name: 'C' },
   ];
   window.__SSB__.render();
-  R.miniAfterSelect = sr.getElementById('ssb-mini-ok').textContent + ' | ' + sr.getElementById('ssb-mini-sub').textContent;
+  R.badgeAfterSelect = badge0.style.display + ' · ' + badge0.textContent + ' · ' + badge0.className;
 
   // 2) GIA LẬP LÔ ĐANG GỬI: 10 chat, 4 đã xong
   const bs = window.__SSB__.batchStats;
   bs.total = 10;
   window.__SSB__.summaryCounters.okApi = 4;
   window.__SSB__.flushBatchSummaryUI ? window.__SSB__.flushBatchSummaryUI() : window.__SSB__.render();
-  R.miniSending = sr.getElementById('ssb-mini-ok').textContent + ' | ' + sr.getElementById('ssb-mini-sub').textContent
-    + ' | width=' + sr.getElementById('ssb-mini-fill').style.width;
+  R.badgeSending = badge0.style.display + ' · ' + badge0.textContent + ' · ' + badge0.className;
+  R.barUnderRunBtn = sr.getElementById('ssb-bar').style.width + ' · ' + sr.getElementById('ssb-progstat').textContent;
 
   // 3) XONG LÔ
   bs.loopFinished = true;
   window.__SSB__.summaryCounters.okApi = 8;
   window.__SSB__.summaryCounters.fail = 2;
   window.__SSB__.flushBatchSummaryUI ? window.__SSB__.flushBatchSummaryUI() : window.__SSB__.render();
-  R.miniDone = sr.getElementById('ssb-mini-ok').textContent + ' | ' + sr.getElementById('ssb-mini-sub').textContent
-    + ' | width=' + sr.getElementById('ssb-mini-fill').style.width + ' | class=' + mini.className;
+  R.badgeDone = badge0.style.display + ' · ' + badge0.textContent + ' · ' + badge0.className;
 
   // 4) LOG ĐÓNG ⇒ 50 dòng log mới KHÔNG được vẽ
   logEl.textContent = 'X';
@@ -82,13 +83,17 @@ const out = await page.evaluate(async () => {
   await new Promise((r) => setTimeout(r, 700));
   R.logNotPaintedAfterCollapse = (logEl.textContent === t2);
 
-  // 7) BÓNG LOGO (panel thu nhỏ) phải hiện số tiến trình
-  sr.getElementById('ssb-bubble-badge').style.display = 'none';
+  // 7) THU NHỎ PANEL ⇒ badge trên BÓNG LOGO hiện số tiến trình
+  const badge = sr.getElementById('ssb-bubble-badge');
+  sr.getElementById('ssb-min').click();
+  await new Promise((r) => setTimeout(r, 200));
+  R.bubbleVisible = sr.getElementById('ssb-bubble').style.display;
+  R.panelHidden = sr.getElementById('ssb-wrap').style.display;
+  R.bubbleBadge = badge.style.display + ' · ' + badge.textContent + ' · ' + badge.className;
   bs.loopFinished = false;
   window.__SSB__.summaryCounters.okApi = 5;
   window.__SSB__.flushBatchSummaryUI();
-  const badge = sr.getElementById('ssb-bubble-badge');
-  R.bubbleBadge = badge.style.display + ' · ' + badge.textContent + ' · ' + badge.className;
+  R.bubbleBadgeSending = badge.style.display + ' · ' + badge.textContent + ' · ' + badge.className;
   bs.loopFinished = true;
   window.__SSB__.summaryCounters.okApi = 10;
   window.__SSB__.summaryCounters.fail = 0;
