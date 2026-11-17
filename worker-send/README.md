@@ -1,97 +1,124 @@
-# worker-send — tách đường gửi ra khỏi main thread
+# worker-send — đường gửi chạy trong Web Worker
 
-**Trạng thái: KHUNG CHẠY ĐƯỢC + TEST THẬT. Chưa bật mặc định trong userscript.**
-
-Thư mục này **tách hẳn** khỏi `release/botfake-ext/` và `release/botfake-ext-stable/`:
-không file nào ở đây được build vào 2 thư mục release đó, và ngược lại.
+**Cài: 1 file dán vào console. Không cần extension, không cần Developer mode.**
 
 ---
 
-## 1. Vì sao phải làm (bằng chứng số)
+## 1. DÙNG NGAY (3 bước)
 
-Ba tab cùng chạy (16:27:05 / 16:27:14 / 16:27:18), cả ba đều 1.92.55:
-
-| tab | PHÁT | ACK OK | **no-ACK** | giữ slot | 🫥 CPU-kẹt |
-|---|---|---|---|---|---|
-| 16:27:05 | 19,28/s | **77** | **5 601** | 5 372 ms | `+84 969 s` · trễ 15 925 lần · max 10,9 s |
-| 16:27:14 | 16,23/s | 132 | 5 038 | — | — |
-| 16:27:18 | 16,51/s | 5 080 | 2 033 | — | `+66 575 s` · trễ 15 015 lần · **max 45,9 s** |
-
-Mà tab 1 ghi `chờ 364 ms · còn lại 5 372 ms` ⇒ **98,7 % thời gian giữ slot là KẸT**,
-không phải I/O. `p90 ACK 6 572 ms > trần ACK_HOLD_CEIL_MS 6 000` ⇒ **cắt ACK thật**.
-
-Chuỗi nhân quả: **CPU bị bóp → đồng hồ trễ → ACK về muộn hơn hạn chờ → mất ACK.**
-
-Hạ nhịp VẼ DOM không cứu được: thủ phạm là promise/closure tạo **theo từng chat**
-(`runPool` một closure/chat, `sleepUntil` ba promise mỗi lần gọi).
-
-## 2. Cấu trúc
-
-| file | chạy ở đâu | làm gì |
-|---|---|---|
-| `engine.mjs` | Worker **và** Node | lõi điều phối: chống trùng 3 lớp, slot, hạn chờ ACK, phân loại kết quả. **Không DOM, không localStorage, không fetch.** |
-| `worker.js` | Web Worker | lớp vỏ: nhận `postMessage`, gọi `fetch` tới API Pancake, đẩy log/tick về trang |
-| `bridge.js` | main thread (userscript) | tạo Worker từ Blob, đưa token/apiBase, nhận log, trả lời RPC |
-| `test-engine.mjs` | Node | **46 test** lõi điều phối, đồng hồ giả, không cần mạng |
-| `test-worker.mjs` | Node | **15 test** chạy **worker thật** + **HTTP server thật** |
-| `test-bridge.mjs` | Node | **24 test** dựng bundle y như trình duyệt rồi chạy trong `vm` + server thật |
-
-## 3. Điều được bảo đảm (có test khoá)
-
-- **KHÔNG gửi trùng.** 3 cổng: `delivered` · `failed` · `inFlight`. Cờ `inFlight` đặt
-  **đồng bộ** trước khi vào lane — đây là chỗ bản đầu của tôi **sai** (đặt trong lane ⇒
-  microtask sau ⇒ 3 lần gọi song song lọt hết). Test `K17`/`K43` khoá lại.
-- **ACK không có = "chưa rõ", KHÔNG bắn lại mù** (`K23`–`K27`). Giữ ưu tiên
-  *không mất tin im lặng* hơn tốc độ.
-- **FB từ chối dứt khoát (#10/#551/1545041) = chốt, không bắn lại** (`K30`–`K32`).
-- **`dead` (chưa bắn) KHÔNG bị chốt failed** ⇒ kênh khác còn cứu được (`K33`–`K34`).
-- **Nhịp phát 4 ms/page, độc lập giữa các page** (`K35`–`K37`).
-- Hằng số **giữ nguyên** bản 1.92.55: `SOCKET_MIN_PACE_MS 4` · `ACK_HOLD 1 200–6 000` ·
-  `ACK_LISTEN 12 000–30 000`.
-
-## 4. Chạy test
+### Bước 1 — tạo file cài
 
 ```bash
-npm run test:worker                # cả 85 test
-node worker-send/test-engine.mjs   # 46 test — lõi điều phối
-node worker-send/test-worker.mjs   # 15 test — worker thật + HTTP server thật
-node worker-send/test-bridge.mjs   # 24 test — bundle thật chạy trong trình duyệt giả lập
+node worker-send/build.mjs
+# → dist/worker-send.install.js   (57,7 KB)
 ```
 
-### Lỗi bridge.js đã mắc và đã sửa (test B1–B9 khoá lại)
+### Bước 2 — nạp vào trang Pancake
 
-`bridge.js` không nạp `engine.mjs` bằng `import` được (content script không có đường dẫn
-tới nó), nên phải **ghép 2 file thành 1 script classic** rồi mới cho vào Blob. Bản đầu của
-tôi làm thiếu 2 bước:
+1. Mở tab Pancake (`pancake.vn` hoặc `pages.fm`), **đợi danh sách chat tải xong**
+2. `F12` → tab **Console**
+3. Dán **toàn bộ** `dist/worker-send.install.js` → `Enter`
 
-1. **Quên strip `export` của `worker.js`** (chỉ strip của `engine.mjs`) ⇒
-   `export function isRejectedError` + `export { boot }` còn trong blob ⇒ **SyntaxError**.
-2. **Bọc trong hàm không `async`** trong khi `worker.js` có `await` ⇒ cũng **SyntaxError**.
+Thấy `[BOTFAKE-WS] đã nạp ✓` là xong.
 
-Biểu hiện ra ngoài của cả hai: **Worker chết ngay khi tạo, panel không có log gì** — không
-báo lỗi. Đây là loại lỗi tệ nhất khi cài. Nay đã bọc `async` + strip cả 2 file + có lưới
-chặn `if (/^\s*(export|import)\s/m.test(code)) throw`. Đã mutation-test: gỡ từng nhát ⇒
-test đỏ tương ứng.
-
-## 5. Còn thiếu để bật được (theo thứ tự)
-
-1. **RPC dò global_id.** Worker không đọc được Redux/IndexedDB → main thread phải trả lời
-   qua `API.onRpc('gid', fn)`. Cầu nối **đã có sẵn chỗ này**, chỉ chưa nối vào hàm cũ.
-2. **Đường gửi đang implement là HTTP API.** Đây là đường **an toàn nhất cho Worker**
-   (fetch có sẵn, không cần DOM) nhưng **chậm hơn Socket**. Muốn dùng Socket trong Worker
-   thì phải chuyển MQTT client sang worker — việc lớn, chưa làm.
-3. **Bind fbId ảnh** (POST `/contents/facebook`) phải qua RPC vì cần token + logic bù.
-
-## 6. Bật thử (không ảnh hưởng bản đang chạy)
+### Bước 3 — chạy thử rồi mới gửi thật
 
 ```js
-// Trong console trang Pancake, sau khi nạp bridge.js:
-const b = window.__BOTFAKE_WORKER_SEND__;
-b.setSources(ENGINE_SRC, WORKER_SRC);          // nội dung 2 file
-b.setConfig({ mainCap: 96, apiBase: 'https://pages.fm/api/public_api/v1', accessToken: TOKEN });
-b.on('log', r => console.log('[WS]', r));
-b.start();
-b.send([{ id: '123_456', pageId: '123', text: 'xin chào' }]);
+BOTFAKE_WS.help()                                   // xem hướng dẫn
+BOTFAKE_WS.run({ text: 'Xin chào', dryRun: true })  // CHẠY THỬ — đọc danh sách, KHÔNG gửi
+BOTFAKE_WS.run({ text: 'Xin chào' })                // GỬI THẬT
 ```
 
-Đường cũ **vẫn nguyên** — cái này chỉ chạy khi gọi `start()`/`send()`.
+Khi xong, console in:
+
+```
+[BOTFAKE-WS] XONG
+  bắn: 240 · ok: 238 · từ chối: 2 · CHƯA RÕ: 0 · chặn trùng: 0
+```
+
+**Luôn chạy `dryRun: true` trước.** Nó cho biết sẽ gửi cho bao nhiêu chat, bao nhiêu chat
+có cờ `ctx7` bật, và danh sách có bị cắt giữa đường không.
+
+---
+
+## 2. Ba thứ lấy tự động (bạn không phải dán token)
+
+| thứ | lấy từ đâu | file |
+|---|---|---|
+| **token** | hook `fetch`/`XHR` của trang + `__NEXT_DATA__` + localStorage | `loadlist.js` |
+| **apiBase** | `location.origin + '/api'` (cùng quy tắc bản cũ, dòng 731) | `loadlist.js` |
+| **danh sách chat** | `GET /api/v1/…/conversations` + `next_cursor` | `loadlist.js` |
+| **cờ `is_record_ctx_7_days`** | Redux của trang (`pages.activatedMap`) | `loadlist.js` |
+
+Worker **không** đọc được Redux/DOM — nên 4 thứ trên tính ở main thread rồi truyền sang.
+
+---
+
+## 3. Đường gửi dùng ĐÚNG request thật của Pancake
+
+Bản đầu của tôi bịa endpoint nên request **vô hiệu** mà test vẫn xanh (server giả nhận gì
+cũng trả `success`). Nay đối chiếu `buildInboxSend` của bản 1.92.55 (dòng 3130):
+
+```
+POST {apiBase}/v1/pages/{page_id}/conversations/{convId}/messages?access_token=…
+   chữ / 1 ảnh  → multipart/form-data: action=reply_inbox · [is_record_ctx_7_days=true] ·
+                  message · [content_id · attachment_id · content_url · width · height] ·
+                  send_by_platform=web
+   ≥ 2 ảnh      → application/json: { action, message, content_ids, attachment_ids,
+                  content_urls, dimensions, send_by_platform: 'web' }
+```
+
+**`is_record_ctx_7_days` là cờ quan trọng nhất.** HAR: 19/19 request CÓ cờ ⇒ `success:true`;
+24/24 request THIẾU cờ ⇒ `(#10)`. Thiếu cờ là nguyên nhân phổ biến nhất của `#10`,
+không phải "app khác giữ thread".
+
+---
+
+## 4. Được bảo đảm (có test khoá)
+
+- **KHÔNG gửi trùng** — 3 cổng `delivered` / `failed` / `inFlight`; cờ `inFlight` đặt
+  **đồng bộ** trước mọi `await`. (Bản đầu đặt trong `lane.enqueue` ⇒ microtask sau ⇒
+  3 lần gọi song song cùng chat **bắn 3 lần** — K17 khoá lại.)
+- **Không ACK = "chưa rõ", KHÔNG bắn lại mù** — ưu tiên không mất tin im lặng > tốc độ.
+- **FB từ chối dứt khoát** (`#10`/`#551`/`1545041`) = chốt, không bắn lại.
+- **`dead` (chưa bắn) KHÔNG chốt failed** ⇒ kênh khác còn cứu được.
+- Nhịp 4 ms/page, hằng số ACK giữ nguyên bản 1.92.55.
+
+## 5. Test — 148 ca, chạy thật
+
+```bash
+npm run test:worker
+```
+
+| file | ca | đo cái gì |
+|---|---|---|
+| `test-engine.mjs` | 46 | lõi điều phối, đồng hồ giả, không mạng |
+| `test-worker.mjs` | 17 | `worker.js` trong `worker_threads` + HTTP server thật |
+| `test-bridge.mjs` | 26 | bundle thật chạy trong `vm` (giả lập trình duyệt) |
+| `test-loadlist.mjs` | 32 | tải danh sách + phân trang + `ctx7`, dữ liệu từ HAR thật |
+| `test-install.mjs` | 27 | **bản cài end-to-end**: dán file → `BOTFAKE_WS.run()` → server nhận |
+
+Mutation-test (gỡ code ⇒ test phải đỏ): bỏ hook token ⇒ H2/H3 đỏ · bỏ cờ `ctx7` ⇒ I22 đỏ ·
+đổi URL về dạng bịa ⇒ I18 đỏ · gỡ strip `export` ⇒ B1/B3 đỏ · bỏ `async` ⇒ B3/B4/B9 đỏ.
+
+## 6. GIỚI HẠN — đọc trước khi tin
+
+1. **Đường gửi là HTTP API, KHÔNG phải Socket** ⇒ chậm hơn bản 1.92.55. Mục đích chính là
+   **đo** CPU/ACK khi đường gửi không còn chiếm main thread.
+2. **Chưa chuyển MQTT/Socket vào Worker.**
+3. **Không có giao diện** — chỉ console.
+4. **Không thay thế bản 1.92.55.** Hai đường chạy được cùng lúc nhưng **đừng gửi cùng một
+   danh sách bằng cả hai** — lưới chống trùng của mỗi bên không thấy bên kia.
+5. **Token hết hạn** ⇒ báo `HTTP 401 — token hết hạn, tải lại trang Pancake`. Tải lại trang
+   rồi dán lại file cài.
+
+## 7. Bản đầu đã sai ở đâu (giữ lại để không lặp)
+
+| lỗi | biểu hiện | test bắt |
+|---|---|---|
+| Bịa endpoint `…/pages/{id}/messages` | request vô hiệu, server thật trả lỗi | I18 |
+| Thiếu `action=reply_inbox` | Pancake không hiểu lệnh gửi | I19 |
+| Bundle thiếu strip `export` + hàm không `async` | **Worker chết câm, panel không có log** | B1/B3/B4 |
+| `loadlist.js` không hook mạng | `pages.fm`: "Không có access_token" dù trang chạy bình thường | H2/H3 |
+| `inFlight` đặt sau microtask | chống trùng mà vẫn bắn 3 lần | K17 |
+| `stats.n` hiểu sai | tưởng thiếu 1 lần gọi | W2 |

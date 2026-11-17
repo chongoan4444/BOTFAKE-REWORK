@@ -43,8 +43,24 @@ function startFakeServer() {
     req.on('end', () => {
       st.calls++;
       st.urls.push(req.url || '');
+      st.ctypes = st.ctypes || [];
+      st.ctypes.push(String(req.headers['content-type'] || ''));
+      /* Thân request PANCAKE THẬT có 2 dạng:
+       *   • chữ / 1 ảnh  → multipart/form-data   (KHÔNG parse JSON được)
+       *   • ≥ 2 ảnh      → application/json
+       * Server giả phải đọc được CẢ HAI, nếu không thì ca "gửi chữ" sẽ luôn rơi vào nhánh
+       * mặc định và test xanh một cách vô nghĩa. */
       let body = {};
-      try { body = JSON.parse(raw || '{}'); } catch (e) { body = {}; }
+      const ctype = String(req.headers['content-type'] || '');
+      if (ctype.indexOf('application/json') > -1) {
+        try { body = JSON.parse(raw || '{}'); } catch (e) { body = {}; }
+      } else {
+        /* multipart: bóc từng part, đủ cho các field dạng text của request này */
+        const re = /name="([^"]+)"(?:\r\n\r\n|\r\n\r\n)([\s\S]*?)\r\n--/g;
+        let m;
+        while ((m = re.exec(raw)) !== null) body[m[1]] = m[2];
+        if (!Object.keys(body).length) body = { __raw: raw.slice(0, 200) };
+      }
       st.bodies.push(body);
       const text = String(body.message || '');
       const send = (code, obj) => {
@@ -120,9 +136,11 @@ check('[W5] đếm fail = 1 (ca REJECT)', done.stats.fail, 1);
 check('[W6] đếm uncertain = 1 (ca NOACK ⇒ chưa rõ, KHÔNG bắn lại)', done.stats.uncertain, 1);
 check('[W7] có log đẩy về main thread', logs.length > 0, true);
 check('[W8] log có đủ 3 loại kind', Array.from(new Set(logs.map((l) => l.kind))).sort(), ['noack', 'ok', 'rejected']);
-check('[W9] URL gửi đúng dạng /v1/pages/{page}/messages?access_token=…',
-  /^\/v1\/pages\/111\/messages\?access_token=TOK$/.test(st.urls[0]), true);
-check('[W10] thân request có conversation_id đúng', st.bodies[0].conversation_id, '111_1');
+check('[W9] URL đúng dạng THẬT /v1/pages/{page}/conversations/{id}/messages?access_token=…',
+  /^\/v1\/pages\/111\/conversations\/111_1\/messages\?access_token=TOK$/.test(st.urls[0]), true);
+check('[W10] thân request có action=reply_inbox (BẮT BUỘC, bản đầu tôi thiếu)', st.bodies[0].action, 'reply_inbox');
+check('[W10b] thân request có send_by_platform=web', st.bodies[0].send_by_platform, 'web');
+check('[W10c] thân request có message đúng', String(st.bodies[0].message || ''), 'xin chào');
 check('[W11] peakInFlight không vượt mainCap 3', done.stats.peakInFlight <= 3, true);
 
 /* ------------------------------------------- ca KHÔNG có token ⇒ 'dead', không bắn */

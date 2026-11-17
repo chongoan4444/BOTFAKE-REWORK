@@ -32,10 +32,21 @@ function startFakeServer(handler) {
   return new Promise((resolve) => {
     const hits = [];
     const srv = http.createServer((req, res) => {
-      let body = '';
-      req.on('data', (c) => { body += c; });
+      let buf = '';
+      req.on('data', (c) => { buf += c; });
       req.on('end', () => {
-        const rec = { url: req.url, method: req.method, body: body ? JSON.parse(body) : null };
+        /* Pancake thật: multipart cho chữ/1 ảnh, JSON cho ≥2 ảnh. Đọc được cả hai. */
+        const ctype = String(req.headers['content-type'] || '');
+        let body = null;
+        if (ctype.indexOf('application/json') > -1) {
+          try { body = JSON.parse(buf || '{}'); } catch (e) { body = null; }
+        } else {
+          body = {};
+          const re = /name="([^"]+)"(?:\r\n\r\n)([\s\S]*?)\r\n--/g;
+          let m;
+          while ((m = re.exec(buf)) !== null) body[m[1]] = m[2];
+        }
+        const rec = { url: req.url, method: req.method, body, ctype };
         hits.push(rec);
         const r = handler(rec, hits.length);
         res.writeHead(r.status, { 'Content-Type': 'application/json' });
@@ -79,6 +90,11 @@ function runInFakeBrowser(code, apiBase, onMessage) {
       addEventListener(ev, fn) { if (ev === 'message') listeners.push(fn); },
     },
     fetch, AbortController, setTimeout, clearTimeout, console,
+    /* TRÌNH DUYỆT có sẵn FormData/Blob/URLSearchParams trong Worker — sandbox vm thì KHÔNG.
+     * Thiếu FormData ⇒ publishViaApi ném ngay ở `new FormData()` và test đỏ hàng loạt.
+     * Đây là khác biệt MÔI TRƯỜNG, không phải lỗi code — nhưng nếu không bổ sung thì
+     * test sẽ đo một thứ khác với trình duyệt thật. */
+    FormData, Blob, URLSearchParams,
     Promise, JSON, Object, String, Array, Error, RegExp, Date, Math, Number, Map, Set,
     encodeURIComponent, parseInt, isNaN,
   };
@@ -165,8 +181,13 @@ if (ctl) {
   check('[B13] nhận được done (bundle sống tới cuối)', !!done, true);
   if (done) {
     check('[B14] 4 dòng, 1 trùng ⇒ 3 request thật', hits.length, 3);
-    check('[B15] URL đúng dạng Pancake', hits[0] && hits[0].url, '/v1/pages/111/messages?access_token=TOK');
-    check('[B16] body.conversation_id đúng', hits[0] && hits[0].body.conversation_id, '111_1');
+    check('[B15] URL đúng dạng THẬT của Pancake',
+      hits[0] && hits[0].url, '/v1/pages/111/conversations/111_1/messages?access_token=TOK');
+    check('[B16] body có action=reply_inbox (bản đầu tôi thiếu ⇒ request vô hiệu)',
+      hits[0] && hits[0].body.action, 'reply_inbox');
+    check('[B16b] body có send_by_platform=web', hits[0] && hits[0].body.send_by_platform, 'web');
+    check('[B16c] dùng multipart/form-data cho tin chữ',
+      hits[0] && /multipart\/form-data/.test(hits[0].ctype), true);
     check('[B17] ok=1', done.stats.ok, 1);
     check('[B18] rejected (#10) ⇒ fail=1', done.stats.fail, 1);
     check('[B19] 503 ⇒ uncertain=1, KHÔNG bắn lại', done.stats.uncertain, 1);

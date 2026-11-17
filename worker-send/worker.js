@@ -75,20 +75,30 @@ function rpc(what, args, timeoutMs) {
 }
 
 /**
- * Bắn MỘT tin qua API Pancake (đường HTTP).
+ * Bắn MỘT tin qua API Pancake — DÙNG ĐÚNG REQUEST THẬT CỦA APP.
  *
- * ĐÂY LÀ ĐƯỜNG AN TOÀN NHẤT ĐỂ CHẠY TRONG WORKER vì:
- *   • `fetch` có sẵn trong Worker, không cần DOM.
- *   • API chỉ cần conversation_id + access_token (HAR: 58/58 lệnh gửi API KHÔNG có global_id)
- *     ⇒ không phải chờ main thread dò gid ⇒ bỏ hẳn khâu 13 475 ms từng thấy ở lô 13:31.
- *   • Token do main thread đưa sang (cookie phiên nằm ở trang), worker chỉ dùng.
+ * BẢN ĐẦU CỦA TÔI SAI (đáng ghi lại, vì nó "chạy được" nên rất dễ tin nhầm):
+ *   tôi viết  POST {apiBase}/v1/pages/{pageId}/messages
+ *              body JSON { conversation_id, message }
+ *   Request đó KHÔNG BAO GIỜ được Pancake xử lý: thiếu đoạn
+ *   `/conversations/{convId}`, thiếu `action=reply_inbox`, thiếu `send_by_platform=web`.
+ *   Test cũ vẫn xanh vì server giả của tôi nhận gì cũng trả `success` — test đúng mà
+ *   giả thuyết sai. Nay đối chiếu với `buildInboxSend` của bản 1.92.55 (dòng 3130).
  *
- * TRẢ VỀ ĐÚNG `kind` MÀ ENGINE CẦN:
- *   'ok'       — server nhận (2xx + success)
- *   'rejected' — FB từ chối dứt khoát (#10 ngoài 24h / #551 không có mặt / 1545041)
- *                ⇒ CHẮC CHẮN chưa gửi ⇒ an toàn để tầng trên bù kênh khác
- *   'noack'    — timeout / 5xx / mạng đứt ⇒ CHƯA RÕ ⇒ tuyệt đối không bắn lại mù
- *   'dead'     — không có token / không cấu hình ⇒ chưa bắn
+ * REQUEST THẬT (đã khớp 13 request của app trong tinnhan.har, ghi ở dòng 3123):
+ *   POST {apiBase}/v1/pages/{page_id}/conversations/{encodeURIComponent(conv.id)}/messages
+ *        ?access_token=...
+ *   • chữ hoặc 1 ảnh  → multipart/form-data:
+ *       action=reply_inbox · [is_record_ctx_7_days=true] · message · [content_id ·
+ *       attachment_id · content_url · width · height] · send_by_platform=web
+ *   • ≥ 2 ảnh         → application/json:
+ *       { action, [is_record_ctx_7_days], message, content_ids, attachment_ids,
+ *         content_urls, dimensions, send_by_platform: 'web' }
+ *
+ * `is_record_ctx_7_days` KHÔNG phải tuỳ chọn cho vui — HAR: 19/19 request CÓ cờ ⇒
+ * success:true; 24/24 request THIẾU cờ ⇒ (#10). Thiếu cờ là nguyên nhân phổ biến nhất
+ * của (#10), KHÔNG phải "app khác giữ thread". Cờ do main thread tính (cần Redux của
+ * trang) rồi truyền vào `conv.isRecordCtx7Days`.
  */
 async function publishViaApi(conv, opts) {
   const token = cfg.accessToken;
@@ -96,26 +106,66 @@ async function publishViaApi(conv, opts) {
   if (!cfg.apiBase) return { ok: false, kind: 'dead', error: 'Worker chưa có apiBase' };
 
   const pageId = opts.pageId;
-  const url = cfg.apiBase + '/v1/pages/' + encodeURIComponent(pageId) + '/messages'
+  const convId = String(conv.id);
+  const url = cfg.apiBase + '/v1/pages/' + encodeURIComponent(pageId)
+    + '/conversations/' + encodeURIComponent(convId) + '/messages'
     + '?access_token=' + encodeURIComponent(token);
 
-  const body = {
-    conversation_id: String(conv.id),
-    message: conv.text || '',
-  };
-  if (conv.contentIds && conv.contentIds.length) body.content_ids = conv.contentIds;
-  if (conv.isRecordCtx7Days) body.is_record_ctx_7_days = true;
+  const text = conv.text == null ? '' : String(conv.text);
+  const ctx7 = !!conv.isRecordCtx7Days;
+  const items = (Array.isArray(conv.photos) && conv.photos.length)
+    ? conv.photos
+    : (conv.photo ? [conv.photo] : []);
+
+  let body; let headers;
+  if (items.length > 1) {
+    /* Đa ảnh ⇒ JSON. Đúng thứ tự field như buildInboxSend của bản cũ. */
+    const jb = {
+      action: 'reply_inbox',
+      message: text,
+      content_ids: items.map((x) => (x && x.id) || ''),
+      attachment_ids: items.map((x) => (x && x.fbId) || ''),
+      content_urls: items.map((x) => (x && x.url) || ''),
+      dimensions: items.map((x) => ({ width: Number(x && x.w) || 0, height: Number(x && x.h) || 0 })),
+      send_by_platform: 'web',
+    };
+    if (ctx7) jb.is_record_ctx_7_days = true;
+    body = JSON.stringify(jb);
+    headers = { Accept: 'application/json', 'Content-Type': 'application/json' };
+  } else {
+    /* Chữ hoặc 1 ảnh ⇒ multipart/form-data. Worker có FormData sẵn. */
+    const fd = new FormData();
+    fd.append('action', 'reply_inbox');
+    if (ctx7) fd.append('is_record_ctx_7_days', 'true');
+    fd.append('message', text);
+    const p0 = items[0] || null;
+    if (p0) {
+      /* ĐÚNG THỨ TỰ request thật của app khi gửi 1 ảnh:
+       * content_id → attachment_id → content_url → width → height */
+      if (p0.id) fd.append('content_id', p0.id);
+      if (p0.fbId) fd.append('attachment_id', p0.fbId);
+      fd.append('content_url', p0.url || '');
+      if (p0.w) fd.append('width', String(p0.w));
+      if (p0.h) fd.append('height', String(p0.h));
+    }
+    fd.append('send_by_platform', 'web');
+    body = fd;
+    headers = { Accept: 'application/json' }; // KHÔNG đặt Content-Type: boundary do FormData sinh
+  }
 
   const t0 = clock.now();
   let res;
   try {
     const ctl = new AbortController();
     const timer = setTimeout(() => { try { ctl.abort(); } catch (e) { /* ignore */ } }, opts.holdMs + 4000);
+    /* `credentials: 'omit'` — CỐ Ý. Worker gửi kèm access_token, không dựa cookie phiên
+     * (bản cũ dùng 'include' vì chạy trên trang). Nếu sau này thấy 401 hàng loạt thì
+     * đổi thành 'include' SAU KHI đo, không đổi mù. */
     res = await fetch(url, {
       method: 'POST',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      credentials: 'omit', // cookie phiên nằm ở trang; worker dùng access_token
+      headers,
+      body,
+      credentials: 'omit',
       signal: ctl.signal,
     }).finally(() => { try { clearTimeout(timer); } catch (e) { /* ignore */ } });
   } catch (e) {

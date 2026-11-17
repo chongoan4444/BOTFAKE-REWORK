@@ -4781,3 +4781,35 @@ bundle thật → `vm` giả lập trình duyệt (có `self`) → HTTP server t
 - bỏ `async` ⇒ **B3, B4, B9 đỏ**
 
 Tổng test worker-send nay **85** (46 + 15 + 24). Bản 1.92.55 vẫn **201/201**, build `--check` OK.
+
+### 91.9 `worker-send/` DÙNG ĐƯỢC THẬT — 5 lỗi nữa phải sửa (có test)
+
+Khung ở §91.5–91.8 vẫn **chưa dùng được**. Để dùng được phải qua 5 lỗi sau, mỗi lỗi
+đều có test khoá:
+
+**LỖI 1 — BỊA ENDPOINT (nặng nhất).** Tôi viết
+`POST {apiBase}/v1/pages/{id}/messages` + body `{conversation_id, message}`.
+Đối chiếu `buildInboxSend` (dòng 3130): request thật là
+`POST …/pages/{page_id}/conversations/{convId}/messages` + **multipart** có
+`action=reply_inbox`, `send_by_platform=web`. **Request của tôi vô hiệu hoàn toàn.**
+Test cũ vẫn xanh vì server giả nhận gì cũng trả `success` ⇒ **test đúng, giả thuyết sai**.
+
+**LỖI 2 — THIẾU CỜ `is_record_ctx_7_days`.** HAR trong chính script cũ: **19/19 request CÓ
+cờ ⇒ success**; **24/24 THIẾU cờ ⇒ `(#10)`**. Thiếu cờ là nguyên nhân phổ biến nhất của
+`#10`, KHÔNG phải "app khác giữ thread".
+
+**LỖI 3 — `loadlist.js` KHÔNG HOOK MẠNG ⇒ token rỗng.** Bản cũ hook `fetch`/`XHR` ngay khi
+nạp (dòng 13730). Trên `pages.fm`, JWT **không** nằm trong localStorage/`__NEXT_DATA__`,
+chỉ xuất hiện trong query của request trang đang gửi ⇒ không hook thì `getToken()` trả `''`
+⇒ báo "Không có access_token" **dù trang chạy bình thường**.
+
+**LỖI 4 — bundle thiếu strip `export` + hàm không `async`** (§91.8): Worker chết câm.
+
+**LỖI 5 — `run()` trả thiếu `items`, `results()` trả `undefined`** khi chưa xong.
+
+Kết quả: **148 test** trong `worker-send/` (46 + 17 + 26 + 32 + 27), `npm run test:worker`.
+
+Bản cài: `node worker-send/build.mjs` → `dist/worker-send.install.js` (57,7 KB) — dán vào
+console trang Pancake, rồi `BOTFAKE_WS.run({text, dryRun:true})` để chạy thử.
+
+Mutation-test: bỏ hook ⇒ H2/H3 đỏ · bỏ cờ ctx7 ⇒ I22 đỏ · URL bịa ⇒ I18 đỏ.
