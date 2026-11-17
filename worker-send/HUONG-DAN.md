@@ -1,93 +1,74 @@
-# GỬI BẰNG WORKER — cách dùng
+# GỬI BẰNG WORKER — cách cài
 
-## Chỉ 3 bước
+## Cách 1 (KHUYÊN): Tampermonkey — cài 1 lần, dùng mãi
 
-### 1. Mở file này
+Sau khi cài, **mỗi lần mở Pancake nút tự hiện**. Không phải dán gì nữa.
 
-`worker-send/cai-dat.js` — bấm vào, rồi **Ctrl+A** chọn hết, **Ctrl+C** copy.
+1. Cài extension **Tampermonkey** (Chrome Web Store)
+2. Mở link này, Tampermonkey sẽ tự bật bảng cài đặt:
+   **`worker-send/cai-dat.js`** → bấm **Install**
+3. Mở Pancake → khung **"Gửi bằng Worker"** hiện ở góc dưới phải
 
-> File đã có sẵn trong repo. Không cần chạy lệnh gì cả.
+> `cai-dat.js` có sẵn header `// ==UserScript==` nên Tampermonkey nhận trực tiếp.
+> Nếu trình duyệt hiện chữ thay vì bảng cài: bấm icon Tampermonkey → **Create a new
+> script** → Ctrl+A → dán → Ctrl+S.
 
-### 2. Dán vào trang Pancake
+## Cách 2: dán console (dùng thử 1 lần)
 
-1. Mở tab Pancake, **đợi danh sách chat hiện ra**
-2. Bấm `F12`
-3. Chọn tab **Console**
-4. **Ctrl+V** dán → `Enter`
+1. Mở `worker-send/cai-dat.js`, **Ctrl+A → Ctrl+C**
+2. Mở Pancake, `F12` → **Console** → `Ctrl+V` → `Enter`
+3. Khung hiện ở góc dưới phải
 
-### 3. Bấm nút
+---
 
-Góc **dưới phải** màn hình hiện khung **"Gửi bằng Worker"**:
+# Dùng
 
 ```
 ┌─────────────────────────────┐
 │ Gửi bằng Worker         —  ✕│
 ├─────────────────────────────┤
-│ ┌─────────────────────────┐ │
-│ │ Nhập nội dung…          │ │
-│ └─────────────────────────┘ │
-│ 2 chat · bật cờ 7 ngày: 2   │
+│ [ Nhập nội dung…          ] │
+│ 1 600 chat · cờ 7 ngày: 412 │
 │ [⟳ Tải danh sách] [⚡ Gửi]  │
 │ [⏹ Dừng]                    │
-│ ┌─────────────────────────┐ │
-│ │ XONG: ok 2/2            │ │
-│ └─────────────────────────┘ │
 └─────────────────────────────┘
 ```
 
-- Bấm **⟳ Tải danh sách** → chờ vài giây, nó báo *"2 chat · bật cờ 7 ngày: 2"*
-- Nhập nội dung
-- Bấm **⚡ Gửi** → hỏi xác nhận → OK
+1. **⟳ Tải danh sách** — chờ tới khi hiện số chat
+2. Nhập nội dung
+3. **⚡ Gửi** → xác nhận
 
-**Hết.** Không có bước 4.
-
----
-
-## Nếu bạn muốn gọn hơn nữa
-
-| cách | số bước |
-|---|---|
-| **Dán console** (trên) | 3 |
-| **Tampermonkey** — dán 1 lần, tự chạy mọi lần mở Pancake | 1 (làm 1 lần, dùng mãi) |
-
-### Cài Tampermonkey (1 lần, dùng mãi)
-
-1. Cài extension **Tampermonkey**
-2. Bấm icon Tampermonkey → **Create a new script**
-3. **Ctrl+A** xoá hết → **Ctrl+V** dán nội dung `cai-dat.js`
-4. **Ctrl+S** lưu
-5. Xong. Mỗi lần mở Pancake nút tự hiện.
-
-Sau đó **không phải dán gì nữa**.
+Nút **Gửi bị khoá** cho tới khi tải xong danh sách — để bạn thấy trước sẽ gửi cho bao nhiêu.
 
 ---
 
-## Hai điều cần biết
+# Tải danh sách — đã sửa lỗi "dừng ở 40"
 
-**1. Phải tải danh sách trước.** Nút "Gửi" bị khoá cho tới khi bấm "Tải danh sách" —
-để bạn thấy trước sẽ gửi cho bao nhiêu chat.
+Lỗi bạn gặp có **3 nguyên nhân**, cả 3 đã sửa và có test khoá:
 
-**2. Nếu hiện "CHƯA RÕ".** Nghĩa là server không trả lời cho mấy chat đó — **không biết
-đã gửi hay chưa**. Khung sẽ cảnh báo. **Đừng bấm gửi lại toàn bộ** — sẽ gửi trùng.
-Kiểm tay mấy chat đó trước.
+| # | nguyên nhân | trước | sau |
+|---|---|---|---|
+| 1 | tải nhiều page mà gọi **endpoint gộp** ⇒ các page khử trùng lẫn nhau | 440/1600 chat | **1600/1600** |
+| 2 | dính **429** là dừng luôn | dừng ở 40 | thử lại 3 lần + nghỉ chung 2,5 s |
+| 3 | chỉ đọc `data.conversations` | 0 chat mà báo thành công | đọc cả `data.data.conversations` |
+
+Số thật theo HAR: **40 chat/trang** kèm `next_cursor` (bản trước tôi để 60 — sai).
+
+Nếu vẫn thiếu, panel **nói rõ**: `Tải THIẾU: … — vẫn đi tiếp với N chat`. Không im lặng.
 
 ---
 
-## Đây là bản gì
+# Trước khi tin bản này
 
-Bản **thử nghiệm** để đo: khi đường gửi không còn chạy trên main thread thì CPU tab
-có về ~0 và ACK còn bị mất không.
-
-- **Không thay thế** bản 1.92.55 bạn đang dùng
-- Dùng **HTTP API** (chậm hơn Socket của bản cũ)
-- **Đừng gửi cùng một danh sách** bằng cả hai bản — chống trùng của mỗi bên không thấy bên kia
+- Đường gửi là **HTTP API**, chưa phải Socket ⇒ **chậm hơn** bản 1.92.55
+- **Đừng gửi cùng một danh sách** bằng cả hai bản
+- Hiện **"CHƯA RÕ"** nghĩa là server không trả lời — **đừng chạy lại toàn bộ**, gửi trùng
 
 ## Lỗi thường gặp
 
-| hiện tượng | nguyên nhân | cách sửa |
-|---|---|---|
-| Không thấy nút nào | dán vào Console của trang khác, hoặc trang chưa tải xong | Đúng tab Pancake, đợi trang tải xong rồi dán lại |
-| "Không tìm thấy access_token" | token chưa có trong request nào | Tải lại trang Pancake (F5) rồi dán lại |
-| "Không xác định được page_id" | Redux chưa sẵn sàng | Đợi danh sách chat hiện ra rồi bấm Tải lại |
-| Nút Gửi vẫn xám | chưa bấm "Tải danh sách", hoặc danh sách rỗng | Bấm "Tải danh sách" trước |
-| Panel hiện "LỖI: HTTP 401" | token hết hạn | F5 tải lại trang rồi dán lại file |
+| hiện tượng | cách sửa |
+|---|---|
+| Không thấy khung | Đúng tab Pancake, đợi trang tải xong |
+| "Không tìm thấy access_token" | F5 tải lại trang rồi bấm Tải danh sách lại |
+| Tải được 40 rồi dừng | Đã sửa — nếu còn, gửi tôi dòng log `Tải THIẾU:` |
+| "HTTP 401" | Token hết hạn, F5 |
