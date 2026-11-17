@@ -3823,3 +3823,57 @@ con trỏ `before=1794874125000`; có những cặp khối trùng nội dung 100
 - JSON sạch ⇒ **không đổi một byte** (đường `pancake.vn/api/v1`).
 - 2 khối JSON nối nhau ⇒ ghi nhận vẫn không parse trần được (giới hạn đã biết, không giả vờ đã vá).
 - Cầu dao: 3 lần CÙNG thread ⇒ đóng; 40 ca khác thread ⇒ đóng; không threadId (timeout) ⇒ **không** đóng.
+
+---
+
+## §79 · Cơ chế TẢI DANH SÁCH và vì sao log 09:19–09:22 trông như "kẹt 429"
+
+### §79.1 Cơ chế hiện tại (đọc code, không suy đoán)
+
+| Bước | Hàm | Dòng |
+|---|---|---|
+| Nút ⚡ là ĐƯỜNG DUY NHẤT phát request danh sách | `scanFullList` | ~2306 |
+| Tải qua API `next_cursor`, **không cuộn DOM** | `loadListViaApi` | ~1753 |
+| 1 page ⇒ luồng gốc tuần tự theo `next_cursor` (+ luồng phụ Erlang, ngân sách **0**) | `loadSequentialOrStitch` | ~2040 |
+| ≥2 page ⇒ mỗi page 1 chuỗi song song, pool 10 | nhánh A | ~1900 |
+| Mỗi trang: `fetchJson` tự thử 3 lần (400 ms × lần), timeout 12 s | `fetchPage` | ~1808 |
+| 429 ⇒ nghỉ **chung** + giảm nửa ngân sách luồng phụ | `rlNote429` | ~1790 |
+
+**Ngân sách luồng phụ cursor giả = 0** (từ 1.92.44) vì nó nhảy mốc thời gian và làm hở danh sách
+(đo được 88 → 73 chat). Nghĩa là **thực tế chỉ có 1 chuỗi `next_cursor` tuần tự** — đây là lý do
+cấu trúc khiến mọi 429 đều rơi đúng vào một đường.
+
+### §79.2 Vì sao ra 62 dòng log và 134,6 s
+
+| Số | Nguồn |
+|---|---|
+| 62 lần 429 trong 134,6 s (~1 lần/2,2 s) | log user dán |
+| Nghỉ **đúng 2,5 s cho MỌI lần** ⇒ tổng ≈ **155 s** nghỉ | đọc `rlNote429` |
+| 155 s nghỉ > 134,6 s cả lượt ⇒ gần như toàn bộ thời gian là NGỒI CHỜ | phép chia |
+| Mỗi trang lỗi in tối đa 1 dòng `⏸ … đang tự thử lại…` (cờ `errRetry === 1`) | đọc code |
+| Con số trong dòng log là `seg0.items.length` — số chat **đã lấy**, tăng dần 160 → 7 440 | đọc code |
+| 429 là THẬT, không phải lỗi script: HAR cũ 22–49 % request `next_cursor` bị 429 (loaddanhsach 7/32, taidanhsach 41/84, loadnhanh 24/56) | đo trên 3 HAR |
+| Trần 1500 trang bị lần THỬ LẠI ăn mất slot ⇒ `truncated` ⇒ `scanFullList` tải lại **từ trang 1** | đọc 2 vòng lặp, so sánh |
+
+### §79.3 Vá ở 1.92.48 (W200.94)
+
+| # | Sửa | Vì sao |
+|---|---|---|
+| 1 | Nghỉ 429 **dài dần**: 2,5 → 5 → 7,5 → 10 s, rồi +1,5 s/lần (trần 20 s); reset khi có phản hồi thành công | 2,5 s cố định = quay lại đúng nhịp đã gây 429 |
+| 2 | Trần **1500 trang ĐÃ LẤY** + ngân sách **40 lần thử lại** riêng | lần thử không còn ăn slot trang (đường A vốn đã làm đúng bằng `guard--`) |
+| 3 | Trang hỏng ⇒ ghi `{cursor, after, jumpMs}` vào `errorPages`, **nhích cursor** sang trang kế rồi đi tiếp | không quay lại trang 1; không bỏ chat nào |
+| 4 | Cuối lượt **tải bù đúng cursor đã lưu** (`resumeCursor`), ngân sách 30 s + 8 s/trang (trần 120 s) | chỉ đốt lại đúng trang thiếu |
+| 5 | 3 trang LIÊN TIẾP lỗi ⇒ dừng hẳn, giữ phần đã tải | không đốt request khi server bóp cả loạt |
+| 6 | Log mỗi mốc (lần 1, 5, 10, 20…) + "đã nghỉ tổng X s" | 62 dòng trùng nhau không cho biết cơn 429 nặng lên hay dịu đi |
+| 7 | TỔNG HỢP in `N trang × p50 X ms/trang · đã nghỉ vì 429 tổng Y s · trang lỗi N (bù được M)` | tách "server chậm" khỏi "ta tự làm chậm bằng cách nghỉ" |
+
+**Rủi ro đã biết, không giấu:** bước 3 phải nhích cursor bằng `shiftCursorBefore()` (lùi `1,2 × spanMs`
+của trang). Nếu span ước lượng sai, có thể **nhảy qua 1 trang** — nhưng trang đó KHÔNG bị coi là đã
+tải (nó vẫn nằm trong `errorPages` và được tải bù), nên không mất chat im lặng. Nếu không dịch được
+cursor ⇒ **không nhích**, dừng và đánh dấu thiếu (thà thiếu còn hơn bịa cursor).
+
+### §79.4 Ca chống hồi quy (mục 26–27)
+- `waitFor(1)=2500`, `waitFor(2)=5000`, `waitFor(3)=10000`, `waitFor(40)=20000`.
+- 62 lần 429 liên tiếp ⇒ tổng nghỉ > 155 s (bản cũ) — tức bản mới nghỉ ĐỦ LÂU để cơn dứt.
+- 100 trang lỗi **không** ăn vào trần 1500 trang.
+- Dịch cursor: mốc đúng ±0, `keyStr` giữ nguyên, cursor rác ⇒ `null` (không bịa), lùi quá mốc 0 ⇒ `null`.

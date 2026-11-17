@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.47-w200.93
+// @version      1.92.48-w200.94
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.47-W200.93'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.48-W200.94'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -1722,6 +1722,18 @@
     }
   }
 
+  /* [v1.92.48] Dịch cursor sang mốc thời gian khác (dùng để NHẢY QUA trang lỗi).
+   * `deltaMs` âm = sang mốc CŨ HƠN (tức trang kế tiếp trong danh sách). Không đụng `keyStr`
+   * nếu không đổi được tsMs — trả null để nơi gọi biết là không nhích được, TUYỆT ĐỐI không
+   * bịa cursor. */
+  function shiftCursorBefore(b64, deltaMs) {
+    const p = parseErlangCursor(b64);
+    if (!p || !p.tsMs) return null;
+    const next = p.tsMs + Number(deltaMs || 0);
+    if (!isFinite(next) || next <= 0) return null;
+    return encodeErlangCursor(p.seenByte, next, p.keyStr);
+  }
+
   function estimatePageSpanMs(convs, fallbackMs) {
     if (!Array.isArray(convs) || convs.length < 2) return fallbackMs || 600000;
     const unpinned = convs.filter((c) => c && !c.is_pinned && !c.isPinned);
@@ -1750,11 +1762,19 @@
   //      hàng loạt request tuần tự. Luồng phụ nào treo cũng không chặn được luồng gốc.
   //   C) Lọc tag lúc gửi (forceTags / maxPages): tuần tự như cũ (chỉ cần 1 trang).
   //   Cả A & B đều DỪNG NGAY khi chuỗi 2 đầu (range) đã đủ 2 đầu hoặc user bấm dừng.
-  async function loadListViaApi(onProgress, opts) {
+  /* [v1.92.48] đổi từ `async function` sang biểu thức: phần TẢI BÙ TRANG LỖI (cuối
+   * loadSequentialOrStitch) cần gọi lại chính hàm này để tiếp tục từ đúng cursor đã lưu.
+   * Luồng gốc của lần tải bù là 1 chuỗi `next_cursor` duy nhất ⇒ tự nó đã tuần tự. */
+  let loadListViaApi = null;
+  loadListViaApi = async function (onProgress, opts) {
     const token = getToken();
     if (!token) return { ok: false, error: 'Không lấy được access token' };
     const startedAt = Date.now();
-    const plainMode = !opts || (!opts.forceTags && !opts.maxPages);
+    /* [v1.92.48] LƯỢT TẢI BÙ (`resumeCursor`) PHẢI ĐI ĐƯỜNG THƯỜNG, KHÔNG phải nhánh lọc tag.
+     * Bản cũ: `maxPages: 40` ⇒ `plainMode === false` ⇒ rơi vào `loadSequential()` của nhánh lọc
+     * tag (đường chỉ dành cho "tải 1 trang để lọc") ⇒ mất đúng hành vi cần có. Nay `resumeCursor`
+     * luôn giữ plainMode. */
+    const plainMode = !opts || (!opts.forceTags && (!opts.maxPages || !!opts.resumeCursor));
 
     const isRangeSatisfied = (idSet) => {
       if (!plainMode || (opts && opts.full)) return false;
@@ -1786,16 +1806,44 @@
      * đúng thứ không được phép. Giữ 0; mọi cải thiện tốc độ tải phải đến từ đi đúng
      * next_cursor + thử lại page lỗi (xem retry riêng từng page bên dưới). */
     const RL_HELPER_BUDGET_START = 0;
-    const rl = { pauseUntil: 0, hits: 0, helperBudget: RL_HELPER_BUDGET_START, logged: false };
+    const rl = { pauseUntil: 0, hits: 0, helperBudget: RL_HELPER_BUDGET_START, logged: false,
+      streak: 0,      // [v1.92.48] số 429 LIÊN TIẾP (reset khi có phản hồi thành công)
+      gapMs: 0,       // [v1.92.48] nhịp chờ giữa hai trang khi đã từng dính 429
+      waitTotalMs: 0, // [v1.92.48] tổng thời gian đã nghỉ vì 429 (in ra để đối chiếu)
+      lastWaitMs: 0 };
     const rlNote429 = () => {
       rl.hits++;
-      rl.pauseUntil = Date.now() + 2500;
+      /* [v1.92.48] NGHỈ CHUNG PHẢI DÀI DẦN KHI CƠN 429 KHÔNG DỨT.
+       * Log 09:19–09:22 (bản 1.92.44): 62 lần 429 trong 134 s. Đọc code thì thấy bản cũ nghỉ
+       * ĐÚNG 2,5 s cho MỌI lần ⇒ tổng thời gian nghỉ vì 429 ≈ 62 × 2,5 = **155 s** > cả 134,6 s
+       * của lượt tải ⇒ gần như TOÀN BỘ thời gian tải là ngồi chờ, không phải tải. Với 2,5 s cố
+       * định thì server còn bóp thì vòng lặp còn quay lại đúng nhịp đó.
+       * Nay: 2,5 s → 5 → 7,5 → 10 s (trần), rồi mỗi lần chờ thêm một nhịp 1,5 s (trần 20 s) nếu
+       * vẫn dính tiếp. Chuỗi reset khi có phản hồi THÀNH CÔNG, nên cơn ngắn không bị phạt. */
+      rl.streak = (rl.streak || 0) + 1;
+      const base = Math.min(10000, 2500 * Math.pow(2, Math.min(2, rl.streak - 1)));
+      const extra = rl.streak > 3 ? Math.min(10000, (rl.streak - 3) * 1500) : 0;
+      const waitMs = Math.min(20000, base + extra);
+      rl.pauseUntil = Date.now() + waitMs;
+      rl.lastWaitMs = waitMs;
+      rl.waitTotalMs = (rl.waitTotalMs || 0) + waitMs;
       // 429 ⇒ giảm nửa số luồng phụ ĐANG được phép sống (6→3→1→0), cuối cùng chỉ còn tuyến gốc.
       rl.helperBudget = Math.max(0, Math.floor(rl.helperBudget / 2));
-      if (!rl.logged) {
+      /* Log MỖI MỐC thay vì chỉ lần đầu: 62 dòng "🧯" trùng nhau (log 09:19–09:20) không cho
+       * biết cơn 429 đang nặng lên hay đã dịu, cũng không cho biết ĐÃ NGHỈ BAO NHIÊU. */
+      if (!rl.logged || rl.hits === 5 || rl.hits % 10 === 0) {
         rl.logged = true;
-        logLine('🧯 Server đang giới hạn tốc độ (429) — tự giảm luồng tải song song + nghỉ chung để qua cơn…');
+        logLine('🧯 Server đang giới hạn tốc độ (429) — tự giảm luồng tải song song + nghỉ chung '
+          + (Math.round(waitMs / 100) / 10) + 's để qua cơn…'
+          + (rl.hits > 1 ? ' (lần ' + rl.hits + ' · đã nghỉ tổng ' + (Math.round(rl.waitTotalMs / 100) / 10) + 's)' : ''));
       }
+    };
+    /* [v1.92.48] 429 liên tiếp → nghỉ dài; CÓ phản hồi thành công → reset chuỗi + trả nhịp 1,5 s
+     * giữa các trang (trước đây 0 ms ⇒ bắn liền tay cho tới khi dính 429). */
+    const rlNoteOk = () => {
+      if (rl.streak) logLine('✅ Server nhả rồi (sau ' + rl.streak + ' lần 429 liên tiếp) — tải tiếp bình thường.');
+      rl.streak = 0;
+      rl.gapMs = 0;
     };
 
     const fetchPage = async (pageCount, cursor, currentCount, extra) => {
@@ -1827,10 +1875,13 @@
 
     // ---------- C) TUẦN TỰ (lọc tag / giới hạn trang) ----------
     const loadSequential = async () => {
-      const seg = { items: [], set: new Set(), cursor: null, pageCount: {} };
+      // [v1.92.48] `opts.resumeCursor` = tải bù ĐÚNG một trang lỗi (xem errorPages ở luồng gốc)
+      const resume = (opts && opts.resumeCursor) || null;
+      const seg = { items: [], set: new Set(), cursor: resume || null, pageCount: {}, rt: [] }; // [v1.92.48] rt = độ trễ từng trang
       let guard = 0;
       let forceMulti = false;
       while (guard++ < 1500 && !stopped()) {
+        const pageT0 = Date.now(); // [v1.92.48]
         const res = await fetchPage(seg.pageCount, seg.cursor, seg.items.length, { forceMulti });
         if (!res.ok) {
           if (stopped() || res.error === 'stopped') {
@@ -1841,6 +1892,7 @@
         }
         const j = res.data || {};
         const convs = j.conversations || [];
+        if (pageT0) seg.rt.push(Date.now() - pageT0); // [v1.92.48] độ trễ trang THẬT (đo được)
         const added = pushConvs(seg, convs);
         if (j.pages_with_current_count) seg.pageCount = Object.assign({}, seg.pageCount, j.pages_with_current_count);
         seg.cursor = (convs.length && j.next_cursor) ? j.next_cursor : null;
@@ -2017,7 +2069,8 @@
 
       const seg0 = {
         items: [], set: new Set(),
-        cursor: (p1.data && p1.data.next_cursor) || null,
+        // [v1.92.48] `opts.resumeCursor` ⇒ bắt đầu từ đúng trang lỗi đã ghi sổ, KHÔNG từ trang 1
+        cursor: (opts && opts.resumeCursor) || ((p1.data && p1.data.next_cursor) || null),
         pageCount: Object.assign({}, (p1.data && p1.data.pages_with_current_count) || {}),
         spanMs: estimatePageSpanMs((p1.data && p1.data.conversations) || [], 600000),
       };
@@ -2161,23 +2214,77 @@
         for (let h = 0; h < STRIDES.length; h++) spawnHelper();
       }
 
-      // Luồng gốc: đi tuần tự, khâu đoạn nào dùng đoạn đó, xong là dừng hết luồng phụ
+      /* Luồng gốc: đi tuần tự, khâu đoạn nào dùng đoạn đó, xong là dừng hết luồng phụ.
+       * [v1.92.48] SỔ TRANG LỖI + KHÔNG LÙI VỀ TRANG 1.
+       * Log 09:19–09:22 cho thấy cùng một sự kiện in ra 62 lần với con số TĂNG DẦN (160 → 7 440).
+       * Đối chiếu đường A (nhiều page): `while (guard++ < 1500) { guard--; continue; }` — tức lần
+       * thử lại KHÔNG tính vào trần 1500. Đường này thì mỗi lần thử lại ăn một slot `guard` ⇒
+       * 8 lần thử lại × số trang ⇒ trần 1500 trang hết trước khi cursor hết ⇒ `truncated = true`
+       * ⇒ tải lại từ đầu. Nay: trần 1500 **trang đã lấy được** + 40 lần **thử lại**, tách riêng.
+       * Trang nào thử 4 lần vẫn lỗi thì ghi vào `errorPages` (vị trí trang + cursor vào), đi tiếp
+       * trang sau, cuối lượt quay lại đúng những trang đó — KHÔNG bỏ chat nào, cũng không quay
+       * lại từ trang 1. */
       let guard = 0;
-      while (guard++ < 1500 && seg0.cursor && !stopped()) {
+      let retryLeft = 40;                 // ngân sách thử lại cả lượt (không tính vào trần trang)
+      let consecFail = 0;                 // số trang LIÊN TIẾP lỗi — 3 trang ⇒ server bóp thật, dừng
+      const errorPages = [];              // { cursor, after, tries }
+      const pageT0s = [];
+      const maxPagesCap = (opts && opts.resumeCursor && opts.maxPages) ? Number(opts.maxPages) : 1500;
+      while (guard < maxPagesCap && seg0.cursor && !stopped()) {
         const before = seg0.items.length;
+        const pageT0 = Date.now();
         const res = await fetchPage(seg0.pageCount, seg0.cursor, seg0.items.length, { forceMulti: forceMultiEndpoint, tries: 3, timeoutMs: 12000 });
+        const waited = Date.now() - pageT0;
+        if (waited <= 30000) seg0.rt.push(waited);   // [v1.92.48] độ trễ TRANG thật (chỉ ca không bị kẹt nghỉ)
         if (!res.ok) {
           if (stopped() || res.error === 'stopped') break; // người dùng bấm dừng — không phải lỗi
-          // v1.84.0: luồng gốc gặp lỗi lẻ (mạng chập chờn/server ì) thì nghỉ rồi tải tiếp ĐÚNG
-          // cursor, tối đa 8 lần — danh sách chỉ thật sự hết khi server báo hết dữ liệu.
+          /* [v1.92.48] 429 KHÔNG ĐƯỢC ĐI TIẾP NGAY: `fetchPage` đã tự thử lại 3 lần bên trong
+           * (mỗi lần 400 ms), rồi thoát ra đây và bản cũ `continue` sau 2 s với cờ errRetry=1
+           * ⇒ lại in "⏸ … đang tự thử lại…" cho CÙNG MỘT trang. Đó là lý do 62 dòng log cho 62
+           * lần 429 / 134 s. Nay cộng thêm nhịp nghỉ chung của `rl` (dài dần, xem rlNote429). */
           seg0.errRetry = (seg0.errRetry || 0) + 1;
+          consecFail++;
           if (seg0.errRetry === 1) logLine('⏸ Tải bị gián đoạn (' + (res.error || 'lỗi') + ') ở ' + seg0.items.length + ' chat — đang tự thử lại…');
-          if (seg0.errRetry <= 8) { await sleepUntil(Date.now() + 2000); continue; }
-          logLine('⚠ Không tải tiếp được sau 8 lần thử — danh sách CHƯA đầy đủ (' + seg0.items.length + ' chat), bấm tải lại để tiếp tục.');
-          seg0.truncated = true;
-          break;
+          if (seg0.errRetry <= 6 && retryLeft > 0) {
+            retryLeft--;
+            await sleepUntil(Date.now() + (rl.lastWaitMs || 2500));
+            continue;
+          }
+          /* Trang này hỏng thật (hoặc server bóp cả 3 trang liền nhau) ⇒ GHI SỔ rồi đi tiếp.
+           * Chat của trang này KHÔNG bị coi là đã tải (sổ còn đó để quay lại), nên không có
+           * chat nào bị bỏ im lặng. */
+          errorPages.push({ cursor: seg0.cursor, after: seg0.items.length, tries: seg0.errRetry });
+          if (consecFail >= 3) {
+            logLine('⛔ 3 trang LIÊN TIẾP lỗi (' + (res.error || '?') + ') — server đang bóp; dừng tải để không phí request. '
+              + 'Đã giữ ' + seg0.items.length + ' chat; ' + errorPages.length + ' trang vào sổ chờ tải bù.');
+            seg0.truncated = true;
+            break;
+          }
+          /* MỐC CỦA TRANG KẾ: cursor của trang hỏng trỏ tới mốc `before` MÀ TA VỪA LẤY ĐƯỢC
+           * (tức trang kế đã bắt đầu ở đúng mốc đó) ⇒ phải lùi thêm ÍT NHẤT một khoảng bằng độ
+           * trải của một trang, nếu không server trả lại chính trang vừa lỗi. Dùng độ trải đo
+           * được từ các trang trước (`seg0.spanMs`, có sẵn), không đoán mốc tuyệt đối. */
+          const jump = Math.max(1000, Math.round((seg0.spanMs || 60000) * 1.2));
+          const nextCursor = shiftCursorBefore(seg0.cursor, -jump);
+          const skippedHere = { cursor: seg0.cursor, after: seg0.items.length, tries: seg0.errRetry, jumpMs: jump };
+          if (!nextCursor) {
+            errorPages.push(skippedHere);
+            logLine('⚠ Trang lỗi (' + (res.error || '?') + ') và KHÔNG dịch được cursor — dừng để không bỏ sót chat. '
+              + 'Đã giữ ' + seg0.items.length + ' chat.');
+            seg0.truncated = true;
+            break;
+          }
+          errorPages.push(skippedHere);
+          logLine('↷ Bỏ qua trang lỗi thứ ' + errorPages.length + ' (' + (res.error || '?') + '): nhích cursor thêm '
+            + (Math.round(jump / 1000)) + ' s để sang trang kế — cuối lượt quay lại đúng trang này (không quay lại từ đầu).');
+          seg0.errRetry = 0;
+          seg0.cursor = nextCursor;
+          continue;
         }
         seg0.errRetry = 0;
+        consecFail = 0;
+        guard++;                        // [v1.92.48] trần 1500 = số trang ĐÃ LẤY, không tính lần thử
+        rlNoteOk();
         const j = res.data || {};
         const convs = j.conversations || [];
         pushConvs(seg0, convs);
@@ -2202,12 +2309,59 @@
         for (let s = alive; s < Math.min(STRIDES.length, rl.helperBudget); s++) spawnHelper();
       }
       helpersDone = true;
+
+      /* [v1.92.48] TẢI BÙ ĐÚNG NHỮNG TRANG ĐÃ BỎ QUA — không quay lại từ trang 1.
+       * Trước đây một trang hỏng = `truncated` = `scanFullList` tải lại TOÀN BỘ (đốt lại hàng
+       * trăm request + lại 429). Nay mỗi trang hỏng đã được ghi `cursor` vào `errorPages`; cuối
+       * lượt chạy lại chính `loadListViaApi` với cursor đó (một chuỗi next_cursor ⇒ tuần tự,
+       * đúng ràng buộc W200.88: chỉ ⚡ phát `next_cursor`, không dựng cursor giả). Gộp theo id,
+       * nên chat trùng không sinh bản ghi thứ hai. */
+      let refilledPages = 0;
+      if (errorPages.length && !stopped()) {
+        const budgetMs = Math.min(120000, 30000 + errorPages.length * 8000);
+        const refillStart = Date.now();
+        for (let k = 0; k < errorPages.length && !stopped(); k++) {
+          if (Date.now() - refillStart > budgetMs) {
+            logLine('⏱ Hết ngân sách tải bù (' + Math.round(budgetMs / 1000) + ' s) — còn '
+              + (errorPages.length - k) + ' trang chưa bù.');
+            break;
+          }
+          const ep = errorPages[k];
+          try {
+            const part = await loadListViaApi(null, Object.assign({}, opts, { resumeCursor: ep.cursor, maxPages: 40 }));
+            if (part && part.ok && Array.isArray(part.rows) && part.rows.length) {
+              const added = pushConvs(seg0, part.rows.map((r) => r.__raw || r));
+              refilledPages++;
+              stitch();
+              if (onProgress) onProgress(seg0.items.length, seg0.items);
+              logLine('✅ Tải bù trang lỗi thứ ' + (k + 1) + ': +' + added + ' chat (tổng ' + seg0.items.length + ').');
+            } else {
+              logLine('⚠ Tải bù trang lỗi thứ ' + (k + 1) + ' vẫn không được — trang này còn thiếu.');
+            }
+          } catch (e0) { /* trang sau vẫn thử tiếp */ }
+        }
+      }
+      // Chỉ còn CHƯA ĐẦY ĐỦ khi cursor chưa hết, hoặc còn trang lỗi chưa bù xong
+      const refillIncomplete = errorPages.length > refilledPages;
       const rangeDone2 = !!(seg0.cursor && !stopped() && isRangeSatisfied(seg0.set));
       // hết vòng lặp mà cursor vẫn còn (chưa đi tới cuối) = CHƯA đầy đủ (trừ khi dừng chủ đích vì đã chạm đủ vùng chọn)
       if (seg0.cursor && !stopped() && !rangeDone2) seg0.truncated = true;
+      if (refillIncomplete && !stopped()) seg0.truncated = true;
       logLine('⚡⚡ Tải ' + (rangeDone2 ? 'đoạn chọn' : 'đa luồng 1 page') + ': ' + seg0.items.length + ' chat trong ' + ((Date.now() - startedAt) / 1000).toFixed(1) + 's'
         + ' (~' + Math.round(seg0.items.length / Math.max(1, (Date.now() - startedAt) / 1000)) + ' chat/giây)'
         + (rl.hits ? ' · 🧯 dính 429×' + rl.hits + ' (đã tự giảm luồng)' : '')
+        /* [v1.92.48] IN THỜI GIAN THẬT ĐỂ ĐỌC ĐƯỢC NÚT CỔ CHAI: số trang, p50 độ trễ một trang,
+         * và tổng thời gian đã NGỒI CHỜ vì 429. Ba số này tách được "server chậm" khỏi "ta tự
+         * làm chậm bằng cách nghỉ": log 09:19–09:22 có 134,6 s nhưng 62 lần 429 × 2,5 s = 155 s
+         * nghỉ, tức gần như toàn bộ thời gian là nghỉ chứ không phải tải. */
+        + (seg0.rt.length
+          ? ' · ' + seg0.rt.length + ' trang × p50 '
+            + Math.round(seg0.rt.slice().sort((a, b) => a - b)[Math.floor(seg0.rt.length / 2)]) + ' ms/trang'
+          : '')
+        + (rl.waitTotalMs
+          ? ' · đã nghỉ vì 429 tổng ' + (Math.round(rl.waitTotalMs / 100) / 10) + ' s'
+          : '')
+        + (errorPages.length ? ' · trang lỗi ' + errorPages.length + ' (bù được ' + refilledPages + ')' : '')
         + (seg0.truncated ? ' · ⚠ CHƯA ĐẦY ĐỦ' : ''));
       return { ok: true, rows: seg0.items, incomplete: !!seg0.truncated && !stopped(), stopped: stopped(), rangePartial: rangeDone2 };
     }

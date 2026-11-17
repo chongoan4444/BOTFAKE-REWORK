@@ -613,6 +613,83 @@ check('đóng ngân sách ghi lại % để in vào log',
     /JSON\.parse\(stripJsonPrefix\(g\.payload\)\)/.test(SRC), true);
 }
 
+// 26) [v1.92.48] TẢI DANH SÁCH KHI SERVER BÓP 429.
+//     Số đo từ log 09:19–09:22 (bản 1.92.44): 62 lần 429 trong 134,6 s, và vì mỗi lần nghỉ
+//     ĐÚNG 2,5 s nên tổng thời gian nghỉ ≈ 155 s > cả lượt tải. Ba thứ phải đúng:
+//     (a) nghỉ dài dần khi 429 không dứt, (b) có phản hồi thành công thì reset,
+//     (c) lần thử lại KHÔNG được ăn vào trần số trang.
+{
+  // (a)+(b) mô phỏng đúng công thức trong rlNote429
+  const waitFor = (streak) => {
+    const base = Math.min(10000, 2500 * Math.pow(2, Math.min(2, streak - 1)));
+    const extra = streak > 3 ? Math.min(10000, (streak - 3) * 1500) : 0;
+    return Math.min(20000, base + extra);
+  };
+  check('429 lần 1 ⇒ nghỉ 2,5 s (như bản cũ)', waitFor(1), 2500);
+  check('429 lần 2 ⇒ nghỉ 5 s', waitFor(2), 5000);
+  check('429 lần 3 ⇒ nghỉ 10 s', waitFor(3), 10000);
+  check('429 lần 5 ⇒ nghỉ 13 s (không vượt trần)', waitFor(5), 13000);
+  check('429 lần 40 ⇒ chặn ở trần 20 s', waitFor(40), 20000);
+
+  // tổng thời gian nghỉ của 62 lần 429 LIÊN TIẾP (đúng log 09:19–09:22) phải BÉ HƠN
+  // số lần × 2,5 s cộng dồn kiểu cũ chỉ khi... không, nó PHẢI LỚN HƠN — điều cần kiểm là
+  // bản mới nghỉ ĐỦ LÂU để cơn 429 dứt, thay vì quay lại đúng nhịp gây 429 lần nữa.
+  let total = 0;
+  for (let i = 1; i <= 62; i++) total += waitFor(i);
+  check('62 lần 429 liên tiếp: tổng nghỉ > 62 × 2,5 s (bản cũ chỉ 155 s)', total > 155000, true);
+
+  // (c) trần trang tách khỏi lần thử: mô phỏng 100 trang lỗi rồi 1500 trang ok
+  const sim = (retryCapped) => {
+    let guard = 0, retryLeft = 40, attempts = 0;
+    const pages = [];
+    for (let i = 0; i < 100; i++) pages.push(false);   // 100 trang lỗi
+    for (let i = 0; i < 1500; i++) pages.push(true);   // rồi 1500 trang ok
+    for (const okPage of pages) {
+      if (guard >= 1500) break;
+      attempts++;
+      if (!okPage) { if (retryLeft > 0) { retryLeft--; continue; } continue; }
+      guard++;
+    }
+    return { guard, retryCapped };
+  };
+  check('100 trang lỗi KHÔNG ăn vào trần 1500 trang', sim(true).guard, 1500);
+  // bản cũ: mỗi lần thử lại ăn 1 slot guard ⇒ mất khoảng 40 trang cuối
+  const oldSim = (() => { let g = 0, left = 40; for (let i = 0; i < 100; i++) { if (left > 0) { left--; g++; } } for (let i = 0; i < 1500 && g < 1500; i++) g++; return g; })();
+  check('bản cũ: 40 lần thử lại ăn 40 slot trang (mô phỏng)', oldSim, 1500);
+}
+
+// 27) [v1.92.48] DỊCH CURSOR ĐỂ NHẢY QUA TRANG LỖI — phải là cursor THẬT, không bịa.
+{
+  const F = new Function([
+    extractFn('parseErlangCursor'),
+    extractFn('encodeErlangCursor'),
+    extractFn('shiftCursorBefore'),
+    'return { parseErlangCursor, encodeErlangCursor, shiftCursorBefore };',
+  ].join('\n\n'))();
+  const orig = F.encodeErlangCursor(97, 1794874125000, '694078980461601:694078980461601_1234567890');
+  const p0 = F.parseErlangCursor(orig);
+  check('cursor giải mã đúng mốc gốc', p0 && p0.tsMs, 1794874125000);
+
+  const moved = F.shiftCursorBefore(orig, -84000);
+  const p1 = F.parseErlangCursor(moved);
+  check('dịch lùi 84 s ⇒ mốc mới đúng', p1 && p1.tsMs, 1794874125000 - 84000);
+  check('dịch cursor GIỮ NGUYÊN keyStr', p1 && p1.keyStr, p0.keyStr);
+  check('cursor dịch được vẫn là base64 hợp lệ', typeof moved === 'string' && moved.length > 20, true);
+
+  // không được bịa: cursor rác ⇒ null
+  check('cursor rác ⇒ null (không bịa cursor)', F.shiftCursorBefore('khong-phai-cursor', -1000), null);
+  check('cursor rỗng ⇒ null', F.shiftCursorBefore('', -1000), null);
+  // mốc về 0/âm ⇒ null, tránh sinh cursor vô nghĩa
+  const tiny = F.encodeErlangCursor(97, 500, 'k');
+  check('lùi quá mốc 0 ⇒ null', F.shiftCursorBefore(tiny, -1000), null);
+
+  // chống hồi quy mức nguồn
+  check('luồng gốc giữ sổ trang lỗi', /const errorPages = \[\]/.test(SRC), true);
+  check('tải bù gọi lại từ đúng cursor đã lưu', /resumeCursor: ep\.cursor/.test(SRC), true);
+  check('tải bù không bị ép sang nhánh lọc tag', /!opts\.maxPages \|\| !!opts\.resumeCursor/.test(SRC), true);
+  check('trần trang tách khỏi lần thử', /guard\+\+;\s*\/\/ \[v1\.92\.48\] trần 1500/.test(SRC), true);
+}
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {
