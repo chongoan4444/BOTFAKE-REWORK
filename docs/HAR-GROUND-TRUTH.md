@@ -4615,3 +4615,67 @@ trần **250 khung/s/page**.
 **Kết luận:** cần **chia tải qua ≥2 page**, KHÔNG phải nới làn. Với 2 page, tỉ lệ thành công kỳ vọng
 ≈ 75–80 % thay vì 56,5 % ⇒ **+1 500–1 800 tin/lô**. Đây là **suy luận có số** (cả 2 lô đều 1 page
 nên chưa có bằng chứng nhân quả) ⇒ kiểm bằng cách chạy đúng lô đó với 2 page. **Không sửa code.**
+
+---
+
+## §90 — LÔ 12 410 CHAT (14:03, 1.92.54): 3 SỐ ĐOAN + 1 KẾT LUẬN CỦA TÔI SAI
+
+Nguồn: `botfake-log-20261117-140300.txt`. Bản 1.92.54-W200.100, **không ảnh**, 25 wave.
+
+### 90.0 Kết quả
+✅ **8 650 (69,7 %)** · ❌ 2 292 · ⚠ 1 468 · PHÁT **51,0/s** · giữ slot **2 671 ms** · cổng TB/max **7 889 / 25 013 ms**.
+So lô 13:31 (6 920 chat): thành công **3 908 → 8 650 (+121 %)** nhưng tốc độ **147 → 51,0/s**.
+
+### 90.1 TÔI ĐÃ SAI: "chia tải qua ≥2 page" — BÁC BỎ BẰNG CHÍNH LÔ NÀY
+Lô này **vẫn `[256×1]` = 1 page** như `SOCKET_MIN_PACE_MS = 4` cho phép 250/s/page và PHÁT 51/s
+(vẫn dưới trần), nhưng thành công **8 650** so với 3 908. ⇒ Tỉ lệ từ chối 39–43 % ở 2 lô trước
+**không do 1 page**, mà do **chất lượng danh sách chat** (lô này `khách không nhận 2 283`).
+**Kết luận "cần 2 page" ở §89.7 là SAI — rút lại.** Bài học: suy luận từ 1 biến không kiểm được
+là đoán, dù có số đi kèm.
+
+### 90.2 BẰNG CHỨNG 1: HẠN CHỜ ACK BỊ KẸP DƯỚI p90 THẬT
+| | lô 13:31 | **lô 14:03** |
+|---|---|---|
+| ACK p90/p95 | 1 808 / 1 913 | **6 773 / 7 321** |
+| ACK TB | 1 379 | **4 136** |
+| `hết hạn chờ` | 1 | **1 246** |
+
+`buckets 2-5s: 5 247 · ≥5s: 3 772` ⇒ **9 019/12 357 = 73 % ACK đến sau 2 s**.
+`ACK_HOLD_CEIL_MS = 6000` (dòng 6131) **< p90 6 773** ⇒ cắt ACK thật ⇒ `hết hạn chờ 1 246`
+≈ `⚠ 1 468`. `retry lần 0` ⇒ không cứu được ca nào.
+**Chưa sửa**: đây là MẪU SỐ CỦA TỐC ĐỘ (lane ÷ hạn chờ). Nới trần ⇒ giữ slot lâu hơn ⇒ chậm hơn.
+Phải chọn có ý thức, chưa đo được cả 2 chiều.
+
+### 90.3 BẰNG CHỨNG 2: CỔNG GIỮ 25 013 ms KHI KHÔNG CÒN WORKER
+Wave 24: `qua cổng 500/500 sau 25 013ms; main đang bay 0`.
+Khi `inFlightMainCount = 0` thì **không ai xếp hàng chờ slot** ⇒ cả 3 số cứng/mềm/tiến độ bằng 0
+mà cổng vẫn giữ. Lý do thật: `waveDoneCount < waveSlice.length` ⇒ cổng chờ **ĐẾM XONG**, và cái
+đếm bị **51 ca còn treo trong sổ chờ xác nhận** giữ lại. 8 wave cuối ≈ 60 s / 243 s (25 %).
+
+### 90.4 BẰNG CHỨNG 3: `Ext dò 10 (đỉnh 0)` LÀ SỐ ĐO HỎNG
+Làn giảm **20 → 14 → 10** (co ×0,7 hai lần) mà đỉnh in **0** ⇒ bất khả. Gốc: `gidExtPeak` chỉ
+được gán trong nhánh **NỚI**, mà nhánh đó **chưa chạy lần nào**.
+⇒ **Vá "đường hồi làn dò" của 1.92.52/54 chưa từng có tác dụng.** Con số 10 là do CO, không do nới.
+(Tồn đọng chỉ **9** ca `lần dò chưa ra` < ngưỡng 12 ⇒ đúng là không được nới. Logic khớp.)
+Không lặp lại lỗi §89.4 (nhận công cho thứ chưa chạy).
+
+### 90.5 BẰNG CHỨNG 4: `Socket bị né (ACK chết) 3 952` GỌI SAI TÊN
+`hết hạn chờ 1 246` · `im lặng THẬT 0`. Cơ chế tuyên bố "ACK chết" đòi **5 lần im lặng THẬT
+liên tiếp** (dòng ~6583) ⇒ **không chạy**. Thủ phạm là `st.lost >= 2` (dòng 6308) — tức
+**"đã 2 lần chứng minh hội thoại KHÔNG có tin sau khi bắn Socket"** (dòng 9851).
+Đây là cơ chế **chống mất tin**, bị dán nhãn "ACK chết" ⇒ đọc log sẽ hiểu sai hoàn toàn.
+
+### 90.6 ĐÃ SỬA Ở 1.92.55 (chỉ số đo + nhãn, KHÔNG đổi nhánh gửi nào)
+1. `gidExtPeak` ghi ở **mọi** chỗ đổi làn (co ×0,7 · nới AIMD +2 · nới theo tồn đọng) ⇒
+   lần sau đỉnh **không thể nhỏ hơn** làn đang chạy.
+2. Cổng: thêm `chờ việc xong: N lượt (không còn worker X · treo chờ xác nhận đỉnh Y)`.
+   Đo nằm **sau khối chặn, trước nhánh mở** ⇒ không đổi nhánh nào.
+3. `Socket bị né (mất tin N · ACK chết M)` — tách 2 luật khác nhau, chỉ đổi **nhãn**.
+
+### 90.7 LÔ SAU PHẢI TRẢ LỜI
+| số | kỳ vọng | nếu sai |
+|---|---|---|
+| `Ext dò (đỉnh N)` | **N ≥ làn đang chạy** | số đo lại hỏng |
+| `chờ việc xong: … không còn worker X` | **X > 0** ⇒ xác nhận 90.3 | X = 0 ⇒ giả thuyết 90.3 sai |
+| `treo chờ xác nhận đỉnh Y` | Y ≈ số ca bị 90.3 | Y = 0 ⇒ cổng giữ vì lý do khác |
+| `Socket bị né (mất tin … · ACK chết …)` | ACK chết ≈ 0 | ACK chết lớn ⇒ phải xem lại |

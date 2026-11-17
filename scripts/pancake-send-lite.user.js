@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.54-w200.100
+// @version      1.92.55-w200.101
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.54-W200.100'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.55-W200.101'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6315,7 +6315,13 @@
   // TỔNG 2 539 chat bị né khỏi làn Socket (≈508 chat/lần) và dồn sang Ext chậm hơn 4 lần.
   // Nay: dò ngay khi số chat bị né kể từ lần dò trước chạm 50 — hư hại tối đa ~50 chat/lần,
   // không phụ thuộc đồng hồ.
-  const socketPickDiag = { deadSkip: 0, deadSkipAtProbe: 0, probe: 0, probeOk: 0, notReady: 0, noGid: 0 };
+  /* [v1.92.55] `deadSkip` GỘP HAI LÝ DO KHÁC HẲN NHAU — lô 14:03 in "Socket bị né (ACK chết) 3 952"
+   * trong khi `hết hạn chờ 1 246` và `im lặng THẬT 0`. Cơ chế tuyên bố "ACK chết" đòi 5 lần im
+   * lặng THẬT liên tiếp (dòng ~6583) ⇒ nhánh đó KHÔNG chạy. Thủ phạm là `st.lost >= 2`
+   * ("đã 2 lần chứng minh hội thoại KHÔNG có tin sau khi bắn Socket") ⇒ nhãn log đang gọi sai
+   * tên một cơ chế chống mất tin thành "ACK chết". Nay đếm riêng 2 lý do, chỉ đổi NHÃN. */
+  const socketPickDiag = { deadSkip: 0, deadSkipAtProbe: 0, probe: 0, probeOk: 0, notReady: 0, noGid: 0,
+    skipLost: 0, skipAckDead: 0 };
   function isPageAckDead(pid) {
     const at = pageAckDeadAt[pid];
     if (!at) return false;
@@ -6765,7 +6771,13 @@
          * Không đổi trần, không đổi sàn, không đổi điều kiện co. */
         if (gidExtCtl.bad >= 3) {
           gidExtCtl.bad = 0;
+          /* [v1.92.55] `gidExtPeak` PHẢI GHI Ở MỌI CHỖ ĐỔI LÀN, không chỉ nhánh tăng.
+           * Lô 14:03 in `Ext dò 10 (đỉnh 0)` — đỉnh 0 mà làn đang 10 là BẤT KHẢ ⇒ số đo hỏng
+           * (chỉ gán trong nhánh nới 1.92.52/54, mà nhánh đó chưa chạy lần nào). Sai số đo thì
+           * mọi kết luận  từ nó đều vô giá trị ⇒ sửa để lần sau đọc được THẬT.
+           * Chú ý: đỉnh ở đây là đỉnh của bước CO (giảm) — vẫn phải ghi để không in số ảo. */
           gidExtLane.setLimit(gidExtLane.getLimit() * 0.7);
+          try { gidExtPeak = Math.max(gidExtPeak, gidExtLane.getLimit()); } catch (ePk0) { /* ignore */ }
           gidExtCtl.cooldowns = (gidExtCtl.cooldowns || 0) + 1;
         }
         try {
@@ -6804,6 +6816,7 @@
         if (gidExtCtl.good >= 10) {
           gidExtCtl.good = 0;
           gidExtLane.setLimit(gidExtLane.getLimit() + 2);
+          try { gidExtPeak = Math.max(gidExtPeak, gidExtLane.getLimit()); } catch (ePk1) { /* ignore */ }
         }
       } else {
         gidExtCtl.good = Math.max(0, gidExtCtl.good - 2);
@@ -7185,6 +7198,12 @@
         }
       }
       socketPickDiag.deadSkip++;
+      /* [v1.92.55] TÁCH LÝ DO — `pageSocketUsable` trả false vì 1 trong 2 luật khác nhau. */
+      try {
+        const _st = sockRoute[String(pageId || '')];
+        if (_st && _st.lost >= 2) socketPickDiag.skipLost++;
+        else socketPickDiag.skipAckDead++;
+      } catch (eSk) { /* ignore */ }
       const noSock = seq.filter((x) => x !== 'socket');
       if (noSock.length) return noSock;
     }
@@ -8257,6 +8276,16 @@
      * Ba số dưới đây tách đúng 3 mức đó. Chỉ ĐẾM, không đổi một nhánh mở cổng nào.
      * (1 180 ms ≈ 2 nhịp kiểm 60 ms; 174 = floor(192 × 0,92) − 2; 161 = floor(192 × 0,85) − 2.) */
     gateBlockHard: 0, gateBlockSoft: 0, gateBlockProgress: 0,
+    /* [v1.92.55] ĐO CẢ NHÁNH "CHỜ VIỆC XONG" — LÔ 14:03 KHÔNG GIẢI THÍCH ĐƯỢC BẰNG 3 SỐ CŨ.
+     * Wave 24 giữ cổng **25 013 ms** với `main đang bay 0`: không có worker nào đang chạy, tức
+     * cũng không thể có ai đang xếp hàng chờ slot ⇒ cả 3 số cũ (cứng/mềm/tiến độ) đều bằng 0 dù
+     * cổng bị giữ 25 s. Lý do thật: `waveDoneCount < waveSlice.length` mà chưa đạt nhánh mở nào
+     * ⇒ cổng chờ ĐẾM XONG, và cái đếm đó bị 51 ca treo trong sổ chờ xác nhận giữ lại.
+     * Nay đếm thêm 2 nhóm để lần sau đọc được bằng số, KHÔNG đổi nhánh mở nào:
+     *   gateWaitDone   = số lượt kiểm mà cổng bị giữ CHỈ vì chưa xong việc (không backpressure)
+     *   gateBgPendingMax = đỉnh số ca còn treo trong sổ chờ xác nhận lúc cổng đang giữ
+     *   gateNoWorkerSeen = số lượt kiểm thấy `main đang bay 0` mà cổng vẫn giữ */
+    gateWaitDone: 0, gateBgPendingMax: 0, gateNoWorkerSeen: 0,
     /* [v1.92.52] ĐO "CHỜ SLOT ĐÃ NHƯỜNG" — giả thuyết về wave 15 giữ 106 s.
      * `acquireMainSlot()` ở dòng ~11255 gọi `runMainItem()` gần như TỨC THÌ sau `await` (không có
      * I/O ở giữa), nên khi một slot vừa nhả, worker nhận lại slot TRƯỚC KHI `bgClock.every(60)`
@@ -8468,6 +8497,10 @@
   // (fetch treo, ACK mất, bù văng lỗi…) → tự chốt ⚠ để pending về 0: TỔNG HỢP luôn kết thúc,
   // nút Chạy/Dừng luôn nhả. KHÔNG gửi lại (tránh trùng); ACK thật về sau markDelivered tự sửa số.
   const pendingBg = {}; // convId → { at, name, via }
+  /* [v1.92.55] đếm số ca ĐANG TREO trong sổ chờ xác nhận — dùng cho số đo cổng (xem waveDiag).
+   * Lô 14:03: wave 24 giữ cổng 25 013 ms với `main đang bay 0` và còn 51 ca treo ⇒ giả thuyết
+   * "cổng chờ ĐẾM XONG bị chính sổ chờ giữ lại" chỉ kiểm được khi có con số này. */
+  function pendingBgCount() { try { return Object.keys(pendingBg).length; } catch (e) { return 0; } }
   // Sổ kiểm chứng sau khi Socket mất ACK (khai báo sớm tại đây để getBatchSummaryCounts
   // tính được số ca đang chờ kiểm chứng vào "pending" — lượt không kết thúc, nút Gửi không
   // nhả cho tới khi kiểm chứng chốt, tránh người dùng bấm lượt mới làm hủy đường bắn cứu).
@@ -8903,7 +8936,13 @@
            * mở được) · tiến độ = slot còn dư nhưng chưa đủ 25 % item xong. */
           + ' · chi tiết giữ cổng: cứng ' + waveDiag.gateBlockHard + ' · mềm ' + waveDiag.gateBlockSoft
           + ' · tiến độ ' + waveDiag.gateBlockProgress
-          + ' · slot thoát ≤75% cap: ' + waveDiag.gateIdleSeen + ' lần (thấp nhất ' + waveDiag.gateIdleMax + ')');
+          + ' · slot thoát ≤75% cap: ' + waveDiag.gateIdleSeen + ' lần (thấp nhất ' + waveDiag.gateIdleMax + ')'
+          /* [v1.92.55] NHÁNH "CHỜ VIỆC XONG" — lô 14:03 giữ cổng 25 013 ms với `main đang bay 0`
+           * mà cả 3 số cứng/mềm/tiến độ đều 0 ⇒ thiếu đúng số này. `không còn worker` phải > 0
+           * mới chứng minh được "cổng chờ ĐẾM XONG bị sổ chờ xác nhận giữ lại". */
+          + ' · chờ việc xong: ' + waveDiag.gateWaitDone + ' lượt'
+          + ' (không còn worker ' + waveDiag.gateNoWorkerSeen + ' lượt · treo chờ xác nhận đỉnh '
+          + waveDiag.gateBgPendingMax + ')');
         logLine('📡 SOCKET: ACK OK/rejected/no-ACK ' + sendDiag.socketAckOk + '/' + sendDiag.socketAckRejected + '/' + sendDiag.socketNoAck
           + ' · ACK TB/max ' + socketAckAvgMs + '/' + sendDiag.socketAckMsMax + 'ms'
           + ' · buckets <250/250-999/1-2s/2-5s/≥5s '
@@ -8953,7 +8992,8 @@
            + ' · chờ dò ngắn (server nói không có gid) ' + (gidStats.shortNoGidWait || 0) + ' ca'
            + ' · chọn kênh: Ext-trước(socket chưa sync) ' + socketPickDiag.notReady
            + ' / thiếu gid ' + socketPickDiag.noGid
-           + ' / Socket bị né (ACK chết) ' + socketPickDiag.deadSkip
+           + ' / Socket bị né (mất tin ' + socketPickDiag.skipLost
+             + ' · ACK chết ' + socketPickDiag.skipAckDead + ') ' + socketPickDiag.deadSkip
            + ' · dò lại ACK chết ' + socketPickDiag.probe + ' (hồi ' + socketPickDiag.probeOk + ')'
           + ' · lane HTTP ' + ctxFetchLane.getLimit()
           + ' / Ext dò ' + gidExtLane.getLimit()
@@ -11455,6 +11495,14 @@
               else if (extBacklog > GATE_EXT_BACKLOG_LIMIT) waveDiag.gateBlockExt++;
               else waveDiag.gateBlockApi++;
               return;
+            }
+            /* [v1.92.55] CHỈ ĐO — nằm sau mọi nhánh chặn, trước các nhánh MỞ.
+             * Lô 14:03: wave 24 giữ 25 013 ms với `main đang bay 0` ⇒ phải có số cho đúng nhánh này. */
+            if (!gateOpened) {
+              waveDiag.gateWaitDone++;
+              if (inFlightMainCount <= 0) waveDiag.gateNoWorkerSeen++;
+              const _bgN = (typeof pendingBgCount === 'function') ? pendingBgCount() : 0;
+              if (_bgN > waveDiag.gateBgPendingMax) waveDiag.gateBgPendingMax = _bgN;
             }
             if (waveDoneCount >= waveSlice.length) { openGate(); return; }
             if (waveDoneCount >= fastGateTarget && inFlightMainCount <= fastActiveLimit) { openGate(); return; }

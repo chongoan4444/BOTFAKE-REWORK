@@ -958,6 +958,45 @@ check('"chuẩn bị ctx" trừ bind ra để không đếm 2 lần',
 check('có in "dò gid" trong dòng GIỮ SLOT',
   /' · dò gid ' \+ \(waveDiag\.prepGidN/.test(SRC), true);
 
+/* ------------- [v1.92.55] SỬA NHỮNG GÌ ĐÃ CÓ BẰNG CHỨNG TỪ LÔ 12 410 CHAT ------------- */
+
+/* (16) `đỉnh 0` KHI LÀN ĐANG 10 LÀ BẤT KHẢ ⇒ gidExtPeak phải ghi ở MỌI chỗ đổi làn.
+ * Lô 14:03 in `Ext dò 10 (đỉnh 0)`: làn giảm 20→14→10 (do co ×0,7 hai lần) mà đỉnh vẫn 0
+ * vì trước bản này chỉ gán trong nhánh NỚI (chưa từng chạy). */
+check('[v1.92.55] gidExtPeak ghi cả ở nhánh CO ×0,7 (nếu không sẽ in đỉnh ảo = 0)',
+  /gidExtLane\.setLimit\(gidExtLane\.getLimit\(\) \* 0\.7\);\s*\n\s*try \{ gidExtPeak = Math\.max/.test(SRC), true);
+check('[v1.92.55] gidExtPeak ghi cả ở nhánh nới AIMD thường (+2/10 lần)',
+  /setLimit\(gidExtLane\.getLimit\(\) \+ 2\);\s*\n\s*try \{ gidExtPeak = Math\.max/.test(SRC), true);
+check('[v1.92.55] đỉnh in ra KHÔNG thể nhỏ hơn làn đang chạy (kiểm bằng công thức gán)',
+  (SRC.match(/gidExtPeak = Math\.max\(gidExtPeak, gidExtLane\.getLimit\(\)\)/g) || []).length >= 3, true);
+
+/* (17) NHÁNH "CHỜ VIỆC XONG" CỦA CỔNG PHẢI CÓ SỐ.
+ * Lô 14:03: wave 24 giữ cổng 25 013 ms với `main đang bay 0`; cứng/mềm/tiến độ đều 0
+ * ⇒ 3 số cũ KHÔNG giải thích được. Khi không còn worker thì cũng không ai xếp hàng chờ slot. */
+check('[v1.92.55] đếm số lượt cổng bị giữ chỉ vì chưa xong việc (gateWaitDone)',
+  /waveDiag\.gateWaitDone\+\+;/.test(SRC), true);
+check('[v1.92.55] đếm số lượt thấy `main đang bay 0` mà cổng vẫn giữ (gateNoWorkerSeen)',
+  /if \(inFlightMainCount <= 0\) waveDiag\.gateNoWorkerSeen\+\+;/.test(SRC), true);
+check('[v1.92.55] đo đỉnh số ca treo trong sổ chờ xác nhận (gateBgPendingMax)',
+  /gateBgPendingMax = _bgN/.test(SRC) && /function pendingBgCount\(\)/.test(SRC), true);
+check('[v1.92.55] in "chờ việc xong" ra dòng WAVE',
+  /' · chờ việc xong: ' \+ waveDiag\.gateWaitDone/.test(SRC), true);
+check('[v1.92.55] số đo cổng nằm SAU khối chặn, TRƯỚC nhánh mở (không đổi nhánh mở nào)',
+  SRC.indexOf('gateWaitDone++') > SRC.indexOf('waveDiag.gateBlockApi++')
+  && SRC.indexOf('gateWaitDone++') < SRC.indexOf('if (waveDoneCount >= waveSlice.length) { openGate(); return; }'), true);
+
+/* (18) "Socket bị né (ACK chết)" GỌI SAI TÊN CƠ CHẾ.
+ * Lô 14:03: né 3 952 nhưng `hết hạn chờ 1 246` và `im lặng THẬT 0`. Cơ chế ACK-chết đòi 5 lần
+ * im lặng thật liên tiếp ⇒ không chạy. Thủ phạm là `st.lost >= 2` (chứng minh MẤT TIN). */
+check('[v1.92.55] tách Socket bị né thành 2 lý do (mất tin · ACK chết)',
+  /skipLost: 0, skipAckDead: 0 \}/.test(SRC), true);
+check('[v1.92.55] đếm đúng luật: lost >= 2 ⇒ "mất tin", còn lại ⇒ "ACK chết"',
+  /if \(_st && _st\.lost >= 2\) socketPickDiag\.skipLost\+\+;\s*\n\s*else socketPickDiag\.skipAckDead\+\+;/.test(SRC), true);
+check('[v1.92.55] nhãn log KHÔNG còn gọi tất cả là "ACK chết"',
+  /' \/ Socket bị né \(ACK chết\) '/.test(SRC), false);
+check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
+  /Socket bị né \(mất tin ' \+ socketPickDiag\.skipLost/.test(SRC), true);
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {
