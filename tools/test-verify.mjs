@@ -699,6 +699,83 @@ check('đóng ngân sách ghi lại % để in vào log',
     /JSON\.parse\(stripJsonPrefix\(g\.payload\)\)/.test(SRC), true);
 }
 
+
+/* ------------------ [v1.92.49] HAI BẪY ĐÃ SẬP THẬT — KHOÁ LẠI BẰNG TEST ------------------
+ * Cả hai đều lộ ra từ SỐ trong log chứ không phải từ suy luận, nên test phải bám đúng số đó.
+ */
+
+/* (1) NGÂN SÁCH DÒ EXT PHẢI ĐÓNG SAU 200 CA THỬ MÀ CỨU 0.
+ * Sổ 11:05 (6 920 chat) in "thử 2 768 · cứu 0" mà KHÔNG có chữ "ĐÓNG" ⇒ cầu dao 200 chưa
+ * từng đóng. Test dựng lại đúng bộ ba nhánh ghi nhận và xác nhận nó đóng ở ca thứ 200. */
+const extBudgetConsts = "const extTry1545 = { tried: 0, saved: 0, closed: false, PROBE: 200, streak: 0, STREAK_MAX: 30, unknown: 0 };";
+/* Mỗi khối dùng MỘT bản sao sạch (sổ là state thật, không được dùng chung giữa các ca). */
+const newExtBudget = () => new Function([
+  extBudgetConsts,
+  "const logLine = () => {};",
+  extractFn('noteExt1545Fail'),
+  extractFn('noteExt1545Outcome'),
+  'return { extTry1545, noteExt1545Fail, noteExt1545Outcome };',
+].join('\n\n'))();
+{
+  // Ngưỡng thật là STREAK_MAX = 30 ca LIÊN TIẾP, nên phải đóng từ rất lâu trước 200.
+  // Log 11:05 in "thử 2 768 · cứu 0" mà vẫn MỞ ⇒ chứng tỏ hàm ghi nhận CHƯA TỪNG được gọi.
+  const { extTry1545, noteExt1545Outcome } = newExtBudget();
+  for (let i = 0; i < 29; i++) noteExt1545Outcome('blocked');
+  check('29 ca Ext bị chặn liên tiếp ⇒ còn mở (chưa tới ngưỡng 30)', extTry1545.closed, false);
+  noteExt1545Outcome('blocked');
+  check('ca thứ 30 liên tiếp ⇒ ĐÓNG ngân sách (đúng cái log 11:05 thiếu)', extTry1545.closed, true);
+}
+{
+  // ca "quá hạn / không rõ" KHÔNG được đóng sổ: chưa có bằng chứng Ext bị chặn
+  const { extTry1545, noteExt1545Outcome } = newExtBudget();
+  for (let i = 0; i < 500; i++) noteExt1545Outcome('unknown');
+  check('500 ca Ext QUÁ HẠN (chưa rõ) ⇒ KHÔNG đóng sổ (không phải bằng chứng)', extTry1545.closed, false);
+  check('nhưng phải ĐẾM riêng để bảng TỔNG HỢP nói được "chưa có kết quả"', extTry1545.unknown, 500);
+}
+{
+  // cứu được 1 ca ⇒ streak về 0, không đóng oan
+  const { extTry1545, noteExt1545Outcome } = newExtBudget();
+  for (let i = 0; i < 30; i++) noteExt1545Outcome('blocked');
+  check('30 ca liên tiếp bị chặn ⇒ đóng', extTry1545.closed, true);
+  noteExt1545Outcome('saved');
+  check('Ext cứu được 1 ca ⇒ đếm saved', extTry1545.saved, 1);
+  check('Ext cứu được ⇒ streak về 0 (không đóng oan)', extTry1545.streak, 0);
+}
+// chống hồi quy ở mức NGUỒN: reset mỗi lượt + cả 3 nhánh bù đều phải gọi hàm ghi nhận
+check('ngân sách dò Ext được RESET đầu mỗi lượt (log 11:10 in số tích luỹ 2 768)',
+  /extTry1545\.tried = 0; extTry1545\.saved = 0; extTry1545\.streak = 0;/.test(SRC), true);
+check('nhánh Ext quá hạn ghi nhận là "unknown", không phải "blocked"',
+  /noteExt1545Outcome\('unknown'\)/.test(SRC), true);
+check('nhánh Ext bị chặn ghi nhận là "blocked"',
+  /noteExt1545Outcome\('blocked'\)/.test(SRC), true);
+
+/* (2) PHÂN XỬ ACK MUỘN CHỈ ĐƯỢC CHẠY KHI THẬT SỰ QUÁ HẠN CHỜ.
+ * Sổ 11:05 in "ACK về MUỘN đã phân xử 6 785" trong khi 📡 in "OK/rejected 3 909/2 876" —
+ * 3 909 + 2 876 = 6 785 ⇒ đúng bằng số ACK ĐẾN ĐÚNG HẠN, tức mỗi tin bị đếm 2 lần.
+ * Test khoá cả 3 mắt xích: cờ, chỗ bật cờ, và điều kiện giao gói cho đường muộn. */
+check('có cờ ackTimedOut để phân biệt "về muộn" với "về đúng hạn"',
+  /let ackTimedOut = false;/.test(SRC), true);
+check('cờ ackTimedOut chỉ bật khi timer hết hạn chờ giữ slot nổ',
+  /ackTimedOut = true; \/\/ \[v1\.92\.49\]/.test(SRC), true);
+check('gói về ĐÚNG HẠN KHÔNG được giao cho đường phân xử muộn (nguồn của số 6 785)',
+  /if \(lateRef && ackTimedOut && !mySilent\) lateRef\.resolve\(resp\);/.test(SRC), true);
+check('nhánh "muộn mà không có payload" được đếm riêng, không im lặng',
+  /sockLateNoack = \(sendDiag\.sockLateNoack \|\| 0\) \+ 1/.test(SRC), true);
+
+/* (3) TRẦN LÀN SOCKET KHÔNG ĐƯỢC VƯỢT 256.
+ * Số đo 2 lô cùng máy: làn 256 ⇒ 44,0 lệnh/s · 312–320 ⇒ 37,7 · 384 ⇒ 33,6 (tương quan ÂM).
+ * Lô 11:05 nới 256→384 lúc 11:05:37 rồi không hạ lại dù p95 lên 2 618 ms. */
+check('trần làn Socket/page = 256 (không leo lại 384)',
+  /const SOCKET_LANE_MAX = 256;/.test(SRC), true);
+check('sàn làn chạy vẫn = 96 (giữ nguyên quyết định 1.92.48)',
+  /const SOCKET_LANE_RUNTIME_FLOOR = 96;/.test(SRC), true);
+
+/* (4) ĐO KHÂU BIND fbId — trước đây KHÔNG có số nào nên mọi kết luận về tốc độ là suy đoán. */
+check('có bộ đo riêng cho khâu upload/bind ảnh',
+  /const photoUpStats = \{ n: 0, ms: 0, max: 0, fail: 0 \};/.test(SRC), true);
+check('số đo bind ảnh được in trong dòng ⏱ GIỮ SLOT',
+  /📷 bind fbId: ' \+ photoUpStats\.n/.test(SRC), true);
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {

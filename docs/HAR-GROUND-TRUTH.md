@@ -4100,3 +4100,96 @@ tiếp) N · im lặng THẬT hết cửa sổ M · ACK về MUỘN đã phân x
 3. Kênh **chết thật** thì cứu Ext vẫn chạy như cũ, chỉ muộn hơn ~12 s.
 4. Đường KHÔNG bắn-nhả (ảnh bù / lượt bù) chỉ **ghi nhận** ACK muộn (`sockLateUnapplied`) — không
    phân xử lại, vì quyết định đã trả về cho người gọi; nếu lô sau thấy số này lớn thì xem lại riêng.
+
+---
+
+## §84 — Lô 6 920 chat (11:05–11:09, bản 1.92.48-W200.94): số đo, ba bẫy, và bốn chỗ vá
+
+Nguồn: log do người dùng dán trong hội thoại (không phải HAR). Mọi con số dưới đây **trích từ log**;
+chỗ nào là đọc code thì ghi rõ "code", chỗ nào là suy luận thì ghi "suy luận".
+
+### 84.1 Số đo của lô
+
+| chỉ số | số trong log | đối chiếu |
+|---|---|---|
+| phát lệnh | 6 920 / 229 s = **30,22/s** | mục tiêu pha giữa ≥ 40/s ⇒ **chưa đạt** |
+| ✅ | 3 915 = 56,6 % (16,83/s) | Socket 3 909 · API 6 · Ext 0 |
+| ❌ / ⚠ | 2 780 / 225 | 225 = đúng số "CẦN GỬI TAY" |
+| `ACK OK/rejected/no-ACK` | **3 909 / 2 876 / 0** | rejected = 41,7 % lưu lượng |
+| ACK`TB/max` | 1 710 / 3 819 ms | p90/p95 = 2 399 / 2 618 |
+| cổng wave `TB/max` | **7 629 / 12 017 ms** | 14 wave, 9 wave > 7 s |
+| `giữ cổng` | 11 369 (toàn bộ là *bay*) | ⇒ cổng chỉ bị giữ vì 192 slot main đầy |
+| làn Socket/page cuối | **[384×1]** | nới 256→384 lúc 11:05:37 (16 nấc) |
+| nền | bóp 632 · trễ 5 930 lần · +7 236,9 s | đuôi thật chỉ ~3,7 s |
+
+**Kết luận tốc độ (số, không suy đoán):** 192 slot ÷ 30,22 lệnh/s = **6,35 s giữ slot mỗi chat**.
+Dòng ⏱ bóc 6,35 s đó thành: `GIỮ SLOT TB chờ 674 ms` + `chuẩn bị 0 ms` + `còn lại 3 406 ms`.
+Vì `inFlightMainCount` luôn > 92 % cap ⇒ **trần là 192 slot, và mỗi slot bị giữ 6,35 s**.
+
+### 84.2 Bẫy 1 — "ACK về MUỘN đã phân xử 6 785" là số ĐẾM HAI LẦN
+
+Log: `ACK OK/rejected/no-ACK 3 909/2 876/0` và `ACK về MUỘN đã phân xử 6 785 (✅ 0 · FB từ chối 0)`.
+
+**3 909 + 2 876 = 6 785** — đúng bằng số ACK **đến đúng hạn**. Nguyên nhân (code, `socketPublishSend`):
+`lateP` nhận **mọi** gói `/ls_resp` qua wrapper `myEntry.callback`; điều kiện chống chạy lại
+(`lateAckClosed`) lại nằm **bên trong** `onLateAck`, không nằm ở chỗ resolve. ⇒ Mỗi tin có ACK đúng
+hạn vẫn chạy `classify(g, true)` lần 2 và tăng `sockLateAck`.
+
+Hệ quả: **dòng 🔔 không dùng được để nghiệm thu**. Bằng chứng "không mất ACK" của lô này là
+`hết hạn chờ (còn nghe tiếp) 0` · `im lặng THẬT 0` · `no-ACK 0` — cả ba đều đạt.
+
+**Vá (1.92.49):** thêm cờ `ackTimedOut`, chỉ bật khi timer `ackWaitMs` nổ; `lateRef.resolve()` chỉ
+được gọi khi `ackTimedOut`. Thêm bộ đếm `sockLateNoack` cho nhánh "muộn mà không payload"
+(trước đây im lặng, nên `lỗi xử lý muộn 0` là 0 giả).
+
+### 84.3 Bẫy 2 — ngân sách dò Ext không bao giờ đóng, và **không reset mỗi lượt**
+
+Log: `🛟 Dò Ext cho ca FB từ chối: thử 2 768 · cứu 0` — **thiếu chữ "ĐÓNG"**.
+`extTry1545` có `PROBE 200` + `STREAK_MAX 30` (code 8221), `saved = 0`, vậy đáng lẽ phải đóng từ lâu.
+
+- **Nguyên nhân (code):** `noteExt1545Fail()` chỉ được gọi ở 3 nhánh `.then` của chuỗi bù
+  (`9034–9058`). Nhánh "ngân sách thử lại Socket đã đóng" bắn bù rồi `return` **ngay**; nếu chuỗi
+  bù đó vướng `sockFiredPending`/`outboundLock` thì `.then` **không bao giờ chạy** ⇒ `streak`
+  đứng ở 0 ⇒ không đóng. Chi phí: 2 768 lệnh Ext mà cứu 0.
+- **Bằng chứng thứ hai (số, rất rõ):** lô 11:10:50 chỉ có **3 chat, 0 lỗi, API 2 · Socket 1**
+  mà vẫn in nguyên `thử 2 768 · cứu 0` ⇒ con số trên bảng TỔNG HỢP là **tích luỹ giữa các lượt**,
+  không phải của lượt đang chạy. Đọc lên hiểu sai hoàn toàn.
+
+**Vá:** gộp về một hàm `noteExt1545Outcome(kind)` — `saved` / `blocked` (bằng chứng Ext bị chặn)
+/ `unknown` (quá hạn, KHÔNG đóng sổ); reset `tried/saved/streak/unknown` đầu mỗi lượt; in thêm
+`chưa có kết quả N`.
+
+### 84.4 Bẫy 3 — trần làn 384 làm CHẬM (tương quan âm)
+
+Số đo 2 lô cùng máy/page: **256 ⇒ 44,0 lệnh/s · 312–320 ⇒ 37,7 · 384 ⇒ 33,6**.
+Lô 11:05 nới 256→384 lúc 11:05:37 rồi **không hạ lại** suốt lô, dù p95 cuối lô 2 618 ms > trần
+`SOCK_RAMP_P95_MAX_MS = 2200`. (Không mâu thuẫn: `rampAllowed()` canh p95 của **1 000 mẫu gần
+nhất**, còn dòng TỔNG HỢP in p95 của cả vòng ⇒ hai con số khác nhau.)
+
+**Vá:** `SOCKET_LANE_MAX` 384 → **256**. Đoạn `LANE_CARRY_CLAMP` đầu lô vốn đã hạ về 256 mỗi lần
+chạy — nay trần chặn luôn đường leo trong lô.
+
+### 84.5 Chỗ chưa kết luận được — và cách để lần sau biết
+
+`còn lại 3 406 ms` sau ACK (chiếm 54 % thời gian giữ slot) chưa có số nào bóc tách. Ứng viên:
+khâu bind ảnh `POST /contents/facebook` (`is_reusable=false`, 1 lệnh/chat có ảnh) chạy **trong**
+lúc giữ slot. Không có số ⇒ không được kết luận.
+
+**Vá (chỉ đo, không đổi hành vi):** bọc `uploadPhotoForPage` bằng bộ đo `photoUpStats`
+(n / TB / max / lỗi) và in trong dòng `⏱ GIỮ SLOT` dưới nhãn `📷 bind fbId`.
+
+**Lô sau đọc thế nào:** nếu `📷 bind fbId TB` ≈ 3 000 ms ⇒ nút cổ chai là khâu ảnh, xử lý riêng.
+Nếu nó nhỏ ⇒ thời gian nằm ở cổng chờ ACK, phải xem lại `ackHoldMsFor()` (lô này giữ slot 6 000 ms
+= trần `ACK_HOLD_CEIL_MS`, vì p90 2 399 × 3 = 7 197 bị kẹp trần).
+
+### 84.6 Tiêu chí nghiệm thu lô sau
+
+| chỉ số | lô 11:05 | lô sau phải là |
+|---|---|---|
+| `hết hạn chờ` / `im lặng THẬT` / `no-ACK` | 0 / 0 / 0 | giữ **0 / 0 / 0** |
+| `ACK về MUỘN đã phân xử` | 6 785 (đếm 2 lần) | **≤ vài chục**, và `✅ muộn + từ chối muộn` phải ≤ số đó |
+| `Dò Ext ... thử N · cứu 0` khi lô nhỏ | 2 768 (tích luỹ) | **0** khi lô không có ca 1545041 |
+| `Dò Ext` khi có ca 1545041 | không có chữ ĐÓNG | phải có chữ **ĐÓNG** sau ≤ 30 ca liên tiếp |
+| `Socket/page limits cuối` | `[384×1]` | **`[256×1]`** (hoặc thấp hơn nếu ACK chậm) |
+| dòng `📷 bind fbId` | không có | **có**, kèm TB/max |
+| phát lệnh pha giữa | 30,22/s | ≥ 40/s (chưa hứa đạt — xem 84.5) |

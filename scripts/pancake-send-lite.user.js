@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.48-w200.94
+// @version      1.92.49-w200.95
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.48-W200.94'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.49-W200.95'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4650,6 +4650,14 @@
      *        Hết ackListenMs mới dọn: clearTimeout + delete, và đánh dấu `mySilent = true`
      *        để lần no-ACK này được tính là IM LẶNG THẬT (bằng chứng) thay vì "hết hạn chờ". */
     let mySilent = false;
+    /* [v1.92.49] PHÂN XỬ MUỘN CHỈ ĐƯỢC CHẠY KHI THẬT SỰ QUÁ HẠN.
+     * Lô 11:05 (6 920 chat): dòng 🔔 in "ACK về MUỘN đã phân xử 6 785 (✅ 0 · FB từ chối 0)"
+     * trong khi 📡 in "ACK OK/rejected/no-ACK 3 909/2 876/0" ⇒ 3 909 + 2 876 = 6 785 ĐÚNG BẰNG
+     * số ACK ĐẾN ĐÚNG HẠN. Nguyên nhân: `lateRef` nhận MỌI gói /ls_resp (kể cả gói về sớm),
+     * nên mỗi tin bị đếm 2 lần vào sockLateAck. Cờ dưới đây chặn đúng chỗ resolve.
+     * ⇒ Số 6 785 KHÔNG phải "6 785 ACK muộn" và KHÔNG chứng minh được "không mất ACK".
+     * Bằng chứng thật của lô đó là `hết hạn chờ 0` + `im lặng THẬT 0` + no-ACK 0. */
+    let ackTimedOut = false;
     let lateRef = null; // { resolve } — bơm kết quả ACK về muộn cho classify() chạy lại
     const lateP = new Promise((resolve) => { lateRef = { resolve }; }); // ACK về SAU hạn chờ giữ slot
     const publishPromise = new Promise((resolve) => {
@@ -4657,6 +4665,7 @@
       const timer = bgClock.after(ackWaitMs, () => {
         if (done) return;
         done = true;
+        ackTimedOut = true; // [v1.92.49] từ đây mới coi là "về muộn"
         // KHÔNG xoá entry ở đây (xem chú thích trên) — chỉ đánh ⚠ rồi nghe tiếp tới ackListenMs.
         resolve({ success: false, data: null, timedOut: true });
         try {
@@ -4688,7 +4697,12 @@
           if (myEntry && typeof myEntry.callback === 'function') {
             const origCb = myEntry.callback;
             myEntry.callback = function (resp) {
-              try { if (lateRef && !mySilent) lateRef.resolve(resp); } catch (eL) { /* ignore */ }
+              try {
+                // [v1.92.49] CHỈ giao cho đường "muộn" khi ĐÃ quá hạn chờ giữ slot.
+                // Gói về trước hạn đã được classify(g) thường xử lý (publishPromise) — giao
+                // thêm ở đây là đếm 2 lần (đúng nguồn của con số 6 785 trong log 11:05).
+                if (lateRef && ackTimedOut && !mySilent) lateRef.resolve(resp);
+              } catch (eL) { /* ignore */ }
               return origCb(resp);
             };
           }
@@ -4743,6 +4757,10 @@
     // 'noack' cho việc thiếu payload (đã hết hạn chờ từ trước rồi), và phải đi đường phục hồi.
     const classify = (g, lateMode) => {
       if (!(g && g.payload)) {
+        /* [v1.92.49] ACK về muộn mà KHÔNG có payload ⇒ không kết luận được gì. Trước đây nhánh
+         * này im lặng hoàn toàn nên dòng 🔔 không phân biệt được "muộn và không xử lý được" với
+         * "không có ca muộn nào". Nay đếm riêng để lần sau đọc được thật. */
+        if (lateMode) sendDiag.sockLateNoack = (sendDiag.sockLateNoack || 0) + 1;
         socketNoAckStreak[pageId] = (socketNoAckStreak[pageId] || 0) + 1;
         recordSocketAckOutcome('noack', Date.now() - publishedAt, pageId);
         noteAckWindowOutcome(pageId, mySilent);
@@ -5715,7 +5733,26 @@
   //   2) Nếu API /contents/facebook lỗi và có photo.url + Extension Pancake:
   //      fallback sang adapter.send({ type: "UPLOAD_INBOX_PHOTO", pageId, photoUrl: url + "?random=" + r, name, platform })
   //      → { success: true, data: { fbId } } (khớp 100% hàm E tại @883200 trong _app!)
+  /* [v1.92.49] ĐO RIÊNG KHÂU UPLOAD ẢNH — đây là ứng viên số 1 cho 3 406 ms "còn lại" mỗi chat.
+   * Mỗi chat ảnh phải POST /contents/facebook (is_reusable=false) để lấy fbId riêng; lô 6 920
+   * chat ⇒ 6 920 lệnh phụ nằm TRONG lúc giữ slot main. Trước bản này KHÔNG có một con số nào
+   * về khâu đó trong TỔNG HỢP nên mọi kết luận về tốc độ đều là suy đoán. Nay đo đủ để lần sau
+   * trả lời được bằng số: upload chiếm bao nhiêu ms/chat, bao nhiêu ca lỗi. */
+  const photoUpStats = { n: 0, ms: 0, max: 0, fail: 0 };
   async function uploadPhotoForPage(pageId, photo, opts) {
+    const _tUp = Date.now();
+    let _up;
+    try { _up = await uploadPhotoForPageRaw(pageId, photo, opts); }
+    catch (eUp) { _up = { ok: false, error: String((eUp && eUp.message) || eUp) }; }
+    try {
+      const d = Math.max(0, Date.now() - _tUp);
+      photoUpStats.n++; photoUpStats.ms += d;
+      if (d > photoUpStats.max) photoUpStats.max = d;
+      if (!(_up && _up.ok)) photoUpStats.fail++;
+    } catch (eSt) { /* ignore */ }
+    return _up;
+  }
+  async function uploadPhotoForPageRaw(pageId, photo, opts) {
     const o = opts || {};
     const reusable = o.reusable !== false;
     const token = getToken();
@@ -5985,7 +6022,15 @@
   // (Extension không còn tham gia đường chính). Nâng: khởi điểm 256, trần 384.
   const BUS_PARALLEL_SOCKET = 256;
   const SOCKET_LANE_MIN = 64;
-  const SOCKET_LANE_MAX = 384;
+  /* [v1.92.49] TRẦN LÀN 384 → 256 — TRẢ VỀ ĐÚNG MỨC ĐÃ KIỂM NGHIỆM.
+   * Số đo 2 lô 10 629 / 6 920 chat (cùng máy, cùng page):
+   *     làn 256 ⇒ 44,0 lệnh/s · làn 312–320 ⇒ 37,7 · làn 384 ⇒ 33,6
+   * Tương quan ÂM: nới làn làm CHẬM. Lô 11:05 nới 256→384 lúc 11:05:37 (16 nấc, mỗi nấc +8
+   * khi đủ 20 ACK nhanh) rồi KHÔNG hạ lại trong suốt lô, dù p95 lên 2 618 ms.
+   * Đoạn clamp đầu lô (LANE_CARRY_CLAMP) vốn đã hạ làn về 256 mỗi lần chạy — chỉ có điều
+   * trong lô nó lại leo lên 384. Nay trần = 256 ⇒ chặn đúng đường leo đó. Sàn vẫn do
+   * socketLaneFloor quản (64, tự hạ tiếp khi ACK chết). Muốn thử lại 384: đổi số này. */
+  const SOCKET_LANE_MAX = 256;
   /* [v1.92.34] CẦU DAO ACK CHƯA BAO GIỜ CÓ TÁC DỤNG — tìm ra ở lô 13:38 (4 573 chat).
    * `makeAdaptivePriorityLane` kẹp `limit = Math.max(min, …)` với `min` CHỤP LÚC TẠO LANE
    * (= socketLaneFloor = 64). Mà lane page được tạo ở tin đầu tiên của page ⇒ mọi lần cầu dao
@@ -8082,7 +8127,7 @@
     //   sockAckHoldExpired phải về 0 khi ACK thật đang về; sockAckLateOk là số ca được CỨU
     //   (␣→✅) nhờ nghe muộn ⇒ mỗi ca ở đây là MỘT TIN KHÔNG BỊ TRÙNG.
     sockAckHoldExpired: 0, sockAckSilent: 0, sockLateAck: 0, sockLateOk: 0, sockLateRejected: 0,
-    sockLateAckErr: 0, sockLateUnapplied: 0,
+    sockLateAckErr: 0, sockLateUnapplied: 0, sockLateNoack: 0,
     apiQueued: 0, apiStarted: 0, apiFetchAttempts: 0, apiSuccess: 0, apiRejected: 0, apiUnknown: 0,
     api429: 0, api429Retries: 0, apiCancelled: 0, apiFallback: 0,
     apiQueueWaitMsTotal: 0, apiQueueWaitMsMax: 0, apiFetchMsTotal: 0, apiFetchMsMax: 0,
@@ -8218,7 +8263,7 @@
    * `saved = 0`. Bất kỳ ca cứu được nào (saved++) là reset chuỗi — nếu Ext thật sự gửi được
    * thì ngân sách mở lại ngay, không bao giờ đóng oan.
    * Vẫn giữ nguyên hệ quả: ca bị đóng ⇒ ⚠ "chưa gửi" + danh sách gửi tay, KHÔNG chốt ❌ oan. */
-  const extTry1545 = { tried: 0, saved: 0, closed: false, PROBE: 200, streak: 0, STREAK_MAX: 30 };
+  const extTry1545 = { tried: 0, saved: 0, closed: false, PROBE: 200, streak: 0, STREAK_MAX: 30, unknown: 0 };
   /* [v1.92.47] CẦU DAO ĐƯỜNG DÒ GLOBAL ID QUA EXTENSION — cùng loại ngân sách với `extTry1545`,
    * nhưng dành cho khâu DÒ chứ không phải khâu GỬI.
    * Bằng chứng ĐO ĐƯỢC:
@@ -8253,6 +8298,21 @@
         + ' undefined"). Từ giờ chỉ dò bằng HTTP/WebSocket; ca không dò được vẫn giữ ⚠ (chưa gửi),'
         + ' KHÔNG chốt ❌ oan.');
     } catch (e0) { /* ignore */ }
+  }
+  /* [v1.92.49] GHI NHẬN KẾT QUẢ CỦA LẦN BÙ EXT — ĐÚNG MỘT CHỖ, GỌI TỪ MỌI NHÁNH.
+   * Sổ 11:05 (6 920 chat): TỔNG HỢP in "🛟 Dò Ext cho ca FB từ chối: thử 2 768 · cứu 0"
+   * mà KHÔNG có chữ "ĐÓNG". Nghĩa là cầu dao ngân sách 200 ca CHƯA BAO GIỜ đóng dù tried
+   * gấp 13,8 lần PROBE. Nguyên nhân đọc được từ code: `noteExt1545Fail()` chỉ được gọi ở
+   * 3 nhánh .then của chuỗi bù; còn nhánh "ngân sách thử lại Socket đã đóng" bắn bù bằng
+   * scheduleBuRetry() rồi return NGAY, và nếu chuỗi bù đó vướng sockFiredPending/outboundLock
+   * (socket vẫn đang bay) thì chuỗi .then KHÔNG BAO GIỜ chạy ⇒ streak không tăng ⇒ không đóng.
+   * Hàm dưới đây gộp 1 chỗ: sổ chỉ đóng khi có BẰNG CHỨNG (Ext cũng bị chặn), còn trường hợp
+   * "chưa có kết quả" (quá hạn / không rõ) chỉ tính vào bộ đếm riêng, KHÔNG đóng sổ. */
+  function noteExt1545Outcome(kind) {
+    if (!extTry1545) return;
+    if (kind === 'saved') { extTry1545.saved++; extTry1545.streak = 0; return; }
+    if (kind === 'blocked') noteExt1545Fail();          // 1545041 / không gửi được: bằng chứng
+    else extTry1545.unknown = (extTry1545.unknown || 0) + 1; // quá hạn / không rõ
   }
   function extFallback1545Allowed() { return !extTry1545.closed; }
   function noteExt1545Fail() {
@@ -8572,6 +8632,7 @@
           + (c.unsureTotal ? ' | ⚠ Không rõ: ' + c.unsureTotal : '')
           + (extTry1545.tried
             ? ' | 🛟 Dò Ext cho ca FB từ chối: thử ' + extTry1545.tried + ' · cứu ' + extTry1545.saved
+              + (extTry1545.unknown ? ' · chưa có kết quả ' + extTry1545.unknown : '')
               + (extTry1545.closed ? ' · ĐÓNG (Ext cũng bị chặn ⇒ phần còn lại vào danh sách gửi tay)' : '')
             : '')
           /* [v1.92.45] ĐO TRẦN THẬT CỦA LÀN EXT — để lần sau không tối ưu sai chỗ.
@@ -8666,6 +8727,12 @@
               + 'ms · chuẩn bị ' + Math.round(waveDiag.slotPrepMs / waveDiag.slotN)
               + 'ms · còn lại ' + Math.round(Math.max(0, waveDiag.slotHoldMs - waveDiag.slotPrepMs) / waveDiag.slotN)
               + 'ms (n=' + waveDiag.slotN + ')'
+              /* [v1.92.49] SỐ ĐO KHÂU ẢNH — để lần sau khỏi suy đoán "3 406 ms còn lại" là gì.
+               * Mỗi chat có ảnh phải bind fbId riêng (is_reusable=false) TRƯỚC khi bắn. */
+              + (photoUpStats.n
+                ? ' · 📷 bind fbId: ' + photoUpStats.n + ' ca · TB ' + Math.round(photoUpStats.ms / photoUpStats.n)
+                  + 'ms · max ' + photoUpStats.max + 'ms · lỗi ' + photoUpStats.fail
+                : '')
             : '')
           + ' · giữ cổng (bay/retry/ext/api) ' + waveDiag.gateBlockInflight + '/' + waveDiag.gateBlockRetry
           + '/' + waveDiag.gateBlockExt + '/' + waveDiag.gateBlockApi);
@@ -8687,6 +8754,7 @@
           + ' · im lặng THẬT hết cửa sổ ' + (sendDiag.sockAckSilent || 0)
           + ' · ACK về MUỘN đã phân xử ' + (sendDiag.sockLateAck || 0)
           + ' (trong đó ✅ ' + (sendDiag.sockLateOk || 0) + ' · FB từ chối ' + (sendDiag.sockLateRejected || 0) + ')'
+          + ' · muộn-không-payload ' + (sendDiag.sockLateNoack || 0)
           + ' · lỗi xử lý muộn ' + (sendDiag.sockLateAckErr || 0)
           + ' · p90/p95 ' + sockAckP90() + '/' + (sockAckP95() || 0) + 'ms (' + ackLatRing.length + ' mẫu)');
         logLine('🌐 API NỀN: queued(nền)/started(nền+đồng bộ)/fetch ' + sendDiag.apiQueued + '/' + sendDiag.apiStarted + '/' + sendDiag.apiFetchAttempts
@@ -9030,10 +9098,7 @@
           markDelivered(conv.id, ch);
           postSendSideEffects(conv);
           markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
-          if (conv.__extFallback1545) { // [v1.92.41] Ext CỨU ĐƯỢC ca 1545041
-            extTry1545.saved++;
-            extTry1545.streak = 0; // [v1.92.45] cứu được ⇒ mở lại ngân sách, không đóng oan
-          }
+          if (conv.__extFallback1545) noteExt1545Outcome('saved'); // [v1.92.49] Ext CỨU ĐƯỢC ca 1545041
           buStats.ok++;
           buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
           logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅', conv.id);
@@ -9042,11 +9107,11 @@
            * Log 16:52/17:03: dò Ext in 'thử 799 · cứu 0' và 'thử 1 431 · cứu 0' — tức ngân sách
            * 200 ca KHÔNG BAO GIỜ đóng, vì ca Ext quá hạn rơi vào nhánh 'maybe' chứ không phải
            * nhánh recipientUnavailable mà tôi chỉ gắn cờ đóng. Nay tính cả nhánh này. */
-          if (conv.__extFallback1545) noteExt1545Fail();
+          if (conv.__extFallback1545) noteExt1545Outcome('unknown'); // quá hạn: chưa phải bằng chứng
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
           logFailGrouped(name, 'bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)', '⚠', conv.id);
         } else if (r && r.recipientUnavailable && !hasMoreAfterSocket) {
-          if (conv.__extFallback1545) noteExt1545Fail(); // [v1.92.41] Ext cũng bị chặn — đo tiếp
+          if (conv.__extFallback1545) noteExt1545Outcome('blocked'); // Ext cũng bị chặn — đo tiếp
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
           // ĐÂY là nơi tín hiệu "khách không nhận được" xuất hiện nhiều nhất (Extension trả
           // {"errorDescription":"Người này hiện không có mặt."}). Chỉ ĐẾM cho dòng chẩn đoán —
@@ -9055,7 +9120,7 @@
           logFailGrouped(name, 'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
             + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)', '❌', conv.id);
         } else {
-          if (conv.__extFallback1545) noteExt1545Fail();
+          if (conv.__extFallback1545) noteExt1545Outcome('blocked');
           logFailGrouped(name, 'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
             + clip((r && r.error) || 'lỗi không rõ', 90) + ' — sang kênh kế nếu còn', '❌', conv.id);
           // CHUỖI BÙ: kênh kế CHƯA thử (mỗi kênh đúng 1 lần — không lặp kênh vừa thua)
@@ -10364,6 +10429,12 @@
       manualResendList.length = 0; sockRescueStats.tried = 0;
       Object.keys(rescueInFlight).forEach((k) => delete rescueInFlight[k]);
     } catch (eMr) { /* ignore */ }
+    /* [v1.92.49] NGÂN SÁCH DÒ EXT PHẢI RESET MỖI LƯỢT.
+     * Lô 11:10:50 (3 chat, API 2 · Socket 1, 0 lỗi) vẫn in nguyên "🛟 Dò Ext cho ca FB từ
+     * chối: thử 2 768 · cứu 0" của lô 6 920 chat trước ⇒ con số trên bảng TỔNG HỢP đang là
+     * số TÍCH LUỸ, đọc lên hiểu sai hoàn toàn là "lô này vừa dò 2 768 ca". Nay reset như mọi
+     * bộ đếm khác; giữ `closed` của lượt trước (nếu Ext đã bị chặn thì không phải dò lại). */
+    extTry1545.tried = 0; extTry1545.saved = 0; extTry1545.streak = 0; extTry1545.unknown = 0;
     extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
     extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
     extSendCtl.probeInFlight = false; // lượt mới không được kẹt bởi thăm dò của lượt cũ đã dừng
