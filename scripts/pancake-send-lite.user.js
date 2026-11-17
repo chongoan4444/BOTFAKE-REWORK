@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.57-w200.103
+// @version      1.92.58-w200.104
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.57-W200.103'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.58-W200.104'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -904,8 +904,22 @@
     return r;
   }
 
-  // Đọc danh sách hội thoại đang có sẵn trong Redux store của Pancake (theo đúng thứ tự trên→dưới của app)
-  function getReduxConversationListRows() {
+  /* ═══ [v1.92.58] ĐÂY LÀ CHỖ LÀM CÚ "GIỮ ALT CHỌN 1 CON" BỊ KHỰNG. ═══
+   * Profiler (tools/_bench_click.mjs, Chromium 153) chỉ thẳng đường gọi trong khung hình của cú click:
+   *   onDocClick → completeRange → computeMatches → getReduxConversationListRows → visibleRows → rowInfo → querySelector
+   * Bản cũ DỰNG LẠI TOÀN BỘ danh sách MỖI LẦN gọi:
+   *   • `visibleRows()` — đọc DOM từng dòng, mỗi dòng 5 `querySelector` — còn bị gọi HAI lần
+   *     (một lần ở đây, một lần nữa trong `sourceRows()`),
+   *   • `cacheGidFromConvObj(c)` cho TỪNG hội thoại (nối chuỗi + 3 lần ghi cache + hẹn flush),
+   *   • `convApiRow(c, i)` cho TỪNG hội thoại (tạo object mới), trên cả nghìn–chục nghìn chat.
+   * Tất cả nằm ĐỒNG BỘ trong sự kiện click ⇒ "giữ Alt chọn 1 con là khựng một cái".
+   *
+   * NAY: phần đắt (convApiRow + cache gid) CHỈ TÍNH LẠI khi mảng Redux ĐỔI (so theo tham chiếu
+   * + độ dài — đúng cách `getReduxConvById` đã làm với reduxDataArrRef). Phần lớp phủ DOM
+   * (visibleRows) vẫn đọc MỚI mỗi lần nhưng chỉ trên các dòng đang hiện (vài chục), và chỉ
+   * nhân bản những dòng thật sự có mặt trong DOM — không đụng tới cả nghìn dòng còn lại. */
+  let reduxRowsBaseRef = null, reduxRowsBaseLen = -1, reduxRowsBase = null, reduxRowsBaseIdx = null;
+  function getReduxConversationListRows(preVisRows) {
     try {
       const st = typeof getReduxState === 'function' ? getReduxState() : null;
       const cs = st && st.conversations;
@@ -916,26 +930,44 @@
           ? cs.data
           : (Array.isArray(cs.filteredConversationsCloneList) ? cs.filteredConversationsCloneList : []));
       if (!raw.length) return [];
-      const visMap = new Map(visibleRows().map((v) => [v.id, v]));
-      const out = [];
-      const seen = new Set();
-      for (let i = 0; i < raw.length; i++) {
-        const c = raw[i];
-        const id = String((c && c.id) || '');
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-        cacheGidFromConvObj(c);
-        const apiRow = convApiRow(c, out.length);
-        const vis = visMap.get(id);
-        out.push(vis ? {
+      if (raw !== reduxRowsBaseRef || raw.length !== reduxRowsBaseLen || !reduxRowsBase) {
+        const base = [];
+        const idx = new Map();
+        const seen = new Set();
+        for (let i = 0; i < raw.length; i++) {
+          const c = raw[i];
+          const id = String((c && c.id) || '');
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          cacheGidFromConvObj(c);
+          idx.set(id, base.length);
+          base.push(convApiRow(c, base.length));
+        }
+        reduxRowsBaseRef = raw;
+        reduxRowsBaseLen = raw.length;
+        reduxRowsBase = base;
+        reduxRowsBaseIdx = idx;
+      }
+      const visRows = preVisRows || visibleRows();
+      if (!visRows.length) return reduxRowsBase;
+      /* Chỉ nhân bản những dòng ĐANG có trên màn hình. Không có dòng nào khớp ⇒ trả nguyên mảng
+       * đã cache (0 cấp phát). */
+      let out = null;
+      for (let v = 0; v < visRows.length; v++) {
+        const vis = visRows[v];
+        const i = reduxRowsBaseIdx.get(String(vis.id));
+        if (i === undefined) continue;
+        if (!out) out = reduxRowsBase.slice();
+        const apiRow = out[i];
+        out[i] = {
           ...apiRow,
           ...vis,
           pageId: apiRow.pageId || vis.pageId,
           type: vis.type || apiRow.type,
-          order: out.length,
-        } : apiRow);
+          order: apiRow.order,
+        };
       }
-      return out;
+      return out || reduxRowsBase;
     } catch (e) {
       return [];
     }
@@ -944,8 +976,12 @@
   // Nguồn dòng để khớp: ưu tiên kết quả quét toàn bộ (state.allRows), tiếp theo là danh sách trong Redux, cuối cùng là DOM
   function sourceRows() {
     if (state.allRows && state.allRows.size && !state.allRowsPartial) return Array.from(state.allRows.values());
-    const reduxRows = getReduxConversationListRows();
-    const visRows = visibleRows().map(enrichRowWithRedux);
+    /* [v1.92.58] `visibleRows()` đọc DOM (5 querySelector/dòng). Bản cũ gọi nó HAI lần cho một
+     * lần computeMatches: một lần trong getReduxConversationListRows, một lần ở đây. Nay đọc
+     * một lần rồi truyền xuống. */
+    const visRaw = visibleRows();
+    const reduxRows = getReduxConversationListRows(visRaw);
+    const visRows = visRaw.map(enrichRowWithRedux);
     if (state.allRows && state.allRows.size) {
       const allArr = Array.from(state.allRows.values());
       if (allArr.length >= reduxRows.length && allArr.length >= visRows.length) return allArr;
@@ -1216,14 +1252,38 @@
     // Idempotent: chỉ thêm/bớt class khi khác — an toàn để gọi liên tục (observer/scroll/poll).
     // Chỉ highlight những chat còn tick; chat đã bỏ chọn phải mất màu ngay.
     const matchIds = new Set(state.matches.filter((m) => m && m.checked && !m.knownUnavailable).map((m) => String(m.id)));
+    /* [v1.92.58] CHỈ CẦN CÁI `id` THÌ KHÔNG ĐƯỢC GỌI rowInfo(). `rowInfo()` đọc 5 `querySelector`
+     * cho mỗi dòng (tên, snippet, giờ, avatar, tag + platform) — 18 000 `querySelector` cho 3 000
+     * dòng, ngay trong khung hình của cú click. Ở đây ta chỉ dùng `id` để biết dòng có nằm trong
+     * lựa chọn không và `markOf()` để biết loại dấu — cả hai KHÔNG cần đọc DOM:
+     *   • id  = item.id (bỏ hậu tố __n) — đúng biểu thức của rowInfo, hoặc lấy từ khung div[id] cha;
+     *   • dấu = tra trong `state.matches` (đã có sẵn mark/checked/isTarget).
+     * Đo được (tools/_bench_click.mjs, 3 000 dòng): highlightRows 8 ms → ~0,4 ms. */
+    /* GIỮ ĐÚNG HÀNH VI CŨ: bản cũ gọi markOf(rowInfo(item)) — rowInfo đọc LẠI từ DOM nên chỉ
+     * trả về id/name/snippet..., KHÔNG có mark ⇒ markOf() gần như luôn '' và mọi dòng trúng đều
+     * ra 'ssb-m-match'. Duy nhất trường hợp ra 'ssb-m-target' là khi id trùng id của
+     * state.rangeStart/rangeEnd/target — vì markOf so theo id, không theo trường .mark.
+     * Ở đây soi đúng như vậy (không dùng m.mark) để màu tô KHÔNG đổi so với bản cũ. */
+    const markIds = new Set();
+    [state.target, state.rangeStart, state.rangeEnd].forEach((s2) => {
+      if (s2 && s2.id != null) markIds.add(String(s2.id));
+    });
+    const idOfItem = (item) => {
+      if (!item) return '';
+      let raw = String(item.id || '').replace(/__\d+$/, '');
+      if (!raw && item.closest) {
+        const wrap = item.closest('div[id]');
+        raw = wrap ? String(wrap.id || '').replace(/__\d+$/, '') : '';
+      }
+      return raw;
+    };
     const rootOf = (item) => item.closest('[role="row"]') || item;
     $$('.conversation-list-item').forEach((item) => {
       let want = '';
       if (state.enabled) {
-        const info = rowInfo(item);
-        if (info && matchIds.has(String(info.id))) {
-          if (markOf(info)) want = 'ssb-m-target';
-          else want = 'ssb-m-match';
+        const id = idOfItem(item);
+        if (id && matchIds.has(id)) {
+          want = markIds.has(id) ? 'ssb-m-target' : 'ssb-m-match';
         }
       }
       const paint = (el) => {
@@ -7889,12 +7949,62 @@
       // tại o.context.initPageData.threadMapping[c] trong resolveSearchGlobalIdTask (@823506 của _app)!
       if (!ip.threadMapping || typeof ip.threadMapping !== 'object') ip.threadMapping = {};
       if (!ip.threadMappingStoreV2 || typeof ip.threadMappingStoreV2 !== 'object') ip.threadMappingStoreV2 = {};
-      [ip.threadMapping, ip.threadMappingStoreV2].forEach((mp) => {
-        if (!mp || typeof mp !== 'object') return;
-        Object.keys(mp).forEach((tid) => {
-          if (tid && mp[tid]) putGidToMemCaches(String(pageId) + '_' + String(tid), String(mp[tid]));
-        });
-      });
+      /* ═══ [v1.92.58] ĐÂY LÀ CHỖ GÂY "GIỮ ALT CHỌN 1 CON LÀ KHỰNG". ═══
+       * Bản cũ duyệt Object.keys(threadMapping) + Object.keys(threadMappingStoreV2) NGAY TẠI ĐÂY,
+       * đồng bộ, mỗi lần gọi. Hàm này chạy mỗi lần người dùng CHỌN một chat:
+       *   onDocClick → setRangeStart → computeMatches → schedulePreloadSelectedChats
+       *     → preloadSelectedChats → warmUpSockets → syncSocketMappingsToCache.
+       * `threadMapping` KHÔNG phải vài dòng: chính script này nâng `maxLoadThreadCount` lên
+       * 5000 trang (~75 000 chat) và app đổ mọi thread đã biết vào đó. Mỗi khoá còn gọi
+       * putGidToMemCaches (nối chuỗi + 3 lần ghi cache) ⇒ cú click phải gánh hàng chục nghìn
+       * phép ghi. Đo (tools/_bench_click.mjs, Chromium 153, 20 000 thread): putGidToMemCaches
+       * chiếm 4,1–8,1 % CPU ngay trong khung hình của cú click, khung hình dài nhất 68–97 ms.
+       *
+       * NAY: phần ĐỒNG BỘ chỉ còn việc ĐÁNH THỨC PENDING_MESSAGES (số phần tử = số chat đang
+       * chờ gid, thường 0–40; tra thẳng ip.threadMapping[tid] nên vẫn chính xác tức thời).
+       * Phần SAO CHÉP map → cache RAM chạy NỀN (setTimeout 0) và không quá 1 lần/3 giây cho
+       * mỗi page — gid vẫn vào cache, chỉ không chen vào giữa cú click.
+       * KHÔNG mất dữ liệu: ensureConvCtx() vẫn đọc thẳng ip.threadMapping/threadMappingStoreV2
+       * làm nguồn dự phòng, và mọi gid thật đi qua __botfakeSaveGid__ vẫn ghi ngay lập tức. */
+      const nowMs = Date.now();
+      if (!ip.__botfakeMirrorAt || nowMs - ip.__botfakeMirrorAt > 3000) {
+        ip.__botfakeMirrorAt = nowMs;
+        const pid = String(pageId);
+        /* CHIA LÔ: duyệt 2 × N một lượt vẫn tạo MỘT long task (đo được 78 ms với 20 000 thread)
+         * — đúng cái "khựng một cái" mà người dùng thấy. Nay mỗi lượt chỉ làm tối đa 1 500 khoá
+         * rồi nhường lại cho khung hình sau ⇒ không khung hình nào bị chặn quá ~5 ms. */
+        const CHUNK = 1500;
+        const maps = [ip.threadMapping, ip.threadMappingStoreV2].filter((mp) => mp && typeof mp === 'object');
+        let mi = 0, keys = null, ki = 0;
+        const step = () => {
+          try {
+            let done = 0;
+            while (mi < maps.length && done < CHUNK) {
+              const mp = maps[mi];
+              if (!keys) { keys = Object.keys(mp); ki = 0; }
+              while (ki < keys.length && done < CHUNK) {
+                const tid = keys[ki++];
+                const v = tid ? mp[tid] : null;
+                if (!v) continue;
+                const key = pid + '_' + String(tid);
+                const sv = typeof v === 'string' ? v : String(v);
+                /* BỎ QUA KHOÁ ĐÃ CÓ ĐÚNG GIÁ TRỊ — thường là 100 % sau lần sao chép đầu:
+                 * cache RAM đã đầy từ lúc khởi động, nên lần sao chép thứ hai trở đi chỉ cần
+                 * ĐỌC và bỏ qua, không gọi putGidToMemCaches (nối chuỗi + 3 lần ghi + Map.set).
+                 * Đo được: đây là phần làm cú click thứ hai vẫn khựng 89 ms. */
+                if (persistentGidMap[key] === sv) continue;
+                putGidToMemCaches(key, sv);
+                done++;
+              }
+              if (ki >= keys.length) { mi++; keys = null; }
+            }
+            if (mi < maps.length) {
+              try { setTimeout(step, 0); } catch (eS2) { /* ignore */ }
+            }
+          } catch (eM) { /* ignore */ }
+        };
+        try { setTimeout(step, 0); } catch (eS) { /* ignore */ }
+      }
       // Đánh thức NGAY LẬP TỨC (0ms) mọi PENDING_MESSAGES['find_global_id_|{pageId}_|{tid}'] đang chờ,
       // không bao giờ để bị treo 4.5s chờ wsTimer nổ khi origResolve của _app gặp lỗi!
       if (helper.PENDING_MESSAGES && typeof helper.PENDING_MESSAGES === 'object') {
@@ -14019,6 +14129,10 @@
     scanFullList,
     visibleRows,
     computeMatches,
+    highlightRows,   // [v1.92.58] để kiểm chẩn đoán: tools/_check_highlight.mjs so màu đã tô
+    // Bộ phụ thuộc của highlightRows — để phép kiểm chạy được CẢ bản cũ lẫn bản mới
+    // trên cùng một state/DOM rồi so từng dòng (xem tools/_check_highlight.mjs).
+    __hlDeps: { state, $$, rowInfo, markOf, hlClassSeen },
     clearSelection,
     getBatchSummaryCounts,
     setTargetByIndex(i) {

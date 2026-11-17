@@ -4975,3 +4975,58 @@ nạp **nguyên bản** `scripts/pancake-send-lite.user.js` vào một trang gi�
 `state.listKey` trong `render()` là code chết; `getBotChecklistElement()` luôn trả `null`.
 Chưa xoá (không phải nguyên nhân lag, và xoá cần rà lại nhánh Ctrl+click) — ghi ở đây để
 lần sau không mất công đo lại.
+
+---
+
+## §94 — "GIỮ ALT CHỌN 1 CON LÀ KHỰNG MỘT CÁI" (1.92.58)
+
+Người dùng: *"vẫn lag, giữ alt chọn vào 1 con là lag luôn, khựng lại 1 cái"*.
+Chọn **một** dòng mà khựng ⇒ việc nặng chạy **đồng bộ ngay trong sự kiện click**.
+
+### 94.1 CÁCH TÌM RA ĐÚNG HÀM
+
+Dựng Chromium 153, nạp nguyên bản userscript, đo **Event Timing** (`PerformanceObserver`
+type `event` — cho đúng `duration` của sự kiện `click`, chính là cái người dùng cảm thấy)
++ **CDP Profiler in cả ĐƯỜNG GỌI** (không chỉ self-time). Đường gọi đọc được:
+
+```
+onDocClick → setRangeStart → computeMatches → getReduxConversationListRows
+   → visibleRows → rowInfo → querySelector
+onDocClick → setRangeStart → computeMatches → highlightRows → rowInfo (5 querySelector/dòng)
+onDocClick → … → warmUpSockets → syncSocketMappingsToCache → Object.keys(threadMapping).forEach
+```
+
+### 94.2 BA SỬA (1.92.58)
+
+| # | chỗ | vấn đề | sửa |
+|---|---|---|---|
+| 5 | `syncSocketMappingsToCache` | duyệt **cả** `threadMapping` + `threadMappingStoreV2` của page (script này tự nâng lên ~75 000 thread) **mỗi lần chọn** ⇒ `putGidToMemCaches` 4,1–8,1 % CPU trong khung hình cú click | chia lô 1 500 + `setTimeout` (nhường khung hình), giãn cách ≥3 s/page, bỏ qua khoá đã có đúng giá trị |
+| 6 | `getReduxConversationListRows` | dựng lại **toàn bộ** danh sách mỗi lần gọi: `convApiRow` + `cacheGidFromConvObj` cho **từng** hội thoại (hàng nghìn–chục nghìn), và gọi `visibleRows()` (đọc DOM) **hai lần** | cache theo **tham chiếu mảng Redux** (`raw !== ref`), chỉ nhân bản những dòng **đang có trên DOM**; `sourceRows` đọc `visibleRows()` một lần rồi truyền xuống |
+| 7 | `highlightRows` | gọi `rowInfo()` cho **mỗi dòng** = 5 `querySelector`/dòng (15 000 `querySelector` cho 3 000 dòng) | lấy `id` thẳng từ `item.id` / `div[id]` cha; màu `target` suy từ id của `target/rangeStart/rangeEnd` — **đúng** như `markOf(rowInfo(...))` cũ |
+
+Đo `highlightRows` (cùng DOM, cùng state): **300 dòng 1,4 → 0,3 ms · 1 000 dòng 6,3 → 1,7 ms ·
+3 000 dòng 16,4 → 3,4 ms** (4–5× nhanh). Kiểm đúng đắn: `tools/_check_highlight.mjs` chạy
+**cả body bản cũ và bản mới trên cùng DOM/state** rồi so từng dòng — kết quả tô **giống hệt**
+(`MATCH MATCH MATCH none none none`, khung `role=row` = MATCH).
+
+Sự kiện click đo được: 24 ms → **24 ms** (ở tab trống của sandbox, cả hai bản đều dưới 1
+khung hình; chênh lệch thật nằm ở CPU nền và ở bảng 20 000 thread — giảm 14,2 % → 7,3 %).
+
+### 94.3 LỖI TEST NGHIÊM TRỌNG ĐÃ PHÁT HIỆN: `checkNot` LUÔN XANH
+
+`checkNot(name, got, forbidden)` so `got !== forbidden`. Tôi truyền vào phần lớn chỗ một
+**đối tượng RegExp** ⇒ hai RegExp khác nhau ⇒ `!==` luôn đúng ⇒ **test LUÔN XANH dù code vi
+phạm**. Nghĩa là mọi test `checkNot(..., /regex/)` viết trước đó đều **vô hiệu** (đó là lý do
+mutation "thêm `rowInfo(item)`", "trả lại `logAll.shift()`"… vẫn xanh). Nay `checkNot` khớp
+RegExp thật trên chuỗi và in cả đoạn khớp khi đỏ.
+
+Sau khi sửa: **6/6 mutation bị bắt** (rowInfo trong highlightRows · step() đồng bộ ·
+`logAll.shift()` · stringify log từng dòng · bỏ cờ `gidMemPrimed` · `getBatchSummaryCounts`
+quay lại `Object.keys`). Test 239 → **253 ca**.
+
+### 94.4 CÒN LẠI (đo được, chưa sửa vì chưa phải nút cổ chai)
+
+`render()` → `flushLogUI()` (mỗi dòng log ghi `el.textContent = state.log.join('\n')`, ~1 500
+dòng) · `logNearBottom` đọc layout · `enrichRowWithRedux`/`cacheGidFromConvObj` trong
+`completeRange` (đường thứ hai của cú Alt thứ 2). Nếu vẫn khựng, đo tiếp bằng
+`tools/_bench_click.mjs` với `PATHS=1` và đọc đường gọi.

@@ -153,10 +153,26 @@ function check(name, got, want) {
   fails.push(`${name}\n     nhận: ${got} | mong đợi: ${want}`);
 }
 
-/** Khẳng định KHÔNG rơi vào một kết luận nguy hiểm (vd không được là 'yes'). */
+/**
+ * Khẳng định KHÔNG rơi vào một kết luận nguy hiểm (vd không được là 'yes').
+ *
+ * [v1.92.58] LỖI NGHIÊM TRỌNG ĐÃ SỬA — test RỖNG:
+ * Bản cũ so `got !== forbidden` bằng `!==`. Nhưng tôi truyền vào phần lớn chỗ là một
+ * **đối tượng RegExp** (`checkNot(..., src, /Object\.keys\(mp\)/)`) ⇒ hai đối tượng RegExp
+ * khác nhau nên `!==` LUÔN đúng ⇒ test LUÔN XANH dù code vi phạm. Nghĩa là MỌI test
+ * checkNot dùng regex trong file này trước đây đều vô hiệu (mutation không bị bắt).
+ * Nay: nếu `forbidden` là RegExp thì KHỚP THẬT trên `got` (chuỗi) và báo đỏ khi khớp.
+ */
 function checkNot(name, got, forbidden) {
-  if (got !== forbidden) { pass++; return; }
-  fails.push(`${name}\n     nhận: ${got} | KHÔNG được là: ${forbidden}`);
+  const re = (forbidden instanceof RegExp)
+    ? forbidden
+    : new RegExp(String(forbidden).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const hay = String(got);
+  const m = re.exec(hay);
+  if (!m) { pass++; return; }
+  const at = Math.max(0, m.index - 60);
+  fails.push(`${name}\n     KHỚP (phải KHÔNG khớp): ${JSON.stringify(m[0])}`
+    + `\n     trong: …${hay.slice(at, m.index + m[0].length + 60)}…`);
 }
 
 /* --------------------------- kịch bản thật --------------------------- */
@@ -1172,6 +1188,71 @@ check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
     check('[v1.92.57] logAll cắt lô tại 2× LOG_ALL_MAX',
       /logAll\.length > LOG_ALL_MAX \* 2\)\s*logAll\.splice/.test(SRC), true);
     check('[v1.92.57] có hằng LOG_ALL_MAX', /LOG_ALL_MAX\s*=\s*\d+/.test(SRC), true);
+  }
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * [v1.92.58] KHOÁ 3 SỬA CỦA CA "GIỮ ALT CHỌN 1 CON LÀ KHỰNG"
+ * Profiler Chromium 153 (tools/_bench_click.mjs) chỉ đường gọi trong khung hình cú click:
+ *   onDocClick → setRangeStart/completeRange → computeMatches → getReduxConversationListRows
+ *     → visibleRows → rowInfo → querySelector   (đọc DOM 2 lần, dựng lại cả danh sách)
+ *   onDocClick → setRangeStart → computeMatches → highlightRows → rowInfo (5 querySelector/dòng)
+ * ══════════════════════════════════════════════════════════════════════════════ */
+{
+  /* 1) getReduxConversationListRows: phần đắt (convApiRow + cache gid) chỉ tính lại khi
+   *    mảng Redux ĐỔI — không dựng lại cả nghìn-hàng chục nghìn dòng mỗi cú click. */
+  {
+    const g = stripComments(extractFn('getReduxConversationListRows'));
+    check('[v1.92.58] getReduxConversationListRows có cache theo tham chiếu mảng Redux',
+      /raw !== reduxRowsBaseRef/.test(g) && /reduxRowsBase = base/.test(g), true);
+    check('[v1.92.58] convApiRow chỉ chạy trong nhánh cache-miss',
+      g.indexOf('convApiRow(') > g.indexOf('raw !== reduxRowsBaseRef'), true);
+    check('[v1.92.58] chỉ nhân bản dòng ĐANG có trên màn hình (visRows nhỏ)',
+      /visRows\.length/.test(g) && /out = reduxRowsBase\.slice\(\)/.test(g), true);
+  }
+
+  /* 2) sourceRows: đọc visibleRows() MỘT lần rồi truyền xuống (bản cũ đọc 2 lần). */
+  {
+    const sr = stripComments(extractFn('sourceRows'));
+    const visCalls = (sr.match(/visibleRows\(\)/g) || []).length;
+    check('[v1.92.58] sourceRows chỉ gọi visibleRows() 1 lần', visCalls, 1);
+    check('[v1.92.58] sourceRows truyền kết quả xuống getReduxConversationListRows',
+      /getReduxConversationListRows\(visRaw\)/.test(sr), true);
+  }
+
+  /* 2b) syncSocketMappingsToCache: phần sao chép map → cache RAM KHÔNG được chạy đồng bộ
+   *     trong cú click; phải chia lô + hẹn setTimeout, và có mốc giãn cách 3 s. */
+  {
+    const ss = stripComments(extractFn('syncSocketMappingsToCache'));
+    checkNot('[v1.92.58] syncSocketMappingsToCache không còn Object.keys(mp).forEach chạy đồng bộ',
+      ss, /Object\.keys\(mp\)\.forEach/);
+    check('[v1.92.58] syncSocketMappingsToCache chia lô (CHUNK) và hẹn setTimeout',
+      /CHUNK/.test(ss) && /setTimeout\(\s*step\s*,\s*0\s*\)/.test(ss), true);
+    /* Sống còn: vòng sao chép phải được HẸN, không chạy đồng bộ trong cú click.
+     * Bản đầu của test chỉ kiểm "có setTimeout(step,0) ở đâu đó" nên mutation thêm step()
+     * gọi thẳng vẫn XANH. Nay: sau `const step = () => {` KHÔNG được có `step();` trần. */
+    checkNot('[v1.92.58] syncSocketMappingsToCache không gọi step() đồng bộ',
+      ss, /\};\s*\n\s*step\(\);/);
+    check('[v1.92.58] syncSocketMappingsToCache giãn cách ≥ 3 000 ms giữa hai lần sao chép',
+      /3000/.test(ss), true);
+    check('[v1.92.58] bỏ qua khoá đã có đúng giá trị (không ghi lại vô ích)',
+      /persistentGidMap\[key\] === sv/.test(ss), true);
+  }
+
+  /* 3) highlightRows: dùng id rẻ thay vì rowInfo (5 querySelector/dòng), và GIỮ ĐÚNG màu cũ:
+   *    mark chỉ phụ thuộc id của rangeStart/rangeEnd/target (đúng như markOf(rowInfo(...)) cũ). */
+  {
+    const h = stripComments(extractFn('highlightRows'));
+    /* stripComments đã bỏ chú thích — bản đầu của test này khớp chính lời chú thích "...KHÔNG
+     * ĐƯỢC GỌI rowInfo()" nên mutation "thêm rowInfo(item)" vẫn XANH. Lần thứ 3 mắc bẫy này. */
+    checkNot('[v1.92.58] highlightRows KHÔNG gọi rowInfo (5 querySelector/dòng)', h, /rowInfo\s*\(/);
+    check('[v1.92.58] highlightRows tra id qua item.id (không đọc DOM sâu)',
+      /idOfItem/.test(h) && /String\(item\.id \|\| ''\)/.test(h), true);
+    check('[v1.92.58] highlightRows có dự phòng lấy id từ div[id] cha',
+      /closest\('div\[id\]'\)/.test(h), true);
+    check('[v1.92.58] màu target theo id của target/rangeStart/rangeEnd (như markOf cũ)',
+      /markIds/.test(h) && /state\.rangeStart/.test(h) && /state\.rangeEnd/.test(h), true);
   }
 }
 
