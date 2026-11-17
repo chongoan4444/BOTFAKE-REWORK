@@ -891,8 +891,28 @@ check('noteGidExtResult có đường hồi theo HÀNG ĐỢI (không chỉ 10 p
 check('trần đường hồi = 12, THẤP HƠN khởi điểm 20 (không mở vùng vận hành mới)',
   /const GID_EXT_QUEUE_RAMP_CAP = 12;/.test(SRC)
   && /const GID_EXT_INITIAL = 20;/.test(SRC), true);
+/* [v1.92.54] ĐIỀU KIỆN ĐÃ ĐỔI ĐẠI LƯỢNG: `waitingCount() >= 12` KHÔNG BAO GIỜ ĐÚNG.
+ * Lô 13:25 và 13:31 (bản 1.92.53): `Ext dò` = 4 suốt cả hai lô (đúng sàn) dù 138/136 ca phải dò.
+ * Lý do: làn 4 chỗ chỉ giữ được ≤4 lượt xếp hàng ⇒ waitingCount không thể tới 12.
+ * Nay đếm TỒN ĐỌNG THẬT: `gidStats.unknown − rampAtUnknown`. */
+check('[v1.92.54] đường hồi đếm TỒN ĐỌNG THẬT (không dùng waitingCount — đại lượng sai)',
+  /backlogNoGid >= 12/.test(SRC) && /gidStats\.unknown \|\| 0\) - \(gidExtCtl\.rampAtUnknown/.test(SRC), true);
+check('[v1.92.54] KHÔNG còn điều kiện waitingCount() >= 12 trong đường hồi',
+  /gidExtLane\.waitingCount\(\) >= 12/.test(SRC), false);
 check('đường hồi chỉ chạy sau ≥2 lần đã co (không nới khi làn còn khoẻ)',
-  /\(gidExtCtl\.cooldowns \|\| 0\) >= 2 && gidExtLane\.waitingCount\(\) >= 12/.test(SRC), true);
+  /\(gidExtCtl\.cooldowns \|\| 0\) >= 2 && backlogNoGid >= 12/.test(SRC), true);
+check('[v1.92.54] trần đường hồi VẪN 12 (thấp hơn khởi điểm 20 ⇒ không mở vùng vận hành mới)',
+  /const GID_EXT_QUEUE_RAMP_CAP = 12;/.test(SRC), true);
+check('[v1.92.54] in ĐỈNH làn dò để lô sau kiểm được đường hồi có chạy thật',
+  /' \(đỉnh ' \+ gidExtPeak/.test(SRC), true);
+/* rampAtUnknown PHẢI khai báo = 0: nếu undefined thì (unknown - undefined) = NaN ⇒ >= 12 luôn false
+ * ⇒ đường hồi chết y như 1.92.52. Đây là lỗi "số ảo" đúng loại đang sửa nên phải khoá riêng. */
+check('[v1.92.54] rampAtUnknown khai báo tường minh = 0 (không để undefined ⇒ NaN)',
+  /rampAtUnknown: 0 \}/.test(SRC), true);
+check('[v1.92.54] mốc rampAtUnknown được cập nhật sau mỗi lần nới làn',
+  /gidExtCtl\.rampAtUnknown = gidStats\.unknown \|\| 0;/.test(SRC), true);
+check('[v1.92.54] dùng ?? hoặc || cho rampAtUnknown để không thể ra NaN',
+  /\(gidStats\.unknown \|\| 0\) - \(gidExtCtl\.rampAtUnknown \|\| 0\)/.test(SRC), true);
 
 /* (12) CHÚ THÍCH SAI VỀ BIND ẢNH PHẢI ĐƯỢC SỬA (nó từng gây kết luận sai).
  * Lô 12:24: 📷 8 186 ca · TB 842 ms; giữ slot 5 741 ms/chat vs 1 362 ms/chat ở lô KHÔNG ảnh. */
@@ -925,7 +945,12 @@ check('có in "phải chờ slot" kèm số ca (0 ca nghĩa là số "chờ 662"
  * nhưng log in 5 741 ⇒ "chờ" nằm TRONG "còn lại" chứ không cộng thêm. Muốn biết 4 237 ms
  * còn lại là gì thì phải có số của khâu dò gid. */
 check('đo riêng khâu dò global_id (prepGidMs)',
-  /waveDiag\.prepGidN\+\+; waveDiag\.prepGidMs \+= Math\.max\(0, Date\.now\(\) - _tGid0\)/.test(SRC), true);
+  /waveDiag\.prepGidN\+\+; waveDiag\.prepGidMs \+= _g;/.test(SRC), true);
+check('[v1.92.54] tách LƯỢT DÒ 1 / LƯỢT DÒ 2 (13 475ms vượt mọi hạn chờ đơn lẻ ⇒ phải 2 lượt)',
+  /waveDiag\.prepGidP2N\+\+; waveDiag\.prepGidP2Ms \+= _g;/.test(SRC)
+  && /waveDiag\.prepGidP1N\+\+; waveDiag\.prepGidP1Ms \+= _g;/.test(SRC), true);
+check('[v1.92.54] in lượt 1 / lượt 2 trong dòng GIỮ SLOT',
+  /' \(lượt 1: ' \+ waveDiag\.prepGidP1N/.test(SRC), true);
 check('đo riêng khâu bind ảnh trong prepareDirectCtx (prepBindMs)',
   /waveDiag\.prepBindN\+\+; waveDiag\.prepBindMs \+= _b/.test(SRC), true);
 check('"chuẩn bị ctx" trừ bind ra để không đếm 2 lần',

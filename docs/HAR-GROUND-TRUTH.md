@@ -4518,3 +4518,100 @@ Ba số này + `📷 bind fbId` + `giữ cổng` **phải cộng xấp xỉ `cò
 2. **Gom bind ảnh theo page** thay vì theo chat (8 186 → ~960). Lợi ích lớn hơn A nhưng
    phải chứng minh được `content_ids` dùng lại được cho nhiều `conv_id` — **chưa có bằng chứng**,
    trong khi code hiện tại ghi rõ *"tuyệt đối KHÔNG dùng lại fbId is_reusable=false của A cho B"*.
+
+---
+
+## §89 — HAI LÔ 1.92.53 (13:25 và 13:31): TỐC ĐỘ ĐÃ Ở TRẦN, VÁ 1.92.52 CÓ MỘT CÁI KHÔNG CHẠY
+
+Nguồn: `botfake-log-20261117-132543.txt` (2 413 chat) · `botfake-log-20261117-133140.txt` (6 920 chat).
+Cả hai bản 1.92.53-W200.99, **không ảnh**, tab ẩn 94 % / 40 %.
+
+### 89.1 Kết quả
+
+| | LOG 1 | LOG 2 |
+|---|---|---|
+| ✅ | 1 486 (61,6 %) | 3 908 (56,5 %) |
+| ❌ / ⚠ | 349 / 578 | 191 / 2 821 |
+| PHÁT | **142,3/s** | **147,1/s** |
+| giữ slot | 1 242 ms | 1 183 ms |
+| gửi trùng | 0 | 0 |
+
+**Hiệu suất slot: LOG 1 = 15,6 s lý thuyết / 17 s thực = 92 %; LOG 2 = 42,6 / 47 = 91 %.**
+⇒ đã sát trần (≈147/s = 192 slot ÷ 1,18 s × 0,91). Muốn nhanh hơn phải **giảm giữ slot**, không phải nới làn.
+
+### 89.2 VÁ `🚫` CỦA 1.92.53 ĐÚNG — VÀ BÀI HỌC ĐẾM
+
+| | sổ `#10` | sổ `#551` | tổng | `🚫` in |
+|---|---|---|---|---|
+| LOG 1 | 38 | 9 | **47** | **47** ✓ |
+| LOG 2 | 1 | 134 | **135** | **135** ✓ |
+
+**Quy tắc đếm: PHẢI đếm trên SỔ (Mục 2), KHÔNG đếm trên log gọn.**
+`logFailGrouped` ghi sổ **trước** (1 dòng/ca) rồi mới gộp màn hình (1 dòng/×N) ⇒ đếm log gọn
+ra 94 và 271 (gấp đôi) ⇒ dễ kết luận sai là "vá hỏng". Sổ ✅ cũng khớp tuyệt đối với TỔNG HỢP
+(1 486 = 1 486 · 3 908 = 3 908) ⇒ **vá `noAudit` của 1.92.52 chạy đúng, không còn ✅ trùng**.
+
+### 89.3 GIẢ THUYẾT §87.2a ĐƯỢC XÁC NHẬN
+
+`slot thoát ≤75 % cap` = **294 lần (LOG 1) / 303 lần (LOG 2)**, **thấp nhất = 0**.
+⇒ "163" tuyệt đối không phải "chỉ dùng 85 % cap" (§87.2a đúng). Cả 4 wave đều mở qua nhánh mềm
+(≤163), không wave nào vượt 176.
+
+### 89.4 VÁ 1.92.52 KHÔNG CHẠY: `Ext dò` đứng ở 4 suốt CẢ HAI LÔ
+
+`Ext dò 4` = đúng sàn `GID_EXT_MIN`, dù có 138/136 ca phải dò (nếu đường hồi chạy thì phải lên ≥6).
+
+**Nguyên nhân (đọc code + số khớp):** điều kiện cũ là `gidExtLane.waitingCount() >= 12`.
+`resolveGlobalId` chạy từ ~192 slot main, mỗi lượt giữ **một** promise trên làn **4 chỗ** ⇒
+**nhiều nhất 4 ca** xếp hàng ⇒ `waitingCount() ≥ 12` gần như không bao giờ đúng.
+**Đo sai đại lượng**: đếm "đang xếp hàng trên làn" thay vì "còn bao nhiêu ca đang thiếu gid".
+
+**Đã sửa (1.92.54):** đếm `gidStats.unknown − rampAtUnknown` (tồn đọng THẬT), mốc cập nhật sau
+mỗi lần nới. Trần **vẫn 12** (thấp hơn khởi điểm 20 ⇒ không mở vùng vận hành mới).
+In thêm `Ext dò (đỉnh N)` — lô sau **đỉnh phải > 4**, nếu vẫn 4 thì lại sai.
+
+### 89.5 `dò gid` 13 475 ms = **2 LƯỢT DÒ** (số học khớp)
+
+| | prepGidN | ca "lần dò chưa ra" | 2 × số đó |
+|---|---|---|---|
+| LOG 1 | 450 | 47 | 94 (chênh 356 — có ảnh hưởng của cứu Ext/Socket) |
+| LOG 2 | **278** | **136** | **272** (chênh **6**) |
+
+Gần như trùng khít ⇒ mỗi ca dò **2 lượt**. Và 13 475 ms/ca **vượt mọi hạn chờ đơn lẻ** trong file
+(`GID_NOGID_SHORT_WAIT 1 500` · WS `6 000` · Ext `10 000` · ext p90 timeout `7 000` và có nhánh
+`want = p90 × 3` = 21 000) ⇒ phải là nhiều lượt nối tiếp.
+
+**Chưa sửa ngưỡng** — 1.92.54 chỉ thêm `dò gid (lượt 1: n/TB x ms · lượt 2: n/TB y ms)`.
+`gidRetryPass` (dòng 3836) đã kiểm: **chỉ được đọc, không nơi nào set** ⇒ không phải nguyên nhân.
+Lượt 2 đến từ nhánh **bắn lại** (`isSocketRetryPass` → đặt lại `gidResolved = false`, hoặc
+`isExtBacklogPass`), chỗ **reset** ở dòng 7629–7630 (`ctx.gidForceFind = true; ctx.gidResolved = false`).
+
+**Cắt ở đâu khi có số:** nhóm "server đã nói không có gid" đã có đường tắt 1,5 s
+(`shortNoGidWait`, LOG 1 = 47 ca · LOG 2 = 138 ca). Nếu `lượt 2` phình to đúng nhóm này thì
+chỗ cắt là **không dò lại lượt 2 cho ca đã có kết luận `server-no-gid`**.
+
+### 89.6 BẪY ĐỌC SỐ (ghi lại để không lặp)
+
+1. `thành công 3 908/4 042 (96,7 %)` **KHÔNG phải** tỉ lệ giao. Mẫu số 4 042 = 6 920 − 57 − 2 821.
+   **2 821 ca bị loại khỏi mẫu số** ⇒ tỉ lệ thật **56,5 %**.
+2. **Tổng thời gian cổng KHÔNG cộng dồn**: cổng wave N+1 chờ trong lúc wave N vẫn rút slot.
+   LOG 2 có 36,7 s cổng trên lô 47 s nhưng thời gian cộng thêm thật chỉ ≈ **4,4 s**.
+3. `🚫` phải đếm trên **sổ**, không đếm log gọn (89.2).
+
+### 89.7 ĐÒN BẨY LỚN NHẤT CÒN LẠI — KHÔNG PHẢI CODE
+
+`📡 SOCKET` LOG 2: `retry lần 0 (cứu 0 · rejected 0 · khác 0 · retry ảnh 0 · bỏ thử lần 2 (ngân sách) 2821)`.
+**Số lần bắn lại thật = 0** — 2 821 ca chưa hề được thử lại lần nào.
+
+Nguyên nhân: ngân sách thử lại chỉ mở khi tỉ lệ từ chối **thấp**, mà tỉ lệ thật:
+**LOG 1 = 924/2 409 = 38,4 %** · **LOG 2 = 2 930/6 832 = 42,9 %**.
+
+Code ghi rõ (`~6026`): *"Socket/page 128 khởi điểm, đủ cho pace 4ms × **2 page** = 500/s"* —
+nhưng `Socket/page limits cuối [256×1]` = **1 page**, trong khi `SOCKET_MIN_PACE_MS = 4` ⇒
+trần **250 khung/s/page**.
+- 1 page: 6 832 ÷ 47 s = **145/s** (chưa trần)
+- **2 page chia tải:** 4 200/2 632 ⇒ page nặng **89/s = 36 % trần** ⇒ dư địa lớn.
+
+**Kết luận:** cần **chia tải qua ≥2 page**, KHÔNG phải nới làn. Với 2 page, tỉ lệ thành công kỳ vọng
+≈ 75–80 % thay vì 56,5 % ⇒ **+1 500–1 800 tin/lô**. Đây là **suy luận có số** (cả 2 lô đều 1 page
+nên chưa có bằng chứng nhân quả) ⇒ kiểm bằng cách chạy đúng lô đó với 2 page. **Không sửa code.**

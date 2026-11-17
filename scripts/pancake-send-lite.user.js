@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.53-w200.99
+// @version      1.92.54-w200.100
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.53-W200.99'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.54-W200.100'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6693,7 +6693,10 @@
   // tốc độ thật; 429/timeout/chậm → giảm mạnh + nghỉ chung, tránh cả nghìn request
   // cùng đâm vào server đang nghẽn rồi cùng chết (đúng bệnh lô 5.000).
   const gidHttpCtl = { good: 0, bad: 0, coolUntil: 0, backoffStreak: 0 };
-  const gidExtCtl = { good: 0, bad: 0 };
+  /* [v1.92.54] `rampAtUnknown` = mốc `gidStats.unknown` tại lần nới làn gần nhất. Phải KHAI BÁO
+   * TƯỜNG MINH: nếu để undefined thì `(gidStats.unknown||0) - undefined` = NaN ⇒ `NaN >= 12`
+   * luôn false ⇒ đường hồi chết y như bản 1.92.52 (đúng kiểu lỗi đang sửa). */
+  const gidExtCtl = { good: 0, bad: 0, cooldowns: 0, rampAtUnknown: 0 };
   async function waitGidHttpCooldown() {
     let waited = false;
     if (!state.stopRequested && Date.now() < gidHttpCtl.coolUntil) {
@@ -6744,6 +6747,7 @@
       }
     } catch (e) { /* điều tiết lỗi không được làm hỏng lượt gửi */ }
   }
+  let gidExtPeak = 0; // [v1.92.54] đỉnh của làn dò (để kiểm đường hồi có chạy thật)
   function noteGidExtResult(responded, timedOut, latencyMs) {
     try {
       if (timedOut || !responded || latencyMs > 12000) {
@@ -6770,12 +6774,25 @@
            * THẤP HƠN mức bình thường của chính nó ⇒ không mở vùng vận hành mới, không thể
            * tạo tải chưa từng được thiết kế. Muốn nới hơn thì đổi 12 → số khác, có ý thức. */
           const GID_EXT_QUEUE_RAMP_CAP = 12;
-          if ((gidExtCtl.cooldowns || 0) >= 2 && gidExtLane.waitingCount() >= 12
+          /* [v1.92.54] `waitingCount()` LUÔN = 0–2 Ở ĐƯỜNG DÒ ⇒ VÁ 1.92.52 KHÔNG BAO GIỜ CHẠY.
+           * Bằng chứng số (lô 13:25 và 13:31, bản 1.92.53): `Ext dò` = **4** suốt CẢ HAI lô
+           * (đúng sàn `GID_EXT_MIN`), dù có 138 / 136 ca phải dò. Nếu đường hồi chạy thì làn phải
+           * lên ít nhất 6. Vì sao không chạy: `resolveGlobalId` được gọi từ ~192 slot main, mỗi
+           * lượt chỉ giữ MỘT promise trên làn 4 chỗ ⇒ **nhiều nhất 4 ca** xếp hàng ⇒
+           * `waitingCount() >= 12` gần như không bao giờ đúng. Điều kiện cũ đo SAI ĐẠI LƯỢNG:
+           * nó đếm "đang xếp hàng trên làn" thay vì đếm "còn bao nhiêu ca đang thiếu gid".
+           * Nay dùng đúng đại lượng: số lần dò CHƯA RA kể từ lần nới gần nhất
+           * (`gidStats.unknown − gidExtCtl.rampAtUnknown`). Ngưỡng 12 giữ nguyên ý nghĩa
+           * "còn tồn đọng thật". Trần 12 vẫn thấp hơn khởi điểm 20 ⇒ không mở vùng mới. */
+          const backlogNoGid = (gidStats.unknown || 0) - (gidExtCtl.rampAtUnknown || 0);
+          if ((gidExtCtl.cooldowns || 0) >= 2 && backlogNoGid >= 12
               && gidExtLane.getLimit() < GID_EXT_QUEUE_RAMP_CAP) {
             gidExtCtl.good++;
             if (gidExtCtl.good >= 6) {
               gidExtCtl.good = 0;
+              gidExtCtl.rampAtUnknown = gidStats.unknown || 0; // đã trả tồn đọng ⇒ phải tích lại từ 0
               gidExtLane.setLimit(Math.min(GID_EXT_QUEUE_RAMP_CAP, gidExtLane.getLimit() + 2));
+              try { gidExtPeak = Math.max(gidExtPeak, gidExtLane.getLimit()); } catch (ePk) { /* ignore */ }
             }
           }
         } catch (eR) { /* ignore */ }
@@ -7093,11 +7110,22 @@
     }
     if (!ctx.gidResolved && ctx.threadId) {
       const _tGid0 = Date.now();
+      const _gidUnknownBefore = gidStats.unknown || 0;
       ctx.gid = await resolveGlobalId(full, ctx.threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
       /* [v1.92.53] ĐO RIÊNG KHÂU DÒ global_id — đây là phần còn lại lớn nhất chưa có số trong
        * "còn lại 5 741 ms" của lô 8 509 (555 ca "lần dò chưa ra", Ext p90 0 ms → timeout 7 000 ms).
-       * Chỉ ĐO, không đổi đường dò. */
-      try { waveDiag.prepGidN++; waveDiag.prepGidMs += Math.max(0, Date.now() - _tGid0); } catch (eG) { /* ignore */ }
+       * Chỉ ĐO, không đổi đường dò.
+       * [v1.92.54] TÁCH LƯỢT 1 / LƯỢT 2 — để chứng minh con số 13 475 ms/ca của lô 13:31 là
+       * HAI lượt dò nối tiếp nhau chứ không phải một lượt chờ 13,5 s (mọi hạn chờ đơn lẻ trong
+       * file đều ≤ 10 000 ms). `lượt 2` = lượt mà TRƯỚC đó đã có ≥1 lần dò chưa ra trên cùng
+       * tiến trình ⇒ chính là ca bị bắn lại qua hàng đợi Ext / thử lại Socket. */
+      try {
+        const _g = Math.max(0, Date.now() - _tGid0);
+        const _pass2 = (gidStats.unknown || 0) > _gidUnknownBefore && _gidUnknownBefore > 0;
+        waveDiag.prepGidN++; waveDiag.prepGidMs += _g;
+        if (_pass2) { waveDiag.prepGidP2N++; waveDiag.prepGidP2Ms += _g; }
+        else { waveDiag.prepGidP1N++; waveDiag.prepGidP1Ms += _g; }
+      } catch (eG) { /* ignore */ }
       if (ctx.deferredToExt) {
         recycleUnusedFbId(pageId, ctx);
         return ctx;
@@ -8264,6 +8292,8 @@
      *                     hàng mới có ms. Nếu lô sau vẫn ra 0 thì con số cũ là số ảo.
      * Ba số này + `bind fbId` + `giữ cổng` phải xấp xỉ `còn lại`; phần dôi ra là CPU bị bóp. */
     prepGidMs: 0, prepGidN: 0, prepBindMs: 0, prepBindN: 0, slotAcqN: 0, slotAcqPosMs: 0,
+    /* [v1.92.54] tách LƯỢT DÒ 1 vs LƯỢT DÒ 2 của khâu global_id (xem chỗ cộng trong prepareDirectCtx) */
+    prepGidP1Ms: 0, prepGidP1N: 0, prepGidP2Ms: 0, prepGidP2N: 0,
   };
 
   /* ===== [v1.92.28] TỈ LỆ FB TỪ CHỐI TRÊN CỬA SỔ GẦN NHẤT =====
@@ -8850,6 +8880,12 @@
                 : '0 ca')
               + ' · dò gid ' + (waveDiag.prepGidN
                 ? waveDiag.prepGidN + ' ca · TB ' + Math.round(waveDiag.prepGidMs / waveDiag.prepGidN) + 'ms'
+                  /* [v1.92.54] TÁCH LƯỢT 1 / LƯỢT 2 — 13 475 ms/ca ở lô 13:31 vượt MỌI hạn chờ đơn
+                   * lẻ trong file (≤10 000 ms) ⇒ phải là 2 lượt nối tiếp. Nếu lô sau ra
+                   * "lượt 1 TB ~7 000ms · lượt 2 TB ~6 500ms" thì giả thuyết đúng, và chỗ cắt
+                   * đúng là lượt 2 của nhóm "server đã nói không có gid". */
+                  + ' (lượt 1: ' + waveDiag.prepGidP1N + ' ca/TB ' + Math.round(waveDiag.prepGidP1Ms / Math.max(1, waveDiag.prepGidP1N)) + 'ms'
+                  + ' · lượt 2: ' + waveDiag.prepGidP2N + ' ca/TB ' + Math.round(waveDiag.prepGidP2Ms / Math.max(1, waveDiag.prepGidP2N)) + 'ms)'
                 : '0 ca')
               + ' · chuẩn bị ctx (không tính bind) '
                 + Math.round(Math.max(0, waveDiag.slotPrepMs - waveDiag.prepBindMs) / waveDiag.slotN) + 'ms'
@@ -8921,6 +8957,10 @@
            + ' · dò lại ACK chết ' + socketPickDiag.probe + ' (hồi ' + socketPickDiag.probeOk + ')'
           + ' · lane HTTP ' + ctxFetchLane.getLimit()
           + ' / Ext dò ' + gidExtLane.getLimit()
+          /* [v1.92.54] `Ext dò` ĐỨNG Y Ở SÀN 4 suốt 2 lô (13:25 và 13:31) chứng minh đường hồi
+           * 1.92.52 KHÔNG CHẠY (nó đòi waitingCount ≥ 12, mà làn 4 chỗ chỉ giữ được ≤4 lượt).
+           * Nay in thêm ĐỈNH để lô sau kiểm được: đỉnh phải > 4. Nếu vẫn = 4 ⇒ lại sai, đọc số ảo. */
+          + ' (đỉnh ' + gidExtPeak + ')'
           + ' / Ext gửi ' + extSendLane.getLimit()
           + ' / Socket/page ' + getPageSocketLaneRange());
         // [v1.92.34] Lô đã chốt ⇒ chạy hậu kiểm 1545041 (chỉ đọc lịch sử, không bắn lại).
