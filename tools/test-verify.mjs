@@ -1459,6 +1459,87 @@ check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
   }
 }
 
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * [v1.92.63] BÁO CÁO SAI KHIẾN NGƯỜI DÙNG GỬI TAY ⇒ KHÁCH NHẬN 2 TIN.
+ * Bằng chứng: log 20:41:43 (5 chat, bản 1.92.62) — 5/5 chat ĐÃ tới nơi qua ext lúc
+ * 20:41:30.164→.400, nhưng bảng chốt lúc 20:41:22 in "🖐 CẦN GỬI TAY: 5 chat".
+ * Mỗi mục dưới đây khoá ĐÚNG hành vi đã sửa; sửa lùi là test đỏ.
+ * ══════════════════════════════════════════════════════════════════════════════ */
+{
+  /* 1) SỔ ĐỊNH TUYẾN phải hồi khi Ext/API giao được, không chỉ Socket.
+   *    Bản 1.92.62: `if (ch === 'socket')` ⇒ Ext giao 5/5 mà sổ vẫn tưởng page mất tin. */
+  {
+    const md = stripComments(extractFn('markDelivered'));
+    check('[v1.92.63] markDelivered hồi sổ định tuyến cho CẢ ext và api',
+      /ch === 'ext'/.test(md) && /ch === 'api'/.test(md), true);
+    checkNot('[v1.92.63] markDelivered không còn chỉ hồi sổ khi socket', md,
+      /if \(ch === 'socket'\) \{\s*try \{\s*const _st = sockRoute/);
+    // chạy THẬT: 3 kênh × 1 ca, kiểm `dlv` tăng và lost về 0
+    const fn = new Function('sockRoute', 'deliveredIds', 'finalFailedIds', 'uncertainIds',
+      'summaryCounters', 'state', 'saveSentIds', 'softNotify', 'updateBatchSummaryUI',
+      'clearBgPending', 'auditPush', 'deliverHits', 'dropManualResend', 'rescueInFlight',
+      'batchStats', 'runSeq', 'nameById',
+      stripComments(extractFn('markDelivered')).replace(/^function markDelivered\(convId, via\) \{/, 'return function markDelivered(convId, via) {') + '\nreturn markDelivered;');
+    ['socket', 'ext', 'api'].forEach((k) => {
+      const route = { '111': { dlv: 0, lostSock: 3, lostExt: 2 } };
+      const delivered = {};
+      const m = fn(route, delivered, {}, {}, { okApi: 0, okExt: 0, okSocket: 0, fail: 0, unsure: 0, skipLate: 0 },
+        { sentIds: new Set(), stopRequested: false }, () => {}, () => {}, () => {}, () => {}, () => {},
+        new Map(), () => {}, {}, { loopFinished: false }, 1, {});
+      m('111_222', k);
+      check('[v1.92.63] giao qua ' + k + ' ⇒ sổ định tuyến hồi (lostSock/lostExt về 0, dlv+1)',
+        route['111'].dlv === 1 && route['111'].lostSock === 0 && route['111'].lostExt === 0, true);
+    });
+  }
+
+  /* 2) Cổng giữ slot KHÔNG được nới mà không có bằng chứng — chốt luôn con số đã kiểm.
+   *    3 lô lớn (14:03 · 19:00:48 · 19:00:54): 3 073 ca no-ACK, phân xử muộn 3 064, cứu ✅ 0
+   *    ⇒ cổng 6 000 KHÔNG cắt oan. Đã thử 9 000 rồi hoàn nguyên. */
+  {
+    const src = stripComments(SRC);
+    check('[v1.92.63] trần giữ slot giữ nguyên 6 000 ms (đã thử nới, bằng chứng phủ định)',
+      /const ACK_HOLD_CEIL_MS = 6000;/.test(src), true);
+    check('[v1.92.63] có ghi lại bằng chứng phủ định ngay cạnh hằng số (không ai nới lại mù)',
+      /ĐÃ THỬ NỚI TRẦN NÀY 6 000 → 9 000/.test(SRC), true);
+    check('[v1.92.63] công thức giữ slot vẫn 3×p90 kẹp [1 200, 6 000]', ACK.ackHoldMsFor(5544), 6000);
+  }
+
+  /* 3) "CẦN GỬI TAY" KHÔNG được chứa chat đã từng có ✅ (tiêu chí nghiệm thu). */
+  {
+    const body = stripComments(SRC);
+    check('[v1.92.63] danh sách gửi tay loại chat đã có trong deliveredIds',
+      /const already = !!deliveredIds\[m\.id\]/.test(body), true);
+    check('[v1.92.63] danh sách gửi tay loại chat TỪNG có dòng ✅ (deliverHits)',
+      /deliverHits\.has\(m\.id\)/.test(body), true);
+    check('[v1.92.63] file .txt nói rõ đã loại bao nhiêu ca vì đã có ✅',
+      /đã loại ' \+ _mz\.delivered \+ ' chat khỏi danh sách này vì ĐÃ có dấu ✅/.test(body), true);
+  }
+
+  /* 4) Bảng chốt không được khẳng định "CẦN GỬI TAY" khi còn ca kiểm chứng nền. */
+  {
+    const body = stripComments(SRC);
+    check('[v1.92.63] TỔNG HỢP đổi câu khi còn kiểm chứng nền (TẠM ⚠, CHƯA gửi tay)',
+      /TẠM ⚠ chưa kết luận/.test(body) && /ĐANG kiểm chứng, CHƯA gửi tay/.test(body), true);
+    check('[v1.92.63] chỉ dùng chữ "CẦN GỬI TAY" khi đã hết kiểm chứng',
+      /verifyLeftNow > 0[\s\S]{0,400}đã hết kiểm chứng/.test(body), true);
+    check('[v1.92.63] có ân hạn chốt bảng thay vì chốt ngay khi pendingSend = 0',
+      /SUMMARY_GRACE_MS/.test(body) && /inGrace/.test(body), true);
+    const fb = stripComments(extractFn('flushBatchSummaryUI'));
+    check('[v1.92.63] isDoneAll trong flushBatchSummaryUI tôn trọng ân hạn',
+      /const isDoneAll = !inGrace && batchStats\.loopFinished/.test(fb), true);
+  }
+
+  /* 5) Dòng gộp log in theo THỨ TỰ SỰ KIỆN (🛟 trước ✅), không theo hạn bộ đếm. */
+  {
+    const fg = stripComments(extractFn('flushGroup'));
+    check('[v1.92.63] flushGroup xả khe CŨ HƠN trước (đúng thứ tự sự kiện)',
+      /o\.t0 < g\.t0/.test(fg), true);
+    check('[v1.92.63] mỗi khe gộp ghi mốc sự kiện đầu (t0)',
+      /t0: now/.test(stripComments(extractFn('logFailGrouped'))), true);
+  }
+}
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {

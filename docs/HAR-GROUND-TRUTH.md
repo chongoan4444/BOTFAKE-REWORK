@@ -5319,3 +5319,95 @@ kiểm cả nhánh `return` khi khoá thất bại).
 
 Panel MỞ + đang gửi, 6 s, 180 dòng log (20 000 thread): **long task 0 · max 0 ms · main thread bận
 0 % · wall 6 005 ms** (bản 1.92.58: 6 long task, max 1 828 ms, bận 51,3 %, wall 12 341 ms).
+
+---
+
+## §99 — BÁO CÁO SAI KHIẾN NGƯỜI DÙNG GỬI TAY (1.92.63)
+
+**Nguồn:** `botfake-log-20261117-204143.txt` (5 chat, page `898735919982398`, bản 1.92.62-W200.108).
+**Câu hỏi của người dùng:** *"sao mấy con này gửi k được, gửi tay được hết"*.
+
+### Kết luận: tin KHÔNG mất — máy BÁO SAI
+
+Chuỗi thật của mỗi chat (từ sổ kiểm chứng, không phải từ bảng tổng hợp):
+
+```
+20:41:21.989  ⚠   Socket không rõ kết quả (không có ACK)
+20:41:30.013  🛟  kiểm chứng: hội thoại KHÔNG có tin ⇒ GỬI CỨU 1 lần qua Extension
+20:41:30.164  ✅  đánh dấu ĐÃ TỚI NƠI qua ext
+```
+
+Cả 5/5 kết thúc `✅ … qua ext`, mỗi chat **1 dòng ✅**, `NGHI GỬI LẶP: 0`, mục
+`🖐 CẦN GỬI TAY` của file .txt = **0 chat**. Tổng 15 s cho 5 chat.
+
+Vậy vì sao người dùng thấy "không gửi được": **bảng TỔNG HỢP chốt trước khi kiểm chứng nền xong.**
+
+```
+20:41:22  📊 TỔNG HỢP CHỐT: ✅ 0/5 · ⚠ 5 · 🖐 CẦN GỬI TAY: 5 chat     ← bảng người dùng đọc
+20:41:30  🔎 Cập nhật: ✅ 0 → 5 · ⚠ 5 → 0                              ← 8 s sau mới là sự thật
+```
+
+### Năm lỗi báo cáo, và sửa
+
+| # | Lỗi | Bằng chứng (số dòng trong log) | Sửa |
+|---|---|---|---|
+| 1 | `markDelivered()` chỉ hồi sổ định tuyến khi `ch === 'socket'` | Ext giao 5/5 (dòng 61–65) mà `sockRoute` vẫn giữ `absent`/`lost` ⇒ máy tưởng page mất tin | hồi sổ với **mọi** kênh giao được (`socket`/`ext`/`api`) |
+| 2 | Bảng chốt khi `pendingSend = 0` mà **còn** kiểm chứng nền | `TỔNG HỢP 20:41:22` vs `✅ đầu tiên 20:41:30` | thêm `SUMMARY_GRACE_MS = 2500` + `isDoneAll` tôn trọng `inGrace` |
+| 3 | Câu **"🖐 CẦN GỬI TAY: 5 chat"** in khi còn kiểm chứng nền | như trên; làm theo là khách nhận **2 tin** | đổi thành `⏳ TẠM ⚠ chưa kết luận — ĐANG kiểm chứng, CHƯA gửi tay`; chữ "CẦN GỬI TAY" chỉ xuất hiện khi `verifyLeftNow === 0` |
+| 4 | Danh sách gửi tay trong .txt chỉ lọc `isRescuing` | cùng 5 chat đã ✅ vẫn đủ điều kiện vào danh sách | thêm 2 tầng lọc: `deliveredIds[id]` và `deliverHits` có ≥1 lần ✅; .txt in rõ "đã loại N chat vì ĐÃ có dấu ✅" |
+| 5 | Dòng gộp log in theo **hạn bộ đếm**, không theo thứ tự sự kiện | sổ: `🛟 30.013` → `✅ 30.164`; bảng log: `🛟 20:41:32` → `✅ 20:41:32` ⇒ đọc thành "gửi cứu SAU khi đã ✅" | mỗi khe gộp ghi `t0` (mốc sự kiện đầu); khi một khe tới hạn thì xả trước mọi khe có `t0` nhỏ hơn |
+
+### Một giả thuyết ĐÃ THỬ VÀ HOÀN NGUYÊN (quan trọng)
+
+Giả thuyết: `ACK p50/p90 4725/5544ms` + `giữ slot 6000ms` ⇒ cổng 6 000 quá sát p90 ⇒ ACK về muộn
+bị coi là no-ACK oan. **Sai.** Đọc đúng dòng 📡 của chính lô đó:
+
+```
+📡 SOCKET: ACK OK/rejected/no-ACK 0/0/5 · buckets <250/250-999/1-2s/2-5s/≥5s 0/0/0/0/0 · ACK TB/max 0/0ms
+🔔 CỬA SỔ NGHE ACK: hết hạn chờ 5 · im lặng THẬT 0 · ACK về MUỘN đã phân xử 0
+```
+
+Không có ACK nào về trễ ⇒ `p50/p90 4725/5544` **không phải** ACK của 5 lệnh này.
+
+Đối chiếu 3 lô lớn để chắc chắn:
+
+| lô | no-ACK | phân xử muộn | **cứu được ✅** | bucket ≥5s (ACK về ĐÚNG hạn) |
+|---|---|---|---|---|
+| 14:03 | 1 246 | 1 238 | **0** | 3 772 |
+| 19:00:48 | 886 | 885 | **0** | 428 |
+| 19:00:54 | 941 | 941 | **0** | 446 |
+
+Ba lô, ~3 000 ca no-ACK, **cứu được 0 ca** — trong khi hàng nghìn ACK ≥5 s vẫn về đúng hạn. Nghĩa
+là cổng 6 000 **không hề cắt oan**; no-ACK ở đây là Socket im lặng thật. Đã thử `ACK_HOLD_CEIL_MS`
+9 000 rồi **hoàn nguyên về 6 000** và ghi lại bằng chứng ngay cạnh hằng số để không ai nới lần nữa
+mà không có log (`buckets ≥5s > 0` hoặc `ACK về MUỘN đã phân xử > 0`).
+
+⇒ **"Nới ra một chút" được thực hiện ở chỗ khác**: ân hạn 2 500 ms cho bảng chốt (mục 2). Nới cổng
+giữ slot chỉ làm lô chậm — mọi phương án đã tính đều ≫ tốc độ thật của pha khoẻ.
+
+### Test
+
+`npm test` **317 ca** (thêm khối `[v1.92.63]`). Mutation **6/6 bị bắt**:
+
+| mã | đột biến | kết quả |
+|---|---|---|
+| M24 | `markDelivered` trả lại `if (ch === 'socket')` | BẮT ĐƯỢC |
+| M25 | bỏ lọc `deliveredIds` khỏi danh sách gửi tay | BẮT ĐƯỢC |
+| M26 | bỏ lọc `deliverHits` khỏi danh sách gửi tay | BẮT ĐƯỢC |
+| M27 | luôn khẳng định "CẦN GỬI TAY" | BẮT ĐƯỢC |
+| M28 | bỏ ân hạn chốt bảng | BẮT ĐƯỢC |
+| M29 | `flushGroup` in theo hạn bộ đếm | BẮT ĐƯỢC |
+
+Ngoài ra **chạy THẬT** `buildAuditText()` với dữ liệu dựng đúng 5 chat của log: ra
+`=== 🖐 CẦN GỬI TAY (0 chat) ===` + `(đã loại 5 chat … vì ĐÃ có dấu ✅ tới nơi)`.
+A/B trên cùng dữ liệu: logic cũ (chỉ lọc `isRescuing`) = **5 chat**, logic mới = **0 chat**.
+
+### Hệ quả với tiêu chí nghiệm thu
+
+| tiêu chí | trước | sau |
+|---|---|---|
+| CẦN GỬI TAY chỉ chứa chat chưa từng có ✅ | ❌ (5 chat) | ✅ (0) |
+| bảng chốt không mời gửi tay khi còn kiểm chứng | ❌ | ✅ |
+| sổ định tuyến hồi khi Ext giao | ❌ | ✅ |
+| thứ tự dòng log = thứ tự sự kiện | ❌ | ✅ |
+| cổng giữ slot 6 000 ms | không cắt oan (đã đo) | giữ nguyên |

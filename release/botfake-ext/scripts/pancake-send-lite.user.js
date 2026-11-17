@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.62-w200.108
+// @version      1.92.63-w200.109
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.62-W200.108'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.63-W200.109'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6197,6 +6197,24 @@
    *     NHƯNG **không xoá chỗ nhận** ⇒ gói về muộn được phân xử thật (✅/❌) qua đường CHỈ ĐỌC.
    * Đây là đường ĐỌC, không thêm một lệnh gửi nào ⇒ không thể sinh tin trùng. */
   const ACK_HOLD_MIN_MS = 1200;     // sàn hạn chờ GIỮ SLOT (giữ nguyên như 1.92.47)
+  /* [v1.92.63] ĐÃ THỬ NỚI TRẦN NÀY 6 000 → 9 000 VÀ ĐÃ HOÀN NGUYÊN — bằng chứng phủ định.
+   * Giả thuyết ban đầu: log 20:41 in `ACK p50/p90 4725/5544ms` + `giữ slot 6000ms` ⇒ cổng
+   * 6 000 quá sát p90 nên ACK về muộn bị coi là no-ACK oan. ĐỌC KỸ CÙNG FILE thì sai:
+   *   • 📡 SOCKET: `ACK OK/rejected/no-ACK 0/0/5` · `buckets 0/0/0/0/0` · `ACK TB/max 0/0ms`
+   *   • 🔔: `hết hạn chờ 5` · `im lặng THẬT 0` · `ACK về MUỘN đã phân xử 0`
+   * ⇒ KHÔNG có ACK nào về trễ. Cả 5 ca KHÔNG có gói /ls_resp nào trong suốt 12 s nghe.
+   *   `p50/p90 4725/5544` KHÔNG phải ACK của 5 lệnh này (buckets rỗng chứng minh).
+   * ĐỐI CHIẾU 3 LÔ LỚN để chắc chắn (đây là số quyết định):
+   *   lô        | no-ACK | phân xử muộn | CỨU được ✅ | bucket ≥5s (ACK về ĐÚNG hạn)
+   *   14:03     |  1 246 |        1 238 |          0 | 3 772
+   *   19:00:48  |    886 |          885 |          0 |   428
+   *   19:00:54  |    941 |          941 |          0 |   446
+   * Ba lô, ~3 000 ca no-ACK: **cứu được 0 ca**. Trong khi đó hàng nghìn ACK ≥5 s VẪN về
+   * đúng hạn (bucket ≥5s) ⇒ cổng 6 000 KHÔNG hề cắt ACK. Các ca no-ACK là IM LẶNG THẬT của
+   * Socket, nới cổng chỉ giữ slot lâu hơn mà không đổi kết quả một ca nào.
+   * Sửa trần thành 9 000 khi p90 ≥ 3 000 chỉ làm lô chậm thêm mà không cứu được ca nào ⇒
+   * giữ nguyên 6 000 (đúng 1.92.47) và ghi lại đây để không ai "nới" lần nữa mà không có log
+   * chứng minh (`buckets ≥5s > 0` hoặc `ACK về MUỘN đã phân xử > 0`). */
   const ACK_HOLD_CEIL_MS = 6000;    // trần hạn chờ GIỮ SLOT (giữ nguyên như 1.92.47)
   const ACK_LISTEN_MAX_MS = 30000;  // = trần tự xoá của app (b=3e4) — nghe tới đây rồi thôi
   const ACK_LAT_RING_N = 1000;      // [v1.92.48] 200 → 1 000 mẫu: 200 mẫu ≈ 5 s cuối lô
@@ -6214,9 +6232,10 @@
     const i = Math.min(a.length - 1, Math.max(0, Math.floor(a.length * pct)));
     return a[i];
   }
-  /** Hạn chờ GIỮ SLOT theo p90 — GIỐNG HỆT 1.92.47 (clamp(p90×3, 1200, 6000)).
+  /** Hạn chờ GIỮ SLOT theo p90 — GIỐNG HỆT 1.92.47 (clamp(p90×3, 1 200, 6 000)).
    *  Giữ nguyên vì đây là MẪU SỐ CỦA TỐC ĐỘ (lane ÷ hạn chờ giữ slot), không phải công cụ
-   *  chống mất ACK. Chống mất ACK là việc của ackListenMsFor() bên dưới. */
+   *  chống mất ACK. Chống mất ACK là việc của ackListenMsFor() bên dưới.
+   *  [v1.92.63] Đã thử nới trần lên 9 000 rồi HOÀN NGUYÊN — xem khối chú thích ở hằng số. */
   function ackHoldMsFor(p90) {
     const v = Math.round(Number(p90) || 0) || 3000;
     return Math.max(ACK_HOLD_MIN_MS, Math.min(ACK_HOLD_CEIL_MS, Math.round(v * 3)));
@@ -8958,6 +8977,7 @@
     skippedPre: 0,
     startedAt: 0,
     loopFinished: false,
+    loopFinishedAt: 0,   // [v1.92.63] Date.now() lúc phát xong — mốc của ân hạn chốt bảng
     finalLogged: false,
   };
 
@@ -9031,7 +9051,13 @@
       if (c.okExt) byCh.push('Ext: ' + c.okExt);
       if (c.okSocket) byCh.push('Socket: ' + c.okSocket);
       const chStr = byCh.length ? ' [' + byCh.join(' · ') + ']' : '';
-      const isDoneAll = batchStats.loopFinished && (c.pendingSend === 0 || state.stopRequested);
+      /* [v1.92.63] `isDoneAll` quyết định có in dòng "TỔNG HỢP CHỐT LƯỢT GỬI" hay không.
+       * Trong ân hạn (còn kiểm chứng nền) thì CHƯA chốt — chỉ vẽ bảng tiến độ. */
+      const verifyLeftChk = Math.max(0, c.pending - c.pendingSend);
+      const inGrace = !!(!state.stopRequested && batchStats.loopFinished && c.pendingSend === 0
+        && verifyLeftChk > 0 && batchStats.loopFinishedAt
+        && (Date.now() - batchStats.loopFinishedAt) < SUMMARY_GRACE_MS);
+      const isDoneAll = !inGrace && batchStats.loopFinished && (c.pendingSend === 0 || state.stopRequested);
       const html = (isDoneAll ? '🏁 <b>TỔNG HỢP:</b> ' : '📊 <b>Đang gửi:</b> ')
         + '<span style="color:#4ade80;font-weight:700">✅ Thành công: ' + c.okTotal + '/' + c.total + ' (' + pct + '%)' + chStr + '</span>'
         + (c.pendingSend > 0 && !state.stopRequested ? ' · <span style="color:#38bdf8">⏳ Đang xử lý: ' + c.pendingSend + '</span>' : '')
@@ -9047,6 +9073,19 @@
       }
       /* [v1.92.60] dải tiến trình thu nhỏ đọc CÙNG nguồn số với bảng tổng hợp. */
       try { updateMiniProgressUI(); } catch (eMini) { /* ignore */ }
+      /* [v1.92.63] BẢNG CHỐT KHÔNG ĐƯỢC CHỐT BẰNG SỐ CÒN ĐANG ĐỔI.
+       * Log 20:41:43 (5 chat, bản 1.92.62): TỔNG HỢP in lúc 20:41:22
+       *     `⚠ Không rõ: 5 | 🖐 CẦN GỬI TAY: 5 chat`
+       * rồi 8 s sau, đúng 5 chat đó lật ⚠ → ✅ (`🔎 Cập nhật … ✅ 0 → 5 · ⚠ 5 → 0`).
+       * Người dùng đọc bảng chốt ⇒ tưởng 5 chat chưa gửi ⇒ GỬI TAY ⇒ khách nhận 2 tin.
+       * Nguyên nhân: `isDoneAll` chỉ đòi `pendingSend === 0` (mọi chat ĐÃ có kết luận ⚠),
+       * không đòi `pending === pendingSend` (không còn ca kiểm chứng nền). Mà ca ⚠ nào cũng
+       * đã có kiểm chứng nền đang chạy ⇒ bảng chốt trước khi kiểm chứng xong là CHẮC CHẮN.
+       * Nay: trong dòng TỔNG HỢP, nếu còn ca kiểm chứng nền thì ghi rõ "chưa chốt" và CẤM
+       * câu khẳng định "CẦN GỬI TAY" (đổi thành "tạm ⚠ — đang kiểm chứng, CHƯA gửi tay"),
+       * kèm mốc hẹn. Không chặn việc in bảng (vẫn phải thấy tiến độ) — chỉ không nói sai.
+       * Điều kiện ĐỦ để khẳng định "cần gửi tay": ca đó đã hết kiểm chứng và vẫn không có ✅. */
+      const verifyLeftNow = Math.max(0, c.pending - c.pendingSend);
       if (c.total > 0) setProgress(c.settled, c.total, c.okTotal, c.pending);
       if (isDoneAll || c.total <= 200) {
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
@@ -9098,7 +9137,16 @@
                 ? ' (làn CHƯA đầy ⇒ nút cổ chai là Extension, không phải làn)' : ' (làn ĐÃ đầy ⇒ nâng làn mới có ích)')
             : '')
           + (resendSplit.rescuing ? ' | ⏳ ĐANG CỨU tự động: ' + resendSplit.rescuing + ' chat (Extension, ~10–13 s)' : '')
-          + (resendSplit.waiting ? ' | 🖐 CẦN GỬI TAY: ' + resendSplit.waiting + ' chat (xem 💾 .txt)' : '')
+          /* [v1.92.63] KHÔNG ĐƯỢC KHẲNG ĐỊNH "CẦN GỬI TAY" KHI CÒN CA ĐANG KIỂM CHỨNG.
+           * Log 20:41:43: in `🖐 CẦN GỬI TAY: 5 chat` lúc 22 s, rồi 30 s CẢ 5 ca lật ✅.
+           * Câu đó là lệnh mời người dùng gửi tay ⇒ gửi là khách nhận 2 tin.
+           * Nay tách 2 câu, chỉ dùng từ "CẦN GỬI TAY" khi đã hết kiểm chứng: */
+          + (resendSplit.waiting
+            ? (verifyLeftNow > 0
+              ? ' | ⏳ TẠM ⚠ chưa kết luận: ' + resendSplit.waiting + ' chat — ĐANG kiểm chứng, CHƯA gửi tay'
+                + ' (chờ dòng 🔎/🛟 rồi hẵn quyết)'
+              : ' | 🖐 CẦN GỬI TAY: ' + resendSplit.waiting + ' chat (đã hết kiểm chứng — xem 💾 .txt)')
+            : '')
           + (c.skipTotal ? ' | 🧹 Bỏ qua: ' + c.skipTotal : '')
           + ((buStats.ok || buStats.cancelled)
             ? ' | 🔁 Bù OK: ' + buStats.ok + ' (' + Object.keys(buStats.byWhy).map((k) => k + ': ' + buStats.byWhy[k]).join(' · ') + ') · hủy bù tránh trùng: ' + buStats.cancelled
@@ -9290,6 +9338,21 @@
     } catch (e) { /* ignore */ }
   }
 
+  /* ═══ [v1.92.63] ÂN HẠN CHỐT BẢNG: "NỚI RA MỘT CHÚT" ĐÚNG CHỖ CÓ BẰNG CHỨNG ═══
+   * Vấn đề đo được (log 20:41:43, 5 chat): mọi chat đã có kết luận ⚠ ⇒ `pendingSend = 0` ⇒
+   * `isDoneAll = true` ⇒ bảng TỔNG HỢP in NGAY, trong khi 5 ca ⚠ đó còn kiểm chứng nền đang
+   * chạy và 8 s sau lật cả 5 sang ✅. Bảng in `🖐 CẦN GỬI TAY: 5 chat` = lời mời gửi tay
+   * ⇒ làm theo là khách nhận 2 tin. Đây là dạng sai nguy hiểm nhất: không mất tin nhưng
+   * DẠY người dùng gây trùng.
+   * Vì sao không chờ hết kiểm chứng: 2 lô lớn cho thấy đuôi kiểm chứng dài 28 s / 3 phút
+   * (lô 14 815: 'lâu nhất 28,2 s'; lô 8 518: '⏳ ĐANG CỨU 35 chat'), chờ hết là lùi đúng cái
+   * tối ưu 1.92.36 đã bỏ.
+   * Nay: ân hạn NGẮN, chỉ khi CÒN ca kiểm chứng nền.
+   *   • `verifyPending > 0` mà mới quá `loopFinished` < SUMMARY_GRACE_MS ⇒ HOÃN in bảng.
+   *   • Hết ân hạn ⇒ in như cũ, nhưng câu về gửi tay đổi thành "TẠM ⚠ — chưa kết luận"
+   *     (xem chỗ dựng câu) ⇒ người dùng không bị mời gửi tay khi máy còn đang kiểm chứng.
+   * Không thêm lệnh gửi nào, không đổi phán quyết của ca nào ⇒ không thể sinh tin trùng. */
+  const SUMMARY_GRACE_MS = 2500;
   function updateBatchSummaryUI() {
     // Trong khi phát từng chat, chưa cần quét các map pending và dựng lại tổng hợp liên tục.
     // Defer thẳng trước khi tính counter, tránh tạo thêm CPU load cho tất cả các tab.
@@ -9300,6 +9363,15 @@
     }
     const c = getBatchSummaryCounts();
     const isDoneAll = batchStats.loopFinished && (c.pendingSend === 0 || state.stopRequested);
+    /* [v1.92.63] ÂN HẠN: còn ca kiểm chứng nền thì đừng chốt bảng vội (xem SUMMARY_GRACE_MS). */
+    const verifyLeftUi = Math.max(0, c.pending - c.pendingSend);
+    if (!state.stopRequested && batchStats.loopFinished && c.pendingSend === 0 && verifyLeftUi > 0) {
+      if (!batchStats.loopFinishedAt) batchStats.loopFinishedAt = Date.now();
+      if (Date.now() - batchStats.loopFinishedAt < SUMMARY_GRACE_MS) {
+        if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 400);
+        return;
+      }
+    }
     // Khi lô lớn còn ACK/bù nền, chỉ dựng lại tổng hợp 1 lần/giây; chốt cuối vẫn flush ngay.
     if (!isDoneAll && c.total > 200) {
       if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 1000);
@@ -9347,8 +9419,16 @@
     deliveredIds[convId] = ch;
     dropManualResend(convId); // đã xác nhận tới nơi ⇒ khỏi danh sách gửi tay
     delete rescueInFlight[convId]; // hết "đang cứu" — đã có kết luận
-    // [v1.92.40] Socket giao được ⇒ xoá sạch số lần mất tin của page (tự hồi, không cần TTL)
-    if (ch === 'socket') {
+    /* [v1.92.63] SỔ ĐỊNH TUYẾN PHẢI HỒI VỚI MỌI KÊNH GIAO ĐƯỢC — không chỉ Socket.
+     * Bản 1.92.40 chỉ hồi khi `ch === 'socket'`. Hệ quả đo được trên log 20:41:43 (5 chat):
+     *   • 5 ca Socket không ACK ⇒ `absent++` (chẩn đoán, không ban) — nhưng bộ đếm vẫn nằm đó;
+     *   • Ext cứu xong ⇒ `markDelivered(id,'ext')` ⇒ nhánh cũ KHÔNG chạy ⇒ sổ vẫn y nguyên;
+     *   • ca sau đọc sổ ⇒ tưởng page vẫn "mất tin" dù vừa giao thành công 5/5.
+     * Nay: BẤT KỲ kênh nào giao được (socket/ext/api) đều là BẰNG CHỨNG DƯƠNG ⇒ cộng `dlv`
+     * và xoá `lostSock`/`lostExt` (tự hồi như thiết kế 1.92.40, chỉ là áp cho mọi kênh).
+     * Chỉ `dlv++` là thay đổi thật; KHÔNG nới điều kiện ban Socket (vẫn chỉ `lostSock` được ban).
+     * `absent` KHÔNG xoá ở đây: nó là số chẩn đoán của Socket, xoá đi là mất dấu vết điều tra. */
+    if (ch === 'socket' || ch === 'ext' || ch === 'api') {
       try {
         const _st = sockRoute[String(String(convId).split('_')[0])];
         if (_st) { _st.dlv++; _st.lostSock = 0; _st.lostExt = 0; }
@@ -10911,6 +10991,7 @@
     batchStats.skippedPre = 0;
     batchStats.startedAt = Date.now();
     batchStats.loopFinished = false;
+    batchStats.loopFinishedAt = 0; // [v1.92.63] mốc phát xong — dùng cho ân hạn chốt bảng
     batchStats.dispatchEndedAt = 0;
     buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
     logProgressMark.pct = 0; // [v1.92.31] mốc tiến độ tính lại từ đầu mỗi lượt
@@ -11934,6 +12015,7 @@
     }
 
     batchStats.loopFinished = true;
+    batchStats.loopFinishedAt = Date.now(); // [v1.92.63] mốc bắt đầu ân hạn chốt bảng
     // [v1.92.50] KHÔNG ghi đè mốc đã đóng ở cuối vòng wave (xem runGroupWaves200.finally) — mốc
     // đó mới là lúc PHÁT xong; ghi đè ở đây (sau khi đuôi chạy hết) làm "PHÁT …/s" bị tính cả đuôi.
     if (!batchStats.dispatchEndedAt) batchStats.dispatchEndedAt = Date.now();
@@ -13247,10 +13329,28 @@
     }
     // [v1.92.37] DANH SÁCH GỬI TAY — để không bao giờ im lặng mất tin.
     out.push('');
-    const _mz = { wait: [], rescuing: [] };
+    /* [v1.92.63] "CẦN GỬI TAY" PHẢI RỖNG VỚI MỌI CHAT ĐÃ TỪNG CÓ ✅ — yêu cầu nghiệm thu.
+     * Bản trước lọc duy nhất theo `isRescuing`. Nhưng một chat có thể ĐÃ ✅ rồi vẫn còn nằm
+     * trong `manualResendList` (được thêm lúc ⚠, mà lần `markDelivered` gần nhất chạy TRƯỚC
+     * khi ca đó được thêm lại — đúng trường hợp log 20:41:43 nếu bảng chốt sớm). Khi đó file
+     * .txt in chat đã tới nơi vào mục "CẦN GỬI TAY" ⇒ người dùng gửi tay ⇒ 2 tin cho khách.
+     * Nay có BA tầng lọc (mọi tầng đều chỉ ĐỌC, không đổi lần gửi nào):
+     *   1. `deliveredIds[id]`            — đã có xác nhận tới nơi ⇒ KHÔNG BAO GIỜ vào danh sách;
+     *   2. `deliverHits` có ≥1 lần ✅     — từng được đánh dấu tới nơi rồi bị lật ⇒ vẫn loại;
+     *   3. `isRescuing`                   — đang được cứu tự động ⇒ tách sang mục "ĐANG CỨU". */
+    const _mz = { wait: [], rescuing: [], delivered: 0 };
     const _nowMr = Date.now();
-    manualResendList.forEach((m) => { (isRescuing(m.id, _nowMr) ? _mz.rescuing : _mz.wait).push(m); });
+    manualResendList.forEach((m) => {
+      const already = !!deliveredIds[m.id]
+        || (deliverHits.has(m.id) && deliverHits.get(m.id).length > 0);
+      if (already) { _mz.delivered++; return; }   // tầng 1 + 2
+      (isRescuing(m.id, _nowMr) ? _mz.rescuing : _mz.wait).push(m);
+    });
     out.push('=== 🖐 CẦN GỬI TAY (' + _mz.wait.length + ' chat) — máy KHÔNG xác nhận được đã gửi ===');
+    if (_mz.delivered) {
+      out.push('(đã loại ' + _mz.delivered + ' chat khỏi danh sách này vì ĐÃ có dấu ✅ tới nơi — '
+        + 'gửi tay cho chúng là gửi 2 lần)');
+    }
     if (!_mz.wait.length) {
       out.push('(không có — mọi chat đều có kết quả chắc chắn: ✅ đã tới nơi hoặc ❌ khách không nhận)');
     } else {
@@ -13335,10 +13435,38 @@
     for (let i = 0; i < VOLATILE_NUM.length; i++) k = k.replace(VOLATILE_NUM[i][0], VOLATILE_NUM[i][1]);
     return tag + '\u0001' + k;
   };
-  function flushGroup(g) {
+  /* [v1.92.63] DÒNG GỘP IN THEO THỨ TỰ ĐÃ XẢY RA, KHÔNG THEO THỨ TỰ GỘP.
+   * Log 20:41:43 (5 chat): sổ kiểm chứng ghi rõ
+   *   20:41:30.013 🛟 GỬI CỨU Ext → 20:41:30.164 ✅ ĐÃ TỚI NƠI qua ext  (thứ tự ĐÚNG)
+   * nhưng bảng log hiện
+   *   20:41:32 🛟 … GỬI CỨU  →  20:41:32 ✅ bù THÀNH CÔNG qua Extension
+   * đọc lên thành "nó vẫn gửi cứu SAU KHI đã báo ✅" ⇒ tưởng bị gửi trùng.
+   * Nguyên nhân: mỗi lý do có khe gộp riêng chờ 2 s; khe nào tới hạn trước thì in trước,
+   * KHÔNG liên quan tới thứ tự sự kiện thật. Nay mỗi khe ghi lại mốc sự kiện ĐẦU của nó
+   * (`g.t0`) và khi in thì chèn đúng vị trí theo mốc đó — dòng log vẫn gộp 1 dòng/2 s (không
+   * quay lại lỗi ngập log), nhưng ai đọc theo thứ tự cũng hiểu đúng.
+   * Không đổi bất kỳ quyết định gửi nào. */
+  /* [v1.92.63] THỨ TỰ IN PHẢI LÀ THỨ TỰ SỰ KIỆN THẬT.
+   * Log 20:41:43 (5 chat): sổ kiểm chứng ghi
+   *   20:41:30.013 🛟 GỬI CỨU Ext  →  20:41:30.164 ✅ ĐÃ TỚI NƠI qua ext   (đúng)
+   * nhưng bảng log in
+   *   20:41:32 🛟 … GỬI CỨU   →   20:41:32 ✅ bù THÀNH CÔNG qua Extension
+   * đọc thành "vẫn gửi cứu SAU KHI đã báo ✅" ⇒ tưởng gửi trùng.
+   * Gốc: mỗi lý do một khe gộp 2 s; khe tới hạn trước in trước, không liên quan thứ tự thật.
+   * Nay ghi mốc sự kiện ĐẦU của khe (`g.t0`) và khi một khe tới hạn, XẢ TRƯỚC mọi khe có
+   * `t0` nhỏ hơn đang chờ. Vẫn gộp 1 dòng/2 s/lý do (không ngập log), chỉ khác thứ tự in.
+   * Không đổi bất kỳ quyết định gửi nào. */
+  function flushGroup(g, _guard) {
     if (!g) return;
     if (g.timer) { clearTimeout(g.timer); g.timer = null; }
     if (!g.n) return;
+    if (!_guard) {
+      let older = null;
+      errGroups.forEach((o) => {
+        if (o !== g && o.n > 0 && o.t0 && g.t0 && o.t0 < g.t0 && (!older || o.t0 < older.t0)) older = o;
+      });
+      if (older) { flushGroup(older, true); }
+    }
     if (errGroups.get(g.key) === g) errGroups.delete(g.key);
     const head = (logGroupCtx ? '[' + logGroupCtx() + '] ' : '');
     const what = GROUP_LABEL[g.tag] || 'cùng lỗi';
@@ -13370,13 +13498,13 @@
     let g = errGroups.get(k);
     if (!g) {
       if (errGroups.size >= GROUP_MAX) flushGroup(errGroups.values().next().value);
-      g = { key: k, tag: tag, n: 0, names: [], display: display, timer: null };
+      g = { key: k, tag: tag, n: 0, names: [], display: display, timer: null, t0: now };
       errGroups.set(k, g);
     }
+    if (!g.n) g.t0 = now; // khe vừa cạn ⇒ đây là sự kiện ĐẦU của lượt gộp mới
     g.n++;
     g.display = display;                                   // hiện số liệu MỚI NHẤT
     if (name && g.names.length < 4 && g.names.indexOf(name) < 0) g.names.push(name);
-    void now;
     if (!g.timer) g.timer = setTimeout(() => flushGroup(g), GROUP_FLUSH_MS);
   }
   function logGroupReset() {
