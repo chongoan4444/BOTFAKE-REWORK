@@ -505,6 +505,40 @@ check('đóng ngân sách ghi lại % để in vào log',
   check('1545012 ⇒ thử lại được', F.isTransientServerError('Đã xảy ra lỗi tạm thời, vui lòng thử lại.'), true);
   check('mã 1545012 trần ⇒ thử lại được', F.isTransientServerError('error 1545012'), true);
   check('1545041 ⇒ KHÔNG thử lại tự động', F.isTransientServerError('Người này hiện không có mặt'), false);
+  // Bản nháp đầu bắt mọi chuỗi dạng "5xx" ⇒ khớp bừa id/token/số ngẫu nhiên trong lỗi.
+  // Đây là ca chống hồi quy cho lỗi đó: các chuỗi sau KHÔNG được coi là lỗi tạm thời.
+  check('chuỗi có số 512 không phải lỗi tạm thời', F.isTransientServerError('room 512 không tồn tại'), false);
+  check('thread 500 không phải lỗi tạm thời', F.isTransientServerError('INCORRECT THREAD 500'), false);
+  check('HTTP 502 ⇒ thử lại được', F.isTransientServerError('HTTP 502'), true);
+  check('HTTP 429 ⇒ KHÔNG thử lại tự động', F.isTransientServerError('HTTP 429'), false);
+}
+
+// 23) [v1.92.45] NGÂN SÁCH DÒ 1545041 phải đóng theo CHUỖI LIÊN TIẾP, không chờ 200 ca —
+//     nhưng KHÔNG được đóng khi còn ca cứu được (nếu Ext thật sự gửi được thì phải mở lại).
+{
+  const mk = () => ({ tried: 0, saved: 0, closed: false, PROBE: 200, streak: 0, STREAK_MAX: 30 });
+  const note = (b) => {
+    if (b.closed) return;
+    b.streak = (b.streak || 0) + 1;
+    if ((b.streak >= b.STREAK_MAX && b.saved === 0) || (b.tried >= b.PROBE && b.saved === 0)) b.closed = true;
+  };
+
+  const b1 = mk();
+  for (let i = 0; i < 29; i++) note(b1);
+  check('29 ca liên tiếp ⇒ ngân sách CÒN mở', b1.closed, false);
+  note(b1);
+  check('30 ca liên tiếp ⇒ ngân sách ĐÓNG (không chờ 200)', b1.closed, true);
+
+  const b2 = mk();
+  for (let i = 0; i < 29; i++) note(b2);
+  b2.saved++; b2.streak = 0; // Ext cứu được 1 ca ⇒ reset chuỗi
+  for (let i = 0; i < 29; i++) note(b2);
+  check('cứu được ca nào thì chuỗi reset, không đóng oan', b2.closed, false);
+
+  const b3 = mk();
+  b3.tried = 200;
+  note(b3);
+  check('trần cũ 200 ca vẫn còn tác dụng', b3.closed, true);
 }
 
 /* ------------------------------- kết quả ------------------------------- */

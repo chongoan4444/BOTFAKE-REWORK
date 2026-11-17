@@ -3719,3 +3719,41 @@ về làn này đều suy từ log). Số đo:
    ACK, Ext quá hạn, API timeout). Với `1545041`/`1545012`/`(#10)` chờ 10 s chỉ làm chậm lô.
 4. **Trần của làn Ext ~13,4 lệnh/s** (đo thật). Nâng sàn/trần làn không làm lô nhanh hơn — sửa
    comment cũ ghi "48 làn ≈ 40–50 tin/s" để lần sau không tối ưu sai chỗ.
+
+### 77.17 Đóng ngân sách dò 1545041 theo chuỗi liên tiếp + đo trần Ext ngay trong log (1.92.46-W200.92)
+
+Nốt ba việc còn lại sau §77.16.
+
+**1. Ngân sách dò `1545041` đóng SỚM (30 ca liên tiếp), không chờ 200.**
+
+Số đo: dò 799 ca cứu **0**, dò 1 431 ca cứu **0** (log 16:11/16:20); HAR làn Ext trả `1545041` ở
+**86/86** ca kể cả khi làn **hoàn toàn rỗng**. Ngân sách cũ đòi đủ `PROBE = 200` mới đóng ⇒ mỗi lô
+mất ~200 lệnh + ~200 s ở đuôi chỉ để học lại điều đã biết.
+
+Nay đóng khi `streak >= 30 && saved === 0` **hoặc** `tried >= 200 && saved === 0`. Bất kỳ ca
+**cứu được** nào cũng `streak = 0` ⇒ nếu Extension thật sự gửi được thì ngân sách mở lại ngay,
+không đóng oan. Hệ quả khi đóng giữ nguyên: ⚠ "chưa gửi" + danh sách gửi tay, **không chốt ❌ oan**.
+
+**2. Đo trần thật của làn Ext ngay trong TỔNG HỢP.**
+
+Thêm dòng `🛰 Ext: p90 phản hồi … · đỉnh in-flight N/limit` + kết luận tự động:
+- `đỉnh < limit` ⇒ *"làn CHƯA đầy ⇒ nút cổ chai là Extension, không phải làn"* — đúng ca HAR
+  (đỉnh 42/48–96), nên lần sau không ai nâng sàn/trần làn để "cho nhanh" nữa;
+- `đỉnh = limit` ⇒ *"làn ĐÃ đầy ⇒ nâng làn mới có ích"*.
+
+**3. Hai comment sai đã sửa.**
+
+| chỗ | sai | đúng |
+|---|---|---|
+| `noteExtSendOutcome` | "AIMD tăng +2 slot tối đa **24**" | lane bị kẹp `[EXT_SEND_MIN 48, EXT_SEND_MAX 96]` |
+| chú thích timeout Ext | "HAR đo ca lỗi p50 **908 ms**" | HAR mới: p50 990 ms · p90 1 450 ms · max 2 130 ms (mọi phản hồi); `1545012` p50 340 ms. 2,5 s vẫn phủ p99 ⇒ giữ nguyên timeout |
+
+**4. `isTransientServerError` siết lại (bắt được lỗi của chính bản nháp §77.16).**
+
+Bản nháp dùng `/(^|\D)5\d\d(\D|$)/` ⇒ khớp **bừa** mọi chuỗi lỗi có số 3 chữ số bắt đầu bằng 5
+(vd `"room 512"`, `"INCORRECT THREAD 500"`) ⇒ sẽ thử lại những ca không hề tạm thời. Nay chỉ nhận:
+mã `1545012` · câu "Đã xảy ra lỗi tạm thời" · `HTTP 5xx` · `(#n) 5xx`. Có **4 ca test chống hồi quy**
+cho đúng lỗi này.
+
+**Test: 86 kịch bản** (`npm test`) — thêm 8 ca: 4 ca siết `isTransientServerError`, 4 ca ngân sách
+(29 ca còn mở / 30 ca đóng / cứu-được-thì-reset / trần 200 vẫn hiệu lực).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.45-w200.91
+// @version      1.92.46-w200.92
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.45-W200.91'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.46-W200.92'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3627,11 +3627,20 @@
    * ⇒ server CHƯA tạo tin ⇒ thử lại an toàn (không thể trùng). Trước bản này script mù hoàn
    * toàn với mã đó (grep = 0 lần).
    */
-  /** Chỉ đúng ca "server tạm thời không xử lý" — thử lại ngay được, KHÔNG THỂ trùng. */
+  /* [v1.92.45] Chỉ đúng ca "server TẠM THỜI không xử lý" — thử lại ngay được, KHÔNG THỂ trùng.
+   * Bản nháp đầu bắt mọi chuỗi chứa số dạng 5xx (`/(^|\D)5\d\d(\D|$)/`) — SAI: chuỗi lỗi hay
+   * chứa id/token/số ngẫu nhiên nên sẽ khớp bừa (vd "room 512", "thread 500"). Nay chỉ nhận:
+   *   • mã 1545012 (HAR: 4/90 request của làn Ext, `payload:null` ⇒ server chưa tạo tin)
+   *   • câu "Đã xảy ra lỗi tạm thời"
+   *   • HTTP 5xx viết đúng dạng `HTTP 5xx` hoặc `(#) 5xx` do chính script tạo ra */
   function isTransientServerError(msg) {
     const m = String(msg || '');
-    return /1545012/.test(m) || /Đã xảy ra lỗi tạm thời/i.test(m)
-      || /(^|\D)5\d\d(\D|$)/.test(m);
+    if (!m) return false;
+    if (/1545012/.test(m)) return true;
+    if (/Đã xảy ra lỗi tạm thời/i.test(m)) return true;
+    if (/\bHTTP\s*5\d\d\b/i.test(m)) return true;   // 'HTTP 502' — chuỗi do script dựng
+    if (/\(#\d+\)\s*5\d\d\b/.test(m)) return true; // '…(#2) 503' — dạng FB trả
+    return false;
   }
 
   function isDefinitiveNotSent(msg) {
@@ -5334,6 +5343,12 @@
       const ownLock = !!(ctx && ctx.ownsOutbound);
       if (!ownLock && !acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
       extSendPermit = await acquireExtSendPermit();
+      /* [v1.92.45] đo đỉnh in-flight THẬT của làn Ext (so với getLimit ở TỔNG HỢP).
+       * Đỉnh <  limit ⇒ Extension tự tuần tự hoá, nâng làn vô ích (HAR: đỉnh 42/48–96). */
+      try {
+        const _act = extSendLane.activeCount();
+        if (_act > (extSendCtl.peakActive || 0)) extSendCtl.peakActive = _act;
+      } catch (ePk) { /* ignore */ }
       if (!extSendPermit) {
         if (!ownLock) releaseOutbound(conv.id);
         if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
@@ -5365,7 +5380,12 @@
         // ⇒ 60 % ca "Extension không phản hồi" thực ra TIN ĐÃ ĐẾN NƠI. Extension gửi xong nhưng
         // không trả lời. Vì vậy giữ làn chờ 7 giây cho một phản hồi sẽ không bao giờ tới là mất
         // trắng: 114 ca × 7s ÷ 48 làn ≈ 17 giây-làn, trong khi HAR đo ca lỗi THẬT trả về
-        // p50 908ms / p90 1 197ms — 2,5s đã phủ trên p99. Ca quá hạn vẫn đi đúng đường cũ:
+        // p50 908ms / p90 1 197ms — 2,5s đã phủ trên p99.
+        // [v1.92.45] số HAR mới nhất (network-log.har, 90 lệnh của extension Pancake v2 trong
+        // lúc tool chạy): p50 990 ms · p90 1 450 ms · max 2 130 ms cho MỌI phản hồi, và
+        // 1545012 (lỗi tạm thời) trả nhanh hơn — p50 340 ms. Kết luận cũ vẫn đúng: 2,5 s phủ
+        // trên p99, không cần nới; nhưng mẫu p90 nay chỉ lấy ca THÀNH CÔNG (xem
+        // noteExtSendOutcome) để không tự siết timeout bằng các ca lỗi trả lời nhanh. Ca quá hạn vẫn đi đúng đường cũ:
         // đánh ⚠ "không rõ", đăng ký kiểm chứng lịch sử nền, KHÔNG BAO GIỜ gửi lại (chỉ nâng
         // ⚠→✅). Rút ngắn thời gian chờ không mở thêm bất kỳ đường gửi trùng nào.
         // [v1.92.8] giữ chỗ chờ để bắt phản hồi MUỘN thay vì vứt bỏ (xem sendExtWithLateWatch)
@@ -6475,7 +6495,8 @@
     // [v1.92.45] Nay chỉ lấy ca THÀNH CÔNG — ca lỗi trả lời rất nhanh (HAR: p50 0,34–1,0 s) nên
     // đưa vào mẫu sẽ siết timeout xuống sàn 2,5 s và làm cổng quá hạn nổ oan.
     latSamples: [],
-    lastOutcomeOk: false }; // kết quả lần gửi Ext gần nhất (dùng cho AIMD + mẫu độ trễ)
+    lastOutcomeOk: false, // kết quả lần gửi Ext gần nhất (dùng cho AIMD + mẫu độ trễ)
+    peakActive: 0 };      // [v1.92.45] đỉnh số lệnh Ext đang bay — so với trần làn để biết nút cổ chai
   const EXT_LAT_RING = 24;
   /** p90 độ trễ phản hồi Ext gần nhất; 0 = chưa có số đo. */
   function extLatP90() {
@@ -7901,18 +7922,34 @@
    * Nhưng không được bù mù: nếu Ext cũng bị đúng lỗi đó thì 5 500 lệnh chỉ làm chậm lô.
    * Vì vậy DÒ CÓ ĐO: thử Ext cho tối đa 200 ca đầu; cứu được ≥1 ⇒ giữ mở; 0 cứu ⇒ ĐÓNG và
    * phần còn lại vào danh sách gửi tay (⚠ "chưa gửi"), KHÔNG chốt ❌ oan. */
-  const extTry1545 = { tried: 0, saved: 0, closed: false, PROBE: 200 };
+  /* [v1.92.45] NGÂN SÁCH DÒ 1545041 — đóng SỚM theo chuỗi liên tiếp, không chờ 200 ca.
+   *
+   * Số đo cũ (log 16:11 / 16:20) + HAR làn Ext: dò 799 ca cứu 0, dò 1 431 ca cứu 0; HAR 90
+   * lệnh của extension Pancake v2 trả 1545041 ở 86/86 ca kể cả khi làn Ext HOÀN TOÀN RỖI.
+   * Nghĩa là với nhóm khách này KHÔNG kênh nào gửi được. Ngân sách cũ đòi đủ 200 ca mới đóng
+   * ⇒ mỗi lô mất ~200 lệnh + 200 s ở đuôi chỉ để học lại một điều đã biết.
+   *
+   * Nay đóng khi: `tried >= PROBE (200)` như cũ **HOẶC** 30 ca LIÊN TIẾP toàn 1545041 mà
+   * `saved = 0`. Bất kỳ ca cứu được nào (saved++) là reset chuỗi — nếu Ext thật sự gửi được
+   * thì ngân sách mở lại ngay, không bao giờ đóng oan.
+   * Vẫn giữ nguyên hệ quả: ca bị đóng ⇒ ⚠ "chưa gửi" + danh sách gửi tay, KHÔNG chốt ❌ oan. */
+  const extTry1545 = { tried: 0, saved: 0, closed: false, PROBE: 200, streak: 0, STREAK_MAX: 30 };
   function extFallback1545Allowed() { return !extTry1545.closed; }
   function noteExt1545Fail() {
     if (extTry1545.closed) return;
-    if (extTry1545.tried >= extTry1545.PROBE && extTry1545.saved === 0) {
-      extTry1545.closed = true;
-      try {
-        logLine('🔒 Đóng ngân sách dò Extension cho ca "người này hiện không có mặt": đã thử '
-          + extTry1545.tried + ' ca, cứu được 0 ⇒ Extension cũng bị FB chặn. Phần còn lại vào '
-          + 'danh sách gửi tay (⚠ chưa gửi), không chốt ❌ oan.');
-      } catch (e0) { /* ignore */ }
-    }
+    extTry1545.streak = (extTry1545.streak || 0) + 1;
+    const byStreak = extTry1545.streak >= extTry1545.STREAK_MAX && extTry1545.saved === 0;
+    const byProbe = extTry1545.tried >= extTry1545.PROBE && extTry1545.saved === 0;
+    if (!byStreak && !byProbe) return;
+    extTry1545.closed = true;
+    try {
+      logLine('🔒 Đóng ngân sách dò Extension cho ca "người này hiện không có mặt": '
+        + (byStreak
+          ? extTry1545.streak + ' ca LIÊN TIẾP toàn bị FB từ chối'
+          : 'đã thử ' + extTry1545.tried + ' ca')
+        + ', cứu được 0 ⇒ Extension cũng bị FB chặn. Phần còn lại vào danh sách gửi tay '
+        + '(⚠ chưa gửi), không chốt ❌ oan.');
+    } catch (e0) { /* ignore */ }
   }
   const finalFailedIds = {}; // convId → đã thất bại hẳn (hết kênh hoặc khách khóa nick)
   const uncertainIds = {};   // convId → không rõ kết quả ('maybe')
@@ -8216,6 +8253,16 @@
           + (extTry1545.tried
             ? ' | 🛟 Dò Ext cho ca FB từ chối: thử ' + extTry1545.tried + ' · cứu ' + extTry1545.saved
               + (extTry1545.closed ? ' · ĐÓNG (Ext cũng bị chặn ⇒ phần còn lại vào danh sách gửi tay)' : '')
+            : '')
+          /* [v1.92.45] ĐO TRẦN THẬT CỦA LÀN EXT — để lần sau không tối ưu sai chỗ.
+           * HAR làn Ext (90 lệnh / 6,74 s) cho thấy trần ~13,4 lệnh/s và đỉnh in-flight chỉ 42
+           * trong khi làn đặt 48–96 ⇒ nâng sàn/trần làn KHÔNG làm lô nhanh hơn. In số đo thật
+           * (p90 phản hồi + đỉnh in-flight) ngay trong TỔNG HỢP để so với HAR mỗi lô. */
+          + ((extSendCtl.latSamples.length || extSendCtl.peakActive)
+            ? ' | 🛰 Ext: p90 phản hồi ' + (extLatP90() ? (extLatP90() / 1000).toFixed(1).replace('.', ',') + ' s' : '—')
+              + ' · đỉnh in-flight ' + (extSendCtl.peakActive || 0) + '/' + extSendLane.getLimit()
+              + ((extSendCtl.peakActive || 0) < extSendLane.getLimit()
+                ? ' (làn CHƯA đầy ⇒ nút cổ chai là Extension, không phải làn)' : ' (làn ĐÃ đầy ⇒ nâng làn mới có ích)')
             : '')
           + (countRescuing() ? ' | ⏳ ĐANG CỨU tự động: ' + countRescuing() + ' chat (Extension, ~10–13 s)' : '')
           + (countManualResendWait() ? ' | 🖐 CẦN GỬI TAY: ' + countManualResendWait() + ' chat (xem 💾 .txt)' : '')
@@ -8643,7 +8690,10 @@
           markDelivered(conv.id, ch);
           postSendSideEffects(conv);
           markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
-          if (conv.__extFallback1545) extTry1545.saved++; // [v1.92.41] Ext CỨU ĐƯỢC ca 1545041
+          if (conv.__extFallback1545) { // [v1.92.41] Ext CỨU ĐƯỢC ca 1545041
+            extTry1545.saved++;
+            extTry1545.streak = 0; // [v1.92.45] cứu được ⇒ mở lại ngân sách, không đóng oan
+          }
           buStats.ok++;
           buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
           logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅', conv.id);
