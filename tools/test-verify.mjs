@@ -1540,6 +1540,70 @@ check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
   }
 }
 
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * [v1.92.64] SỐ TRÊN BÓNG LOGO TO HƠN — nhưng phải ĐỌC ĐƯỢC và KHÔNG TRÀN MÀN HÌNH.
+ * Yêu cầu: "cho cái số tổng hợp hiển thị khi đóng bảng trên biểu tượng thu nhỏ to ra hơn
+ * nữa cho dễ nhìn". Ảnh cũ (tools/_shot_bubble.png): "64/137" cao ~13 px.
+ * ══════════════════════════════════════════════════════════════════════════════ */
+{
+  /* 1) Cỡ chữ badge + cỡ bóng phải TO HƠN bản 1.92.61 (10 px / 40 px). */
+  {
+    const css = SRC;
+    const fontM = css.match(/\.bubble-badge \{[^}]*font-size: (\d+)px/);
+    const svgM = css.match(/#ssb-bubble svg \{[^}]*width: (\d+)px/);
+    check('[v1.92.64] có khai báo cỡ chữ badge', !!fontM, true);
+    check('[v1.92.64] cỡ chữ badge TO HƠN 10 px cũ', Number(fontM && fontM[1]) > 10, true);
+    check('[v1.92.64] badge dùng chữ số đều (tabular-nums) để số không nhảy khi tăng',
+      /font-variant-numeric: tabular-nums/.test(css), true);
+    check('[v1.92.64] bóng logo TO HƠN 40 px cũ (badge to cần chỗ)', Number(svgM && svgM[1]) > 40, true);
+    check('[v1.92.64] badge vẫn canh giữa bóng + vẫn không chặn click',
+      /\.bubble-badge \{[^}]*left: 50%/.test(css) && /\.bubble-badge \{[^}]*pointer-events: none/.test(css), true);
+  }
+
+  /* 2) Chuỗi dài KHÔNG được tràn: có thu cỡ chữ theo bề rộng ước lượng. */
+  {
+    const mini = stripComments(extractFn('updateMiniProgressUI'));
+    check('[v1.92.64] badge thu cỡ chữ khi số quá dài', /estBadgeWidth\(text, fontPx\) > MAX_BADGE_PX/.test(mini), true);
+    check('[v1.92.64] có sàn cỡ chữ (không thu tới 0)', /MIN_BADGE_FONT/.test(mini), true);
+    check('[v1.92.64] KHÔNG đọc layout để đo badge (tránh bẫy layout 547 ms)',
+      !/getBoundingClientRect/.test(mini), true);
+    // chạy THẬT estBadgeWidth + vòng thu cỡ chữ của userscript
+    const grab = (re) => { const m = SRC.match(re); if (!m) throw new Error('thiếu ' + re); return Number(m[1]); };
+    const MAXPX = grab(/const MAX_BADGE_PX = (\d+);/);
+    const MINF = grab(/const MIN_BADGE_FONT = (\d+);/);
+    const MAXF = grab(/const BADGE_FONT_MAX = (\d+);/);
+    const fnSrc = stripComments(extractFn('estBadgeWidth'));
+    const estBadgeWidth = new Function(fnSrc + '\nreturn estBadgeWidth;')();
+    const pick = (t) => { let f = MAXF; while (f > MINF && estBadgeWidth(t, f) > MAXPX) f -= 1; return f; };
+    check('[v1.92.64] "9/9" vừa bóng mới 56 px', estBadgeWidth('9/9', MAXF) <= 56, true);
+    check('[v1.92.64] "64/137" không tràn ngưỡng', estBadgeWidth('64/137', pick('64/137')) <= MAXPX, true);
+    check('[v1.92.64] lô lớn "14815/14815" vẫn nằm trong ngưỡng', estBadgeWidth('14815/14815', pick('14815/14815')) <= MAXPX, true);
+    check('[v1.92.64] ca dài nhất vẫn dùng chữ >= sàn 11 px', pick('14815/14815') >= MINF, true);
+  }
+
+  /* 3) Badge phải được KÉO vào trong màn hình (kể cả khi người dùng kéo bóng sát mép). */
+  {
+    const mini = stripComments(extractFn('updateMiniProgressUI'));
+    check('[v1.92.64] gọi clampBadgeToViewport sau khi đặt chữ',
+      /clampBadgeToViewport\(badge\)/.test(mini), true);
+    const cl = stripComments(extractFn('clampBadgeToViewport'));
+    check('[v1.92.64] clamp so cả mép trái và mép phải',
+      /r\.left < pad/.test(cl) && /r\.right > \(window\.innerWidth - pad\)/.test(cl), true);
+    check('[v1.92.64] clamp chỉ dịch badge, không đổi cỡ/nội dung',
+      /badge\.style\.transform/.test(cl) && !/fontSize/.test(cl), true);
+  }
+
+  /* 4) Nhịp ghi DOM vẫn khoá bằng chữ ký (không vẽ lại mỗi khung hình). */
+  {
+    const mini = stripComments(extractFn('updateMiniProgressUI'));
+    check('[v1.92.64] vẫn bỏ qua khi số không đổi (miniPainted)',
+      /if \(sig === miniPainted\) return;/.test(mini), true);
+    check('[v1.92.64] chữ ký KHÔNG chứa cỡ chữ (đổi cỡ không sinh vòng lặp ghi)',
+      /const sig = show \? \(text \+ '\|' \+ \(done \? 'done' : 'busy'\)\)/.test(mini), true);
+  }
+}
+
 /* ------------------------------- kết quả ------------------------------- */
 
 if (fails.length) {

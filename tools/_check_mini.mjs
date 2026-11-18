@@ -99,6 +99,26 @@ const out = await page.evaluate(async () => {
   window.__SSB__.summaryCounters.fail = 0;
   window.__SSB__.flushBatchSummaryUI();
   R.bubbleBadgeDone = badge.style.display + ' · ' + badge.textContent + ' · ' + badge.className;
+  /* [v1.92.64] Đọc THÊM cỡ chữ thật của badge + bề rộng/khoảng ló để chứng minh "to hơn"
+   * và "không tràn màn hình". Đây là số đo trong DOM thật, không phải suy từ CSS. */
+  try {
+    const cs = getComputedStyle(badge);
+    const rb = badge.getBoundingClientRect();
+    R.bubbleBadgeFont = cs.fontSize + ' · bề rộng ' + Math.round(rb.width) + 'px'
+      + ' · ló trái ' + Math.round(rb.left) + 'px · ló phải '
+      + Math.round(window.innerWidth - rb.right) + 'px';
+  } catch (e) { R.bubbleBadgeFont = 'lỗi: ' + e.message; }
+  // ca xấu nhất: lô 14 815 chat ⇒ phải thu chữ / kéo vào trong
+  bs.total = 14815;
+  window.__SSB__.summaryCounters.okApi = 14815;
+  window.__SSB__.flushBatchSummaryUI();
+  try {
+    const cs2 = getComputedStyle(badge);
+    const rb2 = badge.getBoundingClientRect();
+    R.bubbleBadgeBig = badge.textContent + ' · chữ ' + cs2.fontSize + ' · bề rộng ' + Math.round(rb2.width)
+      + 'px · ló phải ' + Math.round(window.innerWidth - rb2.right) + 'px'
+      + ' · transform ' + (badge.style.transform || '(không)');
+  } catch (e) { R.bubbleBadgeBig = 'lỗi: ' + e.message; }
   return R;
 });
 console.log(JSON.stringify(out, null, 1));

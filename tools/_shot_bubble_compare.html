@@ -1,0 +1,52 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+body{margin:0;background:#f1f5f9;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+.stage{position:relative;height:230px;border-bottom:1px dashed #cbd5e1}
+.label{position:absolute;left:14px;top:10px;font-size:13px;color:#334155;font-weight:700}
+.note{position:absolute;left:14px;top:32px;font-size:11px;color:#64748b}
+.host{position:absolute;right:12px;bottom:12px}
+.old #ssb-bubble svg { width:40px; height:40px; display:block; }
+.old .bubble-badge { position:absolute; left:50%; top:-8px; transform:translateX(-50%);
+ background:#0f172a; color:#4ade80; border:1px solid #22c55e; border-radius:999px;
+ padding:0 6px; font-size:10px; font-weight:700; line-height:15px; white-space:nowrap;
+ letter-spacing:.2px; box-shadow:0 2px 6px rgba(0,0,0,.45); pointer-events:none; }
+.old .bubble-badge.busy { color:#7dd3fc; border-color:#38bdf8; }
+/* BAN MOI 1.92.64 — NGUYEN VAN tu userscript */
+#ssb-bubble { position: relative; display: none; background: transparent; border: none; padding: 0; cursor: grab;
+                      line-height: 0; filter: drop-shadow(0 6px 14px rgba(88,101,242,.45));
+                      transition: transform .15s ease; }
+        #ssb-bubble:hover { transform: scale(1.1) rotate(-4deg); }
+        #ssb-bubble:active { transform: scale(.96); cursor: grabbing; }
+        /* [v1.92.64] BÓNG LOGO TO HƠN — để số tiến trình trên đó đọc được từ xa.
+         * Yêu cầu: "cho cái số tổng hợp hiển thị khi đóng bảng trên biểu tượng thu nhỏ to ra
+         * hơn nữa cho dễ nhìn". Ảnh cũ (tools/_shot_bubble.png) cho thấy số 64/137 chỉ cao
+         * ~13 px trong khi vùng bóng chỉ chiếm 40×52 px ở góc màn hình ⇒ phải phóng CẢ HAI:
+         * badge 10 → 17 px thì bóng 40 px sẽ bị badge đè kín logo.
+         *   bóng   40 → 56 px (+40 %)
+         *   badge  10 → 17 px (+70 %): font 17 px = cỡ chữ phụ của trang, đọc được trên ảnh
+         *          chụp màn hình mà không cần soi.
+         * Không đổi nội dung số (vẫn ok/total lấy từ summaryCounters), không đổi chỗ đặt
+         * (vẫn góc dưới-phải, vẫn kéo được), không đổi nhịp ghi DOM (chữ ký chống trùng). */
+        #ssb-bubble svg { width: 56px; height: 56px; display: block; }
+        /* [v1.92.60] Số tiến trình ngay trên BÓNG LOGO (panel thu nhỏ) — nhìn được cả khi
+           panel đóng, không cần mở gì. Chỉ ghi khi số đổi (updateMiniProgressUI). */
+        .bubble-badge { position: absolute; left: 50%; top: -14px; transform: translateX(-50%);
+                        background: #0f172a; color: #4ade80; border: 2px solid #22c55e;
+                        border-radius: 999px; padding: 0 9px; font-size: 17px; font-weight: 800;
+                        line-height: 25px; white-space: nowrap; letter-spacing: .1px;
+                        font-variant-numeric: tabular-nums;
+                        box-shadow: 0 3px 10px rgba(0,0,0,.55); pointer-events: none; }
+        .bubble-badge.busy { color: #7dd3fc; border-color: #38bdf8; }
+        </style></head><body>
+<div class="stage old"><div class="label">BẢN CŨ — 1.92.61 (chữ 10 px)</div>
+<div class="note">Đúng như ảnh tools/_shot_bubble.png bạn đã thấy</div>
+<div class="host"><div id="ssb-bubble" style="display:block">
+<span class="bubble-badge busy">64/137</span><svg viewBox="0 0 50 52" width="56" height="56" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg></div></div></div>
+<div class="stage"><div class="label">BẢN MỚI — 1.92.64 (chữ 17 px, bóng 56 px)</div>
+<div class="note">Chữ cao hơn 70%, bóng to hơn 40% — vẫn canh giữa, vẫn kéo được</div>
+<div class="host"><div id="ssb-bubble" style="display:block">
+<span class="bubble-badge busy">64/137</span><svg viewBox="0 0 50 52" width="56" height="56" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg></div></div></div>
+<div class="stage"><div class="label">CA XẤU NHẤT — lô 14 815 chat</div>
+<div class="note">Tự thu chữ xuống 16 px; badge được kéo vào trong màn hình</div>
+<div class="host"><div id="ssb-bubble" style="display:block">
+<span class="bubble-badge" style="font-size:16px;line-height:24px">14815/14815</span><svg viewBox="0 0 50 52" width="56" height="56" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg></div></div></div>
+</body></html>

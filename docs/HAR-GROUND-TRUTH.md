@@ -5411,3 +5411,76 @@ A/B trên cùng dữ liệu: logic cũ (chỉ lọc `isRescuing`) = **5 chat**, 
 | sổ định tuyến hồi khi Ext giao | ❌ | ✅ |
 | thứ tự dòng log = thứ tự sự kiện | ❌ | ✅ |
 | cổng giữ slot 6 000 ms | không cắt oan (đã đo) | giữ nguyên |
+
+---
+
+## §100 — SỐ TRÊN BÓNG LOGO TO HƠN (1.92.64)
+
+> "cho cái số tổng hợp hiển thị khi đóng bảng trên biểu tượng thu nhỏ to ra hơn nữa cho dễ nhìn"
+
+Ảnh `tools/_shot_bubble.png` (bản 1.92.61) cho thấy badge `64/137` chỉ cao **~13 px** trong khi bóng
+logo chiếm 40 px ở góc phải-dưới màn hình.
+
+### Đổi gì
+
+| | 1.92.61 | **1.92.64** |
+|---|---|---|
+| cỡ chữ badge | 10 px | **17 px** (+70 %) |
+| bóng logo (svg) | 40 px | **56 px** (+40 %) |
+| viền badge | 1 px | 2 px |
+| chữ số | tỉ lệ thường | `tabular-nums` (số không nhảy bề rộng khi 9 → 10) |
+
+Phóng badge mà giữ bóng 40 px thì badge **đè kín logo** (badge `9/9` ≈ 50 px > 40 px) — nên phải
+phóng cả hai.
+
+### Hai vấn đề mới sinh ra khi phóng to, đã xử lý
+
+Badge canh **giữa** bóng, nên chuỗi dài ló ra hai bên. Ước bề rộng ở 17 px/800 (số 0,62 em · dấu
+`/` 0,42 em · padding 9 px · viền 2 px):
+
+| chuỗi | bề rộng | so bóng 56 px |
+|---|---|---|
+| `9/9` | 50 px | nằm gọn |
+| `64/137` | 82 px | ló 13 px mỗi bên |
+| `14815/14815` | 135 px | ló 39 px mỗi bên |
+
+Bóng đặt `right:12px` ⇒ mép badge ra **ngoài màn hình 27 px** (chữ bị cắt). Nếu người dùng kéo bóng
+sát mép phải thì nặng hơn. Sửa hai tầng, **cả hai chỉ đọc/ghi style badge, không đổi con số nào**:
+
+1. `estBadgeWidth()` + `MAX_BADGE_PX = 132`: chuỗi dài thì **thu cỡ chữ** theo bước 1 px, sàn
+   `MIN_BADGE_FONT = 11` (vẫn to hơn bản cũ). Ước bề rộng **bằng số ký tự**, KHÔNG đọc layout —
+   `getBoundingClientRect` mỗi lần số đổi sẽ tái sinh đúng cái bẫy layout đã đo 547 ms (§95).
+2. `clampBadgeToViewport()`: sau khi đặt chữ, so **cả hai mép** với màn hình rồi dịch badge vào
+   trong bằng `translateX`. Chỉ chạy khi số ĐỔI.
+
+Kết quả tính toán:
+
+```
+số trên badge        cỡ chữ   bề rộng ước
+3 chat                 17px       76.7 px
+4/10                   17px       60.8 px
+64/137                 17px       81.8 px
+9747/14815             17px      124.0 px
+14815/14815            16px      127.9 px   ← tự thu 1 px, vẫn >= sàn 11
+```
+
+Kéo badge vào màn hình (màn 1280 px, badge 128 px):
+
+| vị trí bóng | badge trước | dịch | sau |
+|---|---|---|---|
+| mặc định `right:12px` | [1176, 1304] | −28 px | [1148, 1276] ✅ |
+| kéo sát mép phải | [1204, 1332] | −56 px | [1148, 1276] ✅ |
+| kéo sát mép trái | [−36, 92] | +40 px | [4, 132] ✅ |
+
+Nhịp ghi DOM giữ nguyên: vẫn khoá bằng `miniPainted` (chữ ký **không** chứa cỡ chữ, nên đổi cỡ
+không sinh vòng lặp ghi).
+
+### Kiểm
+
+`npm test` **334 ca** (thêm khối `[v1.92.64]`). Mutation **5/5 bị bắt**: M30 trả badge về 10 px ·
+M31 bỏ thu cỡ chữ · M32 bỏ kéo badge vào màn hình · M33 trả bóng về 40 px · M34 clamp chỉ xét mép phải.
+
+`tools/_shot_bubble_compare.html` — dựng **nguyên văn CSS** của cả hai bản cạnh nhau để so bằng mắt.
+`tools/_check_mini.mjs` in thêm `bubbleBadgeFont` / `bubbleBadgeBig` đọc `getComputedStyle` +
+`getBoundingClientRect` trong DOM thật (**chưa chạy được** ở phiên này: sandbox thiếu
+`node_modules`/Chromium).

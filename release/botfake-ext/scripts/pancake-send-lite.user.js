@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.63-w200.109
+// @version      1.92.64-w200.110
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.63-W200.109'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.64-W200.110'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -12313,14 +12313,25 @@
                       transition: transform .15s ease; }
         #ssb-bubble:hover { transform: scale(1.1) rotate(-4deg); }
         #ssb-bubble:active { transform: scale(.96); cursor: grabbing; }
-        #ssb-bubble svg { width: 40px; height: 40px; display: block; }
+        /* [v1.92.64] BÓNG LOGO TO HƠN — để số tiến trình trên đó đọc được từ xa.
+         * Yêu cầu: "cho cái số tổng hợp hiển thị khi đóng bảng trên biểu tượng thu nhỏ to ra
+         * hơn nữa cho dễ nhìn". Ảnh cũ (tools/_shot_bubble.png) cho thấy số 64/137 chỉ cao
+         * ~13 px trong khi vùng bóng chỉ chiếm 40×52 px ở góc màn hình ⇒ phải phóng CẢ HAI:
+         * badge 10 → 17 px thì bóng 40 px sẽ bị badge đè kín logo.
+         *   bóng   40 → 56 px (+40 %)
+         *   badge  10 → 17 px (+70 %): font 17 px = cỡ chữ phụ của trang, đọc được trên ảnh
+         *          chụp màn hình mà không cần soi.
+         * Không đổi nội dung số (vẫn ok/total lấy từ summaryCounters), không đổi chỗ đặt
+         * (vẫn góc dưới-phải, vẫn kéo được), không đổi nhịp ghi DOM (chữ ký chống trùng). */
+        #ssb-bubble svg { width: 56px; height: 56px; display: block; }
         /* [v1.92.60] Số tiến trình ngay trên BÓNG LOGO (panel thu nhỏ) — nhìn được cả khi
            panel đóng, không cần mở gì. Chỉ ghi khi số đổi (updateMiniProgressUI). */
-        .bubble-badge { position: absolute; left: 50%; top: -8px; transform: translateX(-50%);
-                        background: #0f172a; color: #4ade80; border: 1px solid #22c55e;
-                        border-radius: 999px; padding: 0 6px; font-size: 10px; font-weight: 700;
-                        line-height: 15px; white-space: nowrap; letter-spacing: .2px;
-                        box-shadow: 0 2px 6px rgba(0,0,0,.45); pointer-events: none; }
+        .bubble-badge { position: absolute; left: 50%; top: -14px; transform: translateX(-50%);
+                        background: #0f172a; color: #4ade80; border: 2px solid #22c55e;
+                        border-radius: 999px; padding: 0 9px; font-size: 17px; font-weight: 800;
+                        line-height: 25px; white-space: nowrap; letter-spacing: .1px;
+                        font-variant-numeric: tabular-nums;
+                        box-shadow: 0 3px 10px rgba(0,0,0,.55); pointer-events: none; }
         .bubble-badge.busy { color: #7dd3fc; border-color: #38bdf8; }
         .title .logo { width: 17px; height: 17px; vertical-align: -3px; margin-right: 3px; }
         .saved-lists { border: 1px solid #334155; border-radius: 8px; max-height: 132px; overflow: auto; background: #0b1220; }
@@ -12427,7 +12438,7 @@
         </div>
         <div class="rs" id="ssb-rs" title="Kéo góc này để đổi cỡ panel — đúp chuột để về mặc định"></div>
       </div>
-      <button id="ssb-bubble" type="button" style="display:none" title="Mở panel BOTFAKE (bấm để mở lại)"><span id="ssb-bubble-badge" class="bubble-badge" style="display:none">0/0</span><svg viewBox="0 0 50 52" width="40" height="40" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg></button>
+      <button id="ssb-bubble" type="button" style="display:none" title="Mở panel BOTFAKE (bấm để mở lại)"><span id="ssb-bubble-badge" class="bubble-badge" style="display:none">0/0</span><svg viewBox="0 0 50 52" width="56" height="56" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg></button>
     `;
     (document.body || document.documentElement).appendChild(host);
     wireEvents(shadow);
@@ -13579,6 +13590,49 @@
    * Hàm này CHỈ ghi DOM khi SỐ ĐỔI (so chuỗi đã vẽ), nên gọi từ render() (2 lần/cú click) không
    * làm cú Alt-click nặng thêm. */
   let miniPainted = '';
+  /* ═══ [v1.92.64] SỐ TRÊN BÓNG LOGO PHẢI ĐỌC ĐƯỢC, và KHÔNG ĐƯỢC TRÀN MÀN HÌNH ═══
+   * Người dùng: "cho cái số tổng hợp hiển thị khi đóng bảng trên biểu tượng thu nhỏ to ra hơn
+   * nữa cho dễ nhìn". Đã phóng badge 10 → 17 px + bóng 40 → 56 px (xem CSS .bubble-badge).
+   * Nhưng to hơn thì phải xử lý chỗ mà bản 10 px chưa từng chạm:
+   *   • badge canh GIỮA bóng ⇒ chuỗi dài ló ra 2 bên. Đo với chữ số tabular-nums 17 px/800
+   *     (số 0,62 em · dấu / 0,42 em · padding 9 px · viền 2 px):
+   *       "9/9"            ≈ 50 px  → nằm gọn trong bóng 56 px
+   *       "64/137"         ≈ 82 px  → ló 13 px mỗi bên (chấp nhận được)
+   *       "14 815/14 815"  ≈ 135 px → ló 39 px mỗi bên
+   *     Bóng đặt ở `right:12px` ⇒ mép badge ra NGOÀI màn hình ~27 px. Chữ bị cắt, số đọc sai.
+   *   • Nặng hơn: người dùng KÉO bóng sát mép phải thì badge tràn hẳn.
+   * Nay hai việc, đều là ĐỌC/ĐO rồi ghi style — không đổi con số nào:
+   *   1. `MAX_BADGE_PX = 132`: chuỗi dài hơn ngưỡng thì thu cỡ chữ theo tỉ lệ, sàn 11 px
+   *      (vẫn to hơn bản cũ 10 px). Ước bề rộng bằng số ký tự — KHÔNG đọc layout
+   *      (đọc `getBoundingClientRect` mỗi lần số đổi sẽ là đúng cái bẫy layout đã đo 547 ms).
+   *   2. `clampBadgeToViewport()`: sau khi đặt chữ, so mép badge với mép màn hình và dịch
+   *      badge vào trong bằng `translateX`. Chỉ chạy khi số ĐỔI, không chạy mỗi khung hình.
+   * Cả hai chỉ tác động badge; nhịp ghi DOM vẫn khoá bằng `miniPainted` như cũ. */
+  const MAX_BADGE_PX = 132;      // bề rộng tối đa ước lượng của badge trước khi thu chữ
+  const MIN_BADGE_FONT = 11;     // sàn cỡ chữ (bản 1.92.61 là 10 px)
+  const BADGE_FONT_MAX = 17;     // cỡ chữ mặc định — xem CSS .bubble-badge
+  /** Ước bề rộng badge theo số ký tự (không đọc layout). Khớp với CSS: padding 9, viền 2. */
+  function estBadgeWidth(text, fontPx) {
+    let em = 0;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text.charAt(i);
+      em += (ch >= '0' && ch <= '9') ? 0.62 : (ch === '/' ? 0.42 : 0.52);
+    }
+    return em * fontPx + 18 + 4;
+  }
+  /** Dịch badge vào trong màn hình nếu nó ló ra ngoài (chỉ gọi khi số đổi). */
+  function clampBadgeToViewport(badge) {
+    try {
+      badge.style.transform = ''; // đo ở vị trí gốc trước
+      const r = badge.getBoundingClientRect();
+      if (!r || !r.width) return;
+      const pad = 4;
+      let shift = 0;
+      if (r.left < pad) shift = pad - r.left;
+      else if (r.right > (window.innerWidth - pad)) shift = (window.innerWidth - pad) - r.right;
+      if (shift) badge.style.transform = 'translateX(calc(-50% + ' + Math.round(shift) + 'px))';
+    } catch (e) { /* ignore — thà lệch vài px còn hơn ném lỗi */ }
+  }
   function updateMiniProgressUI() {
     const badge = shadow && shadow.getElementById('ssb-bubble-badge');
     if (!badge) return;
@@ -13595,6 +13649,17 @@
     badge.style.display = 'block';
     badge.textContent = text;
     badge.className = 'bubble-badge' + (done ? '' : ' busy');
+    /* Thu cỡ chữ nếu chuỗi quá dài — giữ badge trong bề rộng đọc được. */
+    let fontPx = BADGE_FONT_MAX;
+    while (fontPx > MIN_BADGE_FONT && estBadgeWidth(text, fontPx) > MAX_BADGE_PX) fontPx -= 1;
+    if (fontPx !== BADGE_FONT_MAX) {
+      badge.style.fontSize = fontPx + 'px';
+      badge.style.lineHeight = Math.round(fontPx * 1.48) + 'px';
+    } else {
+      badge.style.fontSize = '';
+      badge.style.lineHeight = '';
+    }
+    clampBadgeToViewport(badge);
   }
 
   let logStickBottom = true;      // người dùng đang ở sát đáy? (tự cập nhật bằng 'scroll')
