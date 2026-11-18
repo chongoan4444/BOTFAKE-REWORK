@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.64-w200.110
+// @version      1.92.65-w200.111
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.64-W200.110'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.65-W200.111'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -12313,20 +12313,20 @@
                       transition: transform .15s ease; }
         #ssb-bubble:hover { transform: scale(1.1) rotate(-4deg); }
         #ssb-bubble:active { transform: scale(.96); cursor: grabbing; }
-        /* [v1.92.64] BÓNG LOGO TO HƠN — để số tiến trình trên đó đọc được từ xa.
-         * Yêu cầu: "cho cái số tổng hợp hiển thị khi đóng bảng trên biểu tượng thu nhỏ to ra
-         * hơn nữa cho dễ nhìn". Ảnh cũ (tools/_shot_bubble.png) cho thấy số 64/137 chỉ cao
-         * ~13 px trong khi vùng bóng chỉ chiếm 40×52 px ở góc màn hình ⇒ phải phóng CẢ HAI:
-         * badge 10 → 17 px thì bóng 40 px sẽ bị badge đè kín logo.
-         *   bóng   40 → 56 px (+40 %)
-         *   badge  10 → 17 px (+70 %): font 17 px = cỡ chữ phụ của trang, đọc được trên ảnh
-         *          chụp màn hình mà không cần soi.
-         * Không đổi nội dung số (vẫn ok/total lấy từ summaryCounters), không đổi chỗ đặt
-         * (vẫn góc dưới-phải, vẫn kéo được), không đổi nhịp ghi DOM (chữ ký chống trùng). */
-        #ssb-bubble svg { width: 56px; height: 56px; display: block; }
+        /* [v1.92.65] BIỂU TƯỢNG GIỮ NGUYÊN 40 px — CHỈ SỐ TO LÊN.
+         * Người dùng đính chính 1.92.64: "ý là cho cái số to ra thôi còn biểu tượng nhỏ như cũ
+         * á". Vậy trả bóng về đúng 40×40 như 1.92.61, chỉ giữ việc phóng badge.
+         * Vì bóng nhỏ nên badge PHẢI đặt CAO HƠN để không đè lên mặt logo (đo bằng số):
+         *   • 1.92.61 (chữ 10 px, line-height 15, viền 1): cao 17 px, top −8
+         *     ⇒ đáy badge ở +9 px ⇒ đè 9/40 = 22 % bóng (đúng phần TAI, không chạm mặt logo)
+         *   • chữ 17 px, line-height 25, viền 2 ⇒ cao 29 px. Để đè đúng 9 px như bản cũ:
+         *     top = −(29 − 9) = −20 px. (top −14 hay −18 sẽ đè 15/11 px = 38 %/28 % — lấn
+         *     vào mặt logo.) */
+        /* top: -20 (đo ở trên) */
+        #ssb-bubble svg { width: 40px; height: 40px; display: block; }
         /* [v1.92.60] Số tiến trình ngay trên BÓNG LOGO (panel thu nhỏ) — nhìn được cả khi
            panel đóng, không cần mở gì. Chỉ ghi khi số đổi (updateMiniProgressUI). */
-        .bubble-badge { position: absolute; left: 50%; top: -14px; transform: translateX(-50%);
+        .bubble-badge { position: absolute; left: 50%; top: -20px; transform: translateX(-50%);
                         background: #0f172a; color: #4ade80; border: 2px solid #22c55e;
                         border-radius: 999px; padding: 0 9px; font-size: 17px; font-weight: 800;
                         line-height: 25px; white-space: nowrap; letter-spacing: .1px;
@@ -12438,7 +12438,7 @@
         </div>
         <div class="rs" id="ssb-rs" title="Kéo góc này để đổi cỡ panel — đúp chuột để về mặc định"></div>
       </div>
-      <button id="ssb-bubble" type="button" style="display:none" title="Mở panel BOTFAKE (bấm để mở lại)"><span id="ssb-bubble-badge" class="bubble-badge" style="display:none">0/0</span><svg viewBox="0 0 50 52" width="56" height="56" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg></button>
+      <button id="ssb-bubble" type="button" style="display:none" title="Mở panel BOTFAKE (bấm để mở lại)"><span id="ssb-bubble-badge" class="bubble-badge" style="display:none">0/0</span><svg viewBox="0 0 50 52" width="40" height="40" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg></button>
     `;
     (document.body || document.documentElement).appendChild(host);
     wireEvents(shadow);

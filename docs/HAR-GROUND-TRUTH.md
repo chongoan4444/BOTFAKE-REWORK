@@ -5423,15 +5423,25 @@ logo chiếm 40 px ở góc phải-dưới màn hình.
 
 ### Đổi gì
 
-| | 1.92.61 | **1.92.64** |
-|---|---|---|
-| cỡ chữ badge | 10 px | **17 px** (+70 %) |
-| bóng logo (svg) | 40 px | **56 px** (+40 %) |
-| viền badge | 1 px | 2 px |
-| chữ số | tỉ lệ thường | `tabular-nums` (số không nhảy bề rộng khi 9 → 10) |
+> **1.92.65 đính chính 1.92.64:** người dùng nói *"ý là cho cái số to ra thôi còn biểu tượng nhỏ
+> như cũ á"*. 1.92.64 đã phóng **cả** bóng 40 → 56 px. Nay trả bóng về **40 px như 1.92.61**, chỉ
+> giữ việc phóng badge. Bảng dưới là trạng thái **cuối cùng (1.92.65)**.
 
-Phóng badge mà giữ bóng 40 px thì badge **đè kín logo** (badge `9/9` ≈ 50 px > 40 px) — nên phải
-phóng cả hai.
+| | 1.92.61 | 1.92.64 (sai) | **1.92.65 (đúng)** |
+|---|---|---|---|
+| cỡ chữ badge | 10 px | 17 px | **17 px** (+70 %) |
+| bóng logo (svg) | 40 px | 56 px ❌ | **40 px — giữ nguyên** |
+| vị trí badge `top` | −8 px | −14 px | **−20 px** |
+| viền badge | 1 px | 2 px | 2 px |
+| chữ số | tỉ lệ thường | tabular-nums | tabular-nums |
+
+Vì bóng quay về 40 px nên badge **phải nâng cao hơn** để không lấn mặt logo. Đo bằng số:
+
+| bản | cao badge | `top` | đáy badge | đè lên bóng 40 px |
+|---|---|---|---|---|
+| 1.92.61 | 15+2 = 17 px | −8 | +9 px | 9 px = 22 % (đúng phần **tai**) |
+| 1.92.64 | — | −14 | +15 px | 15 px = 38 % ❌ lấn mặt logo |
+| **1.92.65** | 25+4 = 29 px | **−20** | **+9 px** | **9 px = 22 % — bằng hệt bản cũ** |
 
 ### Hai vấn đề mới sinh ra khi phóng to, đã xử lý
 
@@ -5477,8 +5487,20 @@ không sinh vòng lặp ghi).
 
 ### Kiểm
 
-`npm test` **334 ca** (thêm khối `[v1.92.64]`). Mutation **5/5 bị bắt**: M30 trả badge về 10 px ·
-M31 bỏ thu cỡ chữ · M32 bỏ kéo badge vào màn hình · M33 trả bóng về 40 px · M34 clamp chỉ xét mép phải.
+`npm test` **337 ca** (khối `[v1.92.64]` + 3 ca của `[v1.92.65]`). Mutation **10/10 bị bắt**:
+
+| mã | đột biến |
+|---|---|
+| M30 | trả badge về 10 px |
+| M31 | bỏ thu cỡ chữ khi số dài |
+| M32 | bỏ kéo badge vào màn hình |
+| M33 | trả bóng về 40 px *(đảo nghĩa ở 1.92.65: nay phóng bóng MỚI là sai)* |
+| M34 | clamp chỉ xét mép phải |
+| M35 | phóng biểu tượng lên 56 px — **đúng lỗi vừa bị đính chính** |
+| M36 | badge đè sâu vào logo (`top` −10) |
+| M37 | badge lơ lửng tách khỏi bóng (`top` −34) |
+| M38 | `svg` trong HTML lệch 56 trong khi CSS 40 |
+| M39 | trả số về 10 px |
 
 `tools/_shot_bubble_compare.html` — dựng **nguyên văn CSS** của cả hai bản cạnh nhau để so bằng mắt.
 `tools/_check_mini.mjs` in thêm `bubbleBadgeFont` / `bubbleBadgeBig` đọc `getComputedStyle` +

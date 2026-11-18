@@ -1556,7 +1556,24 @@ check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
     check('[v1.92.64] cỡ chữ badge TO HƠN 10 px cũ', Number(fontM && fontM[1]) > 10, true);
     check('[v1.92.64] badge dùng chữ số đều (tabular-nums) để số không nhảy khi tăng',
       /font-variant-numeric: tabular-nums/.test(css), true);
-    check('[v1.92.64] bóng logo TO HƠN 40 px cũ (badge to cần chỗ)', Number(svgM && svgM[1]) > 40, true);
+    /* [v1.92.65] Người dùng đính chính: CHỈ số to, BIỂU TƯỢNG giữ nguyên 40 px. */
+    check('[v1.92.65] biểu tượng GIỮ NGUYÊN 40 px (không phóng theo badge)', Number(svgM && svgM[1]), 40);
+    check('[v1.92.65] svg trong HTML cũng 40 px (không lệch với CSS)',
+      /<svg viewBox="0 0 50 52" width="40" height="40"/.test(SRC), true);
+    /* Badge cao 29 px (25 line-height + 2*2 viền) đặt top −20 ⇒ đáy ở +9 px.
+     * Bản 1.92.61: cao 17, top −8 ⇒ đáy +9. Đúng bằng nhau ⇒ không đè thêm lên logo. */
+    {
+      const topM = css.match(/\.bubble-badge \{[^}]*top: (-?\d+)px/);
+      const lhM = css.match(/\.bubble-badge \{[^}]*line-height: (\d+)px/);
+      const bwM = css.match(/\.bubble-badge \{[^}]*border: (\d+)px solid/);
+      const top = Number(topM && topM[1]), lh = Number(lhM && lhM[1]), bw = Number(bwM && bwM[1]);
+      const badgeH = lh + 2 * bw;
+      const bottomOnBubble = top + badgeH;      // > 0 nghĩa là đè lên bóng
+      check('[v1.92.65] badge không đè quá 9 px lên bóng 40 px (= đúng mức bản 1.92.61)',
+        bottomOnBubble <= 9, true);
+      check('[v1.92.65] badge vẫn chồng lên bóng (không lơ lửng tách rời)',
+        bottomOnBubble > 0, true);
+    }
     check('[v1.92.64] badge vẫn canh giữa bóng + vẫn không chặn click',
       /\.bubble-badge \{[^}]*left: 50%/.test(css) && /\.bubble-badge \{[^}]*pointer-events: none/.test(css), true);
   }
