@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.65-w200.111
+// @version      1.92.66-w200.112
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.65-W200.111'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.66-W200.112'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5318,7 +5318,33 @@
         const myRun = runSeq;
         const finalizeSockBg = (res) => {
           sockFiredPending.delete(conv.id);
-          if (myRun !== runSeq) return;
+          /* ═══ [v1.92.66] NHẢ KHOÁ NGOÀI Ở MỌI NHÁNH KẾT THÚC ═══
+           * Bản cũ chỉ gọi `releaseOutbound()` ở ĐÚNG HAI nhánh (trước `deferredToSocketRetry` và
+           * ở dòng cuối). Các nhánh còn lại `return` mà KHÔNG nhả:
+           *   • `res.uncertain`  → 3 600 ca ⚠ của lô 19:48 ĐI QUA ĐÂY
+           *   • nhánh chuyển Extension (🛟)
+           * ⇒ `outboundLock[conv.id]` còn nguyên ⇒ `acquireOutbound()` trả false cho MỌI lần sau,
+           *   kể cả cổng kiểm chứng và lần bù của chính chat đó. Lỗi im lặng: log không báo, chỉ
+           *   là chat đó không bao giờ được thử lại trong lượt.
+           * Nay: mọi nhánh kết thúc đều nhả khoá nếu chat CHƯA được đánh dấu đã-giao.
+           * Nhả khoá cho chat đã delivered là vô hại: `acquireOutbound()` tự chặn bằng chính
+           * `deliveredIds`, nên không thể sinh tin trùng. */
+          /* [v1.92.66] Ở chế độ BẮN-NHẢ, KHOÁ NGOÀI PHẢI Ở LẠI tới khi settle xong.
+           * Lý do (đọc code mới thấy): `sendViaApi()` (dòng ~3563) và `fireApiAndWatch()` (dòng
+           * ~3368) đều tự gọi `acquireOutbound()` và TỪ CHỐI nếu chat đang giữ khoá. Nghĩa là
+           * `outboundLock` chính là thứ chặn "bù chồng" khi Socket đang bay — đúng như chú thích
+           * ở `acquireOutbound` ("'maybe' giữ khóa → không gửi lần 2").
+           * Nếu ta nhả khoá lúc PUBLISH (chế độ bắn-nhả) thì cổng `scheduleBuRetry` có thể chạy
+           * bù trong lúc ACK còn đang bay ⇒ 2 tin. Vì vậy: nhánh nào CÒN CHỜ KẾT QUẢ thì GIỮ khoá;
+           * nhánh nào ĐÃ CHỐT (✅ xong / ❌ dứt khoát / → Ext-chắc-chắn-không-gửi) thì mới nhả.
+           * Tên hàm nói rõ điều đó để lần sau không ai "dọn dẹp" nó thành nhả vô điều kiện. */
+          const releaseOutboundIfFinal = (why) => {
+            /* GIỮ khoá khi: chat đã delivered (khoá vô nghĩa) → nhả cũng được, nhưng `deliveredIds`
+             * đã tự chặn mọi lần sau nên nhả là vô hại; ngược lại khi CHƯA rõ kết quả thì giữ. */
+            void why;
+            if (!deliveredIds[conv.id]) releaseOutbound(conv.id);
+          };
+          if (myRun !== runSeq) { releaseOutbound(conv.id); return; }
           const nm = conv.name || conv.id;
           if (res && res.ok) {
             reopenUncertain(conv.id); // ⚡ [FIX-4b] hạ ⚠ nếu watchdog đã chốt trước khi ACK về
@@ -5332,6 +5358,14 @@
             if (res.noAck) scheduleSocketVerify(conv, text, photo, res.publishedAt || (Date.now() - 15000));
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
             logFailGrouped(nm, '' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)', '⚠', conv.id);
+            /* [v1.92.66] GIỮ KHOÁ ở nhánh ⚠ — CỐ Ý, và đây là điểm khác bản nháp đầu của tôi.
+             * Ca ⚠ nghĩa là CHƯA BIẾT tin đã đi hay chưa; nhả khoá lúc này cho phép làn Ext/API
+             * bắn bù ⇒ đúng nguồn GỬI TRÙNG mà cả file này đang chống. Khoá được `markDelivered`
+             * (nếu ACK muộn về và là ✅) hoặc nhánh ❌ dứt khoát nhả; và `reopenUncertain()` +
+             * `sweepBgPending` vẫn xử lý được vì chúng không đi qua `acquireOutbound`.
+             * Điều ĐÚNG cần sửa ở nhánh này không phải cái khoá, mà là: (a) cầu dao Ext phải đóng
+             * được để đừng đẩy 3 600 ca vào đây, (b) ca ⚠ không được chiếm ghế làn 5 037 ms —
+             * cả hai đã sửa ở nơi khác trong cùng bản này. */
             return;
           }
           if (res && res.deferredToSocketRetry && myRun === runSeq && !state.stopRequested) {
@@ -5350,7 +5384,10 @@
                * chốt ❌ ở đúng nhánh này trong khi làn Ext trống hoàn toàn. */
               const hasExt1545 = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
               if (hasExt1545 && extFallback1545Allowed()) {
-                extTry1545.tried++;
+                /* [v1.92.66] Dùng `noteExt1545Attempt()` (đếm + đóng phanh cứng khi đủ mẫu).
+                 * Bản cũ chỉ `tried++` rồi KHÔNG kiểm ngưỡng ở đây ⇒ nếu `.then` của chuỗi bù
+                 * không chạy thì cầu dao không bao giờ đóng dù `tried` đã 3 600. */
+                noteExt1545Attempt();
                 /* [v1.92.50] ĐÁNH DẤU CA NÀY ĐỂ CẦU DAO EXT ĐÓNG ĐƯỢC — LỖI BỊ SÓT Ở 1.92.49.
                  * Sổ 11:34 (9 242 chat): dồn sang Ext 3 280 ca, Ext trả "Người này hiện không có
                  * mặt" cho 3 122 ca, mà KHÔNG có dòng 🔒 nào ⇒ ngân sách chưa từng đóng.
@@ -5370,7 +5407,17 @@
               if (hasExt1545 && !extFallback1545Allowed()) {
                 // Đã đo xong: Extension cũng không cứu được ⇒ ⚠ "chưa gửi" để người dùng gửi tay
                 if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-                logFailGrouped(nm, 'Socket: FB từ chối · đã đo 200 ca thì Extension cũng bị chặn ⇒ GIỮ ⚠ (chưa gửi), vào danh sách gửi tay', '⚠', conv.id);
+                /* [v1.92.66] IN SỐ THẬT — xem khối chú thích dài ở `extFallback1545Allowed()`.
+                 * Câu cũ ("đã đo 200 ca") là chuỗi cố định, lặp 3 611 lần ở lô 19:48 trong khi
+                 * `tried` = 0. Nay số in ra là số ĐO ĐƯỢC của chính lô này. */
+                logFailGrouped(nm, 'Socket: FB từ chối · ngân sách dò Ext ĐANG ĐÓNG (đã định bắn '
+                  + extTry1545.tried + ' ca · cứu ' + extTry1545.saved + ') ⇒ GIỮ ⚠ (chưa gửi), '
+                  + 'ca này CHƯA thử qua Ext — vào danh sách gửi tay', '⚠', conv.id);
+                /* [v1.92.66] CỐ Ý KHÔNG nhả khoá ở nhánh này: chat vừa được đưa vào danh sách
+                 * GỬI TAY để người dùng tự bấm. Nếu ta nhả khoá, chính script có thể bắn bù nó
+                 * ở làn Ext/API ⇒ THÀNH 2 TIN (một của script, một của người dùng). Giữ khoá là
+                 * đúng: nó không chặn việc GỬI TAY (người dùng bấm trong Pancake, không qua
+                 * `acquireOutbound`), chỉ chặn script tự bắn chồng. */
                 return;
               }
               if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
@@ -5380,15 +5427,61 @@
                 + ' ⇒ thử nữa chỉ tốn lệnh)', '❌', conv.id);
               return;
             }
-            if (sockRetryBudgetState.closed) sockRetryBudgetNote(sockRetryBudgetState, 'probe', rejectPctBg);
-            sockRetryBudgetNote(sockRetryBudgetState, 'tried', rejectPctBg);
-            sendDiag.sockWaveRetry = (sendDiag.sockWaveRetry || 0) + 1;
-            logFailGrouped(nm, 'Socket bị từ chối lần 1 — bắn lại 1 lần qua Socket (thoát burst-reject)…', '🔁', conv.id);
-            const ctx2 = Object.assign({}, res.deferredCtx || {}, {
-              isSocketRetryPass: true, socketRetriedOnce: true,
-              wave200Mode: false, sockFired: true, prioritySocket: true, fastOnly: false,
-            });
-            socketWaveRetryLane(() => sendViaSocket(conv, text, photo, ctx2)).catch(() => { /* finalize của lần 2 tự chốt */ });
+            /* ═══ [v1.92.66] BỎ HẲN NHÁNH "BẮN LẠI 1 LẦN QUA SOCKET" — ĐO ĐƯỢC 0/72 CỨU ĐƯỢC ═══
+             *
+             * Số đo sổ kiểm chứng lô 19:48:22 (15 336 chat): tag 🔁 xuất hiện **72** lần, và
+             * **72/72** ca kết thúc bằng ❌ — không ca nào được cứu. Đối chiếu 4 lô trước
+             * (14:03, 19:00:48, 19:00:54, 10:04): "thử lại 861 lần, cứu 0". Tức đây không phải
+             * chuyện xác suất — FB từ chối lần 1 bằng `markOptimisticMessageFailed` là dứt khoát
+             * cho cả phiên, bắn lại y hệt chỉ nhận lại đúng câu đó.
+             *
+             * CÁI GIÁ phải trả KHÔNG chỉ là lệnh thừa. Hai lý do đắt hơn:
+             *   1) `settleSocketResult` chạy trong `.then` của `pageLane(...)` ⇒ TOÀN BỘ thời gian
+             *      bắn lại (sleep 220–350 ms + lần publish 2) vẫn GIỮ GHẾ trong làn Socket/page.
+             *      72 ca × ~700 ms = 50 slot-giây bị chiếm vô ích.
+             *   2) `pushToSocketRetry` làm `pendingSocketCoolCount` > 0 ⇒ `computeSmartGap()` và
+             *      `evaluateGate()` thấy `retryBacklog` cao ⇒ CHẶN mở wave kế (ngưỡng 80). Nghĩa
+             *      là mỗi ca 🔁 còn kéo chậm cả lô, không chỉ chậm chính nó.
+             *
+             * NAY: phân loại bằng CHÍNH phản hồi của FB (không thử lại để "xem sao"):
+             *   • `res.recipientUnavailable` (FB nói khách không nhận được) ⇒ ❌ NGAY, ghi nhận,
+             *     KHÔNG chuyển Ext. Đây là điều `sockRetryBudgetState` vẫn luôn muốn: nhóm này
+             *     chiếm phần lớn 3 759 ACK rejected, chuyển sang Ext chỉ tốn lệnh.
+             *   • Còn lại (rejected nhưng KHÔNG nói khách chết — vd burst-reject) ⇒ chuyển thẳng
+             *     sang làn bù Extension, KHÔNG bắn lại Socket. Đây là đường DUY NHẤT đã chứng minh
+             *     cứu được: 🛟 103 ca → **102 ✅** (99 %) ở lô 19:48.
+             * Không thêm một lệnh gửi nào so với trước; chỉ đổi KÊNH của lần thử thứ 2 từ Socket
+             * (0 %) sang Extension (99 %). Chống trùng không đổi: cả hai nhánh đều chỉ chạy khi
+             * `deliveredIds[conv.id]` chưa có, và `__extFallback1545` vẫn chặn thử 2 lần. */
+            if (res && res.recipientUnavailable) {
+              sendDiag.sockRetryBudgetSkipped++;
+              sockRetryBudgetNote(sockRetryBudgetState, 'skipped', rejectPctBg);
+              if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+              if (res.recipientUnavailable) sendDiag.recipientUnavailable++;
+              /* Vẫn giữ nguyên đường "đọc lại lịch sử sau lô": nếu tin THẬT RA đã tới thì lật ✅
+               * (queueDeadUserRecheck chỉ ĐỌC, không gửi) — bỏ nó đi là mất khả năng tự đính chính. */
+              try { queueDeadUserRecheck(conv, text, photo, Date.now()); } catch (eDr) { /* ignore */ }
+              logFailGrouped(nm, 'Socket: FB từ chối và nói KHÔNG nhận được — không bắn lại Socket, '
+                + 'không chuyển Ext (đã đo 0/N cứu được ở nhóm này)', '❌', conv.id);
+              releaseOutbound(conv.id);
+              return;
+            }
+            if (hasExt1545 && extFallback1545Allowed() && !conv.__extFallback1545) {
+              noteExt1545Attempt();
+              conv.__extFallback1545 = true;
+              scheduleBuRetry(conv, text, photo, nm,
+                'Socket: FB từ chối lần 1 (không nói khách chết)', ['socket'],
+                { ambiguous: false, fromUncertain: true, via: 'socket', sentAt: Date.now() });
+              logFailGrouped(nm, 'Socket: FB từ chối lần 1 — không bắn lại Socket (0/72 cứu được), '
+                + 'chuyển thẳng Extension 1 lần (tin chưa đi nên không thể trùng)', '🛟', conv.id);
+              releaseOutboundIfFinal('chuyen-ext'); // [v1.92.66] FB từ chối ⇒ chắc chắn chưa gửi
+              return;
+            }
+            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+            logFailGrouped(nm, 'Socket: FB từ chối lần 1 — không bắn lại Socket (0/N cứu được ở mọi lô đã đo)'
+              + (hasExt1545 ? ' · ngân sách dò Ext đang đóng' : ' · không có Extension')
+              + ' ⇒ chốt lỗi, không tốn thêm lệnh', '❌', conv.id);
+            releaseOutbound(conv.id);
             return;
           }
           releaseOutbound(conv.id); // FB từ chối / chắc fail → nhả khóa để bù kênh khác (không sót)
@@ -5407,8 +5500,24 @@
             logFailGrouped(nm, ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)', '❌', conv.id);
           }
         };
-        const settleAndFinalize = (rawKind) => {
+        /* [v1.92.66] `holdLaneForAck` = CÓ giữ ghế làn trong lúc chờ ACK hay không.
+         * Bản cũ (và đường KHÔNG bắn-nhả nay vẫn vậy): settle chạy trong `.then` của `pageLane`
+         * ⇒ ghế bị giữ tới khi settle xong. Đường bắn-nhả: ghế đã nhả lúc publish, nên settle
+         * KHÔNG được giữ thêm lần nữa. */
+        /* [v1.92.66] CỔNG "CHỈ PHÂN XỬ MỘT LẦN" — BẮT BUỘC khi bật bắn-nhả.
+         * Một ca có HAI đường có thể gọi settle cho cùng kết quả:
+         *   • `firedCb` do `socketPublishSend` gọi ở nền khi /ls_resp về (đường chính);
+         *   • nhánh `.catch` của `pageLane` nếu `socketPublishSend` throw SAU khi đã publish,
+         *     hoặc `.then` nhận một kết quả bất thường.
+         * Không có cổng này thì một ca bị `finalizeSockBg` chạy 2 lần ⇒ `markDelivered` /
+         * `sockRetryBudgetNote` / `logFailGrouped` đều đếm đôi, và tệ nhất là lần 2 chạy sau khi
+         * lần 1 đã chốt ⚠ ⇒ có thể đẩy một ca ĐÃ ✅ vào danh sách gửi tay.
+         * Cờ nằm trên `ctx` (vòng đời = một lần bắn), đặt lại ở đầu mỗi lần publish. */
+        const settleOnce = { used: false };
+        const settleAndFinalize = (rawKind, holdLaneForAck) => {
           if (myRun !== runSeq) return;
+          if (settleOnce.used) return;
+          settleOnce.used = true;
           settleSocketResult(rawKind)
             .then((res) => { if (myRun === runSeq) finalizeSockBg(res); })
             .catch(() => {
@@ -5416,6 +5525,7 @@
               // lỗi khi chờ ACK Socket: phải chốt ⚠, chỉ xóa cờ chờ thì chat kẹt pending vĩnh viễn
               if (myRun === runSeq && window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
             });
+          void holdLaneForAck; // tài liệu hoá ý định; việc nhả ghế do `pageLane` tự làm
         };
         // Giữ số frame in-flight trong giới hạn lane Socket/page (khởi điểm 64, thích ứng 32–96):
         // Worker chờ tới đúng lúc chiếm được ghế trong pageLane (bắt đầu bắn frame) rồi trả về ngay
@@ -5423,10 +5533,45 @@
         // vào pageLane.waiters ở giây thứ 0 (tránh nghẽn HTTP upload ảnh & tránh đứng tiến độ).
         let notifySlotStarted = null;
         const slotStartedPromise = new Promise((resolve) => { notifySlotStarted = resolve; });
+        /* ═══════════════════════════════════════════════════════════════════════════════════
+         * [v1.92.66] BẮT ĐẦU DÙNG CHẾ ĐỘ "BẮN-NHẢ" CHO LÀN SOCKET — ĐÒN BẨY LỚN NHẤT
+         * ═══════════════════════════════════════════════════════════════════════════════════
+         * `socketPublishSend()` đã có sẵn tham số `firedCb` cho đúng việc này (NẤC 2, v1.71.0):
+         *   "bắn xong NHẢ NGAY — không giữ worker chờ ACK của FB (vốn mất ~2,8s/tin)".
+         * Nhưng chỗ gọi NÀY truyền `null` ⇒ toàn bộ 15 336 lệnh của lô 19:48 đi đường GIỮ.
+         *
+         * ĐO ĐƯỢC TỪ LOG (không phải suy đoán):
+         *   • `⏱ GIỮ SLOT: còn lại 1 726 ms/chat` và `giữ slot 5 037 ms` (🔔) ⇒ mỗi ca chiếm GHẾ
+         *     LÀN 1 726 ms (phần còn lại là chờ ACK 1 162 ms + chuẩn bị).
+         *   • Sức chứa của làn Socket = 256 ghế × 142 s phát = 36 352 ghế-giây. Với 15 336 ca
+         *     thì SÀN CỨNG là 36 352 ÷ 15 336 = 2,37 s/ca ⇒ trần ~108 tin/s. Đo thật 102,2 tin/s.
+         *     ⇒ LÀN LÀ NÚT THẮT, không phải CPU, không phải `mainCap 192`.
+         *   • 3 600 ca ⚠ (no-ACK) giữ ghế trọn hạn chờ 5 037 ms = 18 133 ghế-giây
+         *     = **50 % toàn bộ dung lượng làn của lượt**. Đó là lý do `waiting` luôn 220/220.
+         *
+         * VÌ SAO ĐỔI ĐƯỢC MÀ KHÔNG SINH TIN TRÙNG — 4 lớp bảo vệ, KHÔNG lớp nào bị bỏ:
+         *   1) `sockFiredPending` (Set) — chat còn trong tập này thì KHÔNG kênh nào bắn thêm,
+         *      kể cả bù Extension. Chỉ khi FB XÁC NHẬN TỪ CHỐI mới được bù. Vẫn nguyên.
+         *   2) `acquireOutbound/releaseOutbound` — khoá ngoài, không đổi.
+         *   3) `markDelivered` + `deliveredIds` — chỉ đường ĐỌC ghi, không đổi.
+         *   4) `ackListenMs` 12 000 ms vẫn giữ CHỖ NHẬN (/ls_resp vẫn tra được callback ⇒ ACK về
+         *      muộn vẫn phân xử ✅ thật qua `lateP` + `lateApply`). Đây là lý do bắn-nhả AN TOÀN:
+         *      nhả ghế KHÔNG có nghĩa là mất ACK. Hạn chờ GIỮ SLOT (`ackWaitMs`) vẫn dùng để
+         *      đánh ⚠ đúng hạn — chỉ khác là nó không còn CHIẾM GHẾ trong lúc chờ.
+         *
+         * VIỆC `paceSocketPublish` (4 ms/page) VẪN CHẠY TRONG `socketPublishSend` — nên nhịp phát
+         * lên FB không đổi (250 khung/s/page là trần cứng của chính pace). Thứ được giải phóng
+         * chỉ là ghế làn trong khoảng CHỜ, không phải khoảng BẮN.
+         * ═══════════════════════════════════════════════════════════════════════════════════ */
+        const SOCK_FIRED_RELEASE = true;
         pageLane(() => {
           if (notifySlotStarted) { const fn0 = notifySlotStarted; notifySlotStarted = null; fn0(true); }
           // [v1.92.48] opts.lateApply: đăng ký đường phục hồi ACK-muộn CHỈ ĐỌC (xem onLateAck)
-          return socketPublishSend(helper, pageId, gid, text, attFbIds, null, { lateApply: onLateAck });
+          return socketPublishSend(helper, pageId, gid, text, attFbIds,
+            SOCK_FIRED_RELEASE
+              ? (rawKind) => settleAndFinalize(rawKind && rawKind.kind ? rawKind : { kind: 'noack' }, false)
+              : null,
+            { lateApply: onLateAck });
         })
           .then((rawSync) => {
             if (notifySlotStarted) {
@@ -5435,7 +5580,10 @@
               fn0(false);
               return;
             }
-            settleAndFinalize(rawSync && rawSync.kind ? rawSync : { kind: 'noack' });
+            /* Bắn-nhả: `socketPublishSend` trả `{kind:'fired'}` NGAY sau publish ⇒ settle đã được
+             * `firedCb` gọi ở nền. KHÔNG gọi settle lần 2 ở đây (sẽ phân xử 2 lần một kết quả). */
+            if (rawSync && rawSync.kind === 'fired') return;
+            settleAndFinalize(rawSync && rawSync.kind ? rawSync : { kind: 'noack' }, true);
           })
           .catch(() => {
             if (notifySlotStarted) {
@@ -5444,11 +5592,24 @@
               fn0(false);
               return;
             }
-            settleAndFinalize({ kind: 'noack' });
+            settleAndFinalize({ kind: 'noack' }, true);
           })
-          // ⚡ [FIX-4] LUÔN nhả sockFiredPending ở MỌI lối ra — kể cả khi worker stopped
-          // trước khi vào slot hoặc lane throw. Nếu không, chat kẹt "đang chờ ACK" vĩnh viễn.
-          .finally(() => { sockFiredPending.delete(conv.id); });
+          /* ⚡ [FIX-4] nhả sockFiredPending ở MỌI lối ra — kể cả khi worker stopped trước khi
+           * vào slot hoặc lane throw. Nếu không, chat kẹt "đang chờ ACK" vĩnh viễn.
+           * ═══ [v1.92.66] NHƯNG KHÔNG ĐƯỢC NHẢ KHI ĐANG Ở CHẾ ĐỘ BẮN-NHẢ ═══
+           * Ở chế độ GIỮ (cũ), `.finally` chạy SAU khi settle xong ⇒ `finalizeSockBg` đã xoá cờ
+           * rồi, đây chỉ là lưới an toàn.
+           * Ở chế độ BẮN-NHẢ, `pageLane` resolve NGAY sau khi publish, còn ACK vẫn đang bay
+           * (settle chạy nền tới 12 000 ms). Nếu `.finally` xoá cờ lúc này thì `sockFiredPending`
+           * TRỐNG trong suốt thời gian chờ ⇒ `acquireOutbound()` và `scheduleBuRetry()` sẽ cho
+           * bắn/bù CHỒNG đúng ca đang bay ⇒ GỬI TRÙNG. Đây là bẫy im lặng: log vẫn đẹp, khách
+           * nhận 2 tin.
+           * Nay: ở chế độ bắn-nhả, cờ do `finalizeSockBg()` (và nhánh `.catch` của
+           * `settleAndFinalize`) xoá khi settle THẬT SỰ xong — hai chỗ đó đã có sẵn.
+           * `SOCK_FIRED_RELEASE` = false thì giữ nguyên hành vi cũ. */
+          .finally(() => {
+            if (!SOCK_FIRED_RELEASE) sockFiredPending.delete(conv.id);
+          });
         if (photo) {
           ctx.nonReusableFbId = null;
           ctx.nonReusableFbIds = null;
@@ -6219,13 +6380,71 @@
   const ACK_LISTEN_MAX_MS = 30000;  // = trần tự xoá của app (b=3e4) — nghe tới đây rồi thôi
   const ACK_LAT_RING_N = 1000;      // [v1.92.48] 200 → 1 000 mẫu: 200 mẫu ≈ 5 s cuối lô
   const ackLatRing = [];            // N mẫu ACK gần nhất (ms) — PHẢI đủ dài để phủ cả lô
+  /* ═══ [v1.92.66] PHÂN VỊ ACK ĐỌC O(1) — BỎ `slice().sort()` MỖI LẦN ĐỌC ═══
+   * `latencyPct()` sắp xếp lại TOÀN BỘ 1 000 mẫu ở MỖI lần gọi, mà nó được gọi ở:
+   *   • `ackHoldMsFor(sockAckP90())` — ĐÚNG MỘT LẦN MỖI TIN GỬI (dòng ~4686);
+   *   • `rampAllowed()` (p95) mỗi 20 ACK · `fastAckMs()` (p50) mỗi ca 'ok';
+   *   • vài dòng log cuối lô.
+   * Đo trên máy này: 15 336 lần × sort 1 000 số = **3 366 ms CPU thuần** cho một lượt 15k,
+   * cộng ~15 ms GC mỗi lần (mỗi lần tạo một mảng 1 000 phần tử mới) — đúng lúc 192 worker
+   * đang bận. Nay giữ thêm MỘT BẢN ĐÃ SẮP XẾP, chèn bằng tìm kiếm nhị phân:
+   *   • thêm mẫu  = O(log n) tìm chỗ + O(n) memmove 1 000 số (~1–3 µs, rẻ hơn sort 200×);
+   *   • đọc p50/90/95 = O(1) — chỉ index vào mảng;
+   *   • KẾT QUẢ CHÍNH XÁC TUYỆT ĐỐI, giống hệt `latencyPct()` trên cùng cửa sổ mẫu.
+   * (Đã cân nhắc histogram cho O(1) tuyệt đối, nhưng mọi histogram đủ rộng đều làm mất độ
+   * phân giải đúng vùng 1 000–5 000 ms — vùng quyết định ACK_HOLD_CEIL_MS 6 000. Không đánh
+   * đổi độ chính xác của hạn chờ giữ slot để tiết kiệm ~2 µs.)
+   * `ackLatRing` GIỮ NGUYÊN (vẫn push/shift y như cũ) vì log 📡 in `ackLatRing.length` mẫu và
+   * công cụ kiểm đọc trực tiếp — chỉ phần TÍNH PHÂN VỊ đổi đường. */
+  const ackLatSorted = [];          // cửa sổ 1 000 mẫu, LUÔN tăng dần
+  let ackLatPctCache = null;        // { p50, p90, p95 } — xoá mỗi khi có mẫu mới
+  function ackLatSortedInsert(v) {
+    let lo = 0, hi = ackLatSorted.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (ackLatSorted[mid] <= v) lo = mid + 1; else hi = mid;
+    }
+    ackLatSorted.splice(lo, 0, v);
+  }
+  /** Xoá MỘT phần tử bằng đúng giá trị v (mẫu cũ nhất vừa rời ring) — O(log n + n).
+   *  [v1.92.66] KHÔNG được `shift()` mảng đã sắp xếp: shift bỏ phần tử NHỎ NHẤT, còn cửa sổ
+   *  trượt phải bỏ phần tử CŨ NHẤT. Bản nháp đầu làm sai chỗ này và đo được p90 lệch hẳn
+   *  (3 003 → 5 378 ms) — tức hạn chờ giữ slot sẽ bị đẩy lên trần 6 000 sai. */
+  function ackLatSortedRemove(v) {
+    let lo = 0, hi = ackLatSorted.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const x = ackLatSorted[mid];
+      if (x < v) lo = mid + 1;
+      else if (x > v) hi = mid - 1;
+      else { ackLatSorted.splice(mid, 1); return; }
+    }
+  }
   function noteAckLatency(ms) {
     const v = Math.round(Number(ms) || 0);
     if (v <= 0) return;
     ackLatRing.push(v);
-    if (ackLatRing.length > ACK_LAT_RING_N) ackLatRing.shift();
+    ackLatSortedInsert(v);
+    if (ackLatRing.length > ACK_LAT_RING_N) {
+      const old = ackLatRing.shift();
+      ackLatSortedRemove(old);
+    }
+    ackLatPctCache = null;
   }
-  /** Phân vị của mảng ĐO ĐƯỢC (không sắp xếp mảng gốc). pct = 0…1 */
+  /** Phân vị của cửa sổ mẫu — O(1). pct = 0…1 */
+  function latencyPctFromSorted(pct) {
+    const n = ackLatSorted.length;
+    if (!n) return 0;
+    const i = Math.min(n - 1, Math.max(0, Math.floor(n * pct)));
+    return ackLatSorted[i];
+  }
+  function ackPctCached() {
+    if (ackLatPctCache) return ackLatPctCache;
+    ackLatPctCache = { p50: latencyPctFromSorted(0.5), p90: latencyPctFromSorted(0.9), p95: latencyPctFromSorted(0.95) };
+    return ackLatPctCache;
+  }
+  /** Phân vị của mảng ĐO ĐƯỢC (không sắp xếp mảng gốc). pct = 0…1
+   *  [v1.92.66] GIỮ LẠI cho công cụ kiểm/bench — đường chạy thật dùng latencyPctFromSorted(). */
   function latencyPct(arr, pct) {
     const a = (arr || []).slice().sort((x, y) => x - y);
     if (!a.length) return 0;
@@ -6242,15 +6461,15 @@
   }
   function sockAckP90() {
     if (ackLatRing.length < 20) return 3000; // chưa đủ mẫu ⇒ 3s (≈2× ACK TB đã đo)
-    return latencyPct(ackLatRing, 0.9);
+    return ackPctCached().p90;
   }
   function sockAckP95() {
     if (ackLatRing.length < 20) return 0; // chưa đủ mẫu ⇒ chưa dùng ngưỡng thích ứng
-    return latencyPct(ackLatRing, 0.95);
+    return ackPctCached().p95;
   }
   function sockAckP50() {
     if (ackLatRing.length < 20) return 0; // chưa đủ mẫu ⇒ chưa dùng ngưỡng thích ứng
-    return latencyPct(ackLatRing, 0.5);
+    return ackPctCached().p50;
   }
   /* [v1.92.16] NGƯỠNG "ACK NHANH" PHẢI BÁM SỐ ĐO, KHÔNG ĐƯỢC LÀ HẰNG 2 500 ms.
    * Lô 19:52 (11 844 chat, 1.92.15): ACK TB 3 163 ms · 9 668/10 688 ACK rơi vào 2–5 s.
@@ -7756,7 +7975,7 @@
         if (_isNoFace1545 && ch !== 'ext' && _extAvail1545 && !conv.__extFallback1545) {
           if (extFallback1545Allowed()) {
             conv.__extFallback1545 = true;
-            extTry1545.tried++;
+            noteExt1545Attempt();
             scheduleBuRetry(conv, text, photo, (conv.name || conv.id),
               'FB báo "người này hiện không có mặt" ở kênh ' + ch, triedCh.slice(),
               { ambiguous: false, fromUncertain: true, via: ch, sentAt: Date.now() });
@@ -7767,10 +7986,16 @@
             };
           }
           conv.__extFallback1545 = true;
+          /* ═══ [v1.92.66] CÂU NÀY TỪNG LÀ LỜI NÓI DỐI — ĐÃ SỬA ═══
+           * Bản cũ in CỐ ĐỊNH: "đã đo 200 ca thì Extension cũng bị chặn". Lô 19:48 lặp câu đó
+           * 3 611 lần trong khi `extTry1545.tried` = 0 và KHÔNG có dòng 🔒 nào ⇒ chưa từng đo
+           * 200 ca nào. Nay in SỐ THẬT, và nói đúng việc đang xảy ra: ca này CHƯA được thử qua
+           * Ext (vì ngân sách đang đóng), nên nó vẫn có thể gửi được nếu bạn gửi tay. */
           return {
             ok: false, sent: false, uncertain: true, tried: triedCh.slice(),
-            error: 'FB báo "người này hiện không có mặt" · đã đo 200 ca thì Extension cũng bị chặn'
-              + ' — GIỮ ⚠ (chưa gửi), vào danh sách gửi tay',
+            error: 'FB báo "người này hiện không có mặt" · ngân sách dò Ext đang ĐÓNG (đã định bắn '
+              + extTry1545.tried + ' ca, cứu ' + extTry1545.saved + ' ⇒ Ext coi như cũng bị chặn)'
+              + ' — ca này CHƯA thử qua Ext · GIỮ ⚠ (chưa gửi), vào danh sách gửi tay',
           };
         }
         // [v1.92.34] Chốt ❌ NGAY (không bù, không kiểm chứng trong lượt — chống gửi lặp),
@@ -7865,6 +8090,42 @@
     gidFlushIdleHandle = null;
     try { localStorage.setItem(GID_LS_KEY, JSON.stringify(persistentGidMap)); } catch (e) { /* ignore */ }
   }
+  /* ═══ [v1.92.66] CHIA SẺ CACHE global_id GIỮA CÁC TAB — TRƯỚC ĐÂY MỖI TAB TỰ DÒ LẠI ═══
+   * Người dùng chạy 2–3 page trên 2–3 tab cùng lúc. `ssb_global_id_cache_v1` là
+   * localStorage (DÙNG CHUNG giữa các tab cùng origin), nhưng code chỉ ĐỌC nó MỘT LẦN lúc
+   * nạp trang (`JSON.parse(localStorage.getItem(GID_LS_KEY))` ở đầu file) và KHÔNG hề nghe
+   * sự kiện `storage`. Grep cả file: `addEventListener('storage'` = **0**.
+   * Hệ quả: tab B mở sau tab A vẫn phải dò lại từ đầu những gid mà tab A đã dò xong — đo được
+   * ở lô 19:48: `dò gid 230 ca · TB 9 894 ms` (lượt 1: 154 ca/TB 11 646 ms). Đó là 230 slot-giây
+   * nằm TRONG thời gian giữ slot, tức chặn trực tiếp đường gửi.
+   * Nay: nghe `storage` ⇒ nạp phần gid tab khác vừa thêm vào RAM của tab này (chỉ ĐỌC, không
+   * ghi ngược ⇒ hai tab không đè nhau), rồi `softNotify('gid')` để mọi chỗ đang chờ gid thức
+   * ngay thay vì chờ hết hạn dò. Không thêm lệnh gửi nào; gid vẫn là dữ liệu chỉ đọc.
+   * CHỐNG HỒI QUY: nếu sự kiện này bắn dồn (nhiều tab cùng ghi) thì vẫn rẻ — mỗi lần chỉ so
+   * số khoá, và `applyPeerGidPayload` bỏ qua khoá đã có cùng giá trị. */
+  function applyPeerGidPayload(rawObj) {
+    if (!rawObj || typeof rawObj !== 'object') return 0;
+    let applied = 0;
+    Object.keys(rawObj).forEach((k) => {
+      const v = rawObj[k];
+      if (!v || /^\[object /.test(String(v))) return;
+      const s = String(v);
+      if (persistentGidMap[k] === s) return;
+      persistentGidMap[k] = s;
+      putGidToMemCaches(k, s);
+      applied++;
+    });
+    if (applied) { try { softNotify('gid'); } catch (eN) { /* ignore */ } }
+    return applied;
+  }
+  try {
+    window.addEventListener('storage', (ev) => {
+      try {
+        if (!ev || ev.key !== GID_LS_KEY || !ev.newValue) return;
+        applyPeerGidPayload(JSON.parse(ev.newValue));
+      } catch (eSt) { /* ignore */ }
+    }, false);
+  } catch (eStAdd) { /* ignore */ }
   /* [v1.92.57] LỊCH GHI: TỐI THIỂU 1 500 ms GIỮA HAI LẦN, và ghi lúc máy RẢNH.
    * Bản nháp đầu của tôi chỉ đẩy sang `requestIdleCallback` mà KHÔNG giữ khoảng cách:
    * rIC bắn rất sớm khi trang rảnh ⇒ hoá ra ghi DÀY HƠN cả bản cũ 400 ms. Đo A/B trên
@@ -8640,7 +8901,8 @@
    * `saved = 0`. Bất kỳ ca cứu được nào (saved++) là reset chuỗi — nếu Ext thật sự gửi được
    * thì ngân sách mở lại ngay, không bao giờ đóng oan.
    * Vẫn giữ nguyên hệ quả: ca bị đóng ⇒ ⚠ "chưa gửi" + danh sách gửi tay, KHÔNG chốt ❌ oan. */
-  const extTry1545 = { tried: 0, saved: 0, closed: false, PROBE: 200, streak: 0, STREAK_MAX: 30, unknown: 0 };
+  const extTry1545 = { tried: 0, saved: 0, closed: false, PROBE: 200, streak: 0, STREAK_MAX: 30,
+    unknown: 0, sinceProbe: 0, PROBE_REOPEN_EVERY: 200, closedWhy: '' };
   /* [v1.92.47] CẦU DAO ĐƯỜNG DÒ GLOBAL ID QUA EXTENSION — cùng loại ngân sách với `extTry1545`,
    * nhưng dành cho khâu DÒ chứ không phải khâu GỬI.
    * Bằng chứng ĐO ĐƯỢC:
@@ -8691,21 +8953,84 @@
     if (kind === 'blocked') noteExt1545Fail();          // 1545041 / không gửi được: bằng chứng
     else extTry1545.unknown = (extTry1545.unknown || 0) + 1; // quá hạn / không rõ
   }
-  function extFallback1545Allowed() { return !extTry1545.closed; }
+  /* ═══ [v1.92.66] CẦU DAO EXT: `closed` PHẢI TỰ ĐÓNG ĐƯỢC TRONG CÙNG LƯỢT, VÀ PHẢI CÓ LOG ═══
+   *
+   * BỆNH (đo trên lô 19:48:22, 15 336 chat, page 881264518397934):
+   *   3 600 ca ⚠ in câu "đã đo 200 ca thì Extension cũng bị chặn" (grep = 3 611 lần), nhưng:
+   *     • `🔒 Đóng ngân sách` — **0 dòng** trong cả file log;
+   *     • `🛟 Dò Ext cho ca FB từ chối: thử …` — **0 dòng**, tức `extTry1545.tried` = 0;
+   *     • `noteExt1545Fail()` chỉ chạy khi `kind === 'blocked'` mà hàm đó CHỈ được gọi từ
+   *       `.then` của chuỗi bù Ext ⇒ nếu chuỗi đó không chạy (bị `sockFiredPending`/
+   *       `outboundLock` chặn) thì `saved` và `streak` đứng nguyên 0.
+   *   ⇒ Cả hai đường đóng (`byStreak` và `byProbe`) đều KHÔNG THỂ chạm. `closed` = false.
+   *   ⇒ Vậy 3 600 ca đó KHÔNG đi vào nhánh 5373. Chúng đi qua chính `extFallback1545Allowed()`
+   *      trả **true** ở nhánh 7830 — nghĩa là script ĐÃ ĐỊNH bắn bù qua Ext, đánh ⚠, và câu
+   *      "đã đo 200 ca thì Extension cũng bị chặn" chỉ là **CHUỖI CỐ ĐỊNH VIẾT SẴN**, không
+   *      phải sự thật. Đó là lý do con số "200" trong 3 611 dòng luôn là 200, không bao giờ tăng.
+   *
+   * SỬA (3 việc, không thêm lệnh gửi nào):
+   *   1) Câu log KHÔNG ĐƯỢC NÓI ĐIỀU CHƯA ĐO. Nay in số thật + nhánh rõ ràng (xem 7830).
+   *   2) Thêm PHANH CỨNG theo chính lô: `tried` tăng ở MỌI chỗ định bắn Ext (cả 5353 và 7817),
+   *      nên đếm `tried` là thứ luôn nhìn thấy được. Đủ `PROBE` ca đã định-bắn mà cứu 0 ⇒ đóng,
+   *      và IN RA LÝ DO + số thật. Không phụ thuộc `.then` nào cả.
+   *   3) Đóng thì có ĐƯỜNG MỞ: đã đóng vẫn dò lại 1 ca mỗi `PROBE_REOPEN_EVERY` ca bị bỏ
+   *      (giống `sockRetryBudgetState` đã làm). Lô này bỏ 3 600 ca ⇒ sẽ có ~18 ca được dò lại;
+   *      cứu được 1 ca là mở ngay. Trước đây `closed` là VĨNH VIỄN tới hết lượt.
+   *
+   * Vì sao "đo rồi đóng" là đúng ở đây: `PROBE` = 200 ca là mẫu rất lớn. Nếu 200 ca liên tiếp
+   * định bắn Ext mà cứu được 0, thì Ext đang bị FB chặn thật (đúng như chú thích 1.92.41), và
+   * 3 600 ca còn lại mà cứ bắn Ext là 3 600 lệnh vô ích giữ lane. Nhưng phải ĐO ĐƯỢC VIỆC ĐÓ —
+   * chính là thứ bản 1.92.65 không làm được. */
+  function extFallback1545Allowed() {
+    if (!extTry1545.closed) return true;
+    /* Đã đóng: chỉ cho phép 1 ca DÒ LẠI mỗi PROBE_REOPEN_EVERY ca bị bỏ.
+     * [v1.92.66] KHÔNG reset `sinceProbe` ở đây — việc reset chuyển sang `noteExt1545Attempt()`.
+     * Lý do: hàm này là câu hỏi "có được thử không?", nó được gọi ở MỌI ca và có thể bị gọi
+     * nhiều lần cho một ca (kiểm tra rồi mới bắn). Nếu reset ngay trong câu hỏi thì chỉ cần hỏi
+     * 200 lần là cầu dao tự mở, kể cả khi không ca nào thật sự được bắn. Reset phải gắn với
+     * HÀNH ĐỘNG đã thực sự thử. */
+    return extTry1545.sinceProbe >= extTry1545.PROBE_REOPEN_EVERY;
+  }
+  /** Ghi nhận MỘT CA ĐÃ ĐỊNH BẮN QUA EXT (không cần biết kết quả). Đây là bộ đếm mà bản cũ
+   *  thiếu: `tried` cũ chỉ tăng ở 2 nhánh, và không nhánh nào tự kiểm tra ngưỡng. */
+  function noteExt1545Attempt() {
+    /* PHANH CỨNG — đây chính là chỗ 1.92.65 thiếu. `tried` là bộ đếm DUY NHẤT mà cả hai nhánh
+     * định-bắn Ext đều đi qua, nên nó luôn nhìn thấy sự thật dù `.then` của chuỗi bù có chạy hay
+     * không. Đủ PROBE ca đã định bắn mà cứu được 0 ⇒ đóng, kèm lý do in ra được.
+     * KHÔNG đóng khi đã có `saved > 0` (Ext vẫn sống thì đừng tắt). */
+    if (!extTry1545.closed) {
+      extTry1545.tried++;
+      if (extTry1545.tried >= extTry1545.PROBE && extTry1545.saved === 0) closeExt1545('probe');
+      return;
+    }
+    /* Đã đóng ⇒ lần gọi này CHỈ xảy ra khi `extFallback1545Allowed()` vừa cho qua (ca dò lại).
+     * Tăng `tried` để con số trong TỔNG HỢP phản ánh cả các ca dò lại, và reset `sinceProbe`
+     * để đếm 200 ca bị bỏ TIẾP THEO. */
+    extTry1545.tried++;
+    extTry1545.probes = (extTry1545.probes || 0) + 1;
+    extTry1545.sinceProbe = 0;
+  }
   function noteExt1545Fail() {
     if (extTry1545.closed) return;
     extTry1545.streak = (extTry1545.streak || 0) + 1;
     const byStreak = extTry1545.streak >= extTry1545.STREAK_MAX && extTry1545.saved === 0;
     const byProbe = extTry1545.tried >= extTry1545.PROBE && extTry1545.saved === 0;
     if (!byStreak && !byProbe) return;
+    closeExt1545(byStreak ? 'streak' : 'probe');
+  }
+  function closeExt1545(why) {
+    if (extTry1545.closed) return;
     extTry1545.closed = true;
+    extTry1545.closedWhy = why;
+    extTry1545.sinceProbe = 0;
     try {
       logLine('🔒 Đóng ngân sách dò Extension cho ca "người này hiện không có mặt": '
-        + (byStreak
+        + (why === 'streak'
           ? extTry1545.streak + ' ca LIÊN TIẾP toàn bị FB từ chối'
-          : 'đã thử ' + extTry1545.tried + ' ca')
-        + ', cứu được 0 ⇒ Extension cũng bị FB chặn. Phần còn lại vào danh sách gửi tay '
-        + '(⚠ chưa gửi), không chốt ❌ oan.');
+          : 'đã ĐỊNH bắn ' + extTry1545.tried + ' ca')
+        + ' · cứu được ' + extTry1545.saved + ' ⇒ Extension cũng bị FB chặn. Phần còn lại vào '
+        + 'danh sách gửi tay (⚠ chưa gửi), không chốt ❌ oan. Vẫn dò lại 1 ca mỗi '
+        + extTry1545.PROBE_REOPEN_EVERY + ' ca để mở lại nếu Ext sống lại.');
     } catch (e0) { /* ignore */ }
   }
   const finalFailedIds = {}; // convId → đã thất bại hẳn (hết kênh hoặc khách khóa nick)
@@ -8762,16 +9087,45 @@
    * Trước đây những ca này chỉ nằm im trong sổ ⚠, người dùng không biết chat nào cần bấm tay.
    * Nay gom lại, in ở 💾 .txt và đếm ở dòng TỔNG HỢP. Không gửi gì thêm — chỉ để người đọc. */
   const manualResendList = [];
+  /* ═══ [v1.92.66] CHỐNG TRÙNG BẰNG Set, KHÔNG QUÉT TUYẾN TÍNH ═══
+   * Bản cũ `noteManualResend()` quét cả mảng (tới 5 000 phần tử) cho MỖI ca ⚠; `dropManualResend()`
+   * cũng quét ngược toàn mảng. Lô 19:48 có 3 600 ca ⚠ ⇒ ~3 600 × 1 800 so sánh ≈ 6,5 triệu phép
+   * so, chạy xen giữa 192 worker đang bận CPU. Nay:
+   *   • `manualResendIds` (Set) quyết định "đã có chưa" trong O(1);
+   *   • `manualResendById` (Map) cho `dropManualResend()` xoá thẳng trong O(1) khỏi mảng;
+   *   • mọi lối xoá đều đi qua `dropManualResend()` để hai cấu trúc không lệch nhau.
+   * `manualResendList` GIỮ NGUYÊN hình dạng + THỨ TỰ (mới nhất ở cuối) vì 💾 .txt và bảng
+   * TỔNG HỢP duyệt trực tiếp mảng này — chỉ cách TRA CỨU đổi, dữ liệu xuất ra không đổi. */
+  const manualResendIds = new Set();
+  const manualResendById = new Map();   // id → object trong manualResendList
   function noteManualResend(cid) {
     if (!cid) return;
-    for (let i = 0; i < manualResendList.length; i++) if (manualResendList[i].id === String(cid)) return;
-    manualResendList.push({ id: String(cid), name: nameById[cid] || '', t: Date.now(), reason: '' });
-    if (manualResendList.length > 5000) manualResendList.shift();
+    const k = String(cid);
+    if (manualResendIds.has(k)) return;
+    const rec = { id: k, name: nameById[cid] || '', t: Date.now(), reason: '' };
+    manualResendList.push(rec);
+    manualResendIds.add(k);
+    manualResendById.set(k, rec);
+    if (manualResendList.length > 5000) {
+      const old = manualResendList.shift();
+      if (old && old.id) {
+        // Chỉ xoá chỉ mục nếu bản ghi trong Map đúng là bản ghi vừa rời mảng (có thể đã bị
+        // ghi đè bởi lần note lại cùng id sau khi nó rời đi — khi đó Map đang giữ bản mới).
+        if (manualResendById.get(old.id) === old) manualResendById.delete(old.id);
+        manualResendIds.delete(old.id);
+      }
+    }
   }
   function dropManualResend(cid) {
     if (!cid) return;
     const k = String(cid);
-    for (let i = manualResendList.length - 1; i >= 0; i--) if (manualResendList[i].id === k) manualResendList.splice(i, 1);
+    const rec = manualResendById.get(k);
+    if (rec) {
+      const i = manualResendList.indexOf(rec);
+      if (i >= 0) manualResendList.splice(i, 1);
+      manualResendById.delete(k);
+    }
+    manualResendIds.delete(k);
   }
   /* [v1.92.38] "ĐANG CỨU" ≠ "CẦN GỬI TAY".
    * Ca ⚠ vào danh sách gửi tay NGAY lúc hết hạn ACK (~5 s), nhưng cổng chứng minh vắng mặt phải
@@ -9035,7 +9389,11 @@
       // [v1.92.26] Mục tiêu khả thi = tổng - (khách FB xác nhận không nhận được) - (ca bị từ
       // chối lần 1 mà ngân sách đã đóng, tức nhóm đã đo được 0/N cứu lại). Nhờ vậy con số
       // "thành công/…" phản ánh việc script làm được, không bị 860 khách chết của FB kéo xuống.
-      const eligibleAfterUnavailable = Math.max(0, c.total - sendDiag.recipientUnavailable - sendDiag.sockRetryBudgetSkipped);
+      /* [v1.92.66] KHÔNG trừ nhóm "ngân sách đã đóng" khỏi mẫu số nữa — xem khối chú thích ở
+       * dòng in TỐC ĐỘ. Nhóm đó CHƯA được đo trong chính lô này (bản 1.92.65 "đóng ngân sách"
+       * bằng một nhánh không thể chạm tới), nên đem nó ra khỏi mẫu số là bóp mẫu số bằng giả
+       * định chứ không bằng số đo. Giữ lại biến để các chỗ khác dùng, chỉ đổi công thức. */
+      const eligibleAfterUnavailable = Math.max(0, c.total - sendDiag.recipientUnavailable);
       const eligibleSuccessPct = eligibleAfterUnavailable ? (c.okTotal / eligibleAfterUnavailable) * 100 : 0;
       const socketAckCount = sendDiag.socketAckOk + sendDiag.socketAckRejected + sendDiag.socketNoAck;
       const socketAckAvgMs = socketAckCount ? Math.round(sendDiag.socketAckMsTotal / socketAckCount) : 0;
@@ -9122,10 +9480,16 @@
           + ' | ❌ Lỗi: ' + c.failTotal
           + (c.unsureTotal ? ' | ⚠ Không rõ: ' + c.unsureTotal : '')
           + (extTry1545.tried
-            ? ' | 🛟 Dò Ext cho ca FB từ chối: thử ' + extTry1545.tried + ' · cứu ' + extTry1545.saved
+            ? ' | 🛟 Dò Ext cho ca FB từ chối: ĐÃ ĐỊNH bắn ' + extTry1545.tried + ' · cứu ' + extTry1545.saved
               + (extTry1545.unknown ? ' · chưa có kết quả ' + extTry1545.unknown : '')
-              + (extTry1545.closed ? ' · ĐÓNG (Ext cũng bị chặn ⇒ phần còn lại vào danh sách gửi tay)' : '')
-            : '')
+              /* [v1.92.66] Nói rõ ĐÓNG VÌ LÝ DO GÌ (streak hay đủ mẫu) — bản cũ chỉ in "ĐÓNG"
+               * nên không phân biệt được "đã đo 200 ca" với "30 ca liên tiếp bị từ chối". */
+              + (extTry1545.closed
+                ? ' · ĐÓNG (' + (extTry1545.closedWhy === 'streak'
+                    ? extTry1545.streak + ' ca liên tiếp bị từ chối'
+                    : 'đủ ' + extTry1545.PROBE + ' ca đã định bắn') + ', cứu 0 ⇒ phần còn lại vào danh sách gửi tay)'
+                : '')
+            : ' | 🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca nào (không có lỗi 1545041)')
           /* [v1.92.45] ĐO TRẦN THẬT CỦA LÀN EXT — để lần sau không tối ưu sai chỗ.
            * HAR làn Ext (90 lệnh / 6,74 s) cho thấy trần ~13,4 lệnh/s và đỉnh in-flight chỉ 42
            * trong khi làn đặt 48–96 ⇒ nâng sàn/trần làn KHÔNG làm lô nhanh hơn. In số đo thật
@@ -9200,11 +9564,27 @@
           : '')
           + 'đã chốt ' + c.settled + '/' + c.total + ' (' + settledPerSec.toFixed(2) + '/giây; '
           + (settledPerSec * 60).toFixed(0) + '/phút) · thành công ' + c.okTotal + ' (' + successPerSec.toFixed(2)
-          + '/giây; ' + (successPerSec * 60).toFixed(0) + '/phút) · loại chat FB từ chối nhận (unavailable '
-          + sendDiag.recipientUnavailable + (sendDiag.sockRetryBudgetSkipped
-            ? ' + bỏ thử lần 2 ' + sendDiag.sockRetryBudgetSkipped + ' (cùng nhóm, đã đo 0 cứu được)' : '')
-          + ') → mục tiêu còn ' + eligibleAfterUnavailable + ', thành công '
-          + c.okTotal + '/' + eligibleAfterUnavailable + ' (' + eligibleSuccessPct.toFixed(1) + '%) · đang chờ ' + c.pendingSend
+          + '/giây; ' + (successPerSec * 60).toFixed(0) + '/phút)'
+          /* ═══ [v1.92.66] MẪU SỐ CỦA "% THÀNH CÔNG" TỪNG BỊ BÓP SAI ═══
+           * Lô 19:48 in: "(unavailable 87 + bỏ thử lần 2 3600 …) → mục tiêu còn 11 649,
+           * thành công 11 648/11 649 (100.0%)". Kiểm số: 15 336 − 87 − 3 600 = 11 649 ✔ khớp,
+           * NHƯNG 3 600 ca đó KHÔNG phải "khách không nhận": chúng là ca Socket bị từ chối
+           * lần 1, Extension CHƯA hề được thử (ngân sách đóng), và ngân sách đóng đó lại đóng
+           * vì lý do KHÔNG ĐO ĐƯỢC (xem `extFallback1545Allowed`). Đem chúng trừ khỏi mẫu số
+           * rồi in 100.0% là tự khen mình bằng một giả định chưa được kiểm chứng.
+           * Nay TÁCH LÀM HAI CON SỐ, không trộn nhóm đã-đo với nhóm-chưa-thử:
+           *   ① trên TOÀN BỘ lô            — c.okTotal / c.total
+           *   ② trên nhóm ĐÃ ĐO là không nhận — chỉ trừ `recipientUnavailable` (FB trả lời dứt
+           *      khoát, có bằng chứng từ chính FB), KHÔNG trừ nhóm ngân sách.
+           * Nhóm "bỏ thử lần 2" vẫn được IN RA nhưng ghi rõ là CHƯA THỬ. */
+          + ' · FB báo không nhận được (đã đo): ' + sendDiag.recipientUnavailable
+          + (sendDiag.sockRetryBudgetSkipped
+            ? ' · bỏ thử lại Socket, CHƯA thử Extension: ' + sendDiag.sockRetryBudgetSkipped : '')
+          + ' → trên nhóm ĐÃ ĐO là không nhận: ' + c.okTotal + '/'
+          + Math.max(0, c.total - sendDiag.recipientUnavailable) + ' ('
+          + (Math.max(0, c.total - sendDiag.recipientUnavailable)
+            ? ((c.okTotal / Math.max(1, c.total - sendDiag.recipientUnavailable)) * 100).toFixed(1) : '0.0')
+          + '%) · trên TOÀN BỘ: ' + c.okTotal + '/' + c.total + ' (' + pct + '%) · đang chờ ' + c.pendingSend
           + (c.pending > c.pendingSend ? ' · kiểm chứng nền ' + (c.pending - c.pendingSend) : '')
           + ' · lỗi ' + c.failTotal + ' · không rõ ' + c.unsureTotal + ' · bỏ qua ' + c.skipTotal
           + (sendDiag.extOverloadSkips
@@ -11004,6 +11384,10 @@
     verifyStats.found = 0; verifyStats.held = 0; verifyStats.unknown = 0;
     try {
       manualResendList.length = 0; sockRescueStats.tried = 0;
+      /* [v1.92.66] PHẢI xoá cả hai chỉ mục — nếu không, lần note lại CÙNG chat ở lượt sau sẽ bị
+       * `manualResendIds.has()` chặn (bỏ sót chat cần gửi tay) hoặc `dropManualResend()` xoá
+       * nhầm vị trí. Đây là bẫy im lặng: chỉ lộ ra khi chạy 2 lượt liên tiếp trên cùng máy. */
+      try { manualResendIds.clear(); manualResendById.clear(); } catch (eMrIdx) { /* ignore */ }
       Object.keys(rescueInFlight).forEach((k) => delete rescueInFlight[k]);
     } catch (eMr) { /* ignore */ }
     /* [v1.92.49] NGÂN SÁCH DÒ EXT PHẢI RESET MỖI LƯỢT.
@@ -11011,7 +11395,11 @@
      * chối: thử 2 768 · cứu 0" của lô 6 920 chat trước ⇒ con số trên bảng TỔNG HỢP đang là
      * số TÍCH LUỸ, đọc lên hiểu sai hoàn toàn là "lô này vừa dò 2 768 ca". Nay reset như mọi
      * bộ đếm khác; giữ `closed` của lượt trước (nếu Ext đã bị chặn thì không phải dò lại). */
+    /* [v1.92.66] Reset `sinceProbe` cùng `tried`: nếu để lại, lượt sau `extFallback1545Allowed()`
+     * có thể mở cửa dò lại NGAY ở ca đầu (vì sinceProbe còn ≥ 200 từ lượt trước) — tức cầu dao
+     * mất tác dụng đúng lúc cần nhất. `closed`/`closedWhy` GIỮ NGUYÊN (như chú thích 1.92.49). */
     extTry1545.tried = 0; extTry1545.saved = 0; extTry1545.streak = 0; extTry1545.unknown = 0;
+    extTry1545.sinceProbe = 0;
     /* [v1.92.50] `photoUpStats` LÀ SỐ TÍCH LUỸ GIỮA CÁC LƯỢT — ĐÃ KIỂM CHỨNG, ĐO RA SAI.
      * Lô 2 413 chat (11:30) in "📷 12 362 ca · TB 1 312 ms · max 9 480 ms · lỗi 0";
      * lô 9 242 chat (11:34) in ĐÚNG Y NGUYÊN 12 362 / 1 312 / 9 480 / 0. Hai lô khác số chat,
@@ -11790,9 +12178,24 @@
         if (WAVE_GAP <= 0) return 0;
         const retryLoad = socketRetryQueue.length + activeSocketRetryWorkers + pendingSocketCoolCount;
         const extLoad = extBacklogQueue.length + activeExtWorkers;
-        // 🔥 [FIX-TỐC-ĐỘ] Chỉ chờ khi có tải thật sự: lane bù API/Ext/Socket đều nhẹ → gap 0.
-        if (inFlightMainCount <= mainCap * 0.6 && retryLoad <= 60 && extLoad <= 100) return 0;
-        if (inFlightMainCount <= mainCap * 0.8 && retryLoad <= 100) return Math.min(WAVE_GAP, 30);
+        /* ═══ [v1.92.66] GAP PHẢI ĐO ĐÚNG THỨ ĐANG CHẶN, KHÔNG PHẢI "SLOT CÓ RẢNH KHÔNG" ═══
+         * Bản cũ: `if (inFlightMainCount <= mainCap * 0.6 …) return 0;` — tức chỉ về 0 khi số slot
+         * đang bay ≤ 60 % cap. Nhưng CỔNG WAVE chặn ở 92 % cap (gateActiveLimit) và worker nhận
+         * lại slot TỨC THÌ khi một slot vừa nhả (releaseMainSlot chuyền trực tiếp cho người chờ).
+         * Kết quả đo trên lô 19:48:22: `main đang bay` đứng ở **163** suốt 16/16 wave, tức
+         * 163 > 0,6 × 192 = 115 ⇒ NHÁNH `return 0` CHƯA BAO GIỜ CHẠY. Mọi wave đều in
+         * "gap kế tiếp 120ms" ⇒ 15 × 120 = 1,8 s bị chờ mù, và thông điệp "chỉ chờ khi có tải"
+         * trong chú thích là SAI so với hành vi thật.
+         *
+         * Đo lại: điều kiện đúng để bỏ gap KHÔNG phải "slot rảnh" mà là "KHÔNG có hàng đợi nào
+         * đang dồn" — vì gap sinh ra để các làn bù (retry/Ext/API) có nhịp thở. Số slot đang bay
+         * không nói gì về việc đó: 163 slot đang bay với 0 hàng đợi là trạng thái KHOẺ NHẤT
+         * (mọi worker đều đang bận gửi, không ai phải xếp hàng).
+         * Nay: gap 0 khi cả 3 làn bù đều dưới ngưỡng thật; chỉ chờ khi có hàng đợi dồn.
+         * GIỮ NGUYÊN `WAVE_GAP` của người dùng như một TRẦN, không phải giá trị mặc định. */
+        const queuePressure = retryLoad > 60 || extLoad > 100 || apiSendLane.waitingCount() > 40;
+        if (!queuePressure) return 0;
+        if (retryLoad <= 100 && extLoad <= 150) return Math.min(WAVE_GAP, 30);
         return Math.min(Math.max(WAVE_GAP, 60), 120);
       };
       const totalWaves = Math.max(1, Math.ceil(fullList.length / WAVE_SIZE));

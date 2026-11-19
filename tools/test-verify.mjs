@@ -731,14 +731,21 @@ check('đóng ngân sách ghi lại % để in vào log',
 /* (1) NGÂN SÁCH DÒ EXT PHẢI ĐÓNG SAU 200 CA THỬ MÀ CỨU 0.
  * Sổ 11:05 (6 920 chat) in "thử 2 768 · cứu 0" mà KHÔNG có chữ "ĐÓNG" ⇒ cầu dao 200 chưa
  * từng đóng. Test dựng lại đúng bộ ba nhánh ghi nhận và xác nhận nó đóng ở ca thứ 200. */
-const extBudgetConsts = "const extTry1545 = { tried: 0, saved: 0, closed: false, PROBE: 200, streak: 0, STREAK_MAX: 30, unknown: 0 };";
+/* [v1.92.66] HẰNG SỐ LẤY TỪ NGUỒN THẬT, không chép tay.
+ * Bản cũ chép lại chuỗi `const extTry1545 = {...}` vào test ⇒ khi 1.92.66 thêm `sinceProbe`,
+ * `PROBE_REOPEN_EVERY`, `closedWhy`, chính chỗ chép tay đó làm test ĐỎ (ReferenceError) chứ
+ * không phải code sai. Nay trích nguyên dòng khai báo từ userscript: test luôn chạy trên đúng
+ * cấu hình mà bản build dùng. */
 /* Mỗi khối dùng MỘT bản sao sạch (sổ là state thật, không được dùng chung giữa các ca). */
 const newExtBudget = () => new Function([
-  extBudgetConsts,
+  `const extTry1545 = ${extractConst('extTry1545')};`,
   "const logLine = () => {};",
   extractFn('noteExt1545Fail'),
   extractFn('noteExt1545Outcome'),
-  'return { extTry1545, noteExt1545Fail, noteExt1545Outcome };',
+  extractFn('noteExt1545Attempt'),
+  extractFn('closeExt1545'),
+  extractFn('extFallback1545Allowed'),
+  'return { extTry1545, noteExt1545Fail, noteExt1545Outcome, noteExt1545Attempt, closeExt1545, extFallback1545Allowed };',
 ].join('\n\n'))();
 {
   // Ngưỡng thật là STREAK_MAX = 30 ca LIÊN TIẾP, nên phải đóng từ rất lâu trước 200.
@@ -800,6 +807,55 @@ check('có bộ đo riêng cho khâu upload/bind ảnh',
 check('số đo bind ảnh được in trong dòng ⏱ GIỮ SLOT',
   /📷 bind fbId: ' \+ photoUpStats\.n/.test(SRC), true);
 
+/* ═══ [v1.92.66] CẦU DAO EXT: PHANH CỨNG + ĐƯỜNG MỞ LẠI ═══
+ * Lô 19:48:22 (15 336 chat) là bằng chứng: câu "đã đo 200 ca thì Extension cũng bị chặn" in ra
+ * 3 611 lần, `extTry1545.tried` = 0 (không có dòng "🛟 Dò Ext…"), và `🔒 Đóng ngân sách` = 0 dòng.
+ * Nghĩa là cầu dao CHƯA TỪNG đóng trong lô đó, còn câu kia chỉ là chuỗi viết sẵn. Hai lỗi phải
+ * cùng sửa: (a) bộ đếm phải tự đóng khi đủ mẫu — không phụ thuộc `.then` nào; (b) đóng phải có
+ * đường mở lại, vì bản cũ đóng là tắt vĩnh viễn cho tới hết lượt.
+ */
+{
+  // (a) PHANH CỨNG: 199 ca đã-định-bắn mà cứu 0 ⇒ vẫn mở; ca thứ 200 ⇒ đóng, KHÔNG cần .then.
+  const { extTry1545, noteExt1545Attempt, extFallback1545Allowed } = newExtBudget();
+  for (let i = 0; i < 199; i++) noteExt1545Attempt();
+  check('199 ca đã định bắn Ext mà chưa đủ 200 ⇒ cầu dao còn mở', extTry1545.closed, false);
+  noteExt1545Attempt();
+  /* Đóng theo `tried` chỉ xảy ra qua noteExt1545Fail (cần bằng chứng 'blocked'). Phanh CỨNG
+   * nằm trong noteExt1545Attempt: đủ PROBE ca định-bắn mà saved = 0 thì đóng luôn. */
+  check('đủ 200 ca đã định bắn Ext (cứu 0) ⇒ ĐÓNG ngay, không cần .then nào chạy',
+    extTry1545.closed, true);
+  check('đóng vì đủ mẫu ⇒ closedWhy = probe (in được lý do thật trong TỔNG HỢP)',
+    extTry1545.closedWhy, 'probe');
+  check('đóng rồi ⇒ đường dò Ext bị chặn', extFallback1545Allowed(), false);
+}
+{
+  // (b) ĐƯỜNG MỞ LẠI: đóng vẫn phải dò lại 1 ca mỗi PROBE_REOPEN_EVERY ca bị bỏ.
+  const { extTry1545, noteExt1545Attempt, extFallback1545Allowed } = newExtBudget();
+  for (let i = 0; i < 200; i++) noteExt1545Attempt();
+  check('sau khi đóng, ca NGAY SAU đó vẫn bị chặn', extFallback1545Allowed(), false);
+  // Mô phỏng vòng bỏ ca: mỗi ca bị bỏ làm sinceProbe++ (qua chính hàm cho phép).
+  let reopend = 0;
+  for (let i = 0; i < 1000; i++) {
+    if (extFallback1545Allowed()) { reopend++; noteExt1545Attempt(); }
+    else extTry1545.sinceProbe++;
+  }
+  check('1000 ca bị bỏ sau khi đóng ⇒ có dò lại đúng ~5 ca (1 mỗi 200)', reopend >= 4 && reopend <= 6, true);
+  check('dò lại KHÔNG được mở toang cầu dao', reopend < 10, true);
+}
+{
+  // (c) Cứu được 1 ca ⇒ streak về 0 (không đóng oan) — giữ hành vi 1.92.49.
+  const { extTry1545, noteExt1545Outcome } = newExtBudget();
+  for (let i = 0; i < 29; i++) noteExt1545Outcome('blocked');
+  noteExt1545Outcome('saved');
+  for (let i = 0; i < 29; i++) noteExt1545Outcome('blocked');
+  check('Ext cứu 1 ca giữa chuỗi ⇒ KHÔNG đóng dù tổng blocked > 30', extTry1545.closed, false);
+}
+/* Chống hồi quy ở mức NGUỒN: câu log KHÔNG được nói điều chưa đo. */
+check('câu "đã đo 200 ca thì Extension cũng bị chặn" đã bị xoá khỏi mọi nhánh log',
+  stripComments(SRC).includes('đã đo 200 ca thì Extension cũng bị chặn'), false);
+check('nhánh ngân sách đóng phải in SỐ THẬT của lô (tried/saved), không in hằng số',
+  /ngân sách dò Ext ĐANG ĐÓNG \(đã định bắn '/.test(stripComments(SRC)), true);
+
 /* ------------- [v1.92.50] BỐN CHỖ ĐO SAI ĐÃ SẬP Ở LÔ 9 242 CHAT -------------
  * Tất cả đều lộ ra bằng SỐ trong sổ 11:34, không phải bằng suy luận.
  */
@@ -813,8 +869,11 @@ check('số đo bind ảnh được in trong dòng ⏱ GIỮ SLOT',
                         SRC.indexOf('if (hasExt1545 && !extFallback1545Allowed()) {'));
   check('nhánh 5284 có set cờ __extFallback1545 (thiếu cờ ⇒ cầu dao Ext không bao giờ đóng)',
     /conv\.__extFallback1545 = true;/.test(seg), true);
-  check('nhánh 5284 vẫn tăng extTry1545.tried như cũ',
-    /extTry1545\.tried\+\+;/.test(seg), true);
+  /* [v1.92.66] Đổi từ `extTry1545.tried++` sang `noteExt1545Attempt()`: bản cũ CHỈ tăng bộ đếm
+   * mà không kiểm ngưỡng, nên `tried` lên 3 600 vẫn không đóng được cầu dao nếu `.then` của
+   * chuỗi bù không chạy. Hàm mới vừa đếm vừa đóng (phanh cứng). */
+  check('nhánh 5284 đếm qua noteExt1545Attempt() (đếm + tự đóng phanh cứng)',
+    /noteExt1545Attempt\(\);/.test(seg), true);
 }
 /* Test hành vi: set cờ RỒI ghi nhận ⇒ sổ phải đóng sau 30 ca. */
 {
@@ -1623,6 +1682,134 @@ check('[v1.92.55] nhãn mới có cả "mất tin" và "ACK chết"',
 
 /* ------------------------------- kết quả ------------------------------- */
 
+/* ═══════ [v1.92.66] HIỆU NĂNG + ĐƯỜNG GỬI — KHOÁ LẠI BẰNG SỐ ĐO CỦA LÔ 19:48 ═══════ */
+
+/* (A) PHÂN VỊ ACK PHẢI ĐỌC O(1) VÀ KHỚP TUYỆT ĐỐI BẢN SORT.
+ * Lô 19:48: `latencyPct()` cũ sắp xếp lại 1 000 mẫu ở MỖI tin gửi (gọi từ
+ * `ackHoldMsFor(sockAckP90())` trong socketPublishSend) — đo 2 537 ms CPU cho 15 336 ca.
+ * Test này chạy CHÍNH code trong userscript và so với bản sort tham chiếu. */
+{
+  const ackPctCode = new Function([
+    'const ACK_LAT_RING_N = ' + extractConst('ACK_LAT_RING_N') + ';',
+    'const ackLatRing = [];',
+    'const ackLatSorted = [];',
+    'let ackLatPctCache = null;',
+    extractFn('ackLatSortedInsert'),
+    extractFn('ackLatSortedRemove'),
+    extractFn('noteAckLatency'),
+    extractFn('latencyPctFromSorted'),
+    extractFn('ackPctCached'),
+    extractFn('sockAckP90'),
+    extractFn('sockAckP95'),
+    extractFn('sockAckP50'),
+    'return { ackLatRing, ackLatSorted, noteAckLatency, ackPctCached, sockAckP90, sockAckP50, sockAckP95, ACK_LAT_RING_N };',
+  ].join('\n'))();
+  const refPct = (arr, p) => { const a = arr.slice().sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.max(0, Math.floor(a.length * p)))]; };
+
+  // phân phối giống log thật: 62 % rơi 2–5 s, 37 % 250–999 ms, 1 % ≥5 s
+  let seed = 12345;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  let mismatch = 0, checked = 0;
+  for (let i = 0; i < 4000; i++) {
+    const u = rnd();
+    const v = u < 0.62 ? Math.round(2001 + rnd() * 2999)
+      : (u < 0.99 ? Math.round(250 + rnd() * 749) : Math.round(5000 + rnd() * 1500));
+    ackPctCode.noteAckLatency(v);
+    if (ackPctCode.ackLatRing.length === ackPctCode.ACK_LAT_RING_N && i % 7 === 0) {
+      checked++;
+      const want90 = refPct(ackPctCode.ackLatRing, 0.9);
+      const want50 = refPct(ackPctCode.ackLatRing, 0.5);
+      if (ackPctCode.sockAckP90() !== want90) mismatch++;
+      if (ackPctCode.sockAckP50() !== want50) mismatch++;
+    }
+  }
+  check('cửa sổ phân vị ACK đầy đúng 1 000 mẫu', ackPctCode.ackLatRing.length, ackPctCode.ACK_LAT_RING_N);
+  check('mảng đã sắp xếp cùng cỡ với ring (không rò rỉ phần tử)', ackPctCode.ackLatSorted.length, ackPctCode.ACK_LAT_RING_N);
+  check('p50/p90 mới KHỚP TUYỆT ĐỐI bản sort tham chiếu (' + checked + ' lần so)', mismatch, 0);
+  /* Bẫy đã sập ở bản nháp đầu: dùng `sorted.shift()` (bỏ phần tử NHỎ NHẤT) thay vì xoá đúng
+   * giá trị cũ nhất ⇒ p90 lệch 3 003 → 5 378 ms ⇒ hạn chờ giữ slot bị đẩy lên trần 6 000 sai. */
+  check('không dùng shift() trên mảng đã sắp xếp (bỏ nhầm phần tử nhỏ nhất)',
+    /ackLatSorted\.shift\(\)/.test(stripComments(SRC)), false);
+}
+
+/* (B) CẦU DAO EXT PHẢI ĐÓNG ĐƯỢC MÀ KHÔNG CẦN `.then` NÀO.
+ * Lô 19:48: 3 611 dòng "đã đo 200 ca" nhưng 0 dòng 🔒 và 0 dòng "Dò Ext… thử" ⇒ cầu dao
+ * chưa từng đóng. Test khoá đúng chỗ đó ở mức NGUỒN. */
+check('cầu dao Ext có phanh cứng trong noteExt1545Attempt (không phụ thuộc .then)',
+  /function noteExt1545Attempt\(\)[\s\S]{0,600}?closeExt1545\('probe'\)/.test(stripComments(SRC)), true);
+check('đóng cầu dao có in 🔒 kèm số thật (tried/saved)',
+  /🔒 Đóng ngân sách dò Extension[\s\S]{0,400}?extTry1545\.saved/.test(SRC), true);
+check('cầu dao đóng vẫn có ĐƯỜNG MỞ LẠI (dò 1 ca mỗi PROBE_REOPEN_EVERY)',
+  /sinceProbe >= extTry1545\.PROBE_REOPEN_EVERY/.test(stripComments(SRC)), true);
+/* Đoạn code mới (1.92.66) có nhắc `sinceProbe = 0` TRONG `noteExt1545Attempt` — đúng chỗ. Bài
+ * test phải khoanh đúng THÂN hàm `extFallback1545Allowed`, không được quét cả vùng lân cận. */
+{
+  const fnBody = stripComments(extractFn('extFallback1545Allowed'));
+  check('extFallback1545Allowed KHÔNG tự reset sinceProbe (hỏi nhiều lần không được mở cầu dao)',
+    /sinceProbe\s*=/.test(fnBody), false);
+  check('noteExt1545Attempt CÓ reset sinceProbe (mở lại gắn với HÀNH ĐỘNG đã thử, không với câu hỏi)',
+    /sinceProbe = 0/.test(stripComments(extractFn('noteExt1545Attempt'))), true);
+}
+
+/* (C) MẪU SỐ "% THÀNH CÔNG" KHÔNG ĐƯỢC TRỪ NHÓM CHƯA THỬ.
+ * Lô 19:48 in "11 648/11 649 (100.0%)" sau khi trừ 3 600 ca CHƯA thử Extension. Test khoá
+ * công thức để không ai trả lại kiểu tự khen đó. */
+check('mẫu số chỉ trừ nhóm FB đã xác nhận không nhận (KHÔNG trừ ngân sách)',
+  /const eligibleAfterUnavailable = Math\.max\(0, c\.total - sendDiag\.recipientUnavailable\);/.test(stripComments(SRC)), true);
+check('dòng TỐC ĐỘ in cả "% trên TOÀN BỘ" để không thể đọc thành 100 %',
+  /trên TOÀN BỘ: ' \+ c\.okTotal/.test(stripComments(SRC)), true);
+
+/* (D) NHÁNH BẮN LẠI SOCKET PHẢI BỊ BỎ (0/72 cứu được ở lô 19:48; 0/861 ở lô 10:04). */
+check('không còn nhánh bắn lại Socket trong đường bắn-nhả',
+  /deferredToSocketRetry[\s\S]{0,200}?socketWaveRetryLane\(/.test(stripComments(SRC)), false);
+check('ca bị từ chối mà FB nói khách không nhận ⇒ chốt lỗi, không chuyển Ext',
+  /FB từ chối và nói KHÔNG nhận được[\s\S]{0,300}?releaseOutbound/.test(stripComments(SRC)), true);
+
+/* (E) LÀN SOCKET PHẢI ĐƯỢC NHẢ SAU KHI PUBLISH, KHÔNG GIỮ TỚI KHI CÓ ACK.
+ * Lô 19:48: mỗi ca chiếm ghế làn 1 726 ms ⇒ sàn cứng 2,37 s/ca ⇒ trần ~108 tin/s (đo 102,2).
+ * 3 600 ca no-ACK giữ ghế 5 037 ms = 50 % dung lượng làn của cả lượt. */
+check('làn Socket dùng chế độ bắn-nhả (truyền firedCb, không truyền null)',
+  /socketPublishSend\(helper, pageId, gid, text, attFbIds,\s*SOCK_FIRED_RELEASE/.test(stripComments(SRC)), true);
+check('bắn-nhả KHÔNG xoá sockFiredPending trong .finally (sẽ cho bù chồng khi ACK còn bay)',
+  /\.finally\(\(\) => \{\s*if \(!SOCK_FIRED_RELEASE\) sockFiredPending\.delete/.test(stripComments(SRC)), true);
+check('kết quả "fired" không bị settle lần 2 (sẽ phân xử 2 lần một kết quả)',
+  /rawSync\.kind === 'fired'\) return;/.test(stripComments(SRC)), true);
+{
+  /* Nhánh ⚠ phải (1) KHÔNG gọi hàm nhả khoá, và (2) có chú thích giải thích vì sao giữ. */
+  const seg = stripComments(SRC);
+  const k = seg.indexOf('(xác nhận nền — không gửi thêm để tránh trùng)');
+  const after = k >= 0 ? seg.slice(k, k + 400) : '';
+  check('nhánh ⚠ KHÔNG nhả khoá ngoài (nhả ra ⇒ làn bù bắn chồng ⇒ 2 tin)',
+    /releaseOutbound|releaseOutboundIfFinal/.test(after.split('return;')[0] || ''), false);
+}
+check('có cổng "chỉ phân xử một lần" cho mỗi ca (firedCb + .catch không chạy đôi)',
+  /if \(settleOnce\.used\) return;/.test(stripComments(SRC)), true);
+check('ca ⚠ vẫn chạy kiểm chứng nền (scheduleSocketVerify)',
+  /if \(res\.noAck\) scheduleSocketVerify\(conv, text, photo, res\.publishedAt/.test(stripComments(SRC)), true);
+
+/* (F) GAP GIỮA WAVE KHÔNG ĐƯỢC CHỜ MÙ KHI KHÔNG CÓ HÀNG ĐỢI.
+ * Lô 19:48: `main đang bay` = 163 suốt 16/16 wave ⇒ điều kiện cũ (≤ 0,6 × cap = 115) chưa
+ * bao giờ đúng ⇒ mọi wave đều chờ 120 ms (1,8 s/lượt) dù không có gì dồn. */
+check('computeSmartGap dựa trên HÀNG ĐỢI, không dựa trên số slot đang bay',
+  /const queuePressure = retryLoad > 60 \|\| extLoad > 100/.test(stripComments(SRC)), true);
+check('gap vẫn bị chặn trần bởi WAVE_GAP người dùng đặt',
+  /Math\.min\(WAVE_GAP, 30\)/.test(stripComments(SRC)), true);
+
+/* (G) CACHE GID PHẢI ĐƯỢC CHIA SẺ GIỮA CÁC TAB.
+ * Lô 19:48: `dò gid 230 ca · TB 9 894 ms` — mỗi tab tự dò lại dù localStorage dùng chung. */
+check('có nghe sự kiện storage để nạp gid tab khác vừa dò',
+  /addEventListener\('storage'/.test(stripComments(SRC)), true);
+check('nghe storage KHÔNG ghi ngược (hai tab không đè nhau)',
+  /applyPeerGidPayload = \(rawObj\)[\s\S]{0,900}?scheduleGidFlush/.test(stripComments(SRC)), false);
+check('gid nạp từ tab khác cũng phải bỏ qua giá trị nhiễm [object Object]',
+  /if \(!v \|\| \/\^\\\[object \/\.test\(String\(v\)\)\) return;/.test(SRC), true);
+
+/* (H) noteManualResend PHẢI O(1) — lô 19:48 có 3 600 ca ⚠ ⇒ ~6,5 triệu phép so. */
+check('noteManualResend chống trùng bằng Set, không quét mảng',
+  /if \(manualResendIds\.has\(k\)\) return;/.test(stripComments(SRC)), true);
+check('reset đầu lượt phải xoá CẢ HAI chỉ mục của danh sách gửi tay',
+  /manualResendIds\.clear\(\); manualResendById\.clear\(\);/.test(stripComments(SRC)), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
@@ -1630,3 +1817,4 @@ if (fails.length) {
 }
 console.log(`✓ ${pass} kịch bản đều đúng (phân xử lịch sử + ngân sách thử lại Socket).`);
 console.log('  (gồm 4 ca mà bản cũ kết luận sai: khác nội dung, lượt trước, thiếu mốc giờ, tin thu hồi)');
+
