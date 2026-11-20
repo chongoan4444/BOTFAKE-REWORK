@@ -519,10 +519,7 @@ check('đóng ngân sách ghi lại % để in vào log',
     'return { absenceVerdict };',
   ].join('\n\n');
   // [v1.92.48] cổng phải đứng SAU cửa sổ nghe ACK ⇒ tiêm thêm mốc BU_PROOF_NOT_BEFORE_MS
-  /* [v1.93.0] tiêm thêm `buGate` — trạng thái hai cổng cắt đuôi 🛟 (trần + chuỗi trắng).
-   * Harness chạy `absenceVerdict` ĐƠN LẬP nên biến toàn cục của file không tồn tại ở đây. */
-  const newGate = () => ({ absent: 0, streak: 0, capped: 0, streakStop: 0, cap: 600, streakMax: 12 });
-  const A = new Function('serverSkewMs', 'BU_PROOF_STALE_MS', 'BU_PROOF_NOT_BEFORE_MS', 'buGate', acode)(0, 30000, 14000, newGate());
+  const A = new Function('serverSkewMs', 'BU_PROOF_STALE_MS', 'BU_PROOF_NOT_BEFORE_MS', acode)(0, 30000, 14000);
   const P = '898735919982398';
   const PSID = '39224298167184827';
   const CID = P + '_' + PSID;
@@ -543,34 +540,6 @@ check('đóng ngân sách ghi lại % để in vào log',
   check('cổng: thiếu updated_at ⇒ unknown', A.absenceVerdict([conv({ snippet: 'Tin cũ', updated_at: '' })], CID, P, PSID, sendTxt, t0, true, tLate), 'unknown');
   check('cổng: hội thoại khác ⇒ unknown', A.absenceVerdict([conv({ id: P + '_999', from_psid: '999', snippet: 'Tin cũ', updated_at: raw(t0 - 600000) })], CID, P, PSID, sendTxt, t0, true, tLate), 'unknown');
   check('cổng: danh sách rỗng ⇒ unknown', A.absenceVerdict([], CID, P, PSID, sendTxt, t0, true, tLate), 'unknown');
-
-  // ── [v1.93.0] HAI CỔNG CẮT ĐUÔI 🛟 ──────────────────────────────────────────────
-  // Lô 18 568 chat sinh 1 636 ca 'absent' (8,9 %), mỗi ca chờ 83–110 s ⇒ đuôi ~27 phút ⇒ lag.
-  // Hai cổng dưới đây CHỈ đổi 'absent' → 'unknown' (giữ ⚠ + vào danh sách gửi tay), tức bớt
-  // gửi bù — không bao giờ thêm một lần gửi. Test phải chứng minh đúng điều đó.
-  const quietConv = () => [conv({ snippet: 'Tin cũ của shop', updated_at: raw(t0 - 600000) })];
-  {
-    const g = newGate();
-    const B = new Function('serverSkewMs', 'BU_PROOF_STALE_MS', 'BU_PROOF_NOT_BEFORE_MS', 'buGate', acode)(0, 30000, 14000, g);
-    // Cổng 1 — TRẦN: chạm trần thì thôi phán 'absent'
-    let last = null;
-    for (let i = 0; i < 600; i++) last = B.absenceVerdict(quietConv(), CID, P, PSID, sendTxt, t0, true, tLate);
-    check('cổng trần: 600 ca đầu vẫn được phán absent', last, 'absent');
-    check('cổng trần: ca thứ 601 KHÔNG còn được phán absent (giữ ⚠)',
-      B.absenceVerdict(quietConv(), CID, P, PSID, sendTxt, t0, true, tLate), 'unknown');
-    check('cổng trần: có đếm số ca bị chặn', g.capped, 1);
-
-    // Cổng 2 — CHUỖI TRẮNG: engine không giao được gì ⇒ "không đổi" không còn là bằng chứng
-    const g2 = newGate();
-    const C = new Function('serverSkewMs', 'BU_PROOF_STALE_MS', 'BU_PROOF_NOT_BEFORE_MS', 'buGate', acode)(0, 30000, 14000, g2);
-    g2.streak = 12; // 12 ca trắng liên tiếp, chưa ca nào thấy tin
-    check('cổng chuỗi: 12 ca trắng liên tiếp ⇒ KHÔNG phán absent nữa (giữ ⚠)',
-      C.absenceVerdict(quietConv(), CID, P, PSID, sendTxt, t0, true, tLate), 'unknown');
-    check('cổng chuỗi: có đếm số ca bị chặn', g2.streakStop, 1);
-    g2.streak = 0;   // có một lần thấy tin ⇒ engine còn giao được ⇒ mở lại
-    check('cổng chuỗi: thấy tin 1 lần ⇒ mở lại, phán absent được',
-      C.absenceVerdict(quietConv(), CID, P, PSID, sendTxt, t0, true, tLate), 'absent');
-  }
 }
 
 // 21) [v1.92.44] photoMovedVerdict — cổng "hội thoại vừa động" cho ca gửi ẢNH kèm chữ ngắn.

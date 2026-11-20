@@ -197,12 +197,7 @@ async function runBgSend(tabId, job) {
   const total = targets.length;
   const token = job.token;
   const apiBase = job.apiBase;
-  // [v1.93.0] "KHÔNG RÕ" PHẢI CÓ BỘ ĐẾM RIÊNG — đây là chỗ bộ đếm từng nói dối.
-  // Đo được (HAR gửi thật: 34/34 ca có phản hồi rõ, 23 success:true + 11 e_code, KHÔNG ca nào
-  // body rỗng) ⇒ gặp phản hồi KHÔNG ĐỌC ĐƯỢC nghĩa là thứ gì đó đã hỏng theo cách chưa từng
-  // thấy. Bản cũ dồn ca đó vào `fail++` rồi thôi: không log, không kích hoạt bù ⇒ tin chết
-  // im lặng, và bảng tổng hợp chỉ hiện "fail" như thể API từ chối.
-  let ok = 0, fail = 0, unclear = 0, done = 0, next = 0;
+  let ok = 0, fail = 0, done = 0, next = 0;
   bgCtl[tabId] = { stop: false, running: true };
 
   const bump = async () => {
@@ -211,7 +206,7 @@ async function runBgSend(tabId, job) {
       type: 'BOTFAKE_JOB', sending: true, scanning: false, phase: 'send',
       pct, ok, total, done,
     });
-    tell(tabId, { type: 'BOTFAKE_BG_PROGRESS', pct, ok, fail, unclear, total, done });
+    tell(tabId, { type: 'BOTFAKE_BG_PROGRESS', pct, ok, fail, total, done });
   };
 
   if (!token || !apiBase || !total) {
@@ -238,28 +233,8 @@ async function runBgSend(tabId, job) {
         const { res, data } = await postInbox(apiBase, token, item, text, photo, auth.cookieHeader);
         const success = !!(res && res.ok && data && data.success);
         const errMsg = (data && (data.message || data.error)) || ('HTTP ' + (res && res.status));
-        /* [v1.93.0] TÁCH "KHÔNG RÕ" RA KHỎI "CHẮC CHẮN LỖI".
-         * Bản cũ: `certainFail` đòi 4xx, hoặc 200 + `success:false`. Mọi dạng khác rơi vào
-         * `fail++` — kể cả 200 + body KHÔNG đọc được (data = null), body HTML, JSON lạ,
-         * ERR_ABORTED sau khi request đã tới server. Ở những ca đó ta KHÔNG BIẾT tin có đi
-         * hay không, mà bảng tổng hợp lại báo như "API từ chối" ⇒ người dùng đọc số sai.
-         * Nay 3 nhánh dứt khoát:
-         *   success  → ok            (bằng chứng dương: server trả success:true)
-         *   certain  → bù Socket/Ext (bằng chứng âm: server từ chối rõ ràng)
-         *   unclear  → unclear++ + LOG + KHÔNG gửi lại (không thể sinh tin trùng)
-         * `unclear` KHÔNG được cộng vào `ok`. */
         const certainFail = !success && res && ((res.status >= 400 && res.status < 500) || (res.ok && data && data.success === false));
-        const unclearRes = !success && !certainFail;
         if (success) ok++;
-        else if (unclearRes) {
-          unclear++;
-          tell(tabId, {
-            type: 'BOTFAKE_BG_LOG',
-            line: '⚠ ' + (item.name || item.id) + ' — NỀN: phản hồi KHÔNG ĐỌC ĐƯỢC (HTTP '
-              + (res && res.status) + (res ? ', data=' + (data === null ? 'null' : typeof data) : ', không có res')
-              + ') ⇒ KHÔNG tính ✅, KHÔNG gửi lại (chống trùng).',
-          });
-        }
         else if (certainFail) {
           tell(tabId, {
             type: 'BOTFAKE_BG_FALLBACK',
@@ -292,7 +267,6 @@ async function runBgSend(tabId, job) {
       stopped,
       okN: ok,
       fail,
-      unclear,
       total,
       done,
     });

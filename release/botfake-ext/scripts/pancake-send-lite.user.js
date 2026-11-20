@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.0-w200.112
+// @version      1.92.66-w200.112
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.0-W200.112'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.92.66-W200.112'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -689,15 +689,6 @@
               if (r && r.ok) {
                 if (r.sendBy === 'socket') summaryCounters.okSocket++;
                 else if (r.sendBy === 'extension' || r.sendBy === 'ext') summaryCounters.okExt++;
-                /* [v1.93.0] ĐÂY LÀ NGUỒN CỦA CON SỐ 15 483. Ca này được tính ✅ chỉ vì
-                 * `sendViaExtension()` thấy adapter trả `{success:true}` — KHÔNG có bằng
-                 * chứng nào từ server, và ngay trước đó chính hội thoại vừa được phán
-                 * "KHÔNG có tin" (1 636 ca trong log 12:29–12:31). Hai vế đó chỉ có thể
-                 * cùng đúng nếu mỗi lần gửi bù đều tới nơi thật — chưa từng kiểm chứng.
-                 * Nay đưa vào hậu kiểm ngược: đọc lại lịch sử, không thấy tin thì HẠ. */
-                if (r.sendBy === 'extension' || r.sendBy === 'ext') {
-                  try { queueDownVerify(conv, tx, lastBgPhoto, Date.now()); } catch (eDv) { /* ignore */ }
-                }
                 logLine('✅ ' + nm + ' — bù THÀNH CÔNG qua ' + (r.sendBy === 'socket' ? 'Socket' : 'Extension'));
               } else if (r && r.recipientUnavailable) {
                 summaryCounters.fail++;
@@ -721,7 +712,6 @@
         if (msg.type === 'BOTFAKE_BG_PROGRESS') {
           summaryCounters.okApi = msg.ok || 0;
           summaryCounters.fail = msg.fail || 0;
-          summaryCounters.unclearApi = msg.unclear || 0; // [v1.93.0] tách khỏi `fail`
           batchStats.total = msg.total || batchStats.total;
           setProgress(msg.done || 0, msg.total || 0, msg.ok || 0);
           try { updateBatchSummaryUI(); } catch (e0) { /* ignore */ }
@@ -7288,11 +7278,6 @@
         if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
         const lateMs = Date.now() - startedAt;
         try { markDelivered(conv.id, 'ext'); } catch (e) { /* ignore */ }
-        /* [v1.93.0] ✅ này cũng chỉ dựa vào lời khai của adapter ⇒ đưa vào hậu kiểm ngược.
-         * Chữ cần đối chiếu lấy từ `payload.message` (không phải biến `text` — hàm này không có),
-         * và mốc gửi là `startedAt`. `photo` để null: ở đây chỉ đối chiếu CHỮ, không đoán ảnh
-         * (đoán sai ảnh ⇒ hạ ✅ oan). */
-        try { queueDownVerify(conv, payload && payload.message, null, startedAt); } catch (e) { /* ignore */ }
         try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
         try {
           logFailGrouped((conv.name || conv.id),
@@ -7684,10 +7669,6 @@
           if (r.ok) {
             if (r.fired) return; // bắn-nhả: xác nhận nền tự ghi nhận khi ACK về — không chốt sớm
             markDelivered(conv.id, r.sendBy || 'ext');
-            // [v1.93.0] Ext = lời khai của adapter ⇒ đưa vào hậu kiểm ngược. Socket/API đã có ACK.
-            if (r.sendBy === 'extension' || r.sendBy === 'ext' || !r.sendBy) {
-              try { queueDownVerify(conv, text, photo, Date.now()); } catch (eDv) { /* ignore */ }
-            }
             postSendSideEffects(conv);
             logFailGrouped(nm2, 'gửi THÀNH CÔNG qua '
               + (r.sendBy === 'socket' ? 'Socket' : r.sendBy === 'extension' ? 'Extension' : 'API'), '✅', conv.id);
@@ -9340,10 +9321,7 @@
     if (convId) delete outboundLock[convId];
   }
   // Bộ đếm O(1) chống O(N²) khi chạy 20.000–30.000 tin (không gọi Object.keys() 60.000 lần)
-  /* [v1.93.0] `unclearApi` = ca NỀN trả phản hồi KHÔNG ĐỌC ĐƯỢC (xem extension/background.js).
-   * Trước đây chúng rơi vào `fail` ⇒ bảng TỔNG HỢP báo "API từ chối" cho những ca ta hoàn
-   * toàn KHÔNG BIẾT kết quả. Tách ra để con số trên bảng khớp với sự thật. */
-  const summaryCounters = { okApi: 0, okExt: 0, okSocket: 0, fail: 0, unsure: 0, skipLate: 0, unclearApi: 0 };
+  const summaryCounters = { okApi: 0, okExt: 0, okSocket: 0, fail: 0, unsure: 0, skipLate: 0 };
   let summaryUiTimer = null;
   let windowBlocked = 0; // số lần API từ chối "(#10)/(#551)… ngoài cửa sổ 24h" trong lượt (đều được bù kênh khác)
   const SUMMARY_LS_KEY = 'ssb_last_summary_v1';
@@ -9365,12 +9343,7 @@
     const failTotal = summaryCounters.fail;
     const unsureTotal = summaryCounters.unsure;
     const skipLateTotal = summaryCounters.skipLate;
-    /* [v1.93.0] `unclearApi` PHẢI nằm trong `settled`. Đây là lỗi dễ tự tạo ra khi tách một
-     * bộ đếm: ca "không rõ" trước đây nằm trong `fail` (đã được tính là có kết luận), nay tách
-     * ra mà quên cộng vào `settled` thì `pendingSend = total - settled` luôn ≥ 1 ⇒ `isDoneAll`
-     * không bao giờ đúng ⇒ BẢNG TỔNG HỢP KHÔNG BAO GIỜ IN. Một ca không rõ kết quả vẫn LÀ
-     * đã có kết luận (⚠), chỉ khác là nó không phải ✅. */
-    const settled = okTotal + failTotal + unsureTotal + skipLateTotal + (summaryCounters.unclearApi || 0);
+    const settled = okTotal + failTotal + unsureTotal + skipLateTotal;
     /* [v1.92.56] O(1) thay vì O(k) — xem khối chú thích dài ở `verifyPendingCount`.
      * Ba dòng cũ tạo 3 mảng mới + quét toàn bộ 3 sổ MỖI LẦN một chat chốt xong:
      * đo được 9 946 ms cho lô 12 410 chat. Nay đọc biến đếm.
@@ -9390,7 +9363,6 @@
       total: batchStats.total || 0,
       okTotal, okApi, okExt, okSocket,
       failTotal, unsureTotal,
-      unclearTotal: summaryCounters.unclearApi || 0,
       skipTotal: (batchStats.skippedPre || 0) + skipLateTotal,
       settled, pending, pendingSend,
     };
@@ -9449,9 +9421,6 @@
         + (c.pendingSend > 0 && !state.stopRequested ? ' · <span style="color:#38bdf8">⏳ Đang xử lý: ' + c.pendingSend + '</span>' : '')
         + (c.pending > c.pendingSend ? ' · <span style="color:#a78bfa">🔎 kiểm chứng nền: ' + (c.pending - c.pendingSend) + '</span>' : '')
         + (c.failTotal > 0 ? ' · <span style="color:#f87171">❌ Lỗi: ' + c.failTotal + '</span>' : (isDoneAll ? ' · ❌ Lỗi: 0' : ''))
-        /* [v1.93.0] "KHÔNG RÕ" phải hiện RIÊNG, không được nằm lẫn trong ❌ Lỗi — nếu không
-         * người đọc tưởng FB từ chối, trong khi ta hoàn toàn KHÔNG BIẾT tin có đi hay không. */
-        + (c.unclearTotal > 0 ? ' · <span style="color:#fbbf24">⚠ Không rõ: ' + c.unclearTotal + '</span>' : '')
         + (c.unsureTotal > 0 ? ' · <span style="color:#fbbf24">⚠ Không rõ: ' + c.unsureTotal + '</span>' : '')
         + (c.skipTotal > 0 ? ' · <span style="color:#94a3b8">🧹 Bỏ qua: ' + c.skipTotal + '</span>' : '')
         + (elapsedSec > 0 ? ' · <span style="color:#94a3b8">⏱ ' + elapsedSec + 's</span>' : '');
@@ -9555,15 +9524,6 @@
             ? ' | 🛡 Cổng chống lặp: chặn bù mù ' + sendDiag.buProofGated + ' ca · tin ĐÃ tới (hủy bù) ' + sendDiag.buProofCancelled
               + ' · chứng minh vắng mặt ' + sendDiag.buProofAbsent + ' · không chứng minh được ' + sendDiag.buProofUnknown
               + ' · dùng lại kết quả ' + sendDiag.buProofCached
-            : '')
-          /* [v1.93.0] HAI CỔNG CẮT ĐUÔI 🛟 — phải TỰ KHAI, không được cắt trong im lặng.
-           * Nếu `chặn trần` > 0 nghĩa là lô này có nhiều ca "không đổi hội thoại" bất thường.
-           * Nếu `ngừng theo chuỗi` > 0 nghĩa là engine đang không giao được gì — mọi ca sau đó
-           * giữ ⚠ và nằm trong danh sách gửi tay, KHÔNG gửi bù tự động nữa. */
-          + ((buGate.capped || buGate.streakStop)
-            ? ' | 🚧 Cắt đuôi 🛟: chạm trần ' + buGate.cap + ' ca ⇒ giữ ⚠ ' + buGate.capped
-              + ' ca · ngừng phán vắng mặt sau ' + buGate.streakMax + ' ca trắng liên tiếp (engine không giao được gì) ⇒ giữ ⚠ '
-              + buGate.streakStop + ' ca — số này KHÔNG gửi bù, nằm trong danh sách GỬI TAY'
             : '')
           + (sendDiag.dupBlocked
             ? ' | 🛡 Chặn trùng: ' + sendDiag.dupBlocked + ' ca đã có lệnh bay nên KHÔNG bắn thêm (không tính là đã gửi)'
@@ -9754,8 +9714,6 @@
           + ' / Socket/page ' + getPageSocketLaneRange());
         // [v1.92.34] Lô đã chốt ⇒ chạy hậu kiểm 1545041 (chỉ đọc lịch sử, không bắn lại).
         try { void startDeadUserRecheck(); } catch (eDU) { /* ignore */ }
-        // [v1.93.0] Hậu kiểm NGƯỢC các ca ✅-qua-Ext (chỉ đọc; không thấy tin ⇒ hạ ✅ xuống ⚠).
-        try { void startDownVerify(); } catch (eDV) { /* ignore */ }
       }
     } catch (e) { /* ignore */ }
   }
@@ -10405,32 +10363,6 @@
   const BU_PROOF_NOT_BEFORE_MS = 14000; // > cửa sổ nghe ACK (12 000) + 2 000 ms biên đồng hồ
   const buProofCache = new Map();   // convId|mốc → { at, promise } — 1 chat chỉ chứng minh 1 lần
   const buProbeLane = makeLane(96); // [v1.92.43b] 32 → 96: cùng lý do trên, đọc lịch sử rất rẻ
-  /* ═══ [v1.93.0] HAI CỔNG CẮT ĐUÔI 🛟 — vì sao cần ═══
-   * Đo được trên log 20/11 12:29–12:31 (lô 18 568 chat): **1 636 ca** kết luận
-   * "hội thoại KHÔNG có tin (đã chứng minh vắng mặt)" = **8,9 %** lô. Mỗi ca tốn
-   * 1 probe `GET /v1/conversations/customer/{psid}` + chờ **83–110 s** (p50 95 s) + 1 lệnh Ext,
-   * và `BU_PROOF_NOT_BEFORE_MS` chỉ có SÀN 14 s, **không có TRẦN** chờ.
-   * ⇒ 1 636 × ~95 s ÷ 96 làn ≈ **27 phút** chỉ để chạy hết đuôi. Đúng lý do người dùng phải
-   * thoát ở mốc ~15 000 vì lag, trong khi lô ~11 000 thì chạy êm:
-   *     11 000 × 8,9 % ≈  980 ca  → chịu được
-   *     18 568 × 8,9 % ≈ 1 650 ca  → lag cả máy
-   * Tức LAG TỈ LỆ THUẬN VỚI SỐ CA 🛟, không phải với tổng số chat.
-   *
-   * Cổng 1 — TRẦN: quá `BU_ABSENT_CAP` ca mỗi lượt thì thôi phán 'absent', giữ 'unknown' (⚠).
-   *   Đây là điều kiện CHẶT HƠN: bớt gửi bù, nên KHÔNG THỂ làm mất tin. Ca 'unknown' giữ ⚠ +
-   *   vào danh sách gửi tay y như mọi ca 'unknown' khác.
-   *
-   * Cổng 2 — ENGINE CÒN SỐNG: nếu `BU_ENGINE_DEAD_STREAK` ca gần nhất đều 'absent' mà KHÔNG
-   *   có một lần nào thấy tin, thì "hội thoại không đổi" không còn là bằng chứng về việc GỬI
-   *   — nó là hệ quả của việc engine không giao được gì. Lúc đó phán 'absent' nghĩa là bịa ra
-   *   bằng chứng rồi gửi bù hàng loạt. Nay trả 'unknown' (⚠) thay vì 'absent'.
-   *   LƯU Ý: đây là phép THỬ DỰA TRÊN CHUỖI, không phải chứng minh engine chết; nó chỉ dừng
-   *   việc NHÂN BẢN thêm ca 🛟 khi mọi ca đều trắng. Người dùng vẫn thấy ⚠ và gửi tay được. */
-  const BU_ABSENT_CAP = 600;              // 🛟 tối đa mỗi lượt (18 568 × 8,9 % ≈ 1 650 ⇒ chặn ~2/3 đuôi)
-  const BU_ENGINE_DEAD_STREAK = 12;       // 12 ca 'absent' liên tiếp mà 0 lần thấy tin ⇒ ngừng phán
-  /* Trạng thái cổng gói trong MỘT object để `tools/test-verify.mjs` tiêm được khi chạy hàm
-   * đơn lập (harness cũ chỉ tiêm 3 tham số). Nhờ vậy chính hai cổng này có test riêng. */
-  const buGate = { absent: 0, streak: 0, capped: 0, streakStop: 0, cap: BU_ABSENT_CAP, streakMax: BU_ENGINE_DEAD_STREAK };
 
   function absenceVerdict(convs, convId, pageId, psid, want, sentAt, late, lateAtMs) {
     if (!Array.isArray(convs) || !convs.length) return 'unknown';
@@ -10457,11 +10389,6 @@
     if (t >= at + skew - BU_PROOF_STALE_MS) return 'unknown'; // hội thoại vừa động ⇒ không dám kết luận
     // [v1.92.48] Không phán "vắng mặt" khi cửa sổ nghe ACK còn đang mở (xem BU_PROOF_NOT_BEFORE_MS)
     if (!(Number(lateAtMs) >= at + BU_PROOF_NOT_BEFORE_MS)) return 'unknown';
-    /* [v1.93.0] hai cổng cắt đuôi — xem khối chú thích ở `BU_ABSENT_CAP`. Cả hai chỉ ĐỔI
-     * 'absent' → 'unknown' (giữ ⚠, vào danh sách gửi tay), KHÔNG BAO GIỜ thêm một lần gửi. */
-    if (buGate.absent >= buGate.cap) { buGate.capped++; return 'unknown'; }
-    if (buGate.streak >= buGate.streakMax) { buGate.streakStop++; return 'unknown'; }
-    buGate.absent++;
     return 'absent';
   }
 
@@ -10502,12 +10429,12 @@
         const pageId = (fullC && (fullC.page_id || fullC.pageId)) || conv.pageId || String(conv.id).split('_')[0];
         if (!pageId) return 'unknown';
         const v1 = await probeBuVerdict(conv, pageId, conv.id, want, at, false, hasPhoto);
-        if (v1 === 'yes') { sendDiag.buProofPresent++; buGate.streak = 0; return 'yes'; } // chặn được 1 lần lặp
+        if (v1 === 'yes') { sendDiag.buProofPresent++; return 'yes'; } // chặn được 1 lần lặp
         const target = at + BU_PROOF_WAIT_MS;
         if (Date.now() < target) await sleepUntil(target, 'bu-proof');
         const v2 = await probeBuVerdict(conv, pageId, conv.id, want, at, true, hasPhoto);
-        if (v2 === 'yes') { sendDiag.buProofPresent++; buGate.streak = 0; } // có bằng chứng DƯƠNG ⇒ engine còn giao được
-        else if (v2 === 'absent') { sendDiag.buProofAbsent++; buGate.streak++; }
+        if (v2 === 'yes') sendDiag.buProofPresent++;
+        else if (v2 === 'absent') sendDiag.buProofAbsent++;
         else sendDiag.buProofUnknown++;
         return v2;
       } catch (e) { sendDiag.buProofUnknown++; return 'unknown'; }
@@ -10933,151 +10860,6 @@
           + (flipped ? ' — ' + flipped + ' ca này KHÔNG được gửi lại (tin đã có trong lịch sử).'
             : ' — không ca nào có tin ⇒ chốt ❌ "khách không nhận được" là ĐÚNG.'));
       } catch (e3) { /* ignore */ }
-    }
-  }
-
-  /* ═══ [v1.93.0] HẬU KIỂM NGƯỢC: ĐỌC LẠI CÁC CA ĐÃ ✅ QUA EXTENSION ═══
-   * VẤN ĐỀ ĐO ĐƯỢC (log 20/11 12:29–12:31, lô 18 568 chat):
-   *   • 1 636 ca được kết luận \"hội thoại KHÔNG có tin (đã chứng minh vắng mặt)\";
-   *   • trong đó 1 519 ca được báo \"✅ bù THÀNH CÔNG qua Extension\";
-   *   • và KHÔNG ca nào bị lật ngược lại.
-   * Hai vế đó không thể cùng đúng: nếu 1 519 lần gửi bù thật sự tới nơi thì phải có ít nhất vài
-   * ca nhìn thấy tin ở lần đọc sau. Không có ca nào vì: ✅ qua Ext được đánh dấu từ
-   * `sendViaExtension()` khi adapter trả `{success:true}`, mà đó là LỜI KHAI của extension —
-   * không phải bằng chứng từ server. Và `scheduleUncertainVerify()` bỏ qua mọi ca đã ✅
-   * (dòng `if (deliveredIds[conv.id] ...) return;`) ⇒ ✅ KHÔNG BAO GIỜ ĐƯỢC ĐỌC LẠI.
-   * Kết quả: `summaryCounters.okExt` chỉ tăng, không bao giờ giảm.
-   *
-   * KHỐI NÀY CHỈA ĐÚNG VÀO CHỖ ĐÓ, và chỉ làm 3 việc:
-   *   1. đọc lại lịch sử của ca ✅ **qua ext** (kênh duy nhất không có bằng chứng server);
-   *   2. thấy đúng tin ⇒ giữ nguyên ✅ (không làm gì);
-   *   3. KHÔNG thấy sau 2 lần đọc cách nhau ⇒ HẠ ✅ xuống ⚠, cộng `manualResendList`
-   *      để người dùng biết mà gửi tay.
-   *
-   * AN TOÀN — vì sao không sinh tin trùng:
-   *   • Toàn bộ khối CHỈ ĐỌC. Không có một lệnh gửi nào trong này.
-   *   • Hạ ✅ chỉ khi cả HAI lần đọc đều `unknown` **VÀ** đã đọc được lịch sử thật
-   *     (`ok === true` + mảng `messages` hợp lệ). Đọc lỗi/không đọc được ⇒ KHÔNG hạ.
-   *   • `historyVerdict()` không bao giờ trả `'no'`; nó chỉ có `'yes'`/`'unknown'`. Nên
-   *     \"không thấy tin\" một mình KHÔNG đủ — đó là lý do phải đọc 2 lần và phải đọc được
-   *     lịch sử. Xem `docs/HAR-GROUND-TRUTH.md` §58: kết luận \"chắc chắn chưa đi\" từng
-   *     tạo ra chuỗi gửi trùng, nên ở đây \"không thấy\" chỉ đổi nhãn ✅→⚠ chứ KHÔNG bù.
-   *   • Hạ ✅ về ⚠ làm số đếm GIẢM. Đây là hướng an toàn: một ca bị hạ oan thì người dùng
-   *     gửi tay 1 tin thừa (thấy được, chủ động được); một ca giữ ✅ oan thì khách KHÔNG
-   *     nhận gì và không ai biết (mất tin im lặng — đúng cái đang xảy ra).
-   */
-  const DOWNVERIFY_FIRST_MS = 25000;  // tin vừa đi cần thời gian vào lịch sử (HAR: trễ 7–10 s)
-  const DOWNVERIFY_GAP_MS = 20000;    // lần đọc 2 cách lần 1 — hai lần đều trắng mới hạ
-  const DOWNVERIFY_MAX = 600;         // trần số ca hậu kiểm mỗi lô (không ngập request)
-  const DOWNVERIFY_CONC = 6;          // 6 luồng đọc — chạy SAU lô, không tranh làn gửi
-  const downVerifyQueue = [];
-  const downVerifySeen = new Set();
-  let downVerifyRunning = false;
-  function queueDownVerify(conv, text, photo, sentAtMs) {
-    try {
-      if (!conv || !conv.id) return;
-      if (downVerifyQueue.length >= 4000) return;
-      const k = String(conv.id);
-      if (downVerifySeen.has(k)) return;   // mỗi chat 1 lần / lượt
-      const want = normalizeMsgText(text);
-      if (!want && !photo) return;
-      downVerifySeen.add(k);
-      downVerifyQueue.push({ conv: conv, want: want, photo: photo || null, sentAt: Number(sentAtMs) || Date.now() });
-    } catch (e) { /* ignore */ }
-  }
-  async function startDownVerify() {
-    if (downVerifyRunning || !downVerifyQueue.length) return;
-    downVerifyRunning = true;
-    const myRun = runSeq;
-    const list = downVerifyQueue.splice(0, DOWNVERIFY_MAX);
-    let read = 0, kept = 0, lowered = 0, unknown = 0;
-    const one = async (it) => {
-      const cid = String(it.conv.id);
-      try {
-        if (myRun !== runSeq) return;
-        // Chỉ đụng ca đã ✅ QUA EXT. Socket có ACK thật, API có 200 + success:true ⇒ có
-        // bằng chứng server, không cần đọc lại.
-        if (deliveredIds[cid] !== 'ext') { kept++; return; }
-        let f = null;
-        try { f = peekConv(it.conv); } catch (e0) { f = null; }
-        f = f || it.conv;
-        const pageId = f.page_id || f.pageId || it.conv.pageId || String(cid).split('_')[0];
-        const convId = f.id || cid;
-        const custId = String(f.customerId || it.conv.customerId
-          || (f.customers && f.customers[0] && f.customers[0].id)
-          || (it.conv.customers && it.conv.customers[0] && it.conv.customers[0].id) || '');
-        if (!pageId) { unknown++; return; }
-        const url = apiBase() + '/v1/pages/' + pageId
-          + '/conversations/' + encodeURIComponent(convId)
-          + '/messages?customer_id=' + encodeURIComponent(custId)
-          + '&user_view=true&is_new_api=true&separate_pos=true';
-        let sawOk = false;   // có lần nào ĐỌC ĐƯỢC lịch sử thật không
-        let found = false;
-        for (let attempt = 0; attempt < 2; attempt++) {
-          if (attempt) {
-            if (myRun !== runSeq) return;
-            await bgClock.wait(DOWNVERIFY_GAP_MS);
-            if (myRun !== runSeq) return;
-            if (deliveredIds[cid] !== 'ext') return; // ca này vừa được chốt bằng kênh khác
-          }
-          let res = null;
-          try { res = await ctxFetchLane(() => fetchJson(url, 1, { timeoutMs: 8000 })); } catch (e) { res = null; }
-          // ĐỌC LỖI ⇒ không kết luận gì. Đây là điều kiện bắt buộc để được phép hạ.
-          if (!res || !res.ok || !res.data || res.data.success === false) continue;
-          const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
-          if (!Array.isArray(msgs)) continue;
-          sawOk = true;
-          read++;
-          if (isMessageDeliveredInHistory(msgs, pageId, it.want, it.photo, it.sentAt)) { found = true; break; }
-          if ((await confirmViaSnippet(it.conv, f, pageId, convId, it.want, it.sentAt)) === 'yes') { found = true; break; }
-        }
-        if (found) { kept++; return; }               // thấy tin ⇒ ✅ là ĐÚNG, không đổi gì
-        if (!sawOk) { unknown++; return; }           // không đọc được ⇒ KHÔNG dám hạ
-        if (deliveredIds[cid] !== 'ext') return;     // đã đổi trong lúc chờ
-        /* ── HẠ ✅ → ⚠. Chỉ hạ, KHÔNG gửi lại. ──
-         * PHẢI HỒI LẠI MỌI THỨ MÀ `markDelivered()` ĐÃ GHI, nếu không thì chính bản sửa này
-         * biến thành một nguồn sai mới. `markDelivered(id,'ext')` đã làm 3 việc:
-         *   1. `summaryCounters.okExt++`
-         *   2. `dropManualResend(id)` — xoá khỏi danh sách gửi tay
-         *   3. `sockRoute[page].dlv++` và xoá `lostSock`/`lostExt`  ← chỗ dễ bỏ sót nhất
-         * (3) là bộ đếm "page này giao được" — nếu để nguyên `dlv++` của một ca SAI thì lần sau
-         * tool còn tin page ổn hơn thực tế. Nay hoàn tác cả 3. */
-        delete deliveredIds[cid];
-        summaryCounters.okExt = Math.max(0, summaryCounters.okExt - 1);
-        if (!uncertainIds[cid] && !finalFailedIds[cid]) { uncertainIds[cid] = true; summaryCounters.unsure++; }
-        noteManualResend(cid);
-        try {
-          const _st = sockRoute[String(cid.split('_')[0])];
-          if (_st && _st.dlv > 0) _st.dlv--;
-        } catch (eSt) { /* ignore */ }
-        /* KHÔNG gọi `postSendSideEffects()`: markDelivered đã gửi side effect lúc ✅. Gọi lại ở
-         * đây chỉ tốn request `fill_admin_name` vô ích. Hạ nhãn là việc của sổ, không phải của server. */
-        lowered++;
-        logFailGrouped(it.conv.name || cid,
-          'HẬU KIỂM NGƯỢC: Ext khai đã gửi nhưng lịch sử KHÔNG có tin (2 lần đọc trắng) ⇒ HẠ ✅ xuống ⚠, vào danh sách GỬI TAY',
-          '🔻', cid);
-      } catch (e) { unknown++; }
-    };
-    try {
-      logLine('🔻 HẬU KIỂM NGƯỢC ' + list.length + ' ca ✅-qua-Ext: đọc lại lịch sử sau ~'
-        + Math.round(DOWNVERIFY_FIRST_MS / 1000) + 's (CHỈ ĐỌC — không gửi gì). Không thấy tin ⇒ HẠ ✅ xuống ⚠.');
-      await bgClock.wait(DOWNVERIFY_FIRST_MS);
-      let idx = 0;
-      const worker = async () => {
-        while (idx < list.length && myRun === runSeq) { const it = list[idx++]; await one(it); }
-      };
-      await Promise.all(Array.from({ length: DOWNVERIFY_CONC }, () => worker()));
-    } catch (e) {
-      try { logLine('🔻 HẬU KIỂM NGƯỢC dừng giữa đường: ' + (e && e.message || e)); } catch (e2) { /* ignore */ }
-    } finally {
-      downVerifyRunning = false;
-      try {
-        logLine('🔻 HẬU KIỂM NGƯỢC xong: đọc được lịch sử ' + read + ' lượt · giữ ✅ ' + kept
-          + ' ca · HẠ xuống ⚠ ' + lowered + ' ca' + (lowered ? ' (đã vào danh sách GỬI TAY)' : '')
-          + ' · không đọc được ' + unknown
-          + (downVerifyQueue.length ? ' · còn ' + downVerifyQueue.length + ' ca lượt sau' : ''));
-        try { updateBatchSummaryUI(); } catch (e3) { /* ignore */ }
-      } catch (e4) { /* ignore */ }
     }
   }
 
@@ -11597,8 +11379,6 @@
     // [v1.92.30] cổng chống lặp: reset sổ mỗi lượt (cache chứng minh cũng xoá để không dùng
     // kết quả của lượt trước).
     sendDiag.buProofGated = 0; sendDiag.buProofPresent = 0; sendDiag.buProofAbsent = 0;
-    // [v1.93.0] reset hai cổng cắt đuôi 🛟 cho lượt mới
-    buGate.absent = 0; buGate.streak = 0; buGate.capped = 0; buGate.streakStop = 0;
     sendDiag.buProofUnknown = 0; sendDiag.buProofCached = 0; sendDiag.buProofCancelled = 0;
     try { buProofCache.clear(); } catch (eBp) { /* ignore */ }
     verifyStats.found = 0; verifyStats.held = 0; verifyStats.unknown = 0;
