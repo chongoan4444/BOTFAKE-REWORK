@@ -140,3 +140,114 @@ thoại ⇒ gần như không bao giờ đúng ⇒ HTTP trả gid vẫn bị tí
   nguồn mới.
 - `profile_info` chỉ ghi thông tin cá nhân, không trả gid.
 - `api` + `socket` (làn dò gid) **không có** trong HAR (0 lần) — chưa có ground truth.
+
+## 7. Đọc extension Pancake thật (`0.5.62_0/`) — vì sao "bất globalId"
+
+Nguồn: `0.5.62_0/assets/background.js-EHsGnyIc.js` (413 KB), do người dùng push lên `main`.
+
+### 7.1 `BATCH_GET_GLOBAL_ID` — trả gì, khi nào rỗng
+
+```js
+class Ct {                       // BatchGetGlobalId
+  constructor({pageId, timeRangeMin, maxThreadCount}) {
+    this.threadCache...; this.maxThreadCount = maxThreadCount || ul;   // ul = 250
+  }
+  async init() {
+    if (!O.get(rt, st)) return Promise.reject(`Missing doc_id ${rt} or ${st}`);
+    if (lr[this.pageId]) return Promise.reject("There is a running job");   // ← CHẶN SONG SONG
+    ...
+    for (;;) {
+      const l = await this.getFacebookThreads(a, c);   // GraphQL MessengerGraphQLThreadlistFetcher
+      ...
+      if (l.length === 0) { i = "There's no thread left"; break; }
+      if (maxThreadCount != null && s > maxThreadCount) break;   // ← TRẦN 250
+      let d = parseInt(l[l.length-1].updated_time_precise);
+      if (timeRangeMin != null && d < timeRangeMin) break;
+      a = d - 1;
+    }
+    return Object.entries(r).map(([c, l]) => ({...l, threadId: c}));
+  }
+}
+```
+
+Đối chiếu với cách script gọi (`requestBatchGlobalIds`):
+
+| extension cần | script gửi | hậu quả |
+|---|---|---|
+| `pageId` | ✅ có | |
+| `timeRangeMin` | ✅ `0` | `0` falsy ⇒ `timeRangeMin != null` vẫn đúng nhưng `d < 0` không bao giờ xảy ra ⇒ quét tới hết |
+| `maxThreadCount` | ❌ không gửi | mặc định `ul = 250` ⇒ **tối đa 250 thread/page** |
+| `doc_id` (`MessengerThreadlistWebGraphQLQuery`/`MessengerThreadlistQuery`) | ❌ script không gửi | extension tự lấy qua `O.get(rt, st)`; nếu chưa preload ⇒ **reject "Missing doc_id"** |
+
+Ba đường trả **rỗng** (không phải gid):
+
+1. `Missing doc_id` — chưa preload view `/latest/inbox/messenger` cho page.
+2. `There is a running job` — page đang chạy 1 job khác (chính là lý do script phải
+   `batchGidPromises` chống gọi trùng, nhưng nếu lệnh trước timeout mà extension vẫn đang chạy thì
+   lần sau vẫn bị chặn).
+3. Quét hết thread còn sống ⇒ mảng rỗng.
+
+⇒ `batch nạp 0/0` trong log **khớp** với (1) hoặc (3). Script **không thể** đọc được lý do vì
+`BATCH_GET_GLOBAL_ID_FAILURE` chỉ có `taskId`, không có `err`.
+
+**Trần 250 thread/page là giới hạn thật**, không phải lỗi script. Với page vài nghìn chat, batch
+chỉ phủ được 250 thread gần nhất.
+
+### 7.2 `GET_GLOBAL_ID_FOR_CONV` (chính là `findGlobalIdForConv`) — 4 nguồn, gửi thiếu 3
+
+```js
+class Ee {   // self.GetGlobalId
+  constructor({pageId, postId, convId, convType, threadId, threadKey, isBusiness,
+               conversationUpdatedTime, customerName, accessToken, allowSearchByName})
+  init() {
+    const {success, globalId, threadInfoToRecheck} = await <nguồn theo convType>;
+    const o = bn(this.pageId) === true;             // findThreadByUsername_<pageId>
+    if (convType === "INBOX" && !this.isThreadCorrect(threadInfoToRecheck) && !o)
+      return reject("INCORRECT THREAD");            // ← TỪ CHỐI, không chỉ null
+    if (success) return globalId; else reject();
+  }
+  isThreadCorrect(e) {
+    // e rỗng / toàn null ⇒ false
+    // e.includes(this.threadId) ⇒ true
+  }
+}
+```
+
+Bốn nguồn theo thứ tự (INBOX):
+
+| # | nguồn | cần tham số | script gửi? |
+|---|---|---|---|
+| 1 | `PagesManagerInboxAdminAssignerRootQuery` (`Jt`) | `threadId` | ✅ |
+| 2 | `PagesManagerInboxQueryUtilCommItemHeaderMercuryQuery` (`Zt`) | `threadKey` + `cquick_token` | ✅ |
+| 3 | `findThread(...)` — duyệt threadlist | `threadId` **hoặc** `customerName` | ✅ |
+| 4 | `getUserInboxByName` — tìm theo tên | **`customerName`** + `allowSearchByName` | ✅ (tên) |
+
+Nhưng `finderPayload` của script **đặt `convId: null` và `postId: null`**:
+
+```js
+convType: 'INBOX', postId: null, convId: null,
+```
+
+Điều này **chặn cứng** hai biến thể:
+- `convType: 'COMMENT'` dùng `this.convId.split('_')[1]` ⇒ `null.split` ⇒ crash.
+- `convType: 'RATING'` cũng cần `convId`.
+- Trong INBOX, `findThread` nhận `m = convId.replace(pageId+'_','')` làm phương án dự phòng cho
+  `threadId` — luôn `null`.
+
+Và `accessToken: this.pageAccessToken` không được gửi (script có token ở chỗ khác).
+
+### 7.3 `INCORRECT THREAD` — script coi là "không rõ", extension coi là "từ chối"
+
+`isThreadCorrect` trả `false` khi `threadInfoToRecheck` rỗng ⇒ extension `reject("INCORRECT THREAD")`.
+Script bắt lỗi này ở dạng chuỗi và có nhánh riêng (`incorrectThreadNoGid`), nhưng **nó không gửi
+`convId`** nên mất luôn nguồn dự phòng của extension.
+
+### 7.4 Kết luận
+
+1. `batch nạp 0/0` **không phải** lỗi của 1.93.6 — trần 250 thread và điều kiện `doc_id` là của
+   extension. 1.93.6 chỉ bỏ việc khoá page vĩnh viễn (vẫn đúng: gọi lại được thì mới có cơ hội).
+2. Đường **dò lẻ** (`GET_GLOBAL_ID_FOR_CONV`) có thể cải thiện **không cần đụng extension**: gửi
+   thêm `convId`, `accessToken`, `allowSearchByName`. Đây là tham số extension **đã** nhận.
+3. **Chưa chứng minh** phần nào trong 3 tham số thiếu là nguyên nhân thật. Muốn biết phải xem
+   `C.error("FAIL TO GET GLOBAL ID --> INCORRECT THREAD …")` trong console của **extension**
+   (service worker), không có trong log của userscript.
