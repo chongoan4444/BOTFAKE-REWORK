@@ -1,0 +1,13 @@
+# Build output
+dist/
+
+# Khoá ký extension — TUYỆT ĐỐI không commit (repo công khai)
+installer/extension-signing-key.pem
+*.pem
+*.p12
+*.pfx
+
+# Dependency / OS
+node_modules/
+.DS_Store
+Thumbs.db

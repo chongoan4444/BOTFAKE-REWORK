@@ -1,0 +1,22 @@
+{
+  "name": "botfake-extension",
+  "version": "1.93.11",
+  "private": true,
+  "type": "module",
+  "description": "BOTFAKE LITE — gửi hàng loạt tin nhắn Pancake (MV3 + userscript)",
+  "scripts": {
+    "check": "node tools/build.mjs --check",
+    "build": "node tools/build.mjs",
+    "build:crx": "node tools/build.mjs --crx",
+    "test": "node tools/test-verify.mjs",
+    "stable": "node tools/make-stable.mjs",
+    "check:stable": "node tools/make-stable.mjs --check",
+    "test:worker": "node worker-send/build.mjs && node worker-send/test-engine.mjs && node worker-send/test-worker.mjs && node worker-send/test-bridge.mjs && node worker-send/test-loadlist.mjs && node worker-send/test-install.mjs",
+    "build:worker": "node worker-send/build.mjs"
+  },
+  "devDependencies": {
+    "@sparticuz/chromium": "^153.0.0",
+    "jsdom": "^31.0.1",
+    "playwright-core": "^1.65.1"
+  }
+}

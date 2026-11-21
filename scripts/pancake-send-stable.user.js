@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
-// @namespace    salescript
-// @version      1.91.72-w200.14
-// @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
+// @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
+// @namespace    salescript-stable
+// @version      1.92.43-stable
+// @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -41,13 +41,38 @@
 (function () {
   'use strict';
 
-  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__) return;
+  /* Chống chạy hai bản trong cùng một tab (bản gốc + bản ổn định, hoặc extension + userscript).
+   * Cờ trên window chỉ nhìn thấy nhau khi cả hai chạy chung "page world" — đúng với @grant none.
+   * Thêm dấu trên <html data-botfake-active> làm lưới thứ hai: DOM thì luôn dùng chung, kể cả khi
+   * trình quản lý script chạy mỗi script trong một sandbox riêng. Ai chạy trước thì thắng. */
+  function botfakeClaimSlot(name) {
+    let el = null;
+    try { el = document.documentElement; } catch (e) { el = null; }
+    if (!el) return true;                 // chưa có <html> ⇒ để cờ window quyết, không chặn oan
+    try {
+      if (el.getAttribute('data-botfake-active')) return false; // bản khác đã chiếm chỗ
+      el.setAttribute('data-botfake-active', name);
+      return true;
+    } catch (e) { return true; }
+  }
+
+  /* [STABLE] CHỐNG GỬI TRÙNG KHI CÀI CẢ HAI BẢN:
+   * Bản gốc thoát nếu `__BOTFAKE_TAB_CLIPBOARD_ACTIVE__` đã có. Bản ổn định:
+   *   - nếu BẢN GỐC đang chạy trước → tự tắt;
+   *   - nếu CHÍNH NÓ chạy trước → chiếm luôn cờ của bản gốc để bản gốc cũng tự tắt.
+   * Nhờ vậy trong một tab LUÔN chỉ có đúng một bộ gửi, không bao giờ hai bộ cùng bắn. */
+  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ || window.__BOTFAKE_STABLE_ACTIVE__ || !botfakeClaimSlot('stable')) {
+    try { console.warn('[BOTFAKE STABLE] Đã có bản khác chạy trong tab này — bản ổn định tự tắt để tránh gửi trùng.'); } catch (e0) { /* ignore */ }
+    return;
+  }
+  window.__BOTFAKE_STABLE_ACTIVE__ = true;
   window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ = true;
+  const IS_STABLE_BUILD = true;
 
   /* ============================ HẰNG SỐ ============================ */
 
-  const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.91.72-W200.14'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
+  const APP_VERSION = '1.92.43-STABLE'; // [STABLE] hiện ở tiêu đề panel
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -92,6 +117,10 @@
     sending: false,
     stopRequested: false,
     confirmingSend: false,  // đang mở hộp xác nhận gửi / đọc clipboard — chặn bấm đúp Tab/Chạy
+    // Công tắc phím Tab: mặc định BẬT (giữ đúng hành vi từ trước tới nay). Tắt bằng nút "TAB:"
+    // trên tiêu đề panel — nhớ qua localStorage nên F5 vẫn giữ lựa chọn.
+    // [STABLE] mặc định TẮT (bản gốc mặc định BẬT) — xem ghi chú ngay trên trong tools/make-stable.mjs
+    tabSend: (() => { try { return localStorage.getItem('ssb_tab_send_on') === '1'; } catch (e) { return false; } })(),
     sendListFrozen: false,  // snapshot người nhận; bỏ checkbox UI trong suốt lượt chạy
     msgSource: 'ui',        // 'ui' (gửi bằng câu trên giao diện) | 'clipboard' (gửi bằng dữ liệu đang copy trên clipboard)
     lastCopiedText: '',     // bản sao lưu text vừa copy trên trang (dự phòng khi trình duyệt chặn clipboard API)
@@ -113,72 +142,13 @@
                             // để nút "↺ Chọn lại list vừa gửi" chọn lại y nguyên mà KHÔNG phải tải danh sách
   };
 
-  // Chỉ nhớ conversation ID có Socket xác nhận rejected qua lần retry; không nhớ no-ACK,
-  // lỗi mạng, API ngoài 24h hay lỗi tạm thời. Lần tải/chọn list sau các ID này tự bỏ tick.
-  const UNAVAILABLE_CONV_ID_PREFIX = 'SSB_CONFIRMED_UNAVAILABLE_CONV_ID_V1:';
-  const UNAVAILABLE_CONV_IDS_LEGACY_KEY = 'SSB_CONFIRMED_UNAVAILABLE_CONV_IDS_V1';
-  const unavailableConversationIds = new Set();
-  const unavailableAddedThisRun = new Set();
-  try {
-    // Mỗi ID có khóa riêng: setItem đồng bộ ngay lúc xác nhận lỗi, không phụ thuộc debounce/pagehide,
-    // nên F5 ngay sau lỗi cũng không làm mất phần lớn một danh sách JSON chưa kịp flush.
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i) || '';
-      if (key.indexOf(UNAVAILABLE_CONV_ID_PREFIX) !== 0) continue;
-      try {
-        const id = decodeURIComponent(key.slice(UNAVAILABLE_CONV_ID_PREFIX.length));
-        if (id) unavailableConversationIds.add(id);
-      } catch (e) { /* khóa lỗi riêng lẻ không được chặn khởi động */ }
-    }
-    // Nạp định dạng JSON của các phiên bản trước để không mất IDs đã được lưu.
-    const legacyUnavailable = JSON.parse(localStorage.getItem(UNAVAILABLE_CONV_IDS_LEGACY_KEY) || '[]');
-    if (Array.isArray(legacyUnavailable)) legacyUnavailable.forEach((id) => {
-      if (id != null && String(id)) unavailableConversationIds.add(String(id));
-    });
-  } catch (e) { /* bộ nhớ lỗi hỏng/bị chặn không được chặn khởi động script */ }
-  function isRememberedUnavailable(convId) {
-    return !!convId && unavailableConversationIds.has(String(convId));
-  }
-  function persistUnavailableConversationId(id) {
-    try {
-      // localStorage.setItem là đồng bộ; mỗi kết quả được ghi bền riêng trước khi lượt tiếp tục.
-      localStorage.setItem(UNAVAILABLE_CONV_ID_PREFIX + encodeURIComponent(String(id)), '1');
-      return true;
-    } catch (e) {
-      logLine('⚠ Không lưu được ID unavailable ' + String(id) + ' (localStorage đầy/bị chặn).');
-      return false;
-    }
-  }
-  function rememberConfirmedSocketUnavailable(conv, result) {
-    if (!conv || !conv.id || !result || !result.recipientUnavailable) return false;
-    const error = String(result.error || '');
-    // sendOne đóng gói lỗi theo kênh trong `tried` (ví dụ "socket: Socket: ..."),
-    // nên so khớp thông báo confirmed bên trong kết quả cuối.
-    if (error.indexOf('Socket: FB từ chối nhận tin (khách hiện không có mặt / đã khóa nick)') < 0) return false;
-    const id = String(conv.id);
-    if (unavailableConversationIds.has(id)) return false;
-    unavailableConversationIds.add(id);
-    unavailableAddedThisRun.add(id);
-    persistUnavailableConversationId(id);
-    return true;
-  }
-  function clearRememberedUnavailableIds() {
-    const removed = unavailableConversationIds.size;
-    unavailableConversationIds.clear();
-    unavailableAddedThisRun.clear();
-    try {
-      for (let i = localStorage.length - 1; i >= 0; i--) {
-        const key = localStorage.key(i) || '';
-        if (key.indexOf(UNAVAILABLE_CONV_ID_PREFIX) === 0) localStorage.removeItem(key);
-      }
-      localStorage.removeItem(UNAVAILABLE_CONV_IDS_LEGACY_KEY);
-    } catch (e) { logLine('⚠ Không xóa hết được bộ nhớ ID unavailable trong localStorage.'); }
-    state.listKey = '';
-    state.matches.forEach((m) => {
-      if (m) { m.checked = false; m.knownUnavailable = false; }
-    });
-    return removed;
-  }
+  /* [v1.92.21] ĐÃ XOÁ HẲN CƠ CHẾ "NHỚ CHAT LỖI" — kể cả hai hàm stub (v1.92.22 xoá nốt).
+   * Trước đây mỗi ID bị Socket xác nhận rejected được ghi thành một khoá localStorage, lượt
+   * sau tự bỏ tick những ID đó (lô 20:28 ghi thêm 2 047 ID, phải có nút dọn tay). Nay:
+   *   • KHÔNG lưu gì vào localStorage, KHÔNG lọc gì khi tải/chọn danh sách;
+   *   • danh sách bạn tick là ĐÚNG những chat sẽ được gửi — không có "danh sách đen" ngầm;
+   *   • khoá cũ của bản trước (nếu còn) chỉ là rác, script không đọc nữa.
+   * Không còn hàm ghi nhớ/đọc nhớ nào — mọi chỗ từng gọi đã bị xoá cùng. */
 
   try {
     const savedMode = localStorage.getItem(MSG_MODE_KEY);
@@ -201,7 +171,230 @@
   const $ = (sel, root) => (root || document).querySelector(sel);
   const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
   const norm = (s) => (s || '').normalize('NFC').replace(/\s+/g, ' ').trim();
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  /* ═══ [v1.92.22] ĐỒNG HỒ CHẠY NỀN — timer trong Web Worker ═════════════════════
+   * Sự thật của Chrome (không phải phỏng đoán):
+   *   • Tab ẩn  ⇒ setTimeout/setInterval bị bóp còn ~1 lần/GIÂY.
+   *   • Ẩn > 5 phút + chuỗi timer ≥ 5 lần + im lặng ⇒ còn 1 lần/PHÚT.
+   *   • WebSocket KHÔNG được miễn (chỉ tab phát âm thanh thật và WebRTC được miễn).
+   * Hệ quả với script này khi thu nhỏ cửa sổ: nhịp phát Socket 4 ms → ~1 000 ms (250 tin/s
+   * mỗi page tụt còn ~1 tin/s), nextFrame 34 ms → ~1 000 ms MỖI TIN, cổng wave 60 ms →
+   * ~1 000 ms mỗi wave, đồng hồ soát tin nền 5 s → 60 s.
+   * Timer trong Worker KHÔNG bị bóp ⇒ tab ẩn thì mọi chỗ chờ đi qua Worker; tab hiện thì vẫn
+   * dùng setTimeout gốc (chính xác nhất, không tốn thêm IPC). Worker chỉ báo "đã tới giờ",
+   * KHÔNG gửi, KHÔNG quyết định gì ⇒ không thể tạo tin trùng.
+   */
+  const bgClock = (() => {
+    let worker = null;
+    let blocked = false;        // CSP chặn Blob worker ⇒ quay về setTimeout
+    let seq = 0;
+    const pending = new Map();
+    const st = { waitHidden: 0, waitVisible: 0, clampHits: 0, lateHits: 0, extraMs: 0, maxExtraMs: 0, warned: false };
+    const hidden = () => { try { return !!document.hidden; } catch (e) { return false; } };
+    function boot() {
+      if (worker || blocked) return worker;
+      try {
+        const src = 'onmessage=function(e){var d=e.data||{};setTimeout(function(){postMessage(d.i)},d.ms>0?d.ms:0)}';
+        const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+        worker = new Worker(url);
+        worker.onmessage = (e) => {
+          const fn = pending.get(e.data);
+          if (!fn) return;
+          pending.delete(e.data);
+          try { fn(); } catch (e0) { /* ignore */ }
+        };
+        worker.onerror = () => {
+          blocked = true;
+          const w = worker;
+          worker = null;
+          try { w.terminate(); } catch (e0) { /* ignore */ }
+          const rest = Array.from(pending.values());
+          pending.clear();
+          rest.forEach((fn) => { try { fn(); } catch (e1) { /* ignore */ } });
+        };
+        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (e0) { /* ignore */ } }, 2000);
+      } catch (e) { blocked = true; worker = null; }
+      return worker;
+    }
+    /** Chờ ms. Tab ẩn ⇒ Worker (không bị bóp). Tab hiện ⇒ setTimeout gốc. */
+    function wait(ms) {
+      const d = Math.max(0, Math.round(Number(ms) || 0));
+      if (!d) return Promise.resolve();
+      const hide = hidden();
+      if (hide) st.waitHidden++; else st.waitVisible++;
+      return new Promise((resolve) => {
+        const t0 = Date.now();
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          const real = Date.now() - t0;
+          const extra = Math.max(0, real - d);
+          if (hide && extra > 60) {
+            st.extraMs += extra;
+            if (extra > st.maxExtraMs) st.maxExtraMs = extra;
+            if (d < 900 && real >= 900) st.clampHits++; else if (extra > 400) st.lateHits++;
+            if (!worker && !st.warned) {
+              st.warned = true;
+              logLine('⚠ Tab ẩn bị Chrome bóp đồng hồ (xin ' + d + ' ms → thực ' + real
+                + ' ms) mà máy chặn Web Worker — giữ cửa sổ Pancake phía trước để chạy hết tốc.');
+            }
+          }
+          resolve();
+        };
+        if (!hide) { setTimeout(done, d); return; }
+        const w = boot();
+        if (!w) { setTimeout(done, d); return; }
+        const id = ++seq;
+        pending.set(id, done);
+        try { w.postMessage({ i: id, ms: d }); } catch (e) { pending.delete(id); setTimeout(done, d); }
+      });
+    }
+    /** Hẹn 1 lần, trả hàm huỷ (thay setTimeout ở đường gửi). */
+    function after(ms, fn) {
+      let cancelled = false;
+      wait(ms).then(() => { if (!cancelled) { try { fn(); } catch (e) { /* ignore */ } } });
+      return () => { cancelled = true; };
+    }
+    /** Lặp mỗi ms (thay setInterval ở đường gửi). Trả hàm dừng. */
+    function every(ms, fn) {
+      let stopped = false;
+      const tick = () => {
+        if (stopped) return;
+        try { fn(); } catch (e) { /* ignore */ }
+        if (stopped) return;
+        wait(ms).then(tick);
+      };
+      wait(ms).then(tick);
+      return () => { stopped = true; };
+    }
+    function reset() {
+      st.waitHidden = 0; st.waitVisible = 0; st.clampHits = 0; st.lateHits = 0;
+      st.extraMs = 0; st.maxExtraMs = 0; st.warned = false;
+    }
+    function describe() {
+      const total = st.waitHidden + st.waitVisible;
+      const hidPct = total ? Math.round((st.waitHidden * 100) / total) : 0;
+      const clock = worker ? 'Worker ✓ (không bị bóp)'
+        : (blocked ? 'setTimeout (máy chặn Worker)' : 'setTimeout (chưa cần Worker)');
+      return 'đồng hồ ' + clock + ' · tab ẩn ' + hidPct + '% số lần chờ'
+        + ' · bị bóp ' + st.clampHits + ' lần' + (st.lateHits ? ' + trễ ' + st.lateHits + ' lần' : '')
+        + (st.extraMs ? ' · cộng thêm ' + (Math.round(st.extraMs / 100) / 10) + 's'
+          + ' (nặng nhất ' + (Math.round(st.maxExtraMs / 100) / 10) + 's)' : ' · không trễ thêm');
+    }
+    return { wait, after, every, reset, describe };
+  })();
+  const sleep = (ms) => bgClock.wait(ms);
+
+  // ═══ [v1.92.9] CHỜ MỀM — thức ngay khi điều kiện đạt, không quét theo nhịp cố định ═══
+  // Bối cảnh: bản cũ có 30 chỗ sleep() cố định. Phần lớn là "quét cho tới khi điều kiện đúng"
+  // (chờ lệnh thăm dò Ext xong, chờ lane rảnh, chờ quét danh sách dừng, chờ hết cơn 429…).
+  // Những chỗ đó thức sớm hơn mức cần thiết hoặc trễ hơn mức cần thiết tuỳ nhịp quét.
+  // Nay: sự kiện phát bằng softNotify(key) — người chờ được đánh thức NGAY trong cùng tick.
+  // Đồng hồ chỉ còn là LƯỚI AN TOÀN, không còn là cơ chế chính.
+  const softWaiters = new Map();
+  function softNotify(key) {
+    const set = softWaiters.get(key);
+    if (!set || !set.size) return;
+    const arr = Array.from(set);
+    for (let i = 0; i < arr.length; i++) { try { arr[i](); } catch (e) { /* ignore */ } }
+  }
+  function softWait(key) {
+    let drop = null;
+    const p = new Promise((resolve) => {
+      let set = softWaiters.get(key);
+      if (!set) { set = new Set(); softWaiters.set(key, set); }
+      const fn = () => { try { set.delete(fn); } catch (e) { /* ignore */ } resolve(); };
+      drop = () => { try { set.delete(fn); } catch (e) { /* ignore */ } };
+      set.add(fn);
+    });
+    p.cancel = () => { try { if (drop) drop(); } catch (e) { /* ignore */ } };
+    return p;
+  }
+  // Tín hiệu Dừng dùng chung: MỘT promise duy nhất (không tích rác trong Set khi sleep liên tục).
+  let stopSig = null;
+  function stopSignal() {
+    if (!stopSig) {
+      const box = {};
+      box.promise = new Promise((res) => { box.resolve = res; });
+      stopSig = box;
+    }
+    return stopSig.promise;
+  }
+  function fireStopSignal() { try { if (!stopSig) stopSignal(); if (stopSig && stopSig.resolve) stopSig.resolve(); } catch (e) { /* ignore */ } }
+  function resetStopSignal() { stopSig = null; }
+  /** Ngủ CHÍNH XÁC tới mốc ts; thức ngay nếu softNotify(key) hoặc bấm Dừng. */
+  async function sleepUntil(ts, key) {
+    const ms = Math.max(0, ts - Date.now());
+    if (!ms) return;
+    const waits = [bgClock.wait(ms), stopSignal()];
+    const w = key ? softWait(key) : null;
+    if (w) waits.push(w);
+    await Promise.race(waits);
+    if (w) w.cancel();
+  }
+  /** Chờ tới khi cond() đúng. Thức bằng SỰ KIỆN key; 250 ms chỉ là lưới an toàn cuối. */
+  async function waitCond(cond, key, capMs) {
+    const until = Date.now() + (capMs || 30000);
+    while (!state.stopRequested) {
+      if (cond()) return true;
+      const now = Date.now();
+      if (now >= until) return !!cond();
+      await sleepUntil(Math.min(until, now + 250), key);
+    }
+    return !!cond();
+  }
+  /* ═══ [v1.92.25] LỆCH ĐỒNG HỒ MÁY ↔ SERVER ═══════════════════════════════════════
+   * Mọi mốc so sánh lịch sử đều trộn HAI đồng hồ: publishedAt / Date.now() là đồng hồ MÁY,
+   * còn inserted_at của API là đồng hồ SERVER. Đo trên 2 283 response trong repo: header
+   * "Date" có mặt ở 2 283/2 368 response, và lệch đo được lên tới hàng chục giây ở những máy
+   * chỉnh giờ sai. Vì vậy phải ĐO lệch này chứ không được giả định bằng 0.
+   * Đo bằng header "Date" của chính các response Pancake (sai số ≈ nửa RTT, đủ tốt cho
+   * cửa sổ ±5 s). Không đo được ⇒ giữ 0 (hành vi như cũ).
+   */
+  let serverSkewMs = 0;
+  let serverSkewSamples = 0;
+  function noteServerClock(headers) {
+    try {
+      if (!headers || typeof headers.get !== 'function') return;
+      const d = headers.get('date');
+      if (!d) return;
+      const srv = Date.parse(d);
+      if (isNaN(srv)) return;
+      const skew = srv - Date.now();
+      // [v1.92.27] CHẶN MẪU RÁC: HAR có response lệch −351 388 961 ms (giờ hệ thống hỏng /
+      // entry tổng hợp). Một mẫu rác lọt vào EMA sẽ kéo minTime lệch hàng phút ⇒ chốt ✅ oan.
+      if (!isFinite(skew) || Math.abs(skew) > 120000) return;
+      serverSkewSamples++;
+      serverSkewMs = serverSkewSamples === 1 ? skew : Math.round(serverSkewMs * 0.8 + skew * 0.2);
+    } catch (e) { /* ignore */ }
+  }
+
+  /** [v1.92.9] Tôn trọng Retry-After của server khi có; không có thì dùng mức cũ. */
+  function retryAfterMs(res, fallbackMs) {
+    try {
+      const v = res && res.headers && typeof res.headers.get === 'function' ? res.headers.get('retry-after') : null;
+      if (v) {
+        const sec = Number(v);
+        if (isFinite(sec) && sec >= 0) return Math.min(15000, Math.max(100, Math.round(sec * 1000)));
+        const at = Date.parse(v);
+        if (!isNaN(at)) return Math.min(15000, Math.max(100, at - Date.now()));
+      }
+    } catch (e) { /* ignore */ }
+    return Math.max(0, Number(fallbackMs) || 0);
+  }
+  /** [v1.92.9] Nhường ĐÚNG một khung hình (thay vì ngủ mù 20 ms). Tab ẩn thì lưới an toàn 34 ms. */
+  function nextFrame() {
+    // [v1.92.22] Tab ẩn: rAF KHÔNG chạy, nên bản cũ rơi vào lưới setTimeout(34) — và Chrome bóp
+    // nó thành ~1 000 ms MỖI TIN (thu nhỏ cửa sổ là mỗi tin chậm thêm 1 giây). Tab ẩn thì không
+    // có chu kỳ keydown/keyup nào cần chờ ⇒ trả về ngay; tab hiện vẫn nhường đúng 1 khung hình.
+    try { if (document.hidden) return Promise.resolve(); } catch (e0) { /* ignore */ }
+    return new Promise((resolve) => {
+      let done = false;
+      const fin = () => { if (done) return; done = true; resolve(); };
+      try { if (typeof requestAnimationFrame === 'function') requestAnimationFrame(fin); } catch (e) { bgClock.wait(34).then(fin); return; }
+      bgClock.wait(34).then(fin);
+    });
+  }
 
   let sentIdsSaveTimer = null;
   function saveSentIds() {
@@ -236,7 +429,24 @@
   // "đang phát âm" (hiện icon loa + miễn bóp) — gain ≈ 0 thì Chrome coi như im lặng.
   let keepAliveAudio = null;
   let keepAliveLogged = false;
+  // [v1.92.22] Chrome "Energy Saver" có thể ĐÓNG BĂNG tab ẩn sau 5 phút; trang đang giữ một
+  // Web Lock thì được miễn. Giữ lock suốt lượt gửi/quét (tên riêng, không chặn gì khác).
+  let runLockRelease = null;
+  function holdRunLock() {
+    try {
+      if (runLockRelease) return;
+      if (!navigator || !navigator.locks || typeof navigator.locks.request !== 'function') return;
+      navigator.locks.request('ssb-run-' + String((location && location.host) || 'pancake'), () => new Promise((res) => { runLockRelease = res; }))
+        .catch(() => { /* trình duyệt cũ: bỏ qua */ });
+    } catch (e) { /* ignore */ }
+  }
+  function releaseRunLock() {
+    const r = runLockRelease;
+    runLockRelease = null;
+    try { if (r) r(); } catch (e) { /* ignore */ }
+  }
   function startKeepAliveAudio() {
+    holdRunLock();
     try {
       if (keepAliveAudio && keepAliveAudio.ctx && keepAliveAudio.ctx.state !== 'closed') {
         try { keepAliveAudio.ctx.resume(); } catch (e0) { /* ignore */ }
@@ -257,6 +467,13 @@
       setTimeout(() => {
         try {
           if (keepAliveAudio && keepAliveAudio.ctx === ctx && ctx.state !== 'running') {
+            // [v1.92.22] Chính sách autoplay chỉ mở khoá ở thao tác người dùng ⇒ thử lại ngay
+            // ở cú click/bấm phím kế tiếp thay vì bắt người dùng đoán.
+            try {
+              const wake = () => { try { ctx.resume(); } catch (e3) { /* ignore */ } };
+              document.addEventListener('click', wake, { once: true, capture: true });
+              document.addEventListener('keydown', wake, { once: true, capture: true });
+            } catch (e4) { /* ignore */ }
             logLine('⚠ Âm giữ tab chưa chạy (trạng thái: ' + ctx.state + ') — Chrome đang chặn phát âm; bấm vào trang 1 cái rồi gửi tiếp, hoặc giữ tab Pancake ở phía trước.');
           }
         } catch (e2) { /* ignore */ }
@@ -269,6 +486,7 @@
   }
   function stopKeepAliveAudio() {
     if (state.sending || state.scanning) return;
+    releaseRunLock();
     const ka = keepAliveAudio;
     keepAliveAudio = null;
     if (!ka) return;
@@ -347,6 +565,9 @@
     extCall(payload, 3000); // báo tiến độ — không cần chờ lâu
   }
 
+  // [STABLE] Kênh nói chuyện với tiện ích: kênh RIÊNG (__botfakeS + data-botfake-ext-stable),
+  // xem tools/build.mjs. Cài cả hai tiện ích thì mỗi bên chỉ trả lời lệnh của chính nó
+  // ⇒ không thể cùng gửi một tin.
   function extCall(payload, waitMs) {
     return new Promise((resolve) => {
       try {
@@ -359,12 +580,12 @@
       } catch (e0) { /* MAIN world: không có chrome */ }
       const id = 'bf' + Date.now() + Math.random().toString(36).slice(2, 8);
       const on = (ev) => {
-        if (ev.source !== window || !ev.data || ev.data.__botfake !== 1 || ev.data.dir !== 'from_sw' || ev.data.id !== id) return;
+        if (ev.source !== window || !ev.data || ev.data.__botfakeS !== 1 || ev.data.dir !== 'from_sw' || ev.data.id !== id) return;
         window.removeEventListener('message', on);
         resolve({ res: ev.data.res, err: ev.data.err || null });
       };
       window.addEventListener('message', on);
-      window.postMessage({ __botfake: 1, dir: 'to_sw', id: id, payload: payload }, '*');
+      window.postMessage({ __botfakeS: 1, dir: 'to_sw', id: id, payload: payload }, '*');
       setTimeout(() => {
         window.removeEventListener('message', on);
         resolve({ res: null, err: 'timeout' });
@@ -380,7 +601,7 @@
       }
     } catch (e1) { /* MAIN world */ }
     const on = (ev) => {
-      if (ev.source !== window || !ev.data || ev.data.__botfake !== 1 || ev.data.dir !== 'push') return;
+      if (ev.source !== window || !ev.data || ev.data.__botfakeS !== 1 || ev.data.dir !== 'push') return;
       fn(ev.data.msg, null, function () {});
     };
     window.addEventListener('message', on);
@@ -390,7 +611,7 @@
     try {
       if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) return true;
     } catch (e) { /* ignore */ }
-    return document.documentElement.getAttribute('data-botfake-ext') === '1';
+    return document.documentElement.getAttribute('data-botfake-ext-stable') === '1';
   }
 
   function serializeBgPhoto(photo, qrPhotoByPage, apiFbIdsByPage, fbIdByPage) {
@@ -453,7 +674,7 @@
         unsubBg();
         summaryCounters.okApi = doneMsg.okN || 0;
         summaryCounters.fail = doneMsg.fail || 0;
-        if (doneMsg.stopped) state.stopRequested = true;
+        if (doneMsg.stopped) { state.stopRequested = true; fireStopSignal(); }
         resolve(doneMsg);
       };
       const onMsg = (msg) => {
@@ -475,9 +696,17 @@
               } else if (r && r.recipientUnavailable) {
                 summaryCounters.fail++;
                 logLine('❌ ' + nm + ' — bù không được: ' + clip((r && r.error) || '', 90));
+              } else if (r && r.uncertain) {
+                // [v1.92.28] LỖ HỞ "BÙ LUNG TUNG": nhánh dưới (`!r.ok`) bao gồm CẢ kết quả
+                // "không rõ" (socket mất ACK / Ext quá hạn) ⇒ vừa gọi scheduleBuRetry (bù qua
+                // kênh khác) trong khi tin CÓ THỂ đã đi ⇒ nguy cơ gửi 2 lần. Nay "không rõ" chốt
+                // ⚠ + ghi uncertainIds (để mọi đường bù khác cũng bị chặn), KHÔNG gửi thêm.
+                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+                logLine('⚠ ' + nm + ' — bù: ' + clip((r && r.error) || 'không rõ', 90) + ' — KHÔNG gửi thêm (chống trùng)');
               } else if (r && !r.ok) {
                 logLine('⚠ ' + nm + ' — bù: ' + clip((r && r.error) || 'không rõ', 90));
-                scheduleBuRetry(conv, tx, lastBgPhoto, nm, 'API từ chối (' + clip(msg.error || '', 90) + ')', ['api']);
+                scheduleBuRetry(conv, tx, lastBgPhoto, nm, 'API từ chối (' + clip(msg.error || '', 90) + ')', ['api'],
+                  { ambiguous: true, via: 'api', sentAt: Date.now() });
               }
             })
             .catch((e) => { logLine('❌ ' + nm + ' — bù lỗi: ' + (e && e.message || e)); })
@@ -756,11 +985,10 @@
     const push = (rawRow) => {
       const r = enrichRowWithRedux(rawRow);
       const old = before.get(r.id);
-      const knownUnavailable = isRememberedUnavailable(r.id);
       list.push({
         ...r,
-        knownUnavailable,
-        checked: knownUnavailable ? false : (old ? old.checked : (r.type !== 'comment')), // ID đã bị Socket xác nhận unavailable luôn để lại, không tự tick
+        knownUnavailable: false,
+        checked: old ? old.checked : (r.type !== 'comment'),
         isTarget: !!markOf(r),
         mark: markOf(r),
       });
@@ -775,11 +1003,10 @@
     } else if (state.mode === 'pick') {
       state.matches.forEach((m) => {
         const r = enrichRowWithRedux(m);
-        const knownUnavailable = isRememberedUnavailable(r.id);
         list.push({
           ...r,
-          knownUnavailable,
-          checked: knownUnavailable ? false : (m.checked !== undefined ? m.checked : (r.type !== 'comment')),
+          knownUnavailable: false,
+          checked: m.checked !== undefined ? m.checked : (r.type !== 'comment'),
           isTarget: true,
           mark: m.mark || 'target',
         });
@@ -886,11 +1113,18 @@
     render();
     await scanFullList({ forRange: true, restartIfBusy: true });
     computeMatches({ silentMissingLog: true });
+    const chainAlive = state.mode === 'range' && state.rangeStart
+      && String(state.rangeStart.id) === String(start.id);
     const hasStart = state.matches.some((m) => m.id === start.id);
     const hasEnd = state.matches.some((m) => m.id === endInfo.id);
 
     const n = state.matches.length;
-    if (!hasStart || !hasEnd || !n) {
+    // [v1.92.12] Lượt GỬI chen ngang sẽ clearSelection() ⇒ state.matches rỗng, và dòng
+    // "⚠ Không tìm thấy đủ 2 đầu chuỗi" chỉ là BÁO ĐỘNG GIẢ (log 14:43:06, ngay sau khi
+    // gửi 37 chat trong lúc quét). Chỉ báo khi chuỗi chọn còn nguyên vẹn.
+    if (!chainAlive) {
+      /* lượt chọn đã bị lượt gửi cắt ngang — im lặng, không báo sai */
+    } else if (!hasStart || !hasEnd || !n) {
       logLine('🔗 CHUỖI CHỌN: ' + (start.name || start.id) + ' → ' + (endInfo.name || endInfo.id)
         + ' — ⚠ Không tìm thấy đủ 2 đầu chuỗi trong danh sách hiện tại.');
     } else {
@@ -1161,17 +1395,18 @@
       try {
         // fetch trần KHÔNG tự hết hạn — kết nối treo là await treo theo → chặn toàn bộ lượt gửi
         const ctl = (typeof AbortController === 'function') ? new AbortController() : null;
-        if (ctl) abortTimer = setTimeout(() => ctl.abort(), (reqOpts && reqOpts.timeoutMs) || 15000);
+        if (ctl) abortTimer = bgClock.after((reqOpts && reqOpts.timeoutMs) || 15000, () => ctl.abort());
         const r = await fetch(url, {
           method: isPost ? 'POST' : 'GET',
           body: (isPost && reqOpts.bodyObj) ? buildFormDataFromObj(reqOpts.bodyObj) : undefined,
           credentials: 'include', cache: 'no-store',
           signal: ctl ? ctl.signal : undefined,
         });
-        if (abortTimer) { clearTimeout(abortTimer); abortTimer = null; }
+        if (abortTimer) { try { abortTimer(); } catch (eA2) { /* ignore */ } abortTimer = null; }
+        noteServerClock(r.headers);
         if (r.status === 429 || r.status >= 500) {
           lastErr = 'HTTP ' + r.status;
-          if (t < max) { await sleep(400 * t); continue; }
+          if (t < max) { await sleepUntil(Date.now() + 400 * t); continue; }
           return { ok: false, error: lastErr };
         }
         if (!r.ok) {
@@ -1190,9 +1425,9 @@
           }
         }
       } catch (e) {
-        if (abortTimer) clearTimeout(abortTimer);
+        if (abortTimer) { try { abortTimer(); } catch (eA3) { /* ignore */ } }
         lastErr = (e && e.name === 'AbortError') ? 'quá ' + Math.round(((reqOpts && reqOpts.timeoutMs) || 15000) / 1000) + 's chưa phản hồi' : 'Lỗi mạng: ' + (e && e.message || e);
-        if (t < max) { await sleep(400 * t); continue; }
+        if (t < max) { await sleepUntil(Date.now() + 400 * t); continue; }
         return { ok: false, error: lastErr };
       }
     }
@@ -1488,7 +1723,7 @@
       const req = buildListRequest(pageCount, cursor, currentCount, token, eo.forceMulti || eo.singlePageId ? eo : opts);
       if (!req.ids.length) return { ok: false, error: 'Không xác định được page đang xem' };
       // đang trong cơn 429 → mọi luồng cùng chờ hết giờ nghỉ chung thay vì đâm đầu vào server
-      while (!stopped() && Date.now() < rl.pauseUntil) await sleep(150);
+      if (!stopped() && Date.now() < rl.pauseUntil) await sleepUntil(rl.pauseUntil, 'rl-pause'); // [v1.92.9] thức ĐÚNG mốc
       if (stopped()) return { ok: false, error: 'stopped' };
       const res = await fetchJson(req.url, eo.tries || 3, { method: req.method, bodyObj: req.bodyObj, timeoutMs: eo.timeoutMs || 12000 });
       if (!res.ok) { if (/429/.test(res.error || '')) rlNote429(); return { ok: false, error: res.error }; }
@@ -1756,7 +1991,7 @@
             const res = await fetchPage(seg.pageCount, seg.cursor, seg.estCount + seg.items.length, { forceMulti: forceMultiEndpoint, tries: 2, timeoutMs: 10000 });
             if (!res.ok) {
               // v1.84.0: lỗi lẻ không giết luồng phụ nữa (chết sớm = mất hẳn 1 đường tải song song)
-              if ((seg.errRetry = (seg.errRetry || 0) + 1) <= 6) { await sleep(1200 + Math.random() * 800); continue; }
+              if ((seg.errRetry = (seg.errRetry || 0) + 1) <= 6) { await sleepUntil(Date.now() + 1200 + Math.random() * 800); continue; }
               return;
             }
             seg.errRetry = 0;
@@ -1790,7 +2025,7 @@
           // cursor, tối đa 8 lần — danh sách chỉ thật sự hết khi server báo hết dữ liệu.
           seg0.errRetry = (seg0.errRetry || 0) + 1;
           if (seg0.errRetry === 1) logLine('⏸ Tải bị gián đoạn (' + (res.error || 'lỗi') + ') ở ' + seg0.items.length + ' chat — đang tự thử lại…');
-          if (seg0.errRetry <= 8) { await sleep(2000); continue; }
+          if (seg0.errRetry <= 8) { await sleepUntil(Date.now() + 2000); continue; }
           logLine('⚠ Không tải tiếp được sau 8 lần thử — danh sách CHƯA đầy đủ (' + seg0.items.length + ' chat), bấm tải lại để tiếp tục.');
           seg0.truncated = true;
           break;
@@ -1886,14 +2121,37 @@
   }
 
   // ⚡ Tải danh sách: CHỈ API next_cursor tuần tự. Không cuộn DOM / virtual list.
+  /* [v1.92.43] TẢI DANH SÁCH ĐÚNG 1 LẦN.
+   * Người dùng chọn đi chọn lại nhiều lượt trên cùng một danh sách; mỗi lần bấm ⚡ là một chuỗi
+   * request next_cursor (hàng chục–hàng trăm request, và 429 chỉ rơi đúng vào endpoint DANH SÁCH —
+   * §29: 73/73 lần 429). Danh sách vừa tải mà chưa quá 10 phút thì dùng lại, không gọi API.
+   * Muốn tải mới thật: giữ SHIFT khi bấm ⚡ (hoặc window.__botfakeReloadList__()). */
+  const LIST_CACHE_TTL_MS = 10 * 60 * 1000;
+  function listCacheFresh() {
+    const n = (state.allRows && state.allRows.size) || 0;
+    if (!n || state.allRowsPartial || state.listIncomplete) return 0;
+    const at = state.listLoadedAt || 0;
+    if (!at || (Date.now() - at) > LIST_CACHE_TTL_MS) return 0;
+    return n;
+  }
   async function scanFullList(opts) {
     if (state.sendListFrozen) return;
     const scanOpts = opts || {};
+    if (!scanOpts.force && !scanOpts.forRange && !scanOpts.restartIfBusy) {
+      const cached = listCacheFresh();
+      if (cached) {
+        logLine('♻ Dùng lại danh sách đã tải (' + cached + ' chat, '
+          + Math.round((Date.now() - state.listLoadedAt) / 1000) + 's trước) — KHÔNG gọi lại API.'
+          + ' Muốn tải mới: giữ SHIFT khi bấm ⚡ Tải danh sách.');
+        computeMatches();
+        render();
+        return;
+      }
+    }
     if (state.scanning) {
       if (scanOpts.restartIfBusy) {
         state.scanStopRequested = true;
-        let wg = 0;
-        while (state.scanning && wg++ < 80) await sleep(50);
+        await waitCond(() => !state.scanning, 'scan-done', 4000); // [v1.92.9] thức NGAY khi lượt quét cũ kết thúc
       } else {
         state.scanStopRequested = true;
         logLine('⏹ Đã yêu cầu dừng tải danh sách — dùng ngay số chat vừa tải!');
@@ -2013,6 +2271,7 @@
       let ord = 0;
       found.forEach((v) => { v.order = ord++; });
       state.allRows = found;
+      state.listLoadedAt = Date.now(); // [v1.92.43] mốc để dùng lại danh sách (không tải lại)
       state.allRowsPartial = !!(api && api.rangePartial) && (!prevAllRows || prevAllRowsPartial);
       state.listIncomplete = false;
       setBtn('⚡ Tải danh sách (' + found.size + ' chat)');
@@ -2024,6 +2283,7 @@
       render();
     } finally {
       state.scanning = false;
+      softNotify('scan-done'); // [v1.92.9]
       state.scanStopRequested = false;
       applyScanButtons();
       stopKeepAliveAudio();
@@ -2073,6 +2333,7 @@
     cacheHit: 0, httpHit: 0, httpNoGid: 0, httpFail: 0, http429: 0,
     wsHit: 0, extHit: 0, extUnknown: 0, unknown: 0, batchMappings: 0,
     batchReturned: 0, batchFail: 0, extRespondedNoGid: 0, gateSkip: 0,
+    shortNoGidWait: 0,
   };
   function resetGidStats() {
     Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
@@ -2103,6 +2364,15 @@
         if (custs[i] && custs[i].global_id) return String(custs[i].global_id);
       }
     }
+    // [v1.91.82] ĐO can_inbox — cờ "page còn quyền nhắn khách" của Facebook.
+    // HAR: có mặt trong 91/91 lần đọc tin (4 false / 87 true). CHỈ ĐẾM, không dùng để
+    // quyết định bỏ gửi: mẫu 4/91 quá nhỏ, bỏ gửi theo nó có thể làm lọt khách còn sống.
+    try {
+      if (typeof sendDiag === 'object' && sendDiag && typeof j.can_inbox === 'boolean') {
+        sendDiag.canInboxSeen = (sendDiag.canInboxSeen || 0) + 1;
+        if (j.can_inbox === false) sendDiag.canInboxFalse = (sendDiag.canInboxFalse || 0) + 1;
+      }
+    } catch (e0) { /* ignore */ }
     if (j.global_id) return String(j.global_id);
     if (j.page_customer && j.page_customer.global_id) return String(j.page_customer.global_id);
     return '';
@@ -2565,7 +2835,11 @@
         ok: false,
         sent: false,
         error: (data && (data.message || data.error)) || ('HTTP ' + res.status),
-        code: data && data.message_code,
+        // HAR: response lỗi của Pancake dùng e_code / e_subcode (KHÔNG có message_code):
+        //   {"e_code":10,"e_subcode":2018300,"message":"(#10) Không gửi được…","success":false}
+        //   {"e_code":551,"e_subcode":1545041,"message":"(#551) Người này hiện không có mặt.","success":false}
+        code: (data && (data.e_code != null ? data.e_code : data.message_code)) || null,
+        subcode: (data && data.e_subcode != null) ? data.e_subcode : null,
       };
     } catch (e) {
       return { ok: false, sent: 'maybe', error: 'Lỗi mạng: ' + (e && e.message || e) };
@@ -2648,7 +2922,8 @@
   // Đối chiếu 13 request gửi THẬT của app trong tinnhan.har & executeByApi (@946500) + buildRequestBody (@951000) trong _app:
   //   • Gửi chữ hoặc 1 ảnh: multipart/form-data (action=reply_inbox, [is_record_ctx_7_days], message, content_id, attachment_id, content_url, width, height, send_by_platform=web)
   //   • Gửi >= 2 ảnh (đa ảnh): application/json ({ action: 'reply_inbox', [is_record_ctx_7_days], message, content_ids, attachment_ids, content_urls, dimensions, send_by_platform: 'web' })
-  function buildInboxSend(conv, text, photo) {
+  function buildInboxSend(conv, text, photo, opts) {
+    opts = opts || {};
     const token = getToken();
     if (!token) return { error: 'Không tìm thấy access_token — hãy tải lại trang Pancake rồi thử lại' };
     const pageId = conv.pageId || conv.id.split('_')[0];
@@ -2660,6 +2935,14 @@
       const full7 = peekConv(conv) || conv;
       if (isRecordCtx7Days(full7)) ctx7 = true;
     } catch (e) { /* thiếu dữ liệu → gửi như request thường */ }
+    // ===== BẰNG CHỨNG HAR (đối chiếu 54 request reply_inbox) =====
+    //   • 19/19 request CÓ is_record_ctx_7_days:true        → success:true
+    //   • 24/24 request THIẾU cờ                            → e_code 10 / e_subcode 2018300
+    //        "(#10) Không gửi được tin nhắn do một ứng dụng khác hiện đang kiểm soát thread này."
+    // → Thiếu cờ chính là nguyên nhân phổ biến nhất của (#10), KHÔNG phải app khác giữ thread.
+    // Khi lần gửi trước đã bị (#10) mà request đó thiếu cờ, caller gửi lại ĐÚNG 1 lần kèm cờ
+    // (opts.forceCtx7). (#10) = server chưa gửi → gửi lại không thể sinh tin trùng.
+    if (opts.forceCtx7) ctx7 = true;
 
     const items = normalizePhotoItems(photo);
     if (items.length > 1) {
@@ -2675,13 +2958,21 @@
         dimensions: items.map((x) => ({ width: Number(x.w) || 0, height: Number(x.h) || 0 })),
         send_by_platform: 'web',
       };
+      // [v1.92.5] TRẢ VỀ ĐÚNG NHƯ APP — cờ CHỈ gửi khi dr() đúng.
+      // Bằng chứng trực tiếp trong bundle app: `_app-9331d46f21a84eb1.v6.js`
+      //     j = {action:"reply_inbox", ...(N?.body||{})};
+      //     (0, ev.dr)() && (j.is_record_ctx_7_days = !0);   // ← CÓ ĐIỀU KIỆN
+      // v1.91.80 đổi thành LUÔN gửi dựa trên tương quan trong HAR (19 ca thành công đều có cờ),
+      // nhưng đó là nhiễu: 19 ca đó là chat TRONG 24h (dr() đúng sẵn). Bản thân HAR cũng khớp
+      // code app: 24 ca thiếu cờ = chat ngoài cửa sổ. Gửi cờ khi không đủ điều kiện là bịa
+      // thêm dữ liệu server không mong đợi ⇒ trả lại hành vi gốc của app.
       if (ctx7) jsonBody.is_record_ctx_7_days = true;
-      return { url: url, isJson: true, jsonBody: jsonBody };
+      return { url: url, isJson: true, jsonBody: jsonBody, ctx7: ctx7 };
     }
 
     const fd = new FormData();
     fd.append('action', 'reply_inbox');
-    if (ctx7) fd.append('is_record_ctx_7_days', 'true');
+    if (ctx7) fd.append('is_record_ctx_7_days', 'true'); // [v1.92.5] chỉ khi dr() đúng — xem chú thích nhánh JSON
     fd.append('message', text);
     const p0 = items[0] || photo;
     const fbId0 = (p0 && p0.fbId) || (photo && photo.fbId) || (photo && Array.isArray(photo.fbIds) && photo.fbIds[0]) || '';
@@ -2695,7 +2986,7 @@
       if (p0.h) fd.append('height', String(p0.h));
     }
     fd.append('send_by_platform', 'web'); // request thật của app luôn có (cả text lẫn ảnh)
-    return { url: url, fd: fd, isJson: false };
+    return { url: url, fd: fd, isJson: false, ctx7: ctx7 };
   }
 
   // ⚡ CHẾ ĐỘ NHANH: bắn request API qua cổng điều tiết apiSendLane (64 luồng HTTP song song),
@@ -2713,6 +3004,85 @@
     }
     return false;
   }
+
+  // ===== [v1.91.95] 🔬 MÁY GHI REQUEST GỬI — dò vì sao API bị từ chối còn Ext gửi được =====
+  // Lô 09:10 (1.91.94): API NỀN chạy 1 958 request ⇒ 1 952 bị từ chối, 6 OK; Ext gửi được
+  // 1 148 ca trong CHÍNH những chat API từ chối. Cờ is_record_ctx_7_days đã luôn được gửi,
+  // nên lý do từ chối là thứ HAR hiện có KHÔNG chứa (HAR đó là session của app, không phải
+  // request do Extension phát ra). Máy ghi này bắt đúng cặp (API-thất-bại, Ext-thành-công)
+  // trên CÙNG một chat, để biết khác biệt thật: token, header, hay endpoint.
+  // Không can thiệp kênh gửi: chỉ bọc fetch để ĐỌC, lỗi trong bộ ghi không được ném ra ngoài.
+  const recBuf = [];
+  const REC_MAX = 400;
+  let recOn = false;
+  try { recOn = localStorage.getItem('ssb_rec_send') === '1'; } catch (e) { /* ignore */ }
+  function recFields(body) {
+    try {
+      if (body == null) return '';
+      if (typeof body === 'string') {
+        if (body.charAt(0) === '{') { try { return 'json:' + Object.keys(JSON.parse(body)).join(','); } catch (e) { return 'json?'; } }
+        const out = []; const re = /name="([^"]+)"\r?\n\r?\n([\s\S]*?)\r?\n--/g; let m;
+        while ((m = re.exec(body))) {
+          const k = m[1]; const v = m[2];
+          out.push(k + '=' + (k === 'message' ? '<' + v.length + 'c>' : (v.length > 44 ? v.slice(0, 44) : v)));
+        }
+        return out.join('|');
+      }
+      if (typeof body.forEach === 'function') {
+        const out = []; body.forEach(function (v, k) {
+          out.push(k + '=' + (k === 'message' ? '<' + String(v).length + 'c>' : String(v).slice(0, 44)));
+        });
+        return out.join('|');
+      }
+    } catch (e) { return '?'; }
+    return String(typeof body);
+  }
+  function recPush(e) {
+    if (!recOn) return;
+    try { recBuf.push(e); while (recBuf.length > REC_MAX) recBuf.shift(); } catch (e2) { /* ignore */ }
+  }
+  try {
+    if (!window.__ssbRecFetch__ && typeof window.fetch === 'function') {
+      window.__ssbRecFetch__ = true;
+      const origFetch = window.fetch;
+      window.fetch = function (input, init) {
+        let isSend = false, url = '', f = '', t0 = 0;
+        try {
+          url = typeof input === 'string' ? input : ((input && input.url) || '');
+          isSend = recOn && /\/conversations\/[^/]+\/messages(\?|$)/.test(url) && init && String(init.method || '').toUpperCase() === 'POST';
+          if (isSend) { f = recFields(init.body); t0 = Date.now(); }
+        } catch (e3) { isSend = false; }
+        const p = origFetch.apply(this, arguments);
+        if (isSend) {
+          try {
+            p.then(function (res) {
+              try {
+                res.clone().text().then(function (txt) {
+                  recPush({ ms: Date.now() - t0, st: res.status, u: url.replace(/^https?:\/\/[^/]+/, ''), f: f, r: String(txt).slice(0, 240) });
+                }, function () { recPush({ ms: Date.now() - t0, st: res.status, u: url, f: f, r: '<body?>"' }); });
+              } catch (e4) { /* ignore */ }
+            }, function (err) {
+              recPush({ ms: Date.now() - t0, st: 'ERR', u: url, f: f, r: String(err && err.message || err).slice(0, 140) });
+            });
+          } catch (e5) { /* ignore */ }
+        }
+        return p;
+      };
+    }
+  } catch (e6) { /* ignore */ }
+  try {
+    window.__botfakeSetRec__ = function (on) {
+      recOn = !!on;
+      try { localStorage.setItem('ssb_rec_send', recOn ? '1' : '0'); } catch (e) { /* ignore */ }
+      try { recBuf.length = 0; } catch (e) { /* ignore */ }
+      try { logLine('🔬 Ghi request gửi: ' + (recOn ? 'BẬT' : 'TẮT') + ' — chạy lô nhỏ rồi dán __botfakeDumpRec__()'); } catch (e) { /* ignore */ }
+      return recOn;
+    };
+    window.__botfakeDumpRec__ = function () {
+      try { return JSON.stringify(recBuf, null, 1); } catch (e) { return '[]'; }
+    };
+  } catch (e7) { /* ignore */ }
+  // ===== hết máy ghi =====
 
   function fireApiAndWatch(conv, text, photo) {
     if (photo && !hasValidApiPhoto(photo)) return { ok: false, sent: false, error: 'Không có attachment ảnh cho API' };
@@ -2745,12 +3115,13 @@
         if (typeof AbortController !== 'undefined') {
           ctl = new AbortController();
           opts.signal = ctl.signal;
-          abTimer = setTimeout(() => { try { ctl.abort(); } catch (e0) { /* ignore */ } }, 20000);
+          abTimer = bgClock.after(20000, () => { try { ctl.abort(); } catch (e0) { /* ignore */ } });
         }
         const fetchStartedAt = Date.now();
         if (myRun === runSeq) sendDiag.apiFetchAttempts++;
         try {
           const response = await fetch(req.url, opts);
+          if (response) noteServerClock(response.headers);
           if (myRun === runSeq && response) {
             const statusKey = String(Number(response.status) || 0);
             sendDiag.apiStatusCounts[statusKey] = (sendDiag.apiStatusCounts[statusKey] || 0) + 1;
@@ -2758,18 +3129,20 @@
           }
           return response;
         } finally {
-          if (abTimer) clearTimeout(abTimer);
+          if (abTimer) { try { abTimer(); } catch (eA1) { /* ignore */ } }
           if (myRun === runSeq) {
             const fetchMs = Math.max(0, Date.now() - fetchStartedAt);
             sendDiag.apiFetchMsTotal += fetchMs;
             sendDiag.apiFetchMsMax = Math.max(sendDiag.apiFetchMsMax, fetchMs);
+            const ar = sendDiag.apiFetchSamples;
+            if (Array.isArray(ar)) { ar.push(fetchMs); if (ar.length > 64) ar.shift(); } // [v1.92.10] chống văng cả làn
           }
         }
       };
       let res = await timedFetch(req);
       if (res && res.status === 429 && myRun === runSeq && !state.stopRequested) {
         sendDiag.api429Retries++;
-        await sleep(600);
+        await sleepUntil(Date.now() + retryAfterMs(res, 600)); // [v1.92.9] theo Retry-After, không phải 600 ms cứng
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
           res = await timedFetch(req2);
@@ -2781,9 +3154,10 @@
       try { data = await res.json(); } catch (e) { data = null; parsed = false; }
       if (res.ok && data && data.success) {
         sendDiag.apiSuccess++;
+        resetPageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
         markDelivered(conv.id, 'api'); postSendSideEffects(conv); return;
       } // đã đến nơi — im lặng
-      const msg = (data && (data.message || data.error)) || ('HTTP ' + res.status);
+      let msg = (data && (data.message || data.error)) || ('HTTP ' + res.status);
       if (res.status === 401 || res.status === 403) capturedToken = null;
       const nm = conv.name || conv.id;
       const certainFail = isCertainHttpNotSent(res.status, data, parsed);
@@ -2796,22 +3170,52 @@
         // "(#10)"; HAR có update_global_id chạy sau cả "(#551)"). → PHẢI bù qua kênh chưa thử.
         const win = isWindowClosedError(msg);
         if (win) windowBlocked++;
+        // ===== (#10): thử lại ĐÚNG 1 LẦN KÈM CỜ trước khi kết luận =====
+        // HAR: 24/24 request thiếu is_record_ctx_7_days bị (#10) e_subcode 2018300; 19/19 request
+        // CÓ cờ thì success. Vì vậy nếu request vừa rồi thiếu cờ → bắn lại 1 lần kèm cờ.
+        // (#10) = server CHƯA gửi tin → gửi lại không thể trùng.
+        if (isThreadControlError(msg) && !req.ctx7 && !ctx7Retried[conv.id]) {
+          ctx7Retried[conv.id] = true;
+          const req2 = buildInboxSend(conv, text, photo, { forceCtx7: true });
+          if (!req2.error) {
+            const res2 = await timedFetch(req2);
+            let d2 = null;
+            try { d2 = await res2.json(); } catch (e2) { d2 = null; }
+            if (res2.ok && d2 && d2.success) {
+              sendDiag.apiSuccess++;
+              sendDiag.ctx7RetryOk = (sendDiag.ctx7RetryOk || 0) + 1;
+              resetPageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
+              logLine('🔁 ' + nm + ' — (#10) do THIẾU CỜ ctx-7-days → gửi lại kèm cờ THÀNH CÔNG.');
+              markDelivered(conv.id, 'api'); postSendSideEffects(conv); return;
+            }
+            const msg2 = (d2 && (d2.message || d2.error)) || ('HTTP ' + res2.status);
+            if (d2 && d2.success === false) msg = msg2; // cờ đã có mà vẫn (#10) → chặn thật của chat này
+          }
+        }
         if (isThreadControlError(msg)) {
-          markApiBlockedForPage(conv.pageId || String(conv.id || '').split('_')[0]); // nhớ page này cho các lượt sau
-          if (!batchSkipApi) {
-          batchSkipApi = true; // học nhanh: API bị chặn cấp page (#10 app khác giữ thread, #613…) → chat còn lại trong lô đi thẳng Socket/Ext
-          logLine('⛔ API bị chặn (' + msg + ') — các chat còn lại trong lô sẽ đi thẳng Socket/Ext');
+          // Không blacklist page vì 1 ca: chỉ chặn khi lỗi cấp page lặp liên tiếp.
+          const streak = notePageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
+          // [v1.91.77] TRƯỚC ĐÂY: ca (#10) ĐẦU TIÊN là bật batchSkipApi ⇒ tắt API cho TOÀN BỘ
+          // phần còn lại của lượt (log 11873 tin: "API 8" — chỉ 8 tin đi API, 11865 tin dồn hết
+          // sang Socket). Một ca lẻ không đủ chứng minh API của page bị chặn, nhất là khi (#10)
+          // phần lớn do thiếu cờ ctx-7-days (đã có retry kèm cờ ngay phía trên).
+          // Nay chỉ học khi đã lặp ≥ 2 lần.
+          if (!batchSkipApi && streak >= 2) {
+            batchSkipApi = true;
+            logLine('⛔ API bị chặn lặp (' + clip(msg, 80) + ') — các chat còn lại trong lô sẽ đi thẳng Socket/Ext');
           }
         }
         // BÁO RÕ KẾT QUẢ THẬT — không bao giờ "báo gửi" xong im lặng khi request đã bị từ chối.
         // Bù ĐÚNG 1 lần/kênh qua kênh CHƯA thử (Ext → Socket — đúng plan của app).
         logLine('⚠ ' + nm + ' — API từ chối (' + clip(msg, 90) + ')'
           + (win ? ' — ngoài cửa sổ 24h' : ''));
-        scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + clip(msg, 90) + ')', ['api']);
+        scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + clip(msg, 90) + ')', ['api'],
+          { ambiguous: true, via: 'api', sentAt: Date.now() });
       } else {
         sendDiag.apiUnknown++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-        logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — KHÔNG gửi lại để tránh trùng');
+        logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — kiểm chứng lịch sử trước khi bù');
+        scheduleUncertainVerify(conv, text, photo, Date.now(), msg);
       }
     }).then((laneRes) => {
       // lane nuốt lỗi văng ra từ fetch (mạng / abort quá hạn 20s) thành {ok:false,error:'Lỗi kênh:…'}
@@ -2822,13 +3226,15 @@
         && !deliveredIds[conv.id] && !finalFailedIds[conv.id] && !uncertainIds[conv.id]) {
         sendDiag.apiUnknown++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-        logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng/quá hạn) — KHÔNG gửi lại để tránh trùng');
+        logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng/quá hạn) — kiểm chứng lịch sử trước khi bù');
+        scheduleUncertainVerify(conv, text, photo, Date.now(), 'lỗi mạng/quá hạn');
       }
     }).catch(() => {
       if (myRun !== runSeq) return;
       sendDiag.apiUnknown++;
       if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-      logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng) — KHÔNG gửi lại để tránh trùng');
+      logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng) — kiểm chứng lịch sử trước khi bù');
+      scheduleUncertainVerify(conv, text, photo, Date.now(), 'lỗi mạng');
     });
     return { ok: true, id: '', sendBy: 'api', sent: true, fired: true };
   }
@@ -2838,9 +3244,9 @@
   async function fetchT(url, opts, ms) {
     if (typeof AbortController === 'undefined') return fetch(url, opts);
     const ctl = new AbortController();
-    const t = setTimeout(() => { try { ctl.abort(); } catch (e) { /* ignore */ } }, ms || 30000);
+    const t = bgClock.after(ms || 30000, () => { try { ctl.abort(); } catch (e) { /* ignore */ } });
     try { return await fetch(url, Object.assign({}, opts, { signal: ctl.signal })); }
-    finally { clearTimeout(t); }
+    finally { try { t(); } catch (eT) { /* ignore */ } }
   }
 
   // Đúng request mà _app-...js gửi khi nhắn tin thường (executeByApi + buildRequestBody):
@@ -2858,7 +3264,7 @@
         : { method: 'POST', body: rObj.fd, headers: { Accept: 'application/json' }, credentials: 'include' });
       let res = await fetchT(req.url, makeFetchOpts(req), 30000);
       if (res && res.status === 429 && !state.stopRequested) {
-        await sleep(600);
+        await sleepUntil(Date.now() + retryAfterMs(res, 600)); // [v1.92.9] theo Retry-After
         const req2 = buildInboxSend(conv, text, photo);
         if (!req2.error) {
           res = await fetchT(req2.url, makeFetchOpts(req2), 30000);
@@ -2885,7 +3291,11 @@
         ok: false,
         sent: false,
         error: (data && (data.message || data.error)) || ('HTTP ' + res.status),
-        code: data && data.message_code,
+        // HAR: response lỗi của Pancake dùng e_code / e_subcode (KHÔNG có message_code):
+        //   {"e_code":10,"e_subcode":2018300,"message":"(#10) Không gửi được…","success":false}
+        //   {"e_code":551,"e_subcode":1545041,"message":"(#551) Người này hiện không có mặt.","success":false}
+        code: (data && (data.e_code != null ? data.e_code : data.message_code)) || null,
+        subcode: (data && data.e_subcode != null) ? data.e_subcode : null,
       };
     } catch (e) {
       // lỗi mạng: request có thể đã tới server → KHÔNG rõ — không được thử kênh khác
@@ -2908,6 +3318,12 @@
     }
   }
   let batchSkipApi = false; // API bị chặn CẤP PAGE (#10 app khác giữ thread, #613, rate limit…) → chat sau đi thẳng Socket/Ext
+  // [v1.91.93] ĐẾM LỖI THREAD-CONTROL TRƯỚC KHI TẮT API CẢ LÔ.
+  // Lô 08:48–08:51 (1.91.92): `[API: 17 · Ext: 1840]` — API gần như không được dùng dù đứng
+  // đầu thứ tự làn. Nguyên nhân: sendOne bật `batchSkipApi` ngay ở lỗi thread-control ĐẦU TIÊN
+  // (một ca #613/rate-limit lẻ) ⇒ từ đó MỌI chat bị tước API, dồn hết sang Extension (bị tuần
+  // tự hoá ~10–20 tin/giây). Nay cần 3 ca liên tiếp mới tắt API cho lô; một ca lẻ không đủ.
+  let apiThreadBlockStreak = 0;
 
   // NHỚ THEO PAGE QUA CÁC LƯỢT: page từng bị API chặn cấp page (#10 app khác giữ
   // thread…) thì các lượt SAU đi thẳng Socket/Ext ngay từ con đầu, không bắn API thử
@@ -2926,6 +3342,29 @@
     if (!pageId) return;
     apiBlockedPages[String(pageId)] = Date.now();
     try { sessionStorage.setItem(API_BLOCKED_PAGES_KEY, JSON.stringify(apiBlockedPages)); } catch (e) { /* ignore */ }
+  }
+
+  /* ---- CHẶN API CẤP PAGE: chỉ khi lỗi LẶP, không chặn vì 1 ca lẻ ----
+   * Bản cũ: 1 lần (#10) là markApiBlockedForPage() → page mất API 4 GIỜ. Với lô lớn, một
+   * ca lỗi lẻ (hoặc một request thiếu cờ ctx-7-days) đẩy toàn bộ page sang Socket/Extension
+   * — chậm hơn nhiều và dễ sinh bù chồng. Nay: đếm số lần liên tiếp, đủ ngưỡng mới chặn;
+   * một ca thành công là reset streak (chứng minh API của page vẫn sống).
+   * HAR: 24 ca (#10) liên tiếp trên MỘT page đều thiếu cờ → đây chính là ca "lỗi lẻ" đó. */
+  const PAGE_BLOCK_STREAK_TO_BLOCK = 3;
+  const pageBlockStreak = {}; // pageId → số lần bị từ chối cấp page LIÊN TIẾP
+  function notePageRejection(pageId) {
+    if (!pageId) return 0;
+    const k = String(pageId);
+    pageBlockStreak[k] = (pageBlockStreak[k] || 0) + 1;
+    const n = pageBlockStreak[k];
+    if (n >= PAGE_BLOCK_STREAK_TO_BLOCK) {
+      markApiBlockedForPage(k);
+      pageBlockStreak[k] = 0;
+    }
+    return n;
+  }
+  function resetPageRejection(pageId) {
+    if (pageId) delete pageBlockStreak[String(pageId)];
   }
 
   // NGOÀI CỬA SỔ 24H — API từ chối "(#551) Người này hiện không có mặt" / "(#10)…ngoài khoảng
@@ -3249,7 +3688,7 @@
     const cleanupRace = (keepPendingForScroll) => {
       settled = true;
       if (wsTimer) { clearTimeout(wsTimer); wsTimer = null; }
-      if (wsPoll) { clearInterval(wsPoll); wsPoll = null; }
+      if (wsPoll) { try { wsPoll(); } catch (eStop) { /* ignore */ } wsPoll = null; }
       if (!keepPendingForScroll) {
         try {
           if (mqtt && mqtt.PENDING_MESSAGES && pKey) {
@@ -3272,15 +3711,27 @@
     const cutWsShort = () => {
       if (!settled && wsResolveRef) {
         if (wsTimer) { clearTimeout(wsTimer); wsTimer = null; }
-        if (wsPoll) { clearInterval(wsPoll); wsPoll = null; }
+        if (wsPoll) { try { wsPoll(); } catch (eStop) { /* ignore */ } wsPoll = null; }
         const late = peekFastGlobalId(full, full, badGid);
         if (late) { saveCache(late); cleanupRace(false); wsResolveRef(String(late)); }
         else { cleanupRace(true); wsResolveRef(null); }
       }
     };
 
-    const extWaitMs = 10000;
-    const wsWaitMs = hasExtFinder ? extWaitMs : 6000;
+    /* [v1.92.35] ĐUÔI LÔ — CA SERVER ĐÃ NÓI "KHÔNG CÓ global_id" (lô 14:28, 8 851 chat):
+     * 287 ca rơi vào nhóm này. HTTP GET /messages đã trả LỜI RÕ là hội thoại không có gid,
+     * nhưng code vẫn giữ chúng chờ trọn 10 s cho WebSocket + Extension dò lại ⇒ `wave 14`
+     * đứng 23 449 ms với `main bay 0 · Socket/page active 0/0`, đuôi lô ~10 chat/s.
+     * Bằng chứng: đúng nhóm này Extension trả "không có gid" 287/287 lần ⇒ 10 s đó là chờ suông.
+     * Nay ở lô lớn: chỉ cho 1,5 s (đủ cho `peekFastGlobalId` 60 ms + Ext phản hồi nhanh); không ra
+     * thì đi tiếp y như cũ (gidUnknown → làn API bằng conversation_id). Lô nhỏ giữ nguyên 10 s
+     * để dò kỹ. Tắt nhanh: GID_NOGID_SHORT_WAIT_MS = 0. */
+    const GID_NOGID_SHORT_WAIT_MS = 1500;
+    const serverSaysNoGid = !!(ctx && (ctx.httpState === 'ok-no-gid' || ctx.gidDiscoveryState === 'server-no-gid'));
+    const shortNoGidWait = !!(isLargeBatch && serverSaysNoGid && GID_NOGID_SHORT_WAIT_MS > 0);
+    if (shortNoGidWait) gidStats.shortNoGidWait++;
+    const extWaitMs = shortNoGidWait ? GID_NOGID_SHORT_WAIT_MS : 10000;
+    const wsWaitMs = hasExtFinder ? extWaitMs : (shortNoGidWait ? GID_NOGID_SHORT_WAIT_MS : 6000);
     const extStartDelayMs = discoveryPass === 2 ? 0 : 80;
     const raceTasks = [];
 
@@ -3303,8 +3754,8 @@
             resolve(String(nowGid));
             return;
           }
-          wsPoll = setInterval(() => {
-            if (settled) { if (wsPoll) { clearInterval(wsPoll); wsPoll = null; } return; }
+          wsPoll = bgClock.every(60, () => {
+            if (settled) { if (wsPoll) { try { wsPoll(); } catch (eStop) { /* ignore */ } wsPoll = null; } return; }
             const hitGid = peekFastGlobalId(full, full, badGid);
             if (hitGid) {
               foundSource = 'ws';
@@ -3313,13 +3764,13 @@
               cleanupRace(false);
               resolve(String(hitGid));
             }
-          }, 60);
+          });
           const pendingExpireTimer = setTimeout(() => {
             try { if (mqtt && mqtt.PENDING_MESSAGES && pKey) delete mqtt.PENDING_MESSAGES[pKey]; } catch (e2) { /* ignore */ }
           }, 30000);
           wsTimer = setTimeout(() => {
             wsTimer = null;
-            if (wsPoll) { clearInterval(wsPoll); wsPoll = null; }
+            if (wsPoll) { try { wsPoll(); } catch (eStop) { /* ignore */ } wsPoll = null; }
             const lateGid = peekFastGlobalId(full, full, badGid);
             if (lateGid) {
               foundSource = 'ws';
@@ -3353,16 +3804,16 @@
         }));
       } else if (typeof mqtt.findGlobalId === 'function') {
         raceTasks.push(new Promise((resolve) => {
-          const timer = setTimeout(() => resolve(null), wsWaitMs);
+          const timer = bgClock.after(wsWaitMs, () => resolve(null));
           Promise.resolve()
             .then(() => mqtt.findGlobalId(pageId, threadId))
             .then((r) => {
-              clearTimeout(timer);
+              timer();
               const val = (r && r.success && r.data && String(r.data) !== badGid) ? String(r.data) : null;
               if (val) { foundSource = 'ws'; saveCache(val); if (ctx) ctx.gidFromServerOrCache = false; cleanupRace(false); }
               resolve(val);
             })
-            .catch(() => { clearTimeout(timer); resolve(null); });
+            .catch(() => { timer(); resolve(null); });
         }));
       }
     }
@@ -3371,7 +3822,7 @@
     // một nhịp ngắn trước; nếu WS đã tìm thấy thì nhánh này tự hủy, không tốn lệnh Extension.
     if (hasExtFinder && threadId) {
       raceTasks.push((async () => {
-        if (extStartDelayMs) await sleep(extStartDelayMs);
+        if (extStartDelayMs) await sleepUntil(Date.now() + extStartDelayMs, 'gid'); // [v1.92.9] WS có gid trước thì khỏi chờ đủ 80 ms
         if (settled || state.stopRequested) {
           return peekFastGlobalId(full, full, badGid) || null;
         }
@@ -3391,7 +3842,7 @@
           resolve(String(hitNow));
           return;
         }
-        const timer = setTimeout(() => {
+        const timer = bgClock.after(extWaitMs, () => {
           if (extSettled) return;
           extSettled = true;
           // Timeout chỉ có nghĩa Extension chưa trả lời kịp — KHÔNG phải "không có
@@ -3400,9 +3851,9 @@
           noteGidExtResult(false, true, Date.now() - extStartedAt);
           cutWsShort();
           resolve(null);
-        }, extWaitMs);
+        });
         const finishExt = (val, source) => {
-          clearTimeout(timer);
+          try { timer(); } catch (eT3) { /* ignore */ }
           const alreadySettled = extSettled;
           extSettled = true;
           const elapsedMs = Date.now() - extStartedAt;
@@ -3517,7 +3968,7 @@
             const errStr0 = (d0 && typeof d0 === 'object') ? String(d0.errorMessage || d0.error || d0.reason || '') : '';
             const isConnErr0 = /REOPEN_BROWSER|unableToConnect|extensionDisconnected/i.test(errStr0);
             if (!settled && !extSettled && !state.stopRequested && !isConnErr0 && res && (res.success || (d0 && typeof d0 === 'object'))) {
-              await sleep(250);
+              await sleepUntil(Date.now() + 250, 'gid'); // [v1.92.9] thức ngay khi cache/WS có gid mới
               if (settled || extSettled || state.stopRequested) { onFinderNull(); return; }
               const hitMid1 = peekFastGlobalId(full, full, badGid);
               if (hitMid1) { finishExt(hitMid1, 'cache'); return; }
@@ -3605,7 +4056,11 @@
       const httpOkNoGid = !!((ctx.httpState === 'ok-no-gid' || ctx.gidDiscoveryState === 'server-no-gid')
         || (ccEntry && ccEntry.fetched && !ccEntry.gid));
       const batchSettled = !!(pageId && !batchGidPromises[pageId]);
-      if (isLargeBatch && httpOkNoGid && batchSettled && extFinderRespondedNoGid) {
+      // [v1.92.35] `|| shortNoGidWait`: khi ta CHỦ ĐỘNG rút ngắn thời gian dò (server đã trả lời
+      // "không có gid"), thì không đòi thêm bằng chứng "Ext cũng trả lời không có gid" — chính ta
+      // đã không cho Ext đủ thời gian trả lời. Giữ nguyên hệ quả đã đo ở lô 14:28: nhóm này KHÔNG
+      // gửi Ext thread-only (vô ích, chỉ trả 1545041) mà đi thẳng làn API.
+      if (isLargeBatch && httpOkNoGid && batchSettled && (extFinderRespondedNoGid || shortNoGidWait)) {
         ctx.noGidConfirmedByExt = true;
         ctx.gidGateSkipExt = true;
         ctx.gidDiscoveryState = 'ext-responded-no-gid';
@@ -3666,7 +4121,7 @@
     const nextAt = Math.max(now, (socketLastPublishAt[pid] || 0) + SOCKET_MIN_PACE_MS);
     socketLastPublishAt[pid] = nextAt;
     const waitMs = nextAt - now;
-    if (waitMs > 0) await sleep(waitMs);
+    if (waitMs > 0) await sleepUntil(Date.now() + waitMs); // [v1.92.9] nhịp phát Socket giữ nguyên, chỉ ngắt được khi Dừng
   }
 
   function isSocketAlive(sock) {
@@ -3700,11 +4155,18 @@
       const s = helper && helper.SOCKETS && helper.SOCKETS[pageId];
       if (!isSocketAlive(s)) return s;
       if (isSocketSynced(s)) {
-        if (sawJustSynced) await sleep(180);
+        if (sawJustSynced) await sleepUntil(Date.now() + 180, 'sock-sync'); // [v1.92.9]
         return helper && helper.SOCKETS && helper.SOCKETS[pageId];
       }
       sawJustSynced = true;
-      await sleep(60);
+      // Điều kiện sync = (connectAt + 1000 ms) VÀ (requestId ≥ 1). Mốc thời gian ngủ ĐÚNG hạn,
+      // phần requestId chỉ cần nhịp 25 ms vì frame WS không móc được sự kiện.
+      {
+        const mark = (s && typeof s.connectAt === 'number') ? (s.connectAt + 1000) : 0;
+        const now = Date.now();
+        const wakeAt = mark > now ? Math.min(deadline, mark) : Math.min(deadline, now + 25);
+        await sleepUntil(wakeAt, 'sock-sync');
+      }
     }
     return helper && helper.SOCKETS && helper.SOCKETS[pageId];
   }
@@ -3812,36 +4274,91 @@
     };
     await paceSocketPublish(pageId);
     const publishedAt = Date.now();
-    const nextReqId = (typeof sock.requestId === 'number') ? (sock.requestId + 1) : null;
-    const ackWaitMs = (batchStats && batchStats.total > 0 && batchStats.total <= 30) ? 8000 : 15000;
+    // [v1.91.76] Log lượt 10k: ACK TB 2317ms · MAX 15544ms, bucket ≥5s có 420 ca ⇒ ngưỡng
+    // 15000ms cắt oan đúng những ACK chậm nhất (mỗi ca bị cắt thành "no-ACK" rồi phải kiểm
+    // chứng lịch sử). Nới lên 20000ms cho lô lớn; lô ≤30 chat vẫn 8000ms cho nhanh.
+    // [v1.91.87] HẠN CHỜ THÍCH ỨNG thay cho chờ cứng 8s/20s.
+    // Lô 5 897 tin: ACK TB 1 507ms · max 3 900ms ⇒ chờ 8–20s là dư gấp nhiều lần.
+    // Kênh ACK chết thì trễ đúng bằng hạn chờ rồi vẫn no-ACK ⇒ chờ dài chỉ làm chậm.
+    // [v1.92.2] HẠN CHỜ ACK THEO ĐÚNG SỐ ĐO HAR (thay vì 2,5–20s như trước).
+    // Đo trực tiếp 3 HAR có `_webSocketMessages`, ghép `request_id` của /ls_req với /ls_resp:
+    //   batmesss   13/14 khớp · p50 234ms · p90 256ms · max 300ms
+    //   guisot     26/27 khớp · p50 326ms · p90 390ms · max 1 531ms
+    //   guikhachcu  2/5  khớp · p50 414ms (HAR cũ, ít mẫu)
+    //   khoảng cách giữa 2 lệnh gửi liên tiếp: min 0ms ⇒ FB nhận bắn dồn, không cần nhịp.
+    // ⇒ ACK thật về sau ~0,3s; giữ slot 2,5–7,5s chỉ để chờ là tự bóp làn:
+    //   lô 09:34 có 192 làn nhưng chỉ phát 60 tin/s ⇒ mỗi lệnh chiếm ~3,2s (khớp comment "192 ÷ 3,43s").
+    // Nay: hạn chờ = 3×p90 nhưng CHẶN trong [1 200ms, 3 000ms]. ACK về muộn hơn vẫn không mất:
+    // ca quá hạn ⇒ no-ACK ⇒ đăng ký kiểm chứng lịch sử nền (chỉ nâng ⚠→✅, KHÔNG gửi lại).
+    // HAR cũng cho thấy ~5% request không có /ls_resp (1/14 và 1/27) nên ca no-ACK là có thật,
+    // nhưng chúng phải được xử lý bằng kiểm chứng nền, không phải bằng cách giữ làn 20 giây.
+    // Trần 3 000 ms: ACK thật của Pancake về sau ~0,3 s (HAR); giữ làn lâu hơn chỉ bóp thông lượng.
+    // Ca vượt trần ⇒ 'noack' ⇒ kiểm chứng lịch sử, KHÔNG bắn lại.
+    // [v1.92.24] TRẦN CHỜ ACK PHẢI BÁM SỐ ĐO — KHÔNG ĐƯỢC CHẶN DƯỚI p90.
+    // Lô 09:46 (188 chat, 1.92.22): ACK TB 2 609 ms · p50/p90 2 490/3 086 ms · trần CỨNG 3 000 ms
+    // ⇒ hạn chờ 3 000 < p90 ⇒ 16 ca "no-ACK" OAN (thật ra ACK chỉ chậm hơn 3 s), kéo theo 11 chuỗi
+    // kiểm chứng + bắn cứu ⇒ GỬI TRÙNG. Nay trần = p90 × 1,6, kẹp trong [3 000, 6 000]:
+    // p90 nhỏ như HAR (256 ms) vẫn 3 000 ms y như cũ; p90 lớn thì nới đúng theo số đo.
+    const ackCeiling = Math.max(3000, Math.min(6000, Math.round(sockAckP90() * 1.6)));
+    const ackWaitMs = Math.min(ackCeiling, Math.max(1200, Math.round(sockAckP90() * 3)));
+    try { if (pageId) pageLastAckWait[pageId] = ackWaitMs; } catch (e0) { /* ignore */ }
+    /* ===== SỬA GỐC "MẤT ACK" Ở LÔ LỚN =====
+     * Trong _app (@818834) hàm publish() làm đúng thế này:
+     *     i = { app_id, payload, request_id: ++sock.requestId, type }
+     *     this.PENDING_MESSAGES[`${pageId}_${i.request_id}`] = { callback, clearTimeout }
+     *     instance.publish('/ls_req', JSON.stringify(i))
+     * và khi /ls_resp về: request_id được echo lại → helper tra đúng key đó để resolve.
+     *
+     * Bản cũ ĐOÁN id của chính mình bằng `sock.requestId + 1` ĐỌC TRƯỚC khi gọi publish
+     * (cách nhau một microtask Promise.resolve().then). Với 192 làn cùng một page, hàng chục
+     * frame khác chen vào giữa ⇒ id đoán gần như LUÔN SAI. Tệ hơn: khi hết 15s nó
+     * clearTimeout + delete PENDING_MESSAGES[key đoán] — tức entry của TIN KHÁC — làm promise
+     * của tin kia không bao giờ resolve (timer của nó vừa bị xoá) ⇒ chat treo "chờ ACK" tới
+     * watchdog 180s. Đây chính là "mất ACK" hàng loạt ở lô 10k.
+     *
+     * Nay:
+     *   1) đọc requestId NGAY SÁT lệnh gọi (không await/microtask ở giữa ⇒ chính xác tuyệt đối
+     *      vì request_id = ++sock.requestId xảy ra đồng bộ bên trong publish);
+     *   2) timeout chỉ dọn entry CỦA CHÍNH MÌNH, và chỉ khi còn đúng object tham chiếu đó —
+     *      không bao giờ chạm vào entry của tin khác.
+     */
+    let myKey = null;
+    let myEntry = null;
     const publishPromise = new Promise((resolve) => {
       let done = false;
-      const timer = setTimeout(() => {
+      const timer = bgClock.after(ackWaitMs, () => {
         if (done) return;
         done = true;
         try {
-          if (nextReqId !== null && helper.PENDING_MESSAGES) {
-            const k = pageId + '_' + nextReqId;
-            if (helper.PENDING_MESSAGES[k]) {
-              clearTimeout(helper.PENDING_MESSAGES[k].clearTimeout);
-              delete helper.PENDING_MESSAGES[k];
-            }
+          if (myKey && helper.PENDING_MESSAGES && helper.PENDING_MESSAGES[myKey] === myEntry) {
+            clearTimeout(myEntry.clearTimeout);
+            delete helper.PENDING_MESSAGES[myKey];
           }
         } catch (e0) { /* ignore */ }
         resolve({ success: false, data: null, timedOut: true });
-      }, ackWaitMs);
-      Promise.resolve()
-        .then(() => helper.publish(pageId, '/ls_req', frame, 3))
+      });
+      let publishRet = null;
+      try {
+        const rid = (typeof sock.requestId === 'number') ? sock.requestId + 1 : null;
+        publishRet = helper.publish(pageId, '/ls_req', frame, 3); // gán request_id = ++sock.requestId
+        if (rid !== null) {
+          myKey = pageId + '_' + rid;
+          myEntry = (helper.PENDING_MESSAGES && helper.PENDING_MESSAGES[myKey]) || null;
+        }
+      } catch (ePub) {
+        publishRet = null;
+      }
+      Promise.resolve(publishRet)
         .then((res) => {
           if (done) return;
           done = true;
-          clearTimeout(timer);
+          try { timer(); } catch (eT1) { /* ignore */ }
           resolve(res);
         })
         .catch(() => {
           if (done) return;
           done = true;
-          clearTimeout(timer);
+          try { timer(); } catch (eT2) { /* ignore */ }
           resolve(null);
         });
     });
@@ -3873,6 +4390,19 @@
       if (hasPhoto && hasText && failed.length > 0 && replaced.length > 0) {
         recordSocketAckOutcome('rejected', Date.now() - publishedAt, pageId);
         return { kind: 'photo_failed_text_ok' };
+      }
+      /* [v1.92.18] CHỐT ✅ PHẢI CÓ BẰNG CHỨNG DƯƠNG TÍNH.
+       * Trước đây mọi payload không có markOptimisticMessageFailed đều rơi xuống 'ok' — kể cả
+       * payload mang cờ lỗi (error / error_code / success:false). Ca đó bị chốt ✅ ⇒ không kiểm
+       * chứng lịch sử, không bù ⇒ MẤT TIN IM LẶNG (đúng loại lỗi tệ nhất).
+       * Nay: không có replaceOptimsiticMessage + có cờ lỗi ⇒ 'noack' = KHÔNG RÕ.
+       * 'noack' đi đúng đường an toàn sẵn có: chốt ⚠, kiểm chứng lịch sử nền, KHÔNG BAO GIỜ
+       * bắn lại (chỉ ⚠→✅ hoặc bắn cứu khi lịch sử chứng minh chưa tới). */
+      const errFlag = !!(resp && (resp.error || resp.error_code != null
+        || (Array.isArray(resp.errors) && resp.errors.length) || resp.success === false));
+      if (!replaced.length && errFlag) {
+        recordSocketAckOutcome('noack', Date.now() - publishedAt, pageId);
+        return { kind: 'noack', publishedAt: publishedAt };
       }
       recordSocketAckOutcome('ok', Date.now() - publishedAt, pageId);
       return { kind: 'ok' };
@@ -4121,7 +4651,7 @@
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
         sendDiag.sockRetry++;
-        await sleep(220 + Math.floor(Math.random() * 130));
+        await sleepUntil(Date.now() + 220 + Math.floor(Math.random() * 130), 'delivered'); // [v1.92.9] đã giao thì thức ngay
         if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         // Kiểm tra xem trong nhịp nghỉ đó WebSocket threadMappingStoreV2 có nạp được global_id mới hơn không
@@ -4206,6 +4736,10 @@
         return {
           ok: false,
           sent: false,
+          // [v1.92.30] KHUNG `markOptimisticMessageFailed` KHÔNG nói nó thuộc tin nào ⇒ đây là
+          // phán đoán, không phải bằng chứng "chưa gửi". Cổng chứng minh vắng mặt sẽ quyết định
+          // trước khi bắn lần 2 (xem proveAbsentBeforeBu) — đây là nguồn lặp của bản cũ.
+          ambiguous: true,
           recipientUnavailable: isConfirmedUnavailable,
           error: isConfirmedUnavailable
             ? 'Socket: FB từ chối nhận tin (khách hiện không có mặt / đã khóa nick)'
@@ -4252,6 +4786,10 @@
         }
         if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
         sockFiredPending.add(conv.id);
+        try {
+          const _st = sockRouteOf((conv.pageId || String(conv.id || '').split('_')[0]));
+          if (_st) _st.sent++;
+        } catch (eSt) { /* ignore */ }
         ctx.ownsOutbound = true; // Ext bù ảnh trong settleSocketResult dùng chung khóa này
         const myRun = runSeq;
         const finalizeSockBg = (res) => {
@@ -4260,6 +4798,8 @@
           const nm = conv.name || conv.id;
           if (res && res.ok) {
             reopenUncertain(conv.id); // ⚡ [FIX-4b] hạ ⚠ nếu watchdog đã chốt trước khi ACK về
+            // [v1.92.26] lần thử lại mà cứu được ⇒ giả thuyết "burst-reject" còn sống ⇒ mở ngân sách
+            if (ctx && ctx.isSocketRetryPass) sockRetryBudgetNote(sockRetryBudgetState, 'saved', 0);
             markDelivered(conv.id, 'socket');
             postSendSideEffects(conv);
             return;
@@ -4267,18 +4807,71 @@
           if (res && (res.uncertain || res.sent === 'maybe')) {
             if (res.noAck) scheduleSocketVerify(conv, text, photo, res.publishedAt || (Date.now() - 15000));
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-            logLine('⚠ ' + nm + ' — ' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)');
+            logFailGrouped(nm, '' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)', '⚠', conv.id);
+            return;
+          }
+          if (res && res.deferredToSocketRetry && myRun === runSeq && !state.stopRequested) {
+            // [v1.92.19] khôi phục "bắn lại Socket 1 lần" cho đường bắn-nhả (xem chú thích đầu khối)
+            releaseOutbound(conv.id);
+            // [v1.92.26] NGÂN SÁCH THỬ LẠI (xem sockRetryBudgetAllows): lô 10:04 thử lại 861
+            // lần, cứu 0 (ACK rejected 1 722 = 861 x 2) — tức 27% lưu lượng socket là vô ích.
+            // Đã đo đủ thì chốt ❌ ngay, ghi rõ lý do, KHÔNG bắn thêm lệnh chắc chắn hỏng.
+            const rejectPctBg = socketRejectPctRecent(); // [v1.92.28] cửa sổ 200 ACK gần nhất (-1 = chưa đủ mẫu)
+            if (!sockRetryBudgetAllows(sockRetryBudgetState)) {
+              sockRetryBudgetNote(sockRetryBudgetState, 'skipped', rejectPctBg);
+              sendDiag.sockRetryBudgetSkipped++;
+              /* [v1.92.41] Ngân sách này chỉ có quyền nói "KHÔNG BẮN LẠI SOCKET" — không có quyền
+               * kết luận "chat này không gửi được". FB vừa TỪ CHỐI ĐỨT KHOÁT ⇒ chưa có tin nào
+               * được gửi ⇒ thử Extension là AN TOÀN (không thể trùng). Log 16:11: 3 311 ca bị
+               * chốt ❌ ở đúng nhánh này trong khi làn Ext trống hoàn toàn. */
+              const hasExt1545 = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+              if (hasExt1545 && extFallback1545Allowed()) {
+                extTry1545.tried++;
+                scheduleBuRetry(conv, text, photo, nm,
+                  'Socket bị FB từ chối (ngân sách thử lại Socket đã đóng)', ['socket'],
+                  { ambiguous: false, fromUncertain: true, via: 'socket', sentAt: Date.now() });
+                logFailGrouped(nm, 'Socket: FB từ chối — KHÔNG bắn lại Socket, chuyển Extension 1 lần '
+                  + '(tin chưa đi nên không thể trùng)', '🛟', conv.id);
+                return;
+              }
+              if (hasExt1545 && !extFallback1545Allowed()) {
+                // Đã đo xong: Extension cũng không cứu được ⇒ ⚠ "chưa gửi" để người dùng gửi tay
+                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+                logFailGrouped(nm, 'Socket: FB từ chối · đã đo 200 ca thì Extension cũng bị chặn ⇒ GIỮ ⚠ (chưa gửi), vào danh sách gửi tay', '⚠', conv.id);
+                return;
+              }
+              if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+              logFailGrouped(nm, 'Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử '
+                + sockRetryBudgetState.tried + ' ca, cứu được 0, từ chối gần đây '
+                + (sockRetryBudgetState.closePct >= 0 ? sockRetryBudgetState.closePct + '%' : '—')
+                + ' ⇒ thử nữa chỉ tốn lệnh)', '❌', conv.id);
+              return;
+            }
+            if (sockRetryBudgetState.closed) sockRetryBudgetNote(sockRetryBudgetState, 'probe', rejectPctBg);
+            sockRetryBudgetNote(sockRetryBudgetState, 'tried', rejectPctBg);
+            sendDiag.sockWaveRetry = (sendDiag.sockWaveRetry || 0) + 1;
+            logFailGrouped(nm, 'Socket bị từ chối lần 1 — bắn lại 1 lần qua Socket (thoát burst-reject)…', '🔁', conv.id);
+            const ctx2 = Object.assign({}, res.deferredCtx || {}, {
+              isSocketRetryPass: true, socketRetriedOnce: true,
+              wave200Mode: false, sockFired: true, prioritySocket: true, fastOnly: false,
+            });
+            socketWaveRetryLane(() => sendViaSocket(conv, text, photo, ctx2)).catch(() => { /* finalize của lần 2 tự chốt */ });
             return;
           }
           releaseOutbound(conv.id); // FB từ chối / chắc fail → nhả khóa để bù kênh khác (không sót)
           if (res && !res.recipientUnavailable && res.sent === false && (res.error || '') !== 'Đã dừng') {
             // Frame CHƯA HỀ được bắn lên FB (ví dụ Socket không kết nối hoặc lỗi xin fbId ảnh khi retry)
             // và khách KHÔNG phải nick khóa → chuyển bù qua Extension để không bao giờ sót khách sống!
-            logLine('⚠ ' + nm + ' — ' + (res.error || 'Socket không kết nối') + ' (xác nhận nền) — chuyển bù qua Extension');
+            logFailGrouped(nm, (res.error || 'Socket không kết nối') + ' (xác nhận nền) — chuyển bù qua Extension', '⚠', conv.id);
             scheduleBuRetry(conv, text, photo, nm, res.error || 'Socket không kết nối', ['socket']);
           } else {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-            logLine('❌ ' + nm + ' — ' + ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)');
+            // [v1.91.76] GHI NHỚ KHÁCH KHÔNG NHẬN ĐƯỢC — nhánh "xác nhận nền" trước đây KHÔNG
+            // lưu gì (TỔNG HỢP in "người nhận rejected cuối 0" dù có hàng nghìn ca). Hệ quả:
+            // lượt sau vẫn gửi tiếp vào đúng những chat chết đó, và trong lượt vẫn retry vô ích.
+            // Log thực tế 10k: 3744 lỗi, retry 3302 lần cứu được 0, unavailable ghi nhận 0.
+            if (res && res.recipientUnavailable) sendDiag.recipientUnavailable++;
+            logFailGrouped(nm, ((res && res.error) || 'Socket thất bại') + ' (xác nhận nền)', '❌', conv.id);
           }
         };
         const settleAndFinalize = (rawKind) => {
@@ -4326,6 +4919,9 @@
           ctx.nonReusableFbId = null;
           ctx.nonReusableFbIds = null;
         }
+        // Bấm Dừng: mọi lane đều resolve { ok:false, error:'Đã dừng' } mà KHÔNG gọi hàm trong hàng
+        // (xem start() của makeLane/makeAdaptivePriorityLane) ⇒ .then bên dưới tự gọi
+        // notifySlotStarted(false) ⇒ slotStartedPromise luôn được giải phóng, không treo worker.
         const slotStarted = await slotStartedPromise;
         if (!slotStarted) {
           sockFiredPending.delete(conv.id);
@@ -4373,6 +4969,10 @@
     // chưa hề bắn lệnh Ext nào nên chuyển Socket/API là an toàn, không trùng.
     if (isExtBreakerOpen()) {
       extTimeoutStats.skipped++;
+      sendDiag.extOverloadSkips++; // [v1.92.40] đếm đúng chỗ (trước đây chỉ khai báo, không ai tăng)
+      // [v1.92.40] Ghi dấu lên chat: nó CHƯA hề được gửi qua Ext, chỉ bị bộ ngắt chặn. Nếu không
+      // còn kênh nào khác, chỗ chốt ❌ sẽ dựa vào dấu này để HẸN THỬ LẠI thay vì chốt oan.
+      try { conv.__extSkippedOverload = true; } catch (eSk) { /* ignore */ }
       return {
         ok: false, sent: false, skipExt: true, extBreakerOpen: true,
         error: 'Extension đang quá tải (đang nghỉ hồi sức) — tạm bỏ qua Ext để thử kênh khác',
@@ -4488,7 +5088,22 @@
         }
         extSendStartedAt = Date.now();
         // 🔥 [FIX-TỐC-ĐỘ] 35s→12s: Extension bình thường trả 0,8–3s. 35s chỉ làm kẹt worker khi Ext ì.
-        return adapter.send(payload, { timeout: 12000 });
+        // [v1.91.96] 12s→7s. Log 09:16 (312 chat): 30 ca "Ext quá hạn" ⇒ kiểm chứng lịch sử
+        // sau đó chỉ 1 ca là tin ĐÃ đến nơi, 29 ca thật sự không đi. Tức 12 giây chờ gần như
+        // không bao giờ cứu được tin nào, nhưng với 24 làn thì 30 ca × 12s = 6 phút-làn bị giữ,
+        // đủ để mở bộ ngắt ("Extension không phản hồi 12 lần liên tiếp") và pause cả làn 45s.
+        // 7s vẫn gấp >2 lần mức phản hồi bình thường (0,8–3s), và ca quá hạn vẫn KHÔNG gửi lại
+        // (đánh ⚠, kiểm chứng nền chỉ nâng ⚠→✅) nên rút ngắn không thể sinh tin trùng.
+        // [v1.91.98] 7s→2,5s. Log 09:24 (1 457 chat, 1.91.97):
+        //   🧯 Ext quá hạn 114 · kiểm chứng thấy tin 69 · chưa thấy trong lịch sử 45
+        // ⇒ 60 % ca "Extension không phản hồi" thực ra TIN ĐÃ ĐẾN NƠI. Extension gửi xong nhưng
+        // không trả lời. Vì vậy giữ làn chờ 7 giây cho một phản hồi sẽ không bao giờ tới là mất
+        // trắng: 114 ca × 7s ÷ 48 làn ≈ 17 giây-làn, trong khi HAR đo ca lỗi THẬT trả về
+        // p50 908ms / p90 1 197ms — 2,5s đã phủ trên p99. Ca quá hạn vẫn đi đúng đường cũ:
+        // đánh ⚠ "không rõ", đăng ký kiểm chứng lịch sử nền, KHÔNG BAO GIỜ gửi lại (chỉ nâng
+        // ⚠→✅). Rút ngắn thời gian chờ không mở thêm bất kỳ đường gửi trùng nào.
+        // [v1.92.8] giữ chỗ chờ để bắt phản hồi MUỘN thay vì vứt bỏ (xem sendExtWithLateWatch)
+        return sendExtWithLateWatch(adapter, payload, conv, { softMs: extTimeoutMs(), startedAt: extSendStartedAt });
       });
       if (res && res.extBreakerSkipped) {
         releaseExtSendPermit(extSendPermit);
@@ -4564,8 +5179,12 @@
         // "Người này hiện không có mặt" / không tìm thấy người dùng thì chốt khách không
         // nhận được tin luôn — kể cả khi payload là thread-only (globalUserId=null).
         // Không rơi sang Socket nữa (Socket cũng không có gid để bắn, chỉ tốn thêm vòng lặp).
-        const deadUser = /1545041|Người này hiện không có mặt|Không tìm thấy người dùng/i.test(String(why || ''))
-          && (!globalUserId || !(ctx && ctx.gidFromPsid));
+        // [v1.92.34] BỎ ĐIỀU KIỆN "phải thiếu globalId" — đây là gốc của 1 089 ca sai ở lô 13:38.
+        // Lệnh Ext là lệnh GỬI THẬT vào đúng thread (HAR §68: cùng endpoint
+        // /conversations/{pid}_{threadId}/messages, FB trả e_code 551 / e_subcode 1545041), nên
+        // 1545041 là FB TỪ CHỐI, không phụ thuộc việc có gid hay không. Trước đây ca CÓ gid rơi
+        // vào nhánh `ambiguous` ⇒ bị đem đi chứng minh vắng mặt + bù kênh khác (vô ích, 1 089 ca).
+        const deadUser = /1545041|Người này hiện không có mặt|Không tìm thấy người dùng/i.test(String(why || ''));
         // INCORRECT THREAD khi CHƯA có globalUserId thật: lệnh Ext lúc đó thiếu
         // globalUserId nên có thể không định vị được thread dù thread vẫn tồn tại.
         // Bằng chứng _app @903213 cho thấy khâu dò không cung cấp được "xác nhận
@@ -4576,7 +5195,14 @@
         if (!ownLock) releaseOutbound(conv.id);
         return {
           ok: false, sent: false,
+          // [v1.92.30] Lý do của adapter có thể đến từ bước SAU khi chữ đã đi (dò global_id,
+          // thread_key, fbId ảnh) ⇒ phán đoán, không phải bằng chứng ⇒ phải chứng minh vắng mặt.
+          ambiguous: true,
           recipientUnavailable: deadUser,
+          // [v1.92.34] Đánh dấu NGUỒN của kết luận: chỉ ca này mới vào sổ HẬU KIỂM sau lô
+          // (đọc lại lịch sử; thấy tin ⇒ lật ✅). Các nguồn recipientUnavailable khác (#100…)
+          // không đụng tới.
+          deadUserHint: deadUser,
           gidUnknown: gidUnknownThread,
           discoveryState: (ctx && ctx.gidDiscoveryState) || 'unknown',
           error: errStr,
@@ -4665,13 +5291,13 @@
         }
         lastErr = (j && (j.message || j.error)) || ('HTTP ' + res.status);
         if ((res.status === 429 || res.status >= 500) && attempt < 3) {
-          await sleep(350 * attempt);
+          await sleepUntil(Date.now() + retryAfterMs(res, 350 * attempt)); // [v1.92.9]
           continue;
         }
         break;
       } catch (e) {
         lastErr = 'Lỗi mạng: ' + (e && e.message || e);
-        if (attempt < 3) { await sleep(350 * attempt); continue; }
+        if (attempt < 3) { await sleepUntil(Date.now() + 350 * attempt); continue; } // [v1.92.9] ngắt được khi Dừng
       }
     }
     // Fallback sang UPLOAD_INBOX_PHOTO qua Extension Pancake (đúng hàm E tại @883200 trong _app)
@@ -4866,41 +5492,253 @@
   // /messages khỏe chỉ ~40–250ms, nhưng bắn cố định 128 luồng ở lô 5.000 làm
   // Pancake/Chrome dội 429 + timeout dây chuyền. Lane tự tăng khi phản hồi nhanh,
   // tự giảm + nghỉ chung khi 429/chậm — giữ thông lượng thật cao nhất mà server chịu được.
-  const CTX_FETCH_INITIAL = 32;
+  // [v1.91.75] Ở lô 10k, khâu DÒ global_id là nút cổ chai: mỗi chat chưa có gid phải đi
+  // HTTP GET /messages rồi tới Ext finder, trong khi làn gửi đã 64–192. Trước đây làn dò
+  // chỉ 32 (HTTP) và 12 (Ext) ⇒ đói làn ⇒ resolveGlobalId trả null ⇒ gidUnknown dồn sang
+  // Pass 2 (đúng triệu chứng "mất globalid" người dùng thấy). Nâng mức KHỞI ĐIỂM (không
+  // nâng trần) để vẫn giữ khả năng tự lùi của makeAdaptiveLane khi server bắt đầu chậm/429.
+  const CTX_FETCH_INITIAL = 48;
   const CTX_FETCH_MIN = 8;
-  const CTX_FETCH_MAX = 64;
+  const CTX_FETCH_MAX = 96;
   const PHOTO_UPLOAD_PARALLEL = 96;
-  const GID_EXT_INITIAL = 12;
+  // Ext finder là đường ĐẮT nhất (đi qua Extension) nhưng cũng là đường duy nhất biết
+  // {threadId → globalId} khi HTTP/WS không có. 12 → 20 làn khởi điểm, trần 24 → 32.
+  const GID_EXT_INITIAL = 20;
   const GID_EXT_MIN = 4;
-  const GID_EXT_MAX = 24;
+  const GID_EXT_MAX = 32;
   const PREP_PARALLEL_EXT = 160;  // số chat chưa có global_id chuẩn bị HTTP/WS song song (không bị chặn bởi gidExtLane)
   // 🔥 [FIX-TỐC-ĐỘ] Ext gửi 48 khởi điểm, adaptive tới 64 — đủ cho ~1000 chat ngoài 24h trong 30s.
-  const BUS_PARALLEL_EXT = 48;
-  const EXT_SEND_MIN = 24;
-  const EXT_SEND_MAX = 64;
+  // [v1.91.97] NÂNG THẲNG LÀN EXT (theo yêu cầu, dựa trên số đo):
+  //   Log 09:15:37–09:15:42 = hơn 100 tin ✅ trong 5s ở 24 làn ⇒ ~20–25 tin/s, tức ~1s/lệnh.
+  //   Làn tự hạ về sàn 24 vì bão timeout rồi nằm nguyên đó ⇒ không bao giờ chạm 48.
+  //   Nay: khởi động 64, SÀN 48 (không tụt xuống 24 nữa), trần 96.
+  //   Ước lượng tuyến tính theo số đo trên: 48 làn ≈ 40–50 tin/s, 64 làn ≈ 55–65 tin/s.
+  //   Làn vẫn tự hạ khi lỗi, nhưng không bao giờ thấp hơn 48.
+  const BUS_PARALLEL_EXT = 64;
+  const EXT_SEND_MIN = 48;
+  const EXT_SEND_MAX = 96;
   // 🔥 [FIX-TỐC-ĐỘ] Socket/page 128 khởi điểm, đủ cho pace 4ms × 2 page = 500/s mà không chờ slot.
-  const BUS_PARALLEL_SOCKET = 128;
+  // [v1.92.1] Socket đã được đo lại trên chat khoẻ (lô 09:34, 1 432 chat, 1.92.0):
+  //   📡 SOCKET ACK OK/rejected 917/493 · ACK TB 1 199ms · phát 1 432 lệnh trong 24s (= 60 tin/s)
+  //   peak Socket/page active 192/192 · waiting 192/192  ⇒ LÀN SOCKET ĐÃ BÃO HOÀ ở 192.
+  // Với ACK TB 1,2s thì trần của 192 làn là ~160 tin/s ⇒ đây là nút cổ chốt DUY NHẤT còn lại
+  // (Extension không còn tham gia đường chính). Nâng: khởi điểm 256, trần 384.
+  const BUS_PARALLEL_SOCKET = 256;
   const SOCKET_LANE_MIN = 64;
-  const SOCKET_LANE_MAX = 192;
+  const SOCKET_LANE_MAX = 384;
+  /* [v1.92.34] CẦU DAO ACK CHƯA BAO GIỜ CÓ TÁC DỤNG — tìm ra ở lô 13:38 (4 573 chat).
+   * `makeAdaptivePriorityLane` kẹp `limit = Math.max(min, …)` với `min` CHỤP LÚC TẠO LANE
+   * (= socketLaneFloor = 64). Mà lane page được tạo ở tin đầu tiên của page ⇒ mọi lần cầu dao
+   * hạ sàn 64→32→16 sau đó đều bị `setLimit` kẹp NGƯỢC LÊN 64: đúng 55 dòng "🐢 … xuống 64"
+   * trong log là no-op, làn nằm nguyên 64, và pha cuối lô chạy 8,2 chat/s.
+   * Nay `min` là hằng 16; sàn THẬT vẫn do `socketLaneFloor` quản (mọi chỗ setLimit đều
+   * `Math.max(socketLaneFloor, …)`) ⇒ cầu dao co được, còn khi khoẻ thì lane vẫn leo tới 384. */
+  const SOCKET_LANE_HARD_FLOOR = 16;
+  // [v1.91.84] SÀN cap Socket/page CHỈNH ĐƯỢC LÚC CHẠY — không cần build lại.
+  // Bối cảnh: bộ điều tốc tự hạ 192 → 64 (0,8× mỗi lần) khi ACK chậm; log lô 10 660 tin cho
+  // thấy cap cuối [64×1] trong khi trần lý thuyết (192 ÷ 3,43 s) là 56 tin/s ⇒ bị chặn dưới
+  // khả năng. Nay người dùng tự đặt sàn để tìm điểm ngọt trên máy mình:
+  //     __botfakeSetSockPageFloor__(128)      // trong Console của trang Pancake
+  // hoặc đặt localStorage 'botfake_sock_page_floor' = 128. Đặt lại 64 để về mặc định.
+  let socketLaneFloor = SOCKET_LANE_MIN;
+  let socketFloorUserSet = false; // sàn do NGƯỜI DÙNG đặt thì không tự nâng lại
+  try {
+    const _f = parseInt(localStorage.getItem('botfake_sock_page_floor') || '', 10);
+    if (_f >= 16 && _f <= SOCKET_LANE_MAX) { socketLaneFloor = _f; socketFloorUserSet = true; }
+  } catch (e0) { /* ignore */ }
+  try {
+    window.__botfakeSetSockPageFloor__ = function (v) {
+      const n = parseInt(v, 10);
+      if (!(n >= 16 && n <= SOCKET_LANE_MAX)) return 'giá trị phải trong khoảng 16–' + SOCKET_LANE_MAX;
+      socketLaneFloor = n;
+      socketFloorUserSet = true;
+      try { localStorage.setItem('botfake_sock_page_floor', String(n)); } catch (e1) { /* ignore */ }
+      return 'đã đặt sàn Socket/page = ' + n + ' — áp dụng cho lượt gửi kế tiếp (tải lại trang nếu đang chạy)';
+    };
+  } catch (e2) { /* ignore */ }
+  // [v1.92.1] (SOCKET_LANE_MAX đã chuyển lên trên — khai báo ở đây thì khối đọc
+  // localStorage 'botfake_sock_page_floor' ở trên bị TDZ và ném lỗi bị nuốt im lặng.)
   const SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD = 4; // thử nghiệm: tránh hạ lane vì chỉ 2 ACK đuôi chậm lẻ tẻ
   const SOCKET_LANE_NOACK_BACKOFF_THRESHOLD = 2; // no-ACK giữ ngưỡng chặt hơn vì thường báo hiệu Socket/page có vấn đề
+  // [v1.91.85] CẦU DAO ACK TOÀN CỤC.
+  // Lô thật 19:03 (11/11): từ tin ~1082 trở đi MỌI tin qua Socket đều "không có ACK" liên tục,
+  // rồi dồn hết sang Extension bù ⇒ gửi rất chậm. Đó là Pancake bóp ACK khi có quá nhiều
+  // kết nối socket cùng lúc, không phải lỗi từng chat. Bộ điều tiết cũ chỉ co được xuống
+  // sàn mặc định 64/page nên vẫn quá cao ⇒ ACK càng mất. Nay: mất ACK LIÊN TỤC 25 tin thì
+  // hạ hẳn sàn (64→32→16) để lane co xuống thật sâu và ACK có cơ hội hồi lại.
+  let sockNoAckRun = 0;
+  const SOCK_ACK_STORM_RUN = 25;
+  // [v1.91.86] KÊNH ACK CHẾT THEO PAGE.
+  // Bằng chứng lô 20:36–20:38 (11/11): các lô 5–10 chat, mỗi lô chỉ 1 tin đi Socket và
+  // tin đó LUÔN mất ACK với độ trễ đúng bằng hạn chờ (8000/8002/8003 ms; lô 68 tin: 20016 ms).
+  // Trễ đúng bằng timeout = KHÔNG có phản hồi nào, tức kênh ACK của page đã chết — không phải
+  // server chậm. Hậu quả: mỗi tin như vậy tốn 8–20s chờ + 4 lần đọc kiểm chứng + Ext ⇒ lô 5 tin
+  // mất 13s. Nay: 2 lần no-ACK đủ hạn chờ ⇒ đánh dấu kênh ACK chết, bỏ Socket khỏi thứ tự làn
+  // (đi thẳng Extension ~1s). Chỉ đổi THỨ TỰ kênh, không gửi thêm, không gửi lặp.
+  // [v1.91.87] ĐO ĐỘ TRỄ ACK THẬT ĐỂ BỎ "CHỜ CỨNG".
+  // Hạn chờ cũ là hằng số 8000/20000ms do script tự đặt, không phải Pancake bắt chờ.
+  // Nay hạn chờ bám theo p90 độ trễ ACK quan sát được: wait = clamp(3 × p90, 2500, mức cũ).
+  const ackLatRing = [];   // 200 mẫu ACK OK gần nhất (ms)
+  function noteAckLatency(ms) {
+    const v = Math.round(Number(ms) || 0);
+    if (v <= 0) return;
+    ackLatRing.push(v);
+    if (ackLatRing.length > 200) ackLatRing.shift();
+  }
+  function sockAckP90() {
+    if (ackLatRing.length < 20) return 3000; // chưa đủ mẫu ⇒ 3s (≈2× ACK TB đã đo)
+    const a = ackLatRing.slice().sort((x, y) => x - y);
+    return a[Math.min(a.length - 1, Math.floor(a.length * 0.9))];
+  }
+  function sockAckP50() {
+    if (ackLatRing.length < 20) return 0; // chưa đủ mẫu ⇒ chưa dùng ngưỡng thích ứng
+    const a = ackLatRing.slice().sort((x, y) => x - y);
+    return a[Math.min(a.length - 1, Math.floor(a.length * 0.5))];
+  }
+  /* [v1.92.16] NGƯỠNG "ACK NHANH" PHẢI BÁM SỐ ĐO, KHÔNG ĐƯỢC LÀ HẰNG 2 500 ms.
+   * Lô 19:52 (11 844 chat, 1.92.15): ACK TB 3 163 ms · 9 668/10 688 ACK rơi vào 2–5 s.
+   * Với hằng 2 500 ms thì MỌI ACK của page này đều bị coi là "chậm" ⇒ nhánh else chạy
+   * `if (kind === 'ok') ctl.fastOk = 0` ⇒ bộ đếm KHÔNG BAO GIỜ đạt 20 ⇒ làn không bao giờ tăng;
+   * trong khi 459 no-ACK vẫn cắt làn 0,8× liên tục ⇒ đúng như log: "limits cuối [64×1]"
+   * (ghim ở sàn) dù "waiting 251/251". Làn là mẫu số của thông lượng ⇒ phát lệnh chỉ 42,21/s.
+   * Nay: "nhanh" = không tệ hơn chính nhịp ACK quen thuộc của page (p50 × 1,2), trong [2 500, 6 000].
+   * ACK chậm bất thường (≥6 000 ms) vẫn bị phạt như cũ. */
+  function fastAckMs() {
+    const p50 = sockAckP50();
+    if (!p50) return 2500;
+    return Math.max(2500, Math.min(6000, Math.round(p50 * 1.2)));
+  }
+  /* [v1.92.34] NỚI LANE PHẢI CÓ ĐIỀU KIỆN — lô 13:38 (4 573 chat): 13:38:20→13:38:48 đạt
+   * 115 chat/s (✅ 91,5 %) ở lane 256; 13:38:30 nới 256 → 384; 13:38:48 sập: 1 343 chat sau
+   * đó 0 ✅, 8,2 chat/s, 102 ca Ext quá hạn. ACK của lô này p50 2 194 ms — vẫn "nhanh" theo
+   * ngưỡng cũ (p50×1,2 = 2 633 ms) nên +8 chạy liên tục. Nay chỉ nới khi p50 < 1 800 ms
+   * (bằng chứng: 3 230 chat đầu chạy tốt ở 256 làn ≈ 116 chat/s với p50 2,2 s ⇒ 256 là ĐỦ;
+   * nới thêm chỉ đổi lấy nguy cơ dồn ACK). Số lần bỏ nới in ở dòng 📡 SOCKET. */
+  const SOCK_RAMP_P50_MAX_MS = 1800;
+  let sockRampSkipped = 0;
+  function rampAllowed() {
+    const p50 = sockAckP50();
+    if (p50 && p50 > SOCK_RAMP_P50_MAX_MS) { sockRampSkipped++; return false; }
+    return true;
+  }
+  // [v1.91.92] CHẾ ĐỘ GỬI TOÀN BỘ QUA HTTP — API trước, Ext dự phòng (KHÔNG dùng Socket).
+  // HAR (303 request POST /conversations/{id}/messages): 303/303 có `origin: https://pancake.vn`,
+  // 0 request mang origin `chrome-extension://`, không có header x-api-key riêng, và 0 lần có
+  // `global_id` trong body ⇒ API (fetch từ trang) và Ext đi ĐÚNG cùng một endpoint; khác biệt
+  // duy nhất là cây cầu Extension, và chính nó bị tuần tự hoá (~10–15 tin/giây ở log 08:34).
+  // Vì vậy mặc định BẬT: API (96 làn song song) trước, Ext chỉ là dự phòng.
+  // HAR 12 file, 303 request `POST /conversations/{id}/messages`: p50 = 37ms · p90 = 999ms ·
+  // TB = 283ms — nhanh hơn hẳn Socket+ACK (1 500ms khi khoẻ, 7 400–8 200ms khi kênh ACK chết)
+  // và trả kết quả DỨT KHOÁT nên không cần vòng kiểm chứng lịch sử.
+  // Bật ⇒ bỏ hẳn làn Socket (nguồn của mọi ca ⚠ "không rõ" và mọi lần chờ ACK).
+  let forceExtMode = false;
+  // [v1.91.99] TRẢ MẶC ĐỊNH VỀ TẮT. Lý do — bằng chứng từ 6 lô chạy bật (1.91.92→1.91.98):
+  //   • Extension chưa bao giờ vượt ~20 tin/s: log 09:24 `peak Ext queue/active 360/128` ⇒
+  //     hàng đợi 360, 128 lệnh đang bay, vẫn 12,66 tin/s ⇒ mỗi lệnh chiếm làn ~10s. Bridge
+  //     Extension tuần tự hoá BÊN TRONG nó; tăng làn chỉ làm hàng đợi dài thêm.
+  //   • Vì chế độ này BẬT, làn Socket bị bỏ hẳn ⇒ 6 lô qua Socket chưa từng được thử trên chat
+  //     KHOẺ. Mọi dòng `📡 SOCKET: ACK 0/386` là chat ĐÃ CHẾT (chỉ còn lại sau khi Ext trượt)
+  //     — thiên lệch chọn mẫu, không phải Socket yếu. Người dùng nói rõ: tốc độ ban đầu khi đi
+  //     Socket là mức họ cần (hàng nghìn tin/phút), mà ~20 tin/s của Ext không thể đạt.
+  //   ⇒ [v1.92.0] BỎ HẲN Ô BẬT/TẮT khỏi panel và TẮT VĨNH VIỄN: không còn đường UI nào bật lại,
+  //     để một lần bấm nhầm không thể đẩy cả lô về trần ~20 tin/s của Extension. Vẫn giữ
+  //     __botfakeForceExt__(true) trong console cho lần đo đối chứng nếu cần.
+  forceExtMode = false;
+  function setForceExtMode(v) {
+    // [v1.92.5] KHÔNG ghi localStorage nữa: ô bật/tắt đã bị xoá khỏi panel và `forceExtMode`
+    // được gán cứng = false mỗi lần nạp trang, nên khoá 'ssb_force_ext' ghi ra sẽ không có
+    // ai đọc (đã kiểm: ghi=1, đọc=0). Ghi vào đó chỉ tạo cảm giác "đã lưu" trong khi lần nạp
+    // sau lại bỏ qua. Hàm này giờ chỉ đổi được trong PHIÊN hiện tại, đúng như nó thực sự làm.
+    forceExtMode = !!v;
+    try { logLine((forceExtMode ? '🛰 ĐÃ BẬT' : '🛰 ĐÃ TẮT') + ' chế độ gửi toàn bộ qua HTTP (API → Ext)'
+      + (forceExtMode ? ' — bỏ hẳn làn Socket (không chờ ACK, không ca ⚠ không rõ).' : ' — quay lại dùng Socket như cũ.')
+      + ' · chỉ áp dụng cho PHIÊN này (không lưu qua F5).'); } catch (e) { /* ignore */ }
+    return forceExtMode;
+  }
+  try { window.__botfakeForceExt__ = setForceExtMode; } catch (e) { /* ignore */ }
+  const pageLastAckWait = {};   // pageId → hạn chờ vừa dùng cho lần publish gần nhất
+  const pageAckTimeoutRun = {}; // pageId → số lần no-ACK đủ hạn chờ liên tiếp
+  const pageAckDeadAt = {};     // pageId → thời điểm đánh dấu kênh ACK chết
+  // [v1.91.88] Lô 08:19 (11/11): 74 tin đi Socket, ACK OK = 0, no-ACK = 74, cả 74 phải bù Ext.
+  // 77 chat được PHÁT trong 779ms ⇒ mọi tin đi trước khi ACK đầu tiên kịp mất, nên trong cùng
+  // một wave KHÔNG thể biết trước để né Socket. Giá trị thật của cờ là GIỮ QUA CÁC LÔ: lô sau
+  // biết page đã chết ⇒ đi Ext ngay từ tin đầu. Vì vậy nới TTL 2 phút → 10 phút.
+  const PAGE_ACK_DEAD_TTL_MS = 600000;
+  /* [v1.92.13] CỜ "ACK CHẾT" BỊ BÓP QUÁ LÂU — đo được từ lô 15:54 (9 455 chat, 1.92.12):
+   *   📡 SOCKET: ACK OK/rejected/no-ACK 0/0/0 · peak Socket/page active 0/0 · limits [64×1]
+   * ⇒ Socket KHÔNG ĐƯỢC THỬ MỘT LẦN NÀO trong cả 342s. Toàn bộ 9 455 chat dồn vào làn Ext
+   *   (48 luồng, Ext p90 3 203ms) ⇒ 29,74 tin/s, Ext ngộp: peak queue 468, 633 quá hạn,
+   *   1 526 ca bị bỏ qua vì bộ ngắt quá tải.
+   * Đường duy nhất xoá 'socket' khỏi MỌI kế hoạch là nhánh isPageAckDead() dưới đây, mà TTL
+   * của nó (10 phút) DÀI HƠN cả lượt chạy ⇒ một lần no-ACK ở lượt trước đủ bóp cả lô 9 455
+   * chat vào làn chậm nhất. Nay: vẫn né Socket, nhưng cứ SOCK_DEAD_PROBE_MS cho đúng MỘT ca
+   * đi Socket để dò; ACK về là cờ được xoá ngay (noteSocketPageLaneOutcome 'ok') ⇒ tự hồi. */
+  /* [v1.92.40] ĐỊNH TUYẾN SOCKET THEO BẰNG CHỨNG GIAO HÀNG — thay cho ngưỡng cỡ lô.
+   * Vấn đề thật: "no-ACK" chỉ nói ACK không về, KHÔNG nói tin có tới hay không. Bản cũ suy
+   * diễn: no-ACK ⇒ coi như kênh chết ⇒ gỡ Socket khỏi kế hoạch 10 phút (và từ 1.92.13 dò lại
+   * thưa). Hậu quả hai chiều:
+   *   • Dương tính giả: page chỉ mất ACK nhưng tin VẪN tới (đã gặp: kiểm chứng lật ⚠→✅ nhiều ca)
+   *     ⇒ gỡ Socket oan, dồn 100% sang Ext ~15–21 tin/s ⇒ lô 9 455 chat mất 342 s (§45).
+   *   • Âm tính giả: page Socket gửi mà KHÔNG tới (ca Đinh Thị Loan) ⇒ vẫn thử tiếp, mỗi lần
+   *     mất một tin + 5 s chờ ACK.
+   * Nay đo ĐÚNG thứ cần đo: tỉ lệ GIAO ĐƯỢC của Socket trên từng page.
+   *   st.dlv  = số ca kiểm chứng/xác nhận thấy tin ĐÃ tới qua Socket
+   *   st.lost = số ca chứng minh được hội thoại KHÔNG có tin sau khi bắn Socket
+   * Luật (tự hồi, không cần TTL): một lần giao được ⇒ xoá sạch lost. Ban chỉ khi lost ≥ 2 liên
+   * tiếp mà không có lần nào tới, hoặc (ACK chết + đã có ≥1 lần chứng minh mất tin). */
+  const sockRoute = {}; // pageId → { sent, dlv, lost, probeAt }
+  function sockRouteOf(pid) {
+    const k = String(pid || '');
+    if (!k) return null;
+    if (!sockRoute[k]) sockRoute[k] = { sent: 0, dlv: 0, lost: 0, probeAt: 0 };
+    return sockRoute[k];
+  }
+  function pageSocketUsable(pid) {
+    const st = sockRoute[String(pid || '')];
+    if (!st) return true;                 // chưa có bằng chứng gì ⇒ cho thử (đã có cổng cứu 1.92.37)
+    if (st.lost >= 2) return false;       // 2 lần chứng minh mất tin, 0 lần tới ⇒ Socket vô dụng
+    if (st.lost >= 1 && isPageAckDead(pid)) return false; // mất tin + mất ACK ⇒ đừng đốt thêm tin
+    return true;
+  }
+  const pageAckDeadProbeAt = {};
+  const SOCK_DEAD_PROBE_MS = 20000;
+  // [v1.92.16] Lô 19:52: cờ "ACK chết" bật 5 lần, mỗi lần chỉ được dò lại sau tối đa 20 s ⇒
+  // TỔNG 2 539 chat bị né khỏi làn Socket (≈508 chat/lần) và dồn sang Ext chậm hơn 4 lần.
+  // Nay: dò ngay khi số chat bị né kể từ lần dò trước chạm 50 — hư hại tối đa ~50 chat/lần,
+  // không phụ thuộc đồng hồ.
+  const socketPickDiag = { deadSkip: 0, deadSkipAtProbe: 0, probe: 0, probeOk: 0, notReady: 0, noGid: 0 };
+  function isPageAckDead(pid) {
+    const at = pageAckDeadAt[pid];
+    if (!at) return false;
+    if (Date.now() - at > PAGE_ACK_DEAD_TTL_MS) { delete pageAckDeadAt[pid]; return false; }
+    return true;
+  }
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
   function makeLane(parallel) {
     let active = 0;
     let normalSincePriority = 0;
     const waiters = [];
     const pWaiters = [];
+    // [v1.92.9] phát sự kiện mỗi khi active/hàng đợi đổi → chỗ chờ thức ngay, không quét nhịp
+    const changeSubs = new Set();
+    const laneNotify = () => {
+      if (!changeSubs.size) return;
+      const arr = Array.from(changeSubs);
+      for (let k = 0; k < arr.length; k++) { try { arr[k](); } catch (e) { /* ignore */ } }
+    };
     const enqueue = function (fn, opts) {
       const isPriority = !!(opts && opts.priority);
       return new Promise((resolve) => {
         const start = () => {
           if (state.stopRequested) { resolve({ ok: false, sent: false, error: 'Đã dừng' }); return; }
           active++;
+          laneNotify();
           Promise.resolve()
             .then(fn)
             .catch((e) => ({ ok: false, sent: false, error: 'Lỗi kênh: ' + (e && e.message || e) }))
             .then((r) => {
               active--;
+              laneNotify();
               if (state.stopRequested) {
                 // Đang Dừng: xả HẾT hàng đợi — mỗi start() tự resolve 'Đã dừng' ngay.
                 // Chỉ xả 1 waiter như cũ thì số waiter còn lại kẹt vĩnh viễn (không còn
@@ -4937,6 +5775,11 @@
     enqueue.busy = () => active >= parallel || waiters.length > 0 || pWaiters.length > 0;
     enqueue.activeCount = () => active;
     enqueue.waitingCount = () => waiters.length + pWaiters.length;
+    enqueue.onChange = (fn) => {
+      if (typeof fn !== 'function') return () => {};
+      changeSubs.add(fn);
+      return () => { try { changeSubs.delete(fn); } catch (e) { /* ignore */ } };
+    };
     return enqueue;
   }
 
@@ -4947,6 +5790,13 @@
     let active = 0;
     let limit = Math.max(min, Math.min(max, initial || min));
     const waiters = [];
+    // [v1.92.9] phát sự kiện mỗi khi active/hàng đợi đổi → chỗ chờ thức ngay, không quét nhịp
+    const changeSubs = new Set();
+    const laneNotify = () => {
+      if (!changeSubs.size) return;
+      const arr = Array.from(changeSubs);
+      for (let k = 0; k < arr.length; k++) { try { arr[k](); } catch (e) { /* ignore */ } }
+    };
     const pump = () => {
       if (state.stopRequested) {
         while (waiters.length) { const w = waiters.shift(); w(); }
@@ -4962,11 +5812,13 @@
         const start = () => {
           if (state.stopRequested) { resolve({ ok: false, sent: false, error: 'Đã dừng' }); return; }
           active++;
+          laneNotify();
           Promise.resolve()
             .then(fn)
             .catch((e) => ({ ok: false, sent: false, error: 'Lỗi kênh: ' + (e && e.message || e) }))
             .then((r) => {
               active--;
+              laneNotify();
               pump();
               resolve(r);
             });
@@ -4983,6 +5835,11 @@
       limit = Math.max(min, Math.min(max, Math.round(next) || min));
       pump();
       return limit;
+    };
+    enqueue.onChange = (fn) => {
+      if (typeof fn !== 'function') return () => {};
+      changeSubs.add(fn);
+      return () => { try { changeSubs.delete(fn); } catch (e) { /* ignore */ } };
     };
     return enqueue;
   }
@@ -5062,33 +5919,114 @@
       if (!lane) return;
       const ctl = socketPageLaneCtl[pid] || (socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0, noAckStreak: 0 });
       const ms = Math.max(0, Number(latencyMs) || 0);
-      if (kind === 'ok' && ms < 2500) {
+      /* [v1.92.18] MẪU ĐỘ TRỄ ACK BỊ CẮT CỤT — SỬA GỐC.
+       * noteAckLatency() cũ chỉ chạy TRONG nhánh "ACK nhanh" (ms < fastAckMs) ⇒ mọi ACK chậm
+       * hơn ngưỡng bị VỨT khỏi vòng mẫu. Vòng mẫu vì thế chỉ toàn ca nhanh ⇒ p50 thấp ⇒ ngưỡng
+       * "nhanh" đứng ở sàn 2 500 ms ⇒ với page có ACK 2–3 s thì KHÔNG ca nào được tính là nhanh
+       * ⇒ fastOk không bao giờ đạt 20 ⇒ làn không tăng (đúng "[64×1]" của lô 19:52).
+       * Thống kê tự lừa chính nó: phải lấy CẢ ca chậm mới biết nhịp ACK thật của page.
+       * Chỉ ghi nhận (không đổi đường gửi); hạn chờ ACK vẫn bị chặn trần 3 000 ms. */
+      if (kind === 'ok' || kind === 'rejected') noteAckLatency(ms);
+      if (kind === 'ok' && ms < fastAckMs()) {
         ctl.fastOk++;
         ctl.slowAck = 0;
         ctl.noAckStreak = 0;
-        if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX) {
+        sockNoAckRun = 0; // ACK hồi ⇒ reset cầu dao
+        if (pid) { delete pageAckTimeoutRun[pid]; if (pageAckDeadAt[pid]) { socketPickDiag.probeOk++; delete pageAckDeadProbeAt[pid]; } delete pageAckDeadAt[pid]; }
+        if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX && rampAllowed()) {
           ctl.fastOk = 0;
-          const next = lane.setLimit(lane.getLimit() + 8);
-          logLine('⚡ Socket ACK nhanh ổn định — tăng lane page ' + pid + ' lên ' + next + '.');
+          const prevLimit = lane.getLimit();
+          const next = lane.setLimit(prevLimit + 8);
+          // [v1.92.14] SÀN BỊ CẦU DAO HẠ THÌ KHÔNG BAO GIỜ HỒI — hạ là vĩnh viễn tới khi F5.
+          // Log lô 15:54 cho thấy Socket/page cap in ra "64–384" nhưng limit cuối [64×1]; còn
+          // mỗi lần cầu dao nổ (25 no-ACK liên tiếp) lại hạ sàn 64→32→16 và GIỮ tới hết phiên.
+          // ACK đã nhanh ổn định 20 nhịp liên tiếp thì nâng sàn trở lại dần (không đụng sàn do
+          // người dùng tự đặt bằng __botfakeSetSockPageFloor__).
+          if (!socketFloorUserSet && socketLaneFloor < SOCKET_LANE_MIN) {
+            const _prevFloor = socketLaneFloor;
+            socketLaneFloor = SOCKET_LANE_MIN; // [v1.92.43] phục hồi DỨT ĐIỂM, không +8 mỗi 20 nhịp
+            logLine('🔧 ACK hồi ổn định (' + ctl.fastOk + ' nhịp nhanh liền) — nâng lại sàn Socket/page '
+              + _prevFloor + ' → ' + socketLaneFloor + '/' + SOCKET_LANE_MIN + '.');
+          }
+          logLaneRamp(pid, prevLimit, next); // [v1.92.33] 16 nấc +8 ⇒ 1 dòng
         }
       } else if (kind === 'noack') {
         ctl.fastOk = 0;
         ctl.slowAck = 0;
         ctl.noAckStreak++;
-        if (ctl.noAckStreak >= SOCKET_LANE_NOACK_BACKOFF_THRESHOLD && lane.getLimit() > SOCKET_LANE_MIN) {
+        // [v1.91.87] Trễ ĐÚNG BẰNG hạn chờ vừa áp dụng ⇒ bộ đếm giờ đã nổ, tức KHÔNG có
+        // phản hồi nào ⇒ một lần là đủ kết luận kênh ACK chết (thay vì 2 lần như 1.91.86).
+        const lastWait = (pid && pageLastAckWait[pid]) || 0;
+        const hitCeiling = lastWait > 0 && ms >= lastWait * 0.95;
+        if ((ms >= 6000 || hitCeiling) && pid) {
+          pageAckTimeoutRun[pid] = (pageAckTimeoutRun[pid] || 0) + 1;
+          // [v1.92.14] need 1 → 2. `hitCeiling` gần như LUÔN đúng (bộ đếm giờ nổ đúng hạn chờ
+          // nên ms ≈ lastWait), nghĩa là chỉ MỘT ACK trượt là page bị tuyên bố chết 10 phút.
+          // Lô 14:34 có 117 no-ACK nằm rải giữa 1 173 ACK OK — một ca trượt đơn lẻ không chứng
+          // minh được kênh ACK chết (mọi ACK OK đều xoá bộ đếm này). Đòi 2 ca LIÊN TIẾP: đổi lại
+          // chỉ tốn thêm ~3s trước khi kết luận, nhưng không còn cảnh "trượt một ca ⇒ cả lô 9 455
+          // chat rơi vào Extension".
+          const need = 3; // [v1.92.24] 2 → 3: hạn chờ 3 s < p90 3 086 ms của lô 09:46 làm 2 ca trượt liên tiếp là chuyện thường ⇒ tuyên bố "chết" oan rồi đẩy cả page sang Extension
+          if (pageAckTimeoutRun[pid] >= need && !isPageAckDead(pid)) {
+            pageAckDeadAt[pid] = Date.now();
+            try { if (lane.getLimit() > socketLaneFloor) lane.setLimit(socketLaneFloor); } catch (e0) { /* ignore */ }
+            logLine('🧯 Socket ACK của page ' + pid + ' coi như CHẾT (3 lần no-ACK liên tiếp đủ hạn chờ ~'
+              + Math.round(ms / 1000) + 's) — bỏ Socket khỏi thứ tự làn, đi Extension/API cho tới khi hồi (dò lại sau '
+              + Math.round(SOCK_DEAD_PROBE_MS / 1000) + 's hoặc 20 ca bị né)');
+          }
+        }
+        // [v1.91.85] Cầu dao toàn cục: mất ACK liên tục ⇒ hạ SÀN socket (không chỉ hạ limit).
+        sockNoAckRun++;
+        if (sockNoAckRun >= SOCK_ACK_STORM_RUN && socketLaneFloor > 32) {
+          sockNoAckRun = 0;
+          /* [v1.92.43] SÀN KHÔNG XUỐNG DƯỚI 32 + KHÔNG ĐƯỢC GIỮ TỚI HẾT PHIÊN.
+           * Log 16:52 (7 073 chat): '🧯 Mất ACK liên tục 25 tin — hạ SÀN socket xuống 32 rồi 16/page'
+           * chỉ 2 dòng, sau đó `Socket/page limits cuối [16×1]` và cả lô phát 17,75 tin/s trong khi
+           * làn cho phép 384. 16 làn là **1/24** cấu hình ⇒ tự bóp cả lô vì 25 ca no-ACK.
+           * Nay: sàn thấp nhất 32, và ACK hồi thì nâng lại NGAY (xem nhánh 'ok' bên dưới). */
+          socketLaneFloor = Math.max(32, Math.floor(socketLaneFloor / 2));
+          try { lane.setLimit(Math.max(socketLaneFloor, Math.floor(lane.getLimit() * 0.8))); } catch (e0) { /* ignore */ }
+          logLine('🧯 Mất ACK liên tục ' + SOCK_ACK_STORM_RUN + ' tin — hạ SÀN socket xuống '
+            + socketLaneFloor + '/page (ACK hồi 20 nhịp liền là nâng lại ' + SOCKET_LANE_MIN + ')');
+        }
+        if (ctl.noAckStreak >= SOCKET_LANE_NOACK_BACKOFF_THRESHOLD && lane.getLimit() > socketLaneFloor) {
           ctl.noAckStreak = 0;
-          const next = lane.setLimit(Math.max(SOCKET_LANE_MIN, Math.floor(lane.getLimit() * 0.8)));
-          logLine('🐢 Socket no-ACK lặp ' + SOCKET_LANE_NOACK_BACKOFF_THRESHOLD + ' lần — giảm lane page ' + pid + ' xuống ' + next + '.');
+          const prevLimit = lane.getLimit();
+          const next = lane.setLimit(Math.max(socketLaneFloor, Math.floor(prevLimit * 0.8)));
+          // [v1.92.34] Chỉ ghi khi giá trị THẬT SỰ giảm + gộp 1 dòng / 2 s (lô 13:38 in 55 dòng
+          // "xuống 64" trong khi làn đã nằm ở sàn 64 ⇒ 100 % là dòng rỗng, không có ca hạ thật).
+          logLaneDrop(pid, prevLimit, next, 'Socket no-ACK lặp ' + SOCKET_LANE_NOACK_BACKOFF_THRESHOLD + ' lần');
         }
       } else if (kind === 'ok' || kind === 'rejected') {
-        ctl.fastOk = 0;
-        ctl.noAckStreak = 0;
+        // [v1.92.4] LÀN SOCKET BỊ KHOÁ Ở SÀN — tìm ra cơ chế từ lô 09:44 (3 653 chat, 1.92.3):
+        //   peak Socket/page active 384/384 · waiting 192/192  (làn ĐÃ lên tới 384)
+        //   Socket/page limits cuối [64×1]                     (nhưng kết thúc ở SÀN 64!)
+        //   ACK OK/rejected 2 311/1 261 · buckets 1-2s = 2 921 ca (ACK NHANH)
+        // Nguyên nhân: `ctl.fastOk = 0;` chạy cho CẢ 'rejected'. Mỗi ca bị FB từ chối lại xoá
+        // bộ đếm, mà bộ đếm cần 20 ca ACK nhanh mới tăng làn +8 ⇒ trong lô có 35 % ca rejected,
+        // bộ đếm gần như KHÔNG BAO GIỜ đạt 20 ⇒ làn không tăng, chỉ còn các nhịp giảm 0,8×
+        // ⇒ trôi dần về sàn 64 và nằm đó. Đó là lý do phát lệnh bị chặn ở ~37 tin/s dù ACK
+        // trung bình chỉ 1 448 ms (lý thuyết 384 ÷ 1,45 ≈ 265 tin/s).
+        // Nay: 'rejected' KHÔNG xoá bộ đếm; và nếu FB trả lời nhanh (<2 500 ms) thì tính luôn
+        // là một ca tốt — vì nó chứng minh kênh ACK đang sống, khác hẳn no-ACK.
+        if (kind === 'rejected' && ms < fastAckMs()) {
+          ctl.fastOk++;
+          ctl.noAckStreak = 0;
+          if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX && rampAllowed()) {
+            ctl.fastOk = 0;
+            lane.setLimit(lane.getLimit() + 8);
+          }
+        } else {
+          if (kind === 'ok') ctl.fastOk = 0;
+          ctl.noAckStreak = 0;
+        }
         if (ms >= 6000) {
           ctl.slowAck++;
-          if (ctl.slowAck >= SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD && lane.getLimit() > SOCKET_LANE_MIN) {
+          if (ctl.slowAck >= SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD && lane.getLimit() > socketLaneFloor) {
             ctl.slowAck = 0;
-            const next = lane.setLimit(Math.max(SOCKET_LANE_MIN, Math.floor(lane.getLimit() * 0.8)));
-            logLine('🐢 Socket ACK chậm liên tiếp ' + SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD + ' lần — giảm lane page ' + pid + ' xuống ' + next + '.');
+            const prevLimit = lane.getLimit();
+            const next = lane.setLimit(Math.max(socketLaneFloor, Math.floor(prevLimit * 0.8)));
+            logLaneDrop(pid, prevLimit, next, 'Socket ACK chậm liên tiếp ' + SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD + ' lần');
           }
         } else {
           ctl.slowAck = 0;
@@ -5136,12 +6074,12 @@
   const gidExtCtl = { good: 0, bad: 0 };
   async function waitGidHttpCooldown() {
     let waited = false;
-    while (!state.stopRequested && Date.now() < gidHttpCtl.coolUntil) {
+    if (!state.stopRequested && Date.now() < gidHttpCtl.coolUntil) {
       waited = true;
-      await sleep(Math.min(250, Math.max(25, gidHttpCtl.coolUntil - Date.now())));
+      await sleepUntil(gidHttpCtl.coolUntil, 'gid-cool'); // [v1.92.9] thức ĐÚNG mốc, không quét 25–250 ms
     }
     // Rải nhịp ngẫu nhiên sau cơn 429: tránh cả lane cùng lao lại đúng 1 ms.
-    if (waited && !state.stopRequested) await sleep(Math.floor(Math.random() * 180));
+    if (waited && !state.stopRequested) await sleepUntil(Date.now() + Math.floor(Math.random() * 180));
   }
   function noteGidHttpResult(ok, status, latencyMs) {
     try {
@@ -5208,14 +6146,22 @@
     } catch (e) { /* ignore */ }
   }
   async function waitForGidDiscoveryIdle(maxMs) {
-    const startedAt = Date.now();
-    while (!state.stopRequested && (Date.now() - startedAt) < (maxMs || 8000)) {
-      const busy = (ctxFetchLane.activeCount() + ctxFetchLane.waitingCount())
-        + (gidExtLane.activeCount() + gidExtLane.waitingCount());
-      if (!busy) return true;
-      await sleep(200);
+    // [v1.92.9] thức ngay khi 2 lane dò đổi trạng thái; 200 ms chỉ còn là lưới an toàn.
+    const busy = () => (ctxFetchLane.activeCount() + ctxFetchLane.waitingCount())
+      + (gidExtLane.activeCount() + gidExtLane.waitingCount());
+    const deadline = Date.now() + (maxMs || 8000);
+    const watch = [ctxFetchLane, gidExtLane];
+    while (!state.stopRequested && Date.now() < deadline) {
+      if (!busy()) return true;
+      const subs = [];
+      const changed = new Promise((resolve) => {
+        watch.forEach((lane) => { if (lane && lane.onChange) { try { subs.push(lane.onChange(resolve)); } catch (e) { /* ignore */ } } });
+        setTimeout(resolve, 200); // lưới an toàn
+      });
+      await changed; // đã có lưới an toàn 200 ms bên trong
+      subs.forEach((off) => { try { off(); } catch (e) { /* ignore */ } });
     }
-    return false;
+    return !busy();
   }
   const extPrepLane = makeLane(PREP_PARALLEL_EXT);
   const extSendLane = makeAdaptiveLane(BUS_PARALLEL_EXT, EXT_SEND_MIN, EXT_SEND_MAX);
@@ -5232,10 +6178,103 @@
   // tin, TUYỆT ĐỐI không bắn lại mò (lệnh gốc có thể vẫn nằm trong Extension).
   // 🔥 [FIX-TỐC-ĐỘ] Chịu được 12 timeout liên tiếp trước khi ngắt (thay vì 3) — tránh dừng Ext vì
   // vài ca chat chết riêng lẻ. Nghỉ 15s (thay vì 45s) nếu thật sự mở ngắt.
-  const EXT_SEND_BREAKER_THRESHOLD = 12;
-  const EXT_SEND_BREAKER_BASE_MS = 15000;
-  const EXT_SEND_BREAKER_MAX_MS = 45000;
-  const extSendCtl = { timeoutStreak: 0, openUntil: 0, openStreak: 0, probeInFlight: false, probeToken: 0, fastStreak: 0 };
+  // [v1.91.97] Ngưỡng ngắt phải co giãn theo số làn: 64 làn bay cùng lúc thì "12 lần liên tiếp
+  // không phản hồi" xảy ra thường xuyên hơn 24 làn rất nhiều ⇒ giữ 12 sẽ tự bóp làn liên tục
+  // (đúng thứ đã xảy ra ở lô 09:16: ngắt mở 45s, gửi được có 226 tin trong 78s).
+  // 12 → 30 (tỉ lệ với số làn), và trần nghỉ 45s → 15s. Vẫn là "thăm dò" chứ không mò: lệnh đã
+  // bắn mà quá hạn vẫn KHÔNG bao giờ gửi lại, chỉ kiểm chứng lịch sử để nâng ⚠→✅.
+  // [v1.92.1] 30 → 150. Lô 09:34 mất thẳng 267 chat vì bộ ngắt mở giữa lô:
+  //   🧯 "bỏ qua lúc Ext quá tải 267" — những chat đó ĐÃ bị Socket từ chối, còn Ext thì bị
+  //   chính script chặn, nên rơi vào ❌ oan (mỗi chat chỉ được thử 1 lần/kênh).
+  // Giờ Socket đi trước nên Ext chỉ là làn bù; ngắt giữa lô đắt hơn nhiều so với việc chịu
+  // thêm timeout. Ngưỡng 150 đủ để chỉ ngắt khi Extension CHẾT THẬT, không ngắt vì một cụm
+  // chat khó. Nghỉ vẫn 8–15s.
+  const EXT_SEND_BREAKER_THRESHOLD = 150;
+  const EXT_SEND_BREAKER_BASE_MS = 8000;
+  const EXT_SEND_BREAKER_MAX_MS = 15000;
+  const extSendCtl = { timeoutStreak: 0, openUntil: 0, openStreak: 0, probeInFlight: false, probeToken: 0, fastStreak: 0,
+    // [v1.92.6] Vòng mẫu độ trễ THẬT của Extension (chỉ ca CÓ phản hồi — ca quá hạn là số
+    // liệu bị cắt cụt, đưa vào p90 sẽ tự ru ngủ chính nó). Dùng để suy timeout, xem extTimeoutMs().
+    latSamples: [] };
+  const EXT_LAT_RING = 24;
+  /** p90 độ trễ phản hồi Ext gần nhất; 0 = chưa có số đo. */
+  function extLatP90() {
+    const a = extSendCtl.latSamples;
+    if (!a.length) return 0;
+    const b = a.slice().sort((x, y) => x - y);
+    return b[Math.min(b.length - 1, Math.floor(b.length * 0.9))] || 0;
+  }
+  /**
+   * [v1.92.6] Timeout Extension SUY TỪ SỐ ĐO, không còn là hằng số 2,5 s.
+   *
+   * Bằng chứng (hai lần chạy cùng cơ chế, chỉ khác timeout):
+   *   09:24 · 1 457 chat · timeout 7 s   → Ext quá hạn 114 · kiểm chứng THẤY TIN 69 (60 %)
+   *   09:44 · 3 653 chat · timeout 2,5 s → Ext quá hạn 225 · kiểm chứng THẤY TIN   0 ( 0 %)
+   * Cắt 7 s → 2,5 s không cứu thêm ca nào mà biến 60 % ca "quá hạn" thành mất trắng: lệnh gửi
+   * nằm trong hàng đợi cầu nối, timeout bắn trước khi lệnh kịp chạy ⇒ KHÔNG có gì để kiểm chứng.
+   * Nay: timeout = 3 × p90 đo được (sàn 2,5 s, trần 9 s); chưa có mẫu ⇒ 7 s (mức đã đo là có
+   * 60 % ca đến nơi). Ext trả nhanh thì tự siết về 2,5 s; Ext ì thì tự nới, tối đa 9 s.
+   * Không thể sinh tin trùng: ca quá hạn vẫn chỉ đánh ⚠ + kiểm chứng nền, KHÔNG BAO GIỜ gửi lại.
+   */
+  function extTimeoutMs() {
+    const p90 = extLatP90();
+    const want = p90 > 0 ? p90 * 3 : 7000;
+    return Math.min(9000, Math.max(2500, Math.round(want)));
+  }
+
+  // ==== [v1.92.8] BẮT PHẢN HỒI MUỘN CỦA EXTENSION — không thêm một request nào ====
+  // Trong __ExtensionAdapter__.send (@715835 của _app):
+  //   setTimeout(() => { delete this.pendingMessages[taskId]; resolve({success:false,data:null}); }, timeout)
+  // và listener window "message" CHỈ gọi handler khi taskId CÒN nằm trong pendingMessages
+  // ("null!=e.data.taskId&&e.data.taskId in this.pendingMessages").
+  // ⇒ Phản hồi của Extension đến sau mốc timeout bị VỨT BỎ, dù tin đã gửi xong. Đó chính là
+  //   các dòng "⚠ Ext: Extension không phản hồi (quá hạn)" rồi ~20 s sau lại "🔎 tin ĐÃ đến nơi".
+  // Cách sửa: gọi adapter với timeout DÀI để GIỮ CHỖ CHỜ, chỉ await tới mốc mềm extTimeoutMs().
+  // Quá mốc thì nhả làn như cũ và gắn .then() vào chính promise đó: phản hồi muộn về ⇒ nâng
+  // ⚠→✅ NGAY TẠI CHỖ, không cần đọc lịch sử, không gửi lại ⇒ không thể sinh tin trùng.
+  // Giá trị trả về khi quá hạn vẫn là { success:false, data:null } — đúng hình dạng adapter
+  // trả khi hết giờ, nên toàn bộ luồng xử lý phía sau giữ nguyên 100 %.
+  const EXT_ADAPTER_HOLD_MS = 60000;
+  const EXT_SOFT_MARK = { soft: true };
+  const extLateStats = { ok: 0, fail: 0, silent: 0 };
+  function sendExtWithLateWatch(adapter, payload, conv, opt) {
+    const softMs = Math.max(1000, Number(opt && opt.softMs) || 2500);
+    const startedAt = (opt && opt.startedAt) || Date.now();
+    const myRun = runSeq;
+    let raw;
+    try {
+      raw = adapter.send(payload, { timeout: Math.max(EXT_ADAPTER_HOLD_MS, softMs) });
+    } catch (e) {
+      return Promise.reject(e); // giữ nguyên hành vi cũ: extSendLane bọc thành "Lỗi kênh:"
+    }
+    let timer = null;
+    const soft = new Promise((resolve) => { timer = bgClock.after(softMs, () => resolve(EXT_SOFT_MARK)); });
+    return Promise.race([raw, soft]).then((first) => {
+      if (timer) { try { timer(); } catch (eS) { /* ignore */ } timer = null; }
+      if (first !== EXT_SOFT_MARK) return first; // phản hồi kịp hạn — y như trước
+      Promise.resolve(raw).then((late) => {
+        const good = !!(late && late.success);
+        if (!good) {
+          if (late && late.data) extLateStats.fail++; else extLateStats.silent++;
+          return;
+        }
+        extLateStats.ok++;
+        // Extension CÓ trả lời ⇒ nó không chết. Không để chuỗi timeout mở bộ ngắt oan.
+        try { extSendCtl.timeoutStreak = 0; } catch (e) { /* ignore */ }
+        if (myRun !== runSeq) return;
+        if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+        const lateMs = Date.now() - startedAt;
+        try { markDelivered(conv.id, 'ext'); } catch (e) { /* ignore */ }
+        try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
+        try {
+          logFailGrouped((conv.name || conv.id),
+            'Extension trả lời SAU mốc quá hạn (' + (Math.round(lateMs / 100) / 10) + 's), tin ĐÃ đi — tính ✅ Ext, không gửi lại', '✅', conv.id);
+        } catch (e) { /* ignore */ }
+        try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
+      }).catch(() => { extLateStats.fail++; });
+      return { success: false, data: null };
+    });
+  }
   function isExtBreakerOpen() {
     return Date.now() < extSendCtl.openUntil;
   }
@@ -5243,7 +6282,7 @@
     while (!state.stopRequested) {
       const now = Date.now();
       if (now < extSendCtl.openUntil) return null; // đang nghỉ hồi sức — bỏ qua Ext ngay
-      if (extSendCtl.probeInFlight) { await sleep(250); continue; } // chờ kết quả lệnh thăm dò
+      if (extSendCtl.probeInFlight) { await sleepUntil(Date.now() + 10000, 'ext-probe'); continue; } // [v1.92.9] thức NGAY khi lệnh thăm dò có kết quả
       if (extSendCtl.openUntil) {
         extSendCtl.probeInFlight = true;
         extSendCtl.probeToken++;
@@ -5256,6 +6295,7 @@
   function releaseExtSendPermit(permit) {
     if (permit && permit.probe && extSendCtl.probeToken === permit.token) {
       extSendCtl.probeInFlight = false;
+      softNotify('ext-probe'); // [v1.92.9] đánh thức mọi làn đang chờ kết quả thăm dò
     }
   }
   function noteExtSendOutcome(kind, permit, latencyMs) {
@@ -5264,6 +6304,10 @@
       if (kind === 'responded') {
         // Extension CÓ trả lời (dù thành công hay báo lỗi rõ ràng) = còn sống.
         extSendCtl.timeoutStreak = 0;
+        if (latencyMs != null && latencyMs > 0) {
+          extSendCtl.latSamples.push(latencyMs);
+          if (extSendCtl.latSamples.length > EXT_LAT_RING) extSendCtl.latSamples.shift();
+        }
         // AIMD làn Ext gửi: trả nhanh (<5s) tích lũy 10 lần → tăng +2 slot (tối đa 24).
         // Có 1 lệnh hơi chậm (>5s nhưng không timeout) chỉ trừ nhẹ bộ đếm chứ không xóa về 0.
         if (latencyMs != null) {
@@ -5319,13 +6363,16 @@
       }
     } catch (e) { releaseExtSendPermit(permit); }
   }
+  // [v1.92.19] Làn riêng cho "bắn lại Socket 1 lần" ở đường bắn-nhả. Không dùng pageLane vì retry
+  // chạy SAU khi wave đã nhả ghế — chen vào đây sẽ chiếm ghế của wave kế tiếp (chậm đều cả lô).
+  const socketWaveRetryLane = makeLane(48);
   const socketLane = makeLane(BUS_PARALLEL_SOCKET);
   const pageSocketLanes = {};
   function getPageSocketLane(pageId) {
     const pid = String(pageId || '');
     if (!pid) return socketLane;
     if (!pageSocketLanes[pid]) {
-      pageSocketLanes[pid] = makeAdaptivePriorityLane(BUS_PARALLEL_SOCKET, SOCKET_LANE_MIN, SOCKET_LANE_MAX);
+      pageSocketLanes[pid] = makeAdaptivePriorityLane(BUS_PARALLEL_SOCKET, SOCKET_LANE_HARD_FLOOR, SOCKET_LANE_MAX);
       socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0, noAckStreak: 0 };
     }
     return pageSocketLanes[pid];
@@ -5403,6 +6450,41 @@
   function pickBestDirectOrder(conv, pageId, ctx, baseSeq) {
     const seq = (baseSeq || ['ext', 'socket', 'api']).slice();
     if (!conv || conv.type === 'comment') return seq;
+    // [v1.91.89] Chế độ "toàn bộ qua Extension": Ext trước, API dự phòng, KHÔNG dùng Socket.
+    if (forceExtMode) {
+      // [v1.91.90] Cùng endpoint HTTP, nhưng làn API có 76–96 luồng còn Ext chỉ 48 ⇒ lô toàn
+      // khách vắng (HAR: mỗi ca ~908ms) nhanh hơn rõ rệt khi đi API trước. Ext vẫn là dự phòng.
+      const httpPlan = ['api', 'ext'].concat(seq.filter((x) => x !== 'api' && x !== 'ext' && x !== 'socket'));
+      if (httpPlan.length) return httpPlan;
+    }
+    // [v1.91.86] Né Socket khi page chứng minh là gửi không tới.
+    // [v1.92.40] Điều kiện đổi từ "ACK chết" (suy diễn) sang "bằng chứng giao hàng" (pageSocketUsable).
+    // Chỉ đổi thứ tự làn (bỏ 'socket'), Extension/API vẫn là đường gửi thật như cũ.
+    if (pageId && !pageSocketUsable(pageId)) {
+      // [v1.92.13] Dò lại định kỳ thay vì né Socket mù 10 phút (xem chú thích ở PAGE_ACK_DEAD_TTL_MS).
+      // [v1.92.36] LÔ TÍ HON (≤ 20 chat) KHÔNG DÒ LẠI KÊNH ACK CHẾT.
+      // Lô 3 chat 15:48: page đã bị đánh dấu ACK chết từ lượt trước, nhưng vì tới hạn dò nên
+      // 1 chat vẫn được bắn thử Socket ⇒ chờ ACK 8 s rồi mới chốt ⚠, kéo cả lượt 3 tin lên 13 s.
+      // Dò chỉ đáng giá khi còn nhiều chat để hưởng lợi; lô nhỏ thì đi thẳng Ext/API cho dứt điểm.
+      const tinyBatchNoProbe = !!(batchStats && batchStats.total > 0 && batchStats.total <= 20);
+      const sinceProbe = socketPickDiag.deadSkip - socketPickDiag.deadSkipAtProbe;
+      // [v1.92.34] 50 → 20 ca: lô 13:38 né Socket 1 697 lần nhưng chỉ dò lại 34 lần (≈5 s/lần
+      // thì đúng ra phải ~85) và 0 lần hồi. Dò dày hơn = biết sớm hơn làn nào còn sống,
+      // giá mỗi lần dò chỉ 1 tin đi Socket (nếu ACK chết thì mất đúng hạn chờ của 1 tin).
+      const hasExtNet = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+      if (hasExtNet && !tinyBatchNoProbe
+          && (sinceProbe >= 20 || Date.now() - (pageAckDeadProbeAt[pageId] || 0) >= SOCK_DEAD_PROBE_MS)) {
+        pageAckDeadProbeAt[pageId] = Date.now();
+        socketPickDiag.deadSkipAtProbe = socketPickDiag.deadSkip;
+        if (seq.indexOf('socket') > -1) {
+          socketPickDiag.probe++;
+          return ['socket'].concat(seq.filter((x) => x !== 'socket'));
+        }
+      }
+      socketPickDiag.deadSkip++;
+      const noSock = seq.filter((x) => x !== 'socket');
+      if (noSock.length) return noSock;
+    }
     const hasSock = seq.indexOf('socket') > -1;
     const hasExt = seq.indexOf('ext') > -1;
     if (!hasSock || !hasExt) return seq;
@@ -5413,6 +6495,8 @@
     // để không phải đứng đợi getBusinessWSContext + sendInitMessages (~3s).
     const sockReady = isPageSocketReady(pageId) || (!isSmallBatch && !!(pageId && socketWarmPromises[pageId]));
     const hasRealGid = !!(ctx && ctx.gid && !ctx.gidFromPsid);
+    if (!sockReady) socketPickDiag.notReady++;
+    else if (!hasRealGid) socketPickDiag.noGid++;
     // Khớp 100% với __sendBySocketCacheFB__ trong _app (@927067 & @937200):
     // Ưu tiên bắn qua Socket trước khi WebSocket đang kết nối (hoặc đang khởi động ở đầu lượt lô lớn) VÀ ĐÃ CÓ global_id THẬT (hasRealGid)!
     // Tuyệt đối không ưu tiên Socket khi chưa có global_id thật (vì Socket không nhận from_psid).
@@ -5449,6 +6533,27 @@
       const hint = channelHints[conv.id];
       const idleDiff = getConvIdleMs(conv, full);
       const idleLong = !isNaN(idleDiff) && idleDiff > 86400000;
+      // [v1.91.94] BẰNG CHỨNG HAR — CỜ is_record_ctx_7_days XOÁ SẠCH (#10):
+      //   • CÓ  cờ: 19 success · 5 (#551) · **0 (#10)**
+      //   • KHÔNG cờ: 24 (#10) · 4 (#551) · **0 success**
+      // Từ v1.91.80 script LUÔN gửi is_record_ctx_7_days=true (cả multipart lẫn JSON), nên
+      // tiền đề cũ "chat ngoài 24h gọi API 100% bị từ chối ⇒ đi thẳng Ext" KHÔNG còn đúng.
+      // Logic cũ đó là lý do cả lô 3 384 chat chỉ có [API: 13 · Ext: 1 870] — 96 làn HTTP
+      // đứng không, mọi thứ dồn vào Ext bị tuần tự hoá ~22 tin/giây.
+      // Nay: chat idle >24h VẪN thử API trước (31ms p50). Chỉ khi API trả lỗi thật cho ĐÚNG
+      // chat đó mới rơi xuống Ext — cơ chế alreadyTriedApi/dynamicDirect đã có sẵn, không
+      // bao giờ gửi lại 2 lần (API lỗi ⇒ chưa phát sinh tin).
+      // [v1.91.96] SỬA LẠI KẾT LUẬN SAI CỦA v1.91.94.
+      // Chú thích cũ ở đây (v1.91.94) nói "is_record_ctx_7_days xoá sạch (#10)" — SAI.
+      // (#10) có HAI e_subcode:
+      //   • 2018300 "một ứng dụng khác đang kiểm soát thread"  → cờ ctx7 có tác dụng
+      //   • "Tin nhắn này được gửi NGOÀI KHOẢNG THỜI GIAN cho phép" → cờ ctx7 KHÔNG cứu được
+      // 19 ca "thành công + có cờ" trong HAR đều là chat TRONG 24h ⇒ chỉ là tương quan,
+      // không phải nhân quả. Log thật 09:15 chứng minh: chat ngoài 24h bị (#10)-window và
+      // (#551), sau đó Ext gửi ĐƯỢC ngay.
+      // Giá phải trả khi bắt API đi trước (1.91.94/1.95): mỗi chat chờ queue 1 218ms +
+      // fetch 1 067ms rồi mới rơi về Ext. Lô 312 chat: 2,91 tin/s (so với 20,77 tin/s của
+      // 1.91.93 khi Ext đi trước). Vì vậy: chat đã ngoài 24h ⇒ Ext/Socket TRƯỚC như cũ.
       const textOutWin = !photo && idleLong && !isRecordCtx7Days(full);
       const photoOutWin = !!photo && idleLong && !isRecordCtx7Days(full);
       const noApiPhoto = !!(photo && !photo.fbId);
@@ -5510,16 +6615,33 @@
             if (r.fired) return; // bắn-nhả: xác nhận nền tự ghi nhận khi ACK về — không chốt sớm
             markDelivered(conv.id, r.sendBy || 'ext');
             postSendSideEffects(conv);
-            logLine('✅ ' + nm2 + ' — gửi THÀNH CÔNG qua '
-              + (r.sendBy === 'socket' ? 'Socket' : r.sendBy === 'extension' ? 'Extension' : 'API'));
+            logFailGrouped(nm2, 'gửi THÀNH CÔNG qua '
+              + (r.sendBy === 'socket' ? 'Socket' : r.sendBy === 'extension' ? 'Extension' : 'API'), '✅', conv.id);
             return;
+          }
+          // [v1.91.83] CỨU CA KHÔNG CÓ global_id — chỗ rò 57 tin/lô (0,53%).
+          // Với lô lớn, chat im >24h bị cắt làn API (skipFutileApi) ⇒ plan chỉ còn
+          // ['ext','socket']. Nhưng khi KHÔNG có global_id thì: Ext bị noGidGate chặn,
+          // Socket bắt buộc phải có gid ⇒ CẢ HAI đều bất khả, dù làn API là làn DUY NHẤT
+          // không cần gid (HAR: URL gửi chỉ dùng convId, 58/58 request không chứa global_id).
+          // Nay: gặp đúng tình huống đó thì chuyển sang làn API một lần duy nhất.
+          // An toàn chống trùng: fireApiAndWatch đi qua acquireOutbound(conv.id) — nếu chat
+          // đã được bắn ở làn khác thì trả dupBlocked, không sinh tin thứ hai.
+          if (!r.ok && !r.uncertain && !r.recipientUnavailable
+              && (r.gidUnknown || /globalId/i.test(String(r.error || '')))) {
+            try {
+              sendDiag.apiNoGidFallback = (sendDiag.apiNoGidFallback || 0) + 1;
+              logFailGrouped(nm2, 'không có global_id (Ext/Socket đều bất khả) — chuyển làn API', '🛟', conv.id);
+              fireApiAndWatch(conv, text, photo);
+              return;
+            } catch (e0) { /* rơi xuống xử lý cũ */ }
           }
           if (r.uncertain) {
             if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-            logLine('⚠ ' + nm2 + ' — ' + r.error + ' (không rõ — không gửi thêm)');
+            logFailGrouped(nm2, '' + r.error + ' (không rõ — không gửi thêm)', '⚠', conv.id);
           } else {
             if (r.windowClosed) windowBlocked++;
-            logLine('❌ ' + nm2 + ' — ' + r.error);
+            logFailGrouped(nm2, '' + r.error, '❌', conv.id);
           }
           // cửa sổ 24h VẪN bù kênh khác (Thanh Binh); khách khóa nick (recipientUnavailable) hoặc hết kênh → tự bỏ
           if (!r.ok && !r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
@@ -5560,9 +6682,25 @@
     const channels = {
       api: async () => {
         const r = await sendViaApi(conv, text, photo, ctx);
+        // [v1.92.28] ĐẾM đường API ĐỒNG BỘ (`sendViaApi`) — trước đây KHÔNG được đếm ở đâu cả.
+        // Lô 10:21: 481 lệnh API thật (đường cứu "thiếu global_id") mà dòng "🌐 API NỀN" vẫn in
+        // queued/started/fetch 0/0/0 vì chỉ `fireApiAndWatch` (đường nền) tăng bộ đếm ⇒ số liệu
+        // vô dụng khi truy nguyên. `queued` vẫn là của đường nền (đường này không qua hàng đợi).
+        if (!(r && r.dupBlocked)) {
+          sendDiag.apiStarted++;
+          if (r && r.ok) sendDiag.apiSuccess++;
+          else if (r && r.sent === 'maybe') sendDiag.apiUnknown++;
+          else sendDiag.apiRejected++;
+        }
         if (!r.ok && r.sent !== 'maybe' && isThreadControlError(r.error)) {
-          batchSkipApi = true;
-          markApiBlockedForPage(conv.pageId || String(conv.id || '').split('_')[0]);
+          apiThreadBlockStreak++;
+          if (apiThreadBlockStreak >= 3 && !batchSkipApi) {
+            batchSkipApi = true;
+            markApiBlockedForPage(conv.pageId || String(conv.id || '').split('_')[0]);
+            try { logLine('⛔ API bị chặn cấp page (' + apiThreadBlockStreak + ' ca thread-control liên tiếp) — các chat sau đi thẳng Ext/Socket.'); } catch (e0) { /* ignore */ }
+          }
+        } else if (r.ok) {
+          apiThreadBlockStreak = 0;
         }
         return r;
       },
@@ -5625,30 +6763,58 @@
             // GATE NO-GID: HTTP/Batch/WS/Ext đều đã xác nhận không có global_id ở khâu dò.
             // Không bắn REPLY_INBOX_PHOTO thread-only nữa — đây là nút nghẽn 6 luồng ở đuôi lô.
             recycleUnusedFbId(pid0, ctx);
-            return {
-              ok: false, sent: false, gidUnknown: true, noGidGate: true,
-              discoveryState: ctx.gidDiscoveryState || 'ext-responded-no-gid',
-              error: 'Không tìm được global_id để gửi (server/Batch/WS/Ext đều không có) — bỏ qua Ext thread-only cho nhanh',
-            };
+            // [v1.92.26] LỖ RÒ 51 TIN (lô 10:04): gate này trả ❌ mà KHÔNG thử làn API, dù
+            // lệnh gửi API chỉ dùng conversation_id (HAR: 58/58 request gửi không có
+            // global_id). Đó là lý do log ghi "🌐 API NỀN queued 0 · fallback 0" trong khi
+            // 51 chat (2,1% lô) không hề được gửi ở kênh nào. Nay: còn làn API dùng được thì
+            // đi thẳng làn API; chưa bắn gì nên tuyệt đối không thể trùng.
+            const canApiNoGid = !batchSkipApi && !isApiBlockedForPage(pid0)
+              && seq.indexOf('api') < 0 && !(photo && !photo.fbId) && conv.type !== 'comment';
+            if (canApiNoGid) {
+              seq.push('api');
+              ctx.apiNoGidFirst = true;
+              ctx.gidUnknown = false;
+              ctx.noGidConfirmedByExt = false;
+              ctx.extThreadOnlyRescue = true;
+              ctx.gid = null;
+              ctx.gidFromPsid = false;
+              ctx.gidResolved = true;
+              sendDiag.apiNoGidFallback++;
+              ctx.apiNoGidDone = true; // [v1.92.28] đã xử lý ⇒ không chạy lại khối cứu bên dưới (tránh 2 dòng 🛟/ca)
+              logFailGrouped((conv.name || conv.id),
+                'server/Batch/WS/Ext đều không có global_id ⇒ chuyển làn API bằng conversation_id'
+                + ' (HAR: lệnh gửi API không cần global_id)', '🛟', conv.id);
+            } else {
+              return {
+                ok: false, sent: false, gidUnknown: true, noGidGate: true,
+                discoveryState: ctx.gidDiscoveryState || 'ext-responded-no-gid',
+                error: 'Không tìm được global_id để gửi (server/Batch/WS/Ext đều không có) — bỏ qua Ext thread-only cho nhanh',
+              };
+            }
           }
           // Chưa hề có tin nào được bắn cho chat này, nên cứu hộ ở đây không thể gây trùng:
           // thử Extension bằng thread_id trước, sau đó API bằng conversation_id (đúng fallback
           // của luồng gửi tay trong _app: extension -> socket -> api). Không còn chốt oan
           // "khách đã khóa nick" chỉ vì bước DÒ global_id trả null.
-          ctx.noGidConfirmedByExt = false;
-          ctx.extThreadOnlyRescue = true;
-          ctx.gid = null;
-          ctx.gidFromPsid = false;
-          ctx.gidResolved = true;
-          const canApiRescue = !batchSkipApi && seq.indexOf('api') < 0 && !(photo && !photo.fbId);
-          if (canApiRescue) seq.push('api');
-          logLine('🛟 ' + (conv.name || conv.id)
-            + ' — chưa dò được global_id; chưa kết luận khách khóa nick, sẽ thử Extension theo thread_id'
-            + (canApiRescue ? ' và API theo conversation_id như đường gửi tay' : ''));
+          if (!ctx.apiNoGidDone) {
+            ctx.noGidConfirmedByExt = false;
+            ctx.extThreadOnlyRescue = true;
+            ctx.gid = null;
+            ctx.gidFromPsid = false;
+            ctx.gidResolved = true;
+            const canApiRescue = !batchSkipApi && seq.indexOf('api') < 0 && !(photo && !photo.fbId);
+            if (canApiRescue) seq.push('api');
+            logFailGrouped((conv.name || conv.id),
+              'chưa dò được global_id; chưa kết luận khách khóa nick, sẽ thử Extension theo thread_id'
+              + (canApiRescue ? ' và API theo conversation_id như đường gửi tay' : ''), '🛟', conv.id);
+          }
         }
       }
       const pid = (ctx.full && (ctx.full.page_id || ctx.full.pageId)) || pid0;
       seq = pickBestDirectOrder(conv, pid, ctx, seq);
+      // [v1.92.26] Không có global_id ⇒ Ext/Socket chắc chắn bất khả, chỉ còn làn API:
+      // đưa lên đầu để khỏi tốn 3 lượt thử vô ích cho mỗi ca.
+      if (ctx.apiNoGidFirst) seq = ['api'].concat(seq.filter((x) => x !== 'api'));
     }
 
     const tried = Array.isArray(ctx.triedErrors) ? ctx.triedErrors.slice() : [];
@@ -5656,6 +6822,9 @@
     // Chỉ đánh dấu "gid chưa rõ" khi một kênh thật sự cho biết đang thiếu gid.
     // Lỗi API độc lập (chưa hề cần gid) không được kéo cả chat sang Pass 2 oan.
     let sawGidUnknown = !!(ctx.gidUnknown && !ctx.gid && conv.type !== 'comment');
+    // [v1.92.13] Chat bị CHÍNH BỘ NGẮT QUÁ TẢI của Ext chặn (chưa hề bắn lệnh nào ⇒ chắc chắn
+    // chưa đi) — phải phân biệt với "khách chết" để còn xếp lại, xem runMainItem.
+    let sawExtOverload = false;
     if (triedCh.length) {
       seq = seq.filter((x) => triedCh.indexOf(x) < 0);
     }
@@ -5689,6 +6858,27 @@
       triedCh.push(ch);
       tried.push((ch === 'ext' ? 'Ext' : ch) + ': ' + (r.error || 'fail'));
       if (r.gidUnknown) sawGidUnknown = true;
+      // [v1.92.40] KHÔNG tăng extOverloadSkips ở đây nữa — đã tăng ngay chỗ bộ ngắt chặn
+      // (sendViaExtension), nếu không mỗi ca bị đếm 2 lần.
+      if (r.extBreakerOpen) sawExtOverload = true;
+      // [v1.92.30] `sent:false` nhưng là PHÁN ĐOÁN (Socket bị FB từ chối / Ext trả lỗi có lý do /
+      // API success:false) ⇒ KHÔNG chạy kênh kế ngay tại đây. Chuyển sang cổng "chứng minh vắng
+      // mặt": nếu hội thoại ĐÃ CÓ tin thì hủy bù (chặn lặp), chứng minh được vắng mặt thì mới bắn.
+      // Worker được giải phóng NGAY (trả về đây) ⇒ tốc độ lô không bị bù chồng giữ lại.
+      // KHÔNG áp cho 2 ca mà code đã có bằng chứng riêng: khách không nhận được tin
+      // (recipientUnavailable — FB trả mã 1545041 / "không có mặt") và token hỏng.
+      if (r.ambiguous && !r.recipientUnavailable && !(r.error && r.error.indexOf('Token') === 0)) {
+        recycleUnusedFbId(pid0, ctx);
+        sendDiag.buProofGated++;
+        scheduleBuRetry(conv, text, photo, (conv.name || conv.id),
+          (ch === 'ext' ? 'Extension' : (ch === 'socket' ? 'Socket' : 'API')) + ' báo lỗi ('
+            + clip(String(r.error || 'không rõ'), 70) + ')',
+          triedCh.slice(), { ambiguous: true, via: ch, sentAt: Date.now() });
+        return {
+          ok: false, gated: true, sent: 'maybe', tried: triedCh.slice(),
+          error: tried.join(' | ') + ' — đang chứng minh vắng mặt trước khi bù (không bắn mù)',
+        };
+      }
       // "không rõ" = tin CÓ THỂ đã đi — thử tiếp kênh khác sẽ gửi TRÙNG → dừng ngay
       if (r.sent === 'maybe') {
         recycleUnusedFbId(pid0, ctx);
@@ -5698,6 +6888,36 @@
       // (fbErrorCode 1545041) hoặc (#100) không tìm thấy người dùng → dừng luôn
       if (r.recipientUnavailable || /\(#100\)|Không tìm thấy người dùng phù hợp/i.test(r.error || '')) {
         recycleUnusedFbId(pid0, ctx);
+        /* [v1.92.41] "NGƯỜI NÀY HIỆN KHÔNG CÓ MẶT" (1545041) là lỗi CỦA KÊNH, không phải bằng
+         * chứng khách chặn: Socket đã bị từ chối như vậy 5 800 lần trong 2 lô 16:07/16:11, trong
+         * khi Extension — đi qua tab Facebook thật — gửi được 186 tin. Chưa có tin nào được gửi
+         * ⇒ thử Extension 1 lần là an toàn tuyệt đối, và có ngân sách dò 200 ca để tự đóng nếu
+         * Extension cũng bị chặn y như vậy. */
+        const _isNoFace1545 = /1545041|không có mặt/i.test(String(r.error || ''));
+        const _extAvail1545 = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+        if (_isNoFace1545 && ch !== 'ext' && _extAvail1545 && !conv.__extFallback1545) {
+          if (extFallback1545Allowed()) {
+            conv.__extFallback1545 = true;
+            extTry1545.tried++;
+            scheduleBuRetry(conv, text, photo, (conv.name || conv.id),
+              'FB báo "người này hiện không có mặt" ở kênh ' + ch, triedCh.slice(),
+              { ambiguous: false, fromUncertain: true, via: ch, sentAt: Date.now() });
+            return {
+              ok: false, gated: true, sent: 'maybe', tried: triedCh.slice(),
+              error: 'FB báo "người này hiện không có mặt" ở kênh ' + ch
+                + ' — tin CHƯA gửi ⇒ thử Extension 1 lần (không thể trùng)',
+            };
+          }
+          conv.__extFallback1545 = true;
+          return {
+            ok: false, sent: false, uncertain: true, tried: triedCh.slice(),
+            error: 'FB báo "người này hiện không có mặt" · đã đo 200 ca thì Extension cũng bị chặn'
+              + ' — GIỮ ⚠ (chưa gửi), vào danh sách gửi tay',
+          };
+        }
+        // [v1.92.34] Chốt ❌ NGAY (không bù, không kiểm chứng trong lượt — chống gửi lặp),
+        // nhưng ghi vào sổ để SAU LÔ tự đọc lại lịch sử: nếu tin thật ra đã tới thì lật ✅.
+        if (r.deadUserHint) queueDeadUserRecheck(conv, text, photo, Date.now());
         return { ok: false, sent: false, recipientUnavailable: true, tried: triedCh.slice(), error: tried.join(' | ') };
       }
       // Nếu vừa dùng from_psid phỏng đoán (ctx.gidFromPsid === true) hoặc lỗi thiếu globalId/thread_id:
@@ -5714,6 +6934,19 @@
         ctx.gidFromPsid = false;
         ctx.gid = null;
       }
+      // [v1.92.27] THIẾU global_id Ở BẤT KỲ KÊNH NÀO ⇒ vẫn còn làn API.
+      // Lệnh gửi API chỉ cần conversation_id (HAR: 0/58 request gửi có global_id), nên chat
+      // không dò được gid vẫn PHẢI được gửi. Trước đây plan ['api','ext','socket'] mà api bị
+      // loại (ngoài 24h) thì Ext/Socket đều bất khả ⇒ kết thúc ❌ mà chưa hề gửi.
+      if (r.gidUnknown && !batchSkipApi && conv.type !== 'comment'
+          && !(photo && !photo.fbId) && seq.indexOf('api') < 0) {
+        const pidLoop = (ctx.full && (ctx.full.page_id || ctx.full.pageId)) || conv.pageId
+          || String(conv.id || '').split('_')[0];
+        if (pidLoop && !isApiBlockedForPage(pidLoop)) {
+          seq.push('api');
+          sendDiag.apiNoGidFallback++;
+        }
+      }
       if (r.error && r.error.indexOf('Token') === 0) {
         recycleUnusedFbId(pid0, ctx);
         return r; // token hỏng — dừng hẳn
@@ -5722,6 +6955,7 @@
     recycleUnusedFbId(pid0, ctx);
     return {
       ok: false, sent: false, tried: triedCh.slice(),
+      extOverloaded: sawExtOverload && !deliveredIds[conv.id],
       gidUnknown: !!(sawGidUnknown && !(ctx.gid && !ctx.gidFromPsid)),
       discoveryState: (ctx && ctx.gidDiscoveryState) || '',
       error: tried.join(' | '),
@@ -5787,6 +7021,7 @@
     const s = String(gid);
     if (convId) putGidToMemCaches(String(convId), s);
     if (pageId && threadId) putGidToMemCaches(String(pageId) + '_' + String(threadId), s);
+    softNotify('gid'); // [v1.92.9] mọi chỗ đang chờ gid thức ngay
     if (!gidSaveTimer) gidSaveTimer = setTimeout(flushPersistentGids, 400);
     try {
       const fbStore = window.__FBMetaDataStore__;
@@ -6057,6 +7292,37 @@
     return promise;
   }
 
+  /* [v1.91.75] Nạp global_id cho TOÀN BỘ page của một lượt gửi TRƯỚC khi bắn.
+   * Bằng chứng HAR: response HTTP (GET /conversations, GET /messages) KHÔNG hề có trường
+   * `global_id` — chỉ có `thread_id` (48/48 conversation) và `thread_key` (`t_<thread_id>`).
+   * Và trong _app, threadMapping[threadId] = globalId được dựng từ HAI CỘT KHÁC NHAU
+   * (globalId = cột 2/9, threadId = cột 3/65) ⇒ thread_id KHÔNG phải global_id.
+   * Vì vậy KHÔNG được "đoán" gid từ thread_id (gửi sai thread). Nguồn duy nhất biết
+   * {threadId → globalId} là BATCH_GET_GLOBAL_ID của Extension + socket threadMapping,
+   * nên phải nạp chúng cho mọi page ngay từ đầu lô. */
+  function prefetchGidsForBatch(groups) {
+    const adapter = window.__ExtensionAdapter__;
+    const h = window.__MqttHelper__;
+    if (!adapter || typeof adapter.send !== 'function') return;
+    const seen = {};
+    const pages = [];
+    (groups || []).forEach((g) => {
+      (g && g.list ? g.list : []).forEach((c) => {
+        const pid = String((c && (c.pageId || String(c.id || '').split('_')[0])) || '');
+        if (!pid || seen[pid]) return;
+        seen[pid] = true;
+        pages.push(pid);
+      });
+    });
+    pages.forEach((pid) => {
+      requestBatchGlobalIds(pid, false);
+      try { if (h) syncSocketMappingsToCache(h, pid); } catch (e) { /* ignore */ }
+    });
+    if (pages.length > 1) {
+      try { logLine('🧭 Nạp trước global_id cho ' + pages.length + ' page (BATCH_GET_GLOBAL_ID) trước khi bắn.'); } catch (e) { /* ignore */ }
+    }
+  }
+
   function warmUpSockets(targets, opts) {
     try {
       preloadPersistentGlobalIds();
@@ -6112,6 +7378,63 @@
   }
 
   // Đồng bộ tức thì (0ms) global_id từ WebSocket RAM cache trước khi bắn — tuyệt đối không chặn đầu lượt!
+  /* [v1.92.15] QUYẾT ĐỊNH KÊNH CỦA CẢ LÔ NẰM Ở ~2 GIÂY ĐẦU.
+   * Cùng một lô mà lúc chạy Socket (125 tin/s), lúc dồn hết vào Ext (29,7 tin/s) chỉ vì:
+   *   `pickBestDirectOrder` chọn Socket TRƯỚC chỉ khi `isPageSocketReady(pid)` (SOCKETS[pid] đã
+   *   sync: connectAt + 1000ms VÀ requestId >= 1). Wave 1 chạy trước lúc sync xong ⇒ kế hoạch
+   *   ['ext','socket'] ⇒ Ext trả lời trước (0,8-3s) và THẮNG ⇒ Socket không bao giờ được thử.
+   *
+   * KHÔNG DÙNG HẠN CHỜ TỰ ĐẶT: `warmUpSockets` đã tạo sẵn `socketWarmPromises[pid]` — một
+   * promise resolve ĐÚNG lúc socket connect xong và đã chờ sync (bên trong nó gọi
+   * waitForSocketSynced(2500) rồi tự xoá). Vậy chỉ cần await CHÍNH promise đó: thức ngay khi
+   * socket báo xong (thường 0,3-2s), và nếu mạng hỏng thì nó tự bỏ cuộc theo đúng hạn sync mà
+   * code đã dùng ở mọi nơi khác — không có con số 4s nào do tôi bịa ra.
+   * Không có promise (đã resolve từ trước) thì hỏi thẳng waitForSocketSynced cùng hạn đó. */
+  async function waitSocketsReadyForSend(targets) {
+    const h = window.__MqttHelper__;
+    if (!h || typeof h.initSocket !== 'function') return { waited: 0, ready: 0, pages: 0 };
+    const seen = {};
+    const pages = [];
+    (targets || []).forEach((c) => {
+      const pid = (c && (c.pageId || String(c.id || '').split('_')[0])) || '';
+      if (pid && !seen[pid]) { seen[pid] = true; pages.push(pid); }
+    });
+    if (!pages.length) return { waited: 0, ready: 0, pages: 0 };
+    const pending = pages.filter((pid) => !isPageSocketReady(pid));
+    if (!pending.length) return { waited: 0, ready: pages.length, pages: pages.length };
+    const t0 = Date.now();
+    try { logLine('🔌 Chờ Socket báo sync (thức ngay khi xong, không có hạn chờ cứng)…'); } catch (e0) { /* ignore */ }
+    const waits = pending.map((pid) => {
+      const warm = socketWarmPromises[pid];
+      if (warm && typeof warm.then === 'function') return Promise.resolve(warm).catch(() => null);
+      return waitForSocketSynced(h, pid).catch(() => null);
+    });
+    // LƯỚI CHỐNG TREO (không phải hạn chờ tối ưu): nếu initSocket không bao giờ trả về thì
+    // vẫn phải chạy lô, không đứng chờ vô hạn. Đường bình thường luôn thức bằng SỰ KIỆN.
+    const SOCK_SYNC_HANG_GUARD_MS = 8000;
+    const guard = sleepUntil(Date.now() + SOCK_SYNC_HANG_GUARD_MS, 'sock-sync').then(() => 'guard');
+    // Bấm Dừng thì thoát ngay, không đứng chờ socket.
+    const winner = await Promise.race([
+      Promise.all(waits).then(() => 'ready'),
+      guard,
+      stopSignal().then(() => 'stop'),
+    ]);
+    if (winner === 'guard') {
+      try { logLine('⚠ Socket không báo sync sau ' + SOCK_SYNC_HANG_GUARD_MS + 'ms (initSocket treo) — chạy tiếp, không đứng chờ.'); } catch (eg) { /* ignore */ }
+    }
+    const ready = pages.filter((pid) => isPageSocketReady(pid)).length;
+    const waited = Date.now() - t0;
+    if (ready === pages.length) {
+      try { logLine('✅ Socket đã sync ' + ready + '/' + pages.length + ' page sau ' + waited + 'ms — lô này đi làn Socket trước.'); } catch (e1) { /* ignore */ }
+    } else {
+      try {
+        logLine('⏳ Socket CHƯA sync (' + ready + '/' + pages.length + ' page) sau ' + waited + 'ms — lô này sẽ đi Extension trước, '
+          + 'chậm hơn ~4 lần so với Socket. Bấm ⏹ Dừng + F5 rồi chạy lại NGAY sẽ lấy lại được làn Socket.');
+      } catch (e2) { /* ignore */ }
+    }
+    return { waited, ready, pages: pages.length };
+  }
+
   async function waitInitialGidWarmup(targets) {
     try {
       const h = window.__MqttHelper__;
@@ -6136,13 +7459,27 @@
   const sendDiag = {
     sockRetry: 0, sockRetryRecovered: 0, sockRetryRejected: 0, sockRetryOther: 0, photoRetry: 0,
     recipientUnavailable: 0,
+    // [v1.92.26] Ca bị FB từ chối lần 1 mà KHÔNG thử lại (ngân sách đã đóng) và ca được
+    // cứu sang làn API vì không có global_id (trước đây bị bỏ luôn -> mất tin).
+    sockRetryBudgetSkipped: 0, apiNoGidFallback: 0,
+    // [v1.92.13] Số ca bị CHÍNH bộ ngắt quá tải của Ext chặn trước khi bắn (chưa hề gửi lệnh nào)
+    // mà kế hoạch không còn kênh nào khác ⇒ bị tính ❌ oan. Lô 15:54: 1 526 ca.
+    extOverloadSkips: 0,
     socketAckOk: 0, socketAckRejected: 0, socketNoAck: 0,
     socketAckMsTotal: 0, socketAckMsMax: 0,
     socketAckLt250: 0, socketAck250To999: 0, socketAck1To2s: 0, socketAck2To5s: 0, socketAckGte5s: 0,
     apiQueued: 0, apiStarted: 0, apiFetchAttempts: 0, apiSuccess: 0, apiRejected: 0, apiUnknown: 0,
     api429: 0, api429Retries: 0, apiCancelled: 0, apiFallback: 0,
     apiQueueWaitMsTotal: 0, apiQueueWaitMsMax: 0, apiFetchMsTotal: 0, apiFetchMsMax: 0,
+    // [v1.92.7] Vòng mẫu fetchMs để tính p50. TB bị max kéo lệch nên không phân biệt được
+    // "mọi request chậm" với "vài request kẹt"; p50 mới so được với HAR (xem docs §32).
+    apiFetchSamples: [],
     apiStatusCounts: Object.create(null),
+    // [v1.92.30] Cổng chứng minh vắng mặt trước khi bù: bao nhiêu ca HỦY được bù vì tin ĐÃ tới
+    // (buProofPresent = số lần lặp chặn được), bao nhiêu ca chứng minh được vắng mặt, không rõ,
+    // và bao nhiêu ca dùng lại kết quả đã dò (không tốn thêm request).
+    buProofPresent: 0, buProofAbsent: 0, buProofUnknown: 0, buProofCached: 0,
+    buProofGated: 0, buProofCancelled: 0,
   };
   const waveDiag = {
     waveSize: 0, configuredGapMs: 0, quickEnabled: false, plannedWaves: 0, wavesStarted: 0,
@@ -6152,8 +7489,48 @@
     maxSocketCooldown: 0, maxSocketLaneActiveTotal: 0, maxSocketLaneWaitingTotal: 0,
     maxSocketLaneActivePerPage: 0, maxSocketLaneWaitingPerPage: 0,
     maxExtQueue: 0, maxExtActive: 0, maxApiWaiting: 0,
+    // [v1.92.28] ĐẾM AI GIỮ CỔNG: 4 lý do chặn mở wave, để biết cái gì làm lô chậm.
+    gateBlockInflight: 0, gateBlockRetry: 0, gateBlockExt: 0, gateBlockApi: 0,
+    // [v1.92.43] ĐO THỜI GIAN GIỮ SLOT MAIN theo pha. Log 16:52/17:03: 192 slot mà chỉ
+    // 17,75/18,45 tin/s ⇒ mỗi chat giữ slot ~10,7 s (192 ÷ 18). Trước đây KHÔNG có số nào
+    // tách được thời gian đó nằm ở đâu ⇒ mọi phỏng đoán đều là đoán. Nay tách 3 phần:
+    //   chờ slot · chuẩn bị (ctx/tên/ảnh) · bản thân lần gọi kênh (gid + publish + ACK chờ).
+    slotN: 0, slotAcquireMs: 0, slotHoldMs: 0, slotPrepMs: 0,
   };
 
+  /* ===== [v1.92.28] TỈ LỆ FB TỪ CHỐI TRÊN CỬA SỔ GẦN NHẤT =====
+   * Ngân sách thử lại Socket (1.92.26) đóng theo tỉ lệ từ chối TÍCH LUỸ. Lô 10:21 (12 407 chat):
+   * tỉ lệ tích luỹ đầu lô > 70% (mấy wave đầu nhiều khách chết) nên ngân sách chỉ đóng sau
+   * **657** lần thử (đáng lẽ ~40) ⇒ vẫn phí 5% lưu lượng socket.
+   * Nay đo trên 200 ACK GẦN NHẤT: burst-reject thật (FB chặn tạm cả page) cho ~100%, còn
+   * "lô nhiều khách chết" cho ~40–60% ⇒ phân biệt được ngay từ đầu lô.
+   */
+  const SOCK_ACK_RECENT_N = 200;
+  const sockAckRecent = { ring: new Uint8Array(SOCK_ACK_RECENT_N), i: 0, n: 0, ok: 0, rejected: 0, noack: 0 };
+  function resetSockAckRecent() {
+    sockAckRecent.i = 0; sockAckRecent.n = 0;
+    sockAckRecent.ok = 0; sockAckRecent.rejected = 0; sockAckRecent.noack = 0;
+  }
+  function noteSockAckRecent(kind) {
+    const c = kind === 'ok' ? 1 : (kind === 'rejected' ? 2 : (kind === 'noack' ? 3 : 0));
+    if (!c) return;
+    const R = sockAckRecent;
+    if (R.n === R.ring.length) {
+      const old = R.ring[R.i];
+      if (old === 1) R.ok--; else if (old === 2) R.rejected--; else if (old === 3) R.noack--;
+    } else R.n++;
+    R.ring[R.i] = c;
+    R.i = (R.i + 1) % R.ring.length;
+    if (c === 1) R.ok++; else if (c === 2) R.rejected++; else R.noack++;
+  }
+  /** % bị từ chối trên cửa sổ gần nhất; -1 = chưa đủ mẫu để kết luận (coi như chưa biết). */
+  function socketRejectPctRecent(minSamples) {
+    const R = sockAckRecent;
+    const min = Number(minSamples) || 40;
+    if (R.n < min) return -1;
+    const total = R.ok + R.rejected + R.noack;
+    return total ? (R.rejected * 100 / total) : 0;
+  }
   function recordSocketAckOutcome(kind, elapsedMs, pageId) {
     try {
       const ms = Math.max(0, Number(elapsedMs) || 0);
@@ -6161,7 +7538,11 @@
       if (kind === 'ok') sendDiag.socketAckOk++;
       else if (kind === 'rejected') sendDiag.socketAckRejected++;
       else if (kind === 'noack') sendDiag.socketNoAck++;
-      if (kind === 'ok' || kind === 'rejected' || kind === 'noack') {
+      noteSockAckRecent(kind); // [v1.92.28] cửa sổ 200 ACK gần nhất (dùng cho ngân sách thử lại)
+      // [v1.92.29] Ca 'noack' mang thời gian HẾT HẠN CHỜ (vd 5 263 ms), không phải ACK thật:
+      // lô 13:42 in "ACK TB/max 5263/5263 · bucket ≥5s = 1" cho một ca mất ACK ⇒ p50/p90 lệch
+      // ⇒ "ngưỡng nhanh" sai. Chỉ ok/rejected mới là ACK.
+      if (kind === 'ok' || kind === 'rejected') {
         sendDiag.socketAckMsTotal += ms;
         sendDiag.socketAckMsMax = Math.max(sendDiag.socketAckMsMax, ms);
         if (ms < 250) sendDiag.socketAckLt250++;
@@ -6185,12 +7566,37 @@
   const BU_RETRY_MS = 1000;     // Socket: kênh dự phòng cuối (1s)
   const BU_SPREAD_MS = 50;      // rải nhẹ 50ms — hàng đợi Socket/Ext vốn đã tự điều tiết
   const buRetryDone = {}; // convId → đã bù trong lượt này
+  const ctx7Retried = {}; // convId → đã gửi lại 1 lần kèm cờ ctx-7-days trong lượt này (chống lặp vô hạn)
   let buRetrySeq = 0;
+  // [v1.92.31] đếm số dòng ❌ "bỏ thử lần 2" đã in ĐỦ LÝ DO (20 dòng đầu) — sau đó in bản gọn
+  // để 5 178 dòng trùng nhau không nhấn chìm log.
+  let buQuietBudgetNote = 0;
   let runSeq = 0; // mỗi lượt gửi 1 số — bù của lượt cũ tự hủy khi có lượt mới (chống gửi lẫn/lặp)
   const deliveredIds = {}; // convId → ĐÃ có kênh báo thành công trong lượt này ('api'|'ext'|'socket') — tuyệt đối không gửi lại
   const claimedSendIds = {}; // convId → đã nhận quyền bắn trong lượt này (chống 2 worker / 2 câu cùng 1 chat)
   const outboundLock = {}; // convId → đang/đã bắn tin (chưa xác nhận fail) — chặn POST/publish chồng
   const buRetryTimer = {}; // convId → timeout bù đang chờ (chống 2 chuỗi bù chạy song song)
+  const buLateRetryCount = {}; // [v1.92.40] số lần hẹn thử lại vì Ext bị bộ ngắt chặn (tối đa 2)
+  /* [v1.92.41] NGÂN SÁCH DÒ EXT CHO CA FB TỪ CHỐI "NGƯỜI NÀY HIỆN KHÔNG CÓ MẶT" (1545041).
+   * Số đo 2 lô 16:07/16:11 (1.92.38): Socket bị FB từ chối 3 425 + 2 367 ca; script KHÔNG thử
+   * kênh nào khác ⇒ chốt ❌ 3 311 + 2 214 ca, trong khi làn API và Ext gần như TRỐNG
+   * (API 15/45 lệnh, Ext queue 0/0). Đó là lý do hai lô chỉ đạt 43,1 % và 60,1 %.
+   * Nhưng không được bù mù: nếu Ext cũng bị đúng lỗi đó thì 5 500 lệnh chỉ làm chậm lô.
+   * Vì vậy DÒ CÓ ĐO: thử Ext cho tối đa 200 ca đầu; cứu được ≥1 ⇒ giữ mở; 0 cứu ⇒ ĐÓNG và
+   * phần còn lại vào danh sách gửi tay (⚠ "chưa gửi"), KHÔNG chốt ❌ oan. */
+  const extTry1545 = { tried: 0, saved: 0, closed: false, PROBE: 200 };
+  function extFallback1545Allowed() { return !extTry1545.closed; }
+  function noteExt1545Fail() {
+    if (extTry1545.closed) return;
+    if (extTry1545.tried >= extTry1545.PROBE && extTry1545.saved === 0) {
+      extTry1545.closed = true;
+      try {
+        logLine('🔒 Đóng ngân sách dò Extension cho ca "người này hiện không có mặt": đã thử '
+          + extTry1545.tried + ' ca, cứu được 0 ⇒ Extension cũng bị FB chặn. Phần còn lại vào '
+          + 'danh sách gửi tay (⚠ chưa gửi), không chốt ❌ oan.');
+      } catch (e0) { /* ignore */ }
+    }
+  }
   const finalFailedIds = {}; // convId → đã thất bại hẳn (hết kênh hoặc khách khóa nick)
   const uncertainIds = {};   // convId → không rõ kết quả ('maybe')
   const skippedLateIds = {}; // convId → bỏ qua lúc gửi (tag cấm / icon điện thoại vừa gắn)
@@ -6203,8 +7609,89 @@
   // nhả cho tới khi kiểm chứng chốt, tránh người dùng bấm lượt mới làm hủy đường bắn cứu).
   const sockVerifyPending = {}; // convId → runSeq đang có kiểm chứng chờ (chống đăng ký trùng)
   const sockVerifyFired = {}; // convId → runSeq đã bắn cứu sau kiểm chứng (mỗi lượt tối đa 1 lần/chat)
-  const verifyStats = { found: 0, fired: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
+  // [v1.91.85] HÀNG ĐỢI KIỂM CHỨNG SOCKET — chống bão đọc lịch sử.
+  // Khi ACK mất hàng loạt, mỗi lần mất là 1 vòng kiểm chứng tới 4 lần đọc, giãn cách 2/4/6s.
+  // Với 192 kênh song song thì có thể có hàng trăm vòng đọc cùng lúc ⇒ 429 tràn sang cả
+  // đường Extension bù ⇒ mọi thứ chậm. Nay chỉ chạy tối đa 12 vòng kiểm chứng cùng lúc;
+  // phần còn lại xếp hàng FIFO. KHÔNG đổi logic phán xử (vẫn cần 2 lần đọc rỗng liên tiếp
+  // mới dám kết luận "chưa tới"), chỉ giới hạn số vòng đọc đồng thời.
+  // [v1.92.3] 12 → 32. §29.5: `GET …/messages?customer_id=…` đo trên 217 request trong 12 HAR
+  // có p50 = 43ms, p90 = 132ms (không phải ~900ms như giả định cũ). Kiểm chứng lịch sử vì thế
+  // rất rẻ, trong khi ca no-ACK thật ~5 % (1/14 và 1/27 HAR) sẽ được chốt nhanh hơn nhiều.
+  // Đây chỉ là ĐỌC lịch sử để nâng ⚠→✅ — không bao giờ gửi lại, không thêm tải lên đường gửi.
+  /* [v1.92.43b] 32 → 96. Số đo 2 lô lớn: no-ACK/phải kiểm chứng 1 266 ca (lô A) và 1 881 ca
+   * (lô B); mỗi ca giữ vòng kiểm chứng ~10 s (chờ mốc chứng minh vắng mặt BU_PROOF_WAIT_MS) ⇒
+   * 1 266 ÷ 32 × 10 s ≈ 396 s đuôi. Đường này CHỈ ĐỌC lịch sử (GET …/messages, p50 43 ms theo
+   * §29.5), không gửi, không chiếm ghế làn gửi ⇒ nâng 32 → 96 rút đuôi còn ~1/3.
+   * Trần 96 = đúng trần làn ctx đang dùng, không tạo thêm tải mới. */
+  const SOCK_VERIFY_PARALLEL = 96;
+  let sockVerifyRunning = 0;
+  const sockVerifyQueue = [];
+  function pumpSockVerify() {
+    while (sockVerifyRunning < SOCK_VERIFY_PARALLEL && sockVerifyQueue.length) {
+      const fn = sockVerifyQueue.shift();
+      sockVerifyRunning++;
+      Promise.resolve()
+        .then(fn)
+        .catch(() => { /* lỗi từng vòng đã được xử lý bên trong */ })
+        .then(() => { sockVerifyRunning--; pumpSockVerify(); });
+    }
+  }
+  function enqueueSockVerify(fn) {
+    sockVerifyQueue.push(fn);
+    pumpSockVerify();
+  }
+  const verifyStats = { found: 0, held: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP (held = giữ ⚠, không bắn lại)
+  const sockRescueStats = { tried: 0 }; // [v1.92.37] số ca đã chứng minh vắng mặt ⇒ gửi cứu 1 lần
+  /* [v1.92.37] DANH SÁCH GỬI TAY — mọi chat kết thúc ở ⚠ ("không rõ"): máy KHÔNG dám nói đã gửi.
+   * Trước đây những ca này chỉ nằm im trong sổ ⚠, người dùng không biết chat nào cần bấm tay.
+   * Nay gom lại, in ở 💾 .txt và đếm ở dòng TỔNG HỢP. Không gửi gì thêm — chỉ để người đọc. */
+  const manualResendList = [];
+  function noteManualResend(cid) {
+    if (!cid) return;
+    for (let i = 0; i < manualResendList.length; i++) if (manualResendList[i].id === String(cid)) return;
+    manualResendList.push({ id: String(cid), name: nameById[cid] || '', t: Date.now(), reason: '' });
+    if (manualResendList.length > 5000) manualResendList.shift();
+  }
+  function dropManualResend(cid) {
+    if (!cid) return;
+    const k = String(cid);
+    for (let i = manualResendList.length - 1; i >= 0; i--) if (manualResendList[i].id === k) manualResendList.splice(i, 1);
+  }
+  /* [v1.92.38] "ĐANG CỨU" ≠ "CẦN GỬI TAY".
+   * Ca ⚠ vào danh sách gửi tay NGAY lúc hết hạn ACK (~5 s), nhưng cổng chứng minh vắng mặt phải
+   * chờ tới mốc 10 s mới dám kết luận ⇒ có ~6 s chat vừa nằm trong danh sách vừa đang được cứu.
+   * Nếu người dùng bấm 💾 .txt đúng lúc đó rồi gửi tay thì tin đi 2 lần. Vì vậy tách riêng:
+   * chat đang cứu in ở mục ⏳ "ĐANG CỨU — ĐỪNG gửi tay", quá 60 s không có kết luận mới trả về
+   * danh sách gửi tay (an toàn: thà chậm 1 phút còn hơn gửi đôi). */
+  const rescueInFlight = {}; // convId → thời điểm bắt đầu cứu
+  const RESCUE_INFLIGHT_STALE_MS = 60000;
+  function isRescuing(cid, now) {
+    const k = String(cid);
+    const at = rescueInFlight[k];
+    if (!at) return false;
+    if ((now || Date.now()) - at > RESCUE_INFLIGHT_STALE_MS) { delete rescueInFlight[k]; return false; }
+    return true;
+  }
+  function countRescuing() {
+    const now = Date.now();
+    let n = 0;
+    for (let i = 0; i < manualResendList.length; i++) if (isRescuing(manualResendList[i].id, now)) n++;
+    return n;
+  }
+  function countManualResendWait() {
+    const now = Date.now();
+    let n = 0;
+    for (let i = 0; i < manualResendList.length; i++) if (!isRescuing(manualResendList[i].id, now)) n++;
+    return n;
+  }
   const extVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng sau khi Ext timeout
+  // [v1.91.79] Ca ĐỌC LẠI nhịp giãn: KHÔNG được tính vào "đang chờ" của bảng TỔNG HỢP.
+  // Log 19:01→19:04 (10672 tin): phát lệnh xong 19:01:29 nhưng mãi 19:04:25 mới chốt vì
+  // 16 ca đọc-lại giữ lượt suốt 176s, trong khi kết quả cuối vẫn là "thấy tin 0". Đọc lại
+  // là việc phụ trợ — để nó chạy nền, không bắt người dùng chờ.
+  const extRecheckPending = {}; // convId → runSeq đang đọc lại (không giữ lượt)
+  const uncertainVerifyPending = {}; // convId → runSeq đang chờ kiểm chứng ca "không rõ kết quả" (API timeout/5xx)
   const extTimeoutStats = { timeout: 0, skipped: 0, found: 0, notFound: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
   let bgWatchdogTimer = null;
   // ⚡ [FIX-5] Với bắn-nhả 192 slot, đuôi hàng đợi retry Socket/Ext có thể chờ >90s khi lô lớn.
@@ -6213,7 +7700,7 @@
   function noteBgPending(conv, via) {
     if (!conv || !conv.id) return;
     pendingBg[conv.id] = { at: Date.now(), name: conv.name || conv.id, via: via || '' };
-    if (!bgWatchdogTimer) bgWatchdogTimer = setInterval(sweepBgPending, 5000);
+    if (!bgWatchdogTimer) bgWatchdogTimer = bgClock.every(5000, sweepBgPending);
   }
   function clearBgPending(convId) { if (convId) delete pendingBg[convId]; }
   let bgLaneBusyAt = 0;
@@ -6250,14 +7737,15 @@
       updateBatchSummaryUI();
     }
     if (!Object.keys(pendingBg).length && bgWatchdogTimer) {
-      clearInterval(bgWatchdogTimer);
+      try { bgWatchdogTimer(); } catch (e0) { /* ignore */ }
       bgWatchdogTimer = null;
     }
   }
   // v1.82.6 — khóa tin đang bay: đã POST/publish thì kênh khác không bắn thêm, trừ khi kênh trước
   // XÁC NHẬN thất bại (releaseOutbound). 'maybe' giữ khóa → không gửi lần 2.
   function dupBlockedResult(convId) {
-    return { ok: true, id: '', sendBy: deliveredIds[convId] || 'dup-block', sent: true, fired: true };
+    // [v1.92.28] `dupBlocked` để nơi gọi ĐẾM được là "đã chặn trùng", không nhầm thành 1 lệnh gửi thật.
+    return { ok: true, id: '', sendBy: deliveredIds[convId] || 'dup-block', sent: true, fired: true, dupBlocked: true };
   }
   function acquireOutbound(convId) {
     if (!convId) return true;
@@ -6293,13 +7781,21 @@
     const settled = okTotal + failTotal + unsureTotal + skipLateTotal;
     const verifyPendingNow = Object.keys(sockVerifyPending).filter((id) => sockVerifyPending[id] === runSeq).length;
     const extVerifyPendingNow = Object.keys(extVerifyPending).filter((id) => extVerifyPending[id] === runSeq).length;
-    const pending = Math.max(0, (batchStats.total || 0) - settled) + verifyPendingNow + extVerifyPendingNow;
+    const uncertainVerifyPendingNow = Object.keys(uncertainVerifyPending).filter((id) => uncertainVerifyPending[id] === runSeq).length;
+    /* [v1.92.36] CHỐT LƯỢT KHÔNG ĐỢI KIỂM CHỨNG NỀN.
+     * Lô 3 chat (15:48): phát lệnh 0,6 s nhưng bảng TỔNG HỢP chỉ in sau 13 s; lô 90 chat (15:44):
+     * 0,6 s phát, 31,4 s chờ. Mọi chat đã có kết luận từ lâu, phần chờ là 3 lượt ĐỌC LẠI lịch sử
+     * (chỉ có thể nâng ⚠ → ✅, không bao giờ gửi thêm). Nay `pendingSend` = số chat CHƯA có kết luận
+     * (dùng để chốt lượt), `pending` giữ nguyên nghĩa cũ (dùng để hiện "đang kiểm chứng nền").
+     * Kiểm chứng xong mà có lật ⚠ → ✅ thì in thêm 1 dòng cập nhật, không mở lại cả bảng. */
+    const pendingSend = Math.max(0, (batchStats.total || 0) - settled);
+    const pending = pendingSend + verifyPendingNow + extVerifyPendingNow + uncertainVerifyPendingNow;
     return {
       total: batchStats.total || 0,
       okTotal, okApi, okExt, okSocket,
       failTotal, unsureTotal,
       skipTotal: (batchStats.skippedPre || 0) + skipLateTotal,
-      settled, pending,
+      settled, pending, pendingSend,
     };
   }
 
@@ -6312,9 +7808,19 @@
       const elapsedMs = batchStats.startedAt ? Math.max(1, Date.now() - batchStats.startedAt) : 0;
       const elapsedSec = elapsedMs ? Math.max(1, Math.round(elapsedMs / 1000)) : 0;
       const elapsedExactSec = elapsedMs / 1000;
+      // [v1.92.10] TÁCH 2 CHẶNG: "phát lệnh" (đẩy lệnh đi) vs "chờ xác nhận" (ACK/kiểm chứng nền).
+      // Trước đây chỉ có tổng, nên lô phát xong trong 0,1s mà đuôi kiểm chứng 10s vẫn hiện
+      // "0,39 tin/giây" — đọc thành script chậm, trong khi phát lệnh gần như tức thì.
+      const dispatchEndAt = batchStats.dispatchEndedAt || (batchStats.loopFinished ? Date.now() : 0);
+      const dispatchMs = (dispatchEndAt && batchStats.startedAt) ? Math.max(1, dispatchEndAt - batchStats.startedAt) : 0;
+      const confirmMs = dispatchMs ? Math.max(0, elapsedMs - dispatchMs) : 0;
+      const dispatchPerSec = dispatchMs > 0 ? (c.total / (dispatchMs / 1000)) : 0;
       const settledPerSec = elapsedExactSec > 0 ? c.settled / elapsedExactSec : 0;
       const successPerSec = elapsedExactSec > 0 ? c.okTotal / elapsedExactSec : 0;
-      const eligibleAfterUnavailable = Math.max(0, c.total - sendDiag.recipientUnavailable);
+      // [v1.92.26] Mục tiêu khả thi = tổng - (khách FB xác nhận không nhận được) - (ca bị từ
+      // chối lần 1 mà ngân sách đã đóng, tức nhóm đã đo được 0/N cứu lại). Nhờ vậy con số
+      // "thành công/…" phản ánh việc script làm được, không bị 860 khách chết của FB kéo xuống.
+      const eligibleAfterUnavailable = Math.max(0, c.total - sendDiag.recipientUnavailable - sendDiag.sockRetryBudgetSkipped);
       const eligibleSuccessPct = eligibleAfterUnavailable ? (c.okTotal / eligibleAfterUnavailable) * 100 : 0;
       const socketAckCount = sendDiag.socketAckOk + sendDiag.socketAckRejected + sendDiag.socketNoAck;
       const socketAckAvgMs = socketAckCount ? Math.round(sendDiag.socketAckMsTotal / socketAckCount) : 0;
@@ -6328,10 +7834,11 @@
       if (c.okExt) byCh.push('Ext: ' + c.okExt);
       if (c.okSocket) byCh.push('Socket: ' + c.okSocket);
       const chStr = byCh.length ? ' [' + byCh.join(' · ') + ']' : '';
-      const isDoneAll = batchStats.loopFinished && (c.pending === 0 || state.stopRequested);
+      const isDoneAll = batchStats.loopFinished && (c.pendingSend === 0 || state.stopRequested);
       const html = (isDoneAll ? '🏁 <b>TỔNG HỢP:</b> ' : '📊 <b>Đang gửi:</b> ')
         + '<span style="color:#4ade80;font-weight:700">✅ Thành công: ' + c.okTotal + '/' + c.total + ' (' + pct + '%)' + chStr + '</span>'
-        + (c.pending > 0 && !state.stopRequested ? ' · <span style="color:#38bdf8">⏳ Đang xử lý: ' + c.pending + '</span>' : '')
+        + (c.pendingSend > 0 && !state.stopRequested ? ' · <span style="color:#38bdf8">⏳ Đang xử lý: ' + c.pendingSend + '</span>' : '')
+        + (c.pending > c.pendingSend ? ' · <span style="color:#a78bfa">🔎 kiểm chứng nền: ' + (c.pending - c.pendingSend) + '</span>' : '')
         + (c.failTotal > 0 ? ' · <span style="color:#f87171">❌ Lỗi: ' + c.failTotal + '</span>' : (isDoneAll ? ' · ❌ Lỗi: 0' : ''))
         + (c.unsureTotal > 0 ? ' · <span style="color:#fbbf24">⚠ Không rõ: ' + c.unsureTotal + '</span>' : '')
         + (c.skipTotal > 0 ? ' · <span style="color:#94a3b8">🧹 Bỏ qua: ' + c.skipTotal + '</span>' : '')
@@ -6346,36 +7853,86 @@
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
       }
       if (isDoneAll) markSendIdleIfSettled();
+      // [v1.92.36] Đã in TỔNG HỢP mà kiểm chứng nền sau đó lật ⚠ → ✅ (hoặc ngược lại) ⇒ in ĐÚNG
+      // MỘT dòng cập nhật, không mở lại cả bảng. Đây là hệ quả của việc chốt lượt không đợi
+      // kiểm chứng — số trong bảng vẫn luôn là số ĐÃ TỚI NƠI thật, chỉ là in sớm hơn.
+      if (isDoneAll && batchStats.finalLogged && batchStats.lastLoggedCounts) {
+        const pv = batchStats.lastLoggedCounts;
+        const changed = pv.ok !== c.okTotal || pv.unsure !== c.unsureTotal || pv.fail !== c.failTotal;
+        const verifyLeft = Math.max(0, c.pending - c.pendingSend);
+        const nowT = Date.now();
+        // Lô lớn có thể có cả trăm ca kiểm chứng nền ⇒ KHÔNG in mỗi lần lật (sẽ thành 100 dòng,
+        // quay lại đúng lỗi log cũ). Chỉ in: khi đã sạch kiểm chứng, hoặc 15 s/lần.
+        const dueByTime = nowT - (batchStats.lastDeltaLogAt || 0) >= 15000;
+        if (changed && (verifyLeft === 0 || dueByTime)) {
+          logLine('🔎 Cập nhật sau khi chốt lượt (kiểm chứng nền — KHÔNG gửi lại tin nào): ✅ '
+            + pv.ok + ' → ' + c.okTotal
+            + (pv.unsure !== c.unsureTotal ? ' · ⚠ ' + pv.unsure + ' → ' + c.unsureTotal : '')
+            + (pv.fail !== c.failTotal ? ' · ❌ ' + pv.fail + ' → ' + c.failTotal : '')
+            + (verifyLeft ? ' · còn ' + verifyLeft + ' ca đang kiểm chứng' : ''));
+          batchStats.lastLoggedCounts = { ok: c.okTotal, unsure: c.unsureTotal, fail: c.failTotal };
+          batchStats.lastDeltaLogAt = nowT;
+        }
+      }
       if (isDoneAll && !batchStats.finalLogged && c.total > 0) {
         batchStats.finalLogged = true;
+        batchStats.lastLoggedCounts = { ok: c.okTotal, unsure: c.unsureTotal, fail: c.failTotal };
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
-        logLine('🧾 GHI NHỚ LỖI: thêm mới ' + unavailableAddedThisRun.size + ' ID Socket confirmed-unavailable · tổng đang nhớ '
-          + unavailableConversationIds.size + ' (chỉ tự bỏ chọn khi tải/chọn danh sách sau).');
+        logLine('🫥 CHẠY NỀN: ' + bgClock.describe());
         logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total
           + ' tin (' + pct + '%)' + chStr
           + ' | ❌ Lỗi: ' + c.failTotal
           + (c.unsureTotal ? ' | ⚠ Không rõ: ' + c.unsureTotal : '')
+          + (extTry1545.tried
+            ? ' | 🛟 Dò Ext cho ca FB từ chối: thử ' + extTry1545.tried + ' · cứu ' + extTry1545.saved
+              + (extTry1545.closed ? ' · ĐÓNG (Ext cũng bị chặn ⇒ phần còn lại vào danh sách gửi tay)' : '')
+            : '')
+          + (countRescuing() ? ' | ⏳ ĐANG CỨU tự động: ' + countRescuing() + ' chat (Extension, ~10–13 s)' : '')
+          + (countManualResendWait() ? ' | 🖐 CẦN GỬI TAY: ' + countManualResendWait() + ' chat (xem 💾 .txt)' : '')
           + (c.skipTotal ? ' | 🧹 Bỏ qua: ' + c.skipTotal : '')
           + ((buStats.ok || buStats.cancelled)
             ? ' | 🔁 Bù OK: ' + buStats.ok + ' (' + Object.keys(buStats.byWhy).map((k) => k + ': ' + buStats.byWhy[k]).join(' · ') + ') · hủy bù tránh trùng: ' + buStats.cancelled
             : '')
-          + ((verifyStats.found || verifyStats.fired || verifyStats.unknown)
-            ? ' | 🔎 Kiểm chứng ACK: đã đến nơi ' + verifyStats.found + ' · bắn cứu ' + verifyStats.fired + ' · không kiểm chứng được ' + verifyStats.unknown
+          + ((verifyStats.found || verifyStats.held || verifyStats.unknown || sockRescueStats.tried)
+            ? ' | 🔎 Kiểm chứng ACK: đã đến nơi ' + verifyStats.found + ' · giữ ⚠ (không bắn lại) ' + verifyStats.held
+              + ' · không kiểm chứng được ' + verifyStats.unknown
+              + (sockRescueStats.tried ? ' · 🛟 chứng minh vắng mặt ⇒ gửi cứu 1 lần ' + sockRescueStats.tried : '')
+            : '')
+          + ((sendDiag.buProofGated || sendDiag.buProofPresent || sendDiag.buProofCancelled)
+            ? ' | 🛡 Cổng chống lặp: chặn bù mù ' + sendDiag.buProofGated + ' ca · tin ĐÃ tới (hủy bù) ' + sendDiag.buProofCancelled
+              + ' · chứng minh vắng mặt ' + sendDiag.buProofAbsent + ' · không chứng minh được ' + sendDiag.buProofUnknown
+              + ' · dùng lại kết quả ' + sendDiag.buProofCached
             : '')
           + ((extTimeoutStats.timeout || extTimeoutStats.skipped || extTimeoutStats.found || extTimeoutStats.notFound || extTimeoutStats.unknown)
-            ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy tin ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
+            ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy trong lịch sử ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
+              + ' · phản hồi MUỘN (đã tính ✅) ' + extLateStats.ok + ' · muộn-mà-lỗi ' + extLateStats.fail
+              + ' · im lặng hẳn ' + extLateStats.silent
             : '')
-          + ' | ⏱ Tổng thời gian: ' + elapsedSec + 's');
-        logLine('⚡ TỐC ĐỘ: đã chốt ' + c.settled + '/' + c.total + ' (' + settledPerSec.toFixed(2) + '/giây; '
+          + (dispatchMs
+            ? ' | ⏱ Phát lệnh ' + (Math.round(dispatchMs / 100) / 10) + 's'
+              + ' · chờ xác nhận ' + (Math.round(confirmMs / 100) / 10) + 's'
+              + ' · tổng ' + elapsedSec + 's'
+            : ' | ⏱ Tổng thời gian: ' + elapsedSec + 's'));
+        logDiag('⚡ TỐC ĐỘ: ' + (dispatchMs
+          ? 'PHÁT ' + c.total + ' lệnh trong ' + (Math.round(dispatchMs / 100) / 10) + 's = '
+            + dispatchPerSec.toFixed(2) + '/giây (' + (dispatchPerSec * 60).toFixed(0) + '/phút) · đuôi xác nhận ' + (Math.round(confirmMs / 100) / 10) + 's · '
+          : '')
+          + 'đã chốt ' + c.settled + '/' + c.total + ' (' + settledPerSec.toFixed(2) + '/giây; '
           + (settledPerSec * 60).toFixed(0) + '/phút) · thành công ' + c.okTotal + ' (' + successPerSec.toFixed(2)
-          + '/giây; ' + (successPerSec * 60).toFixed(0) + '/phút) · loại chat FB xác nhận unavailable '
-          + sendDiag.recipientUnavailable + ' → mục tiêu còn ' + eligibleAfterUnavailable + ', thành công '
-          + c.okTotal + '/' + eligibleAfterUnavailable + ' (' + eligibleSuccessPct.toFixed(1) + '%) · đang chờ ' + c.pending
-          + ' · lỗi ' + c.failTotal + ' · không rõ ' + c.unsureTotal + ' · bỏ qua ' + c.skipTotal);
-        logLine('🌊 WAVE: script ' + APP_VERSION + ' · ' + waveDiag.wavesStarted + '/' + waveDiag.plannedWaves + ' wave · size ' + waveDiag.waveSize
+          + '/giây; ' + (successPerSec * 60).toFixed(0) + '/phút) · loại chat FB từ chối nhận (unavailable '
+          + sendDiag.recipientUnavailable + (sendDiag.sockRetryBudgetSkipped
+            ? ' + bỏ thử lần 2 ' + sendDiag.sockRetryBudgetSkipped + ' (cùng nhóm, đã đo 0 cứu được)' : '')
+          + ') → mục tiêu còn ' + eligibleAfterUnavailable + ', thành công '
+          + c.okTotal + '/' + eligibleAfterUnavailable + ' (' + eligibleSuccessPct.toFixed(1) + '%) · đang chờ ' + c.pendingSend
+          + (c.pending > c.pendingSend ? ' · kiểm chứng nền ' + (c.pending - c.pendingSend) : '')
+          + ' · lỗi ' + c.failTotal + ' · không rõ ' + c.unsureTotal + ' · bỏ qua ' + c.skipTotal
+          + (sendDiag.extOverloadSkips
+            ? ' · ⏸ Ext tự nghẽn chặn trước khi bắn (tính lỗi oan): ' + sendDiag.extOverloadSkips
+            : ''));
+        logDiag('🌊 WAVE: script ' + APP_VERSION + ' · ' + waveDiag.wavesStarted + '/' + waveDiag.plannedWaves + ' wave · size ' + waveDiag.waveSize
           + ' · gap cấu hình ' + waveDiag.configuredGapMs + 'ms · Gửi nhanh ' + (waveDiag.quickEnabled ? 'BẬT' : 'TẮT')
           + ' · main cap ' + waveDiag.mainCapMinObserved + '–96 (cuối ' + waveDiag.mainCapFinal + ', hạ/tăng ' + waveDiag.mainCapDownshifts + '/' + waveDiag.mainCapUpshifts + ') / active max ' + waveDiag.maxMainInFlight
-          + ' · Socket/page cap ' + SOCKET_LANE_MIN + '–' + SOCKET_LANE_MAX + ' · wave→cổng TB/max '
+          + ' · Socket/page cap ' + socketLaneFloor + '–' + SOCKET_LANE_MAX + (socketLaneFloor !== SOCKET_LANE_MIN ? ' (sàn tự đặt)' : '') + ' · wave→cổng TB/max '
           + (waveDiag.wavesStarted ? Math.round(waveDiag.gateWaitMsTotal / waveDiag.wavesStarted) : 0) + '/' + waveDiag.gateWaitMsMax + 'ms'
           + ' · peak Socket queue/active/cool ' + waveDiag.maxSocketRetryQueue + '/' + waveDiag.maxSocketRetryActive + '/' + waveDiag.maxSocketCooldown
           + ' · peak Ext queue/active ' + waveDiag.maxExtQueue + '/' + waveDiag.maxExtActive
@@ -6383,22 +7940,35 @@
           + ' · peak Socket/page waiting total/per-page ' + waveDiag.maxSocketLaneWaitingTotal + '/' + waveDiag.maxSocketLaneWaitingPerPage
           + ' · Socket/page limits cuối [' + socketLaneFinal.limits + ']'
           + ' · backoff chậm/no-ACK ' + SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD + '/' + SOCKET_LANE_NOACK_BACKOFF_THRESHOLD
-          + ' · peak API waiting ' + waveDiag.maxApiWaiting);
-        logLine('📡 SOCKET: ACK OK/rejected/no-ACK ' + sendDiag.socketAckOk + '/' + sendDiag.socketAckRejected + '/' + sendDiag.socketNoAck
+          + ' · peak API waiting ' + waveDiag.maxApiWaiting
+          + (waveDiag.slotN
+            ? ' · ⏱ GIỮ SLOT TB chờ ' + Math.round(waveDiag.slotAcquireMs / waveDiag.slotN)
+              + 'ms · chuẩn bị ' + Math.round(waveDiag.slotPrepMs / waveDiag.slotN)
+              + 'ms · còn lại ' + Math.round(Math.max(0, waveDiag.slotHoldMs - waveDiag.slotPrepMs) / waveDiag.slotN)
+              + 'ms (n=' + waveDiag.slotN + ')'
+            : '')
+          + ' · giữ cổng (bay/retry/ext/api) ' + waveDiag.gateBlockInflight + '/' + waveDiag.gateBlockRetry
+          + '/' + waveDiag.gateBlockExt + '/' + waveDiag.gateBlockApi);
+        logDiag('📡 SOCKET: ACK OK/rejected/no-ACK ' + sendDiag.socketAckOk + '/' + sendDiag.socketAckRejected + '/' + sendDiag.socketNoAck
           + ' · ACK TB/max ' + socketAckAvgMs + '/' + sendDiag.socketAckMsMax + 'ms'
           + ' · buckets <250/250-999/1-2s/2-5s/≥5s '
           + sendDiag.socketAckLt250 + '/' + sendDiag.socketAck250To999 + '/' + sendDiag.socketAck1To2s + '/'
           + sendDiag.socketAck2To5s + '/' + sendDiag.socketAckGte5s
+          + ' · retry wave ' + (sendDiag.sockWaveRetry || 0)
           + ' · retry lần ' + sendDiag.sockRetry + ' (cứu ' + sendDiag.sockRetryRecovered + ' · rejected '
-          + sendDiag.sockRetryRejected + ' · khác ' + sendDiag.sockRetryOther + ') · retry ảnh ' + sendDiag.photoRetry
-          + ' · người nhận rejected cuối ' + sendDiag.recipientUnavailable);
-        logLine('🌐 API NỀN: queued/started/fetch ' + sendDiag.apiQueued + '/' + sendDiag.apiStarted + '/' + sendDiag.apiFetchAttempts
+          + sendDiag.sockRetryRejected + ' · khác ' + sendDiag.sockRetryOther           + ' · retry ảnh ' + sendDiag.photoRetry
+          + ' · bỏ thử lần 2 (ngân sách) ' + sendDiag.sockRetryBudgetSkipped
+          + ' · khách không nhận được ' + sendDiag.recipientUnavailable + ' (chỉ đếm, không lưu)');
+        logDiag('🌐 API NỀN: queued(nền)/started(nền+đồng bộ)/fetch ' + sendDiag.apiQueued + '/' + sendDiag.apiStarted + '/' + sendDiag.apiFetchAttempts
           + ' · OK/rejected/không rõ ' + sendDiag.apiSuccess + '/' + sendDiag.apiRejected + '/' + sendDiag.apiUnknown
           + ' · HTTP status [' + apiStatuses + '] · 429/retry ' + sendDiag.api429 + '/' + sendDiag.api429Retries
-          + ' · fallback ' + sendDiag.apiFallback + ' · hủy ' + sendDiag.apiCancelled
+          + ' · fallback ' + sendDiag.apiFallback + ' · cứu thiếu globalId ' + sendDiag.apiNoGidFallback
+          + ' · hủy ' + sendDiag.apiCancelled
           + ' · queue wait TB/max ' + Math.round(sendDiag.apiQueueWaitMsTotal / apiStartedSafe) + '/' + sendDiag.apiQueueWaitMsMax + 'ms'
-          + ' · fetch TB/max ' + Math.round(sendDiag.apiFetchMsTotal / apiFetchSafe) + '/' + sendDiag.apiFetchMsMax + 'ms');
-        logLine('🧭 Chẩn đoán globalId: cache ' + gidStats.cacheHit
+          + ' · fetch TB/max ' + Math.round(sendDiag.apiFetchMsTotal / apiFetchSafe) + '/' + sendDiag.apiFetchMsMax + 'ms'
+          + ' · fetch p50 ' + (() => { const a = (sendDiag.apiFetchSamples || []).slice().sort((x, y) => x - y);
+              return a.length ? a[Math.floor(a.length / 2)] : 0; })() + 'ms');
+        logDiag('🧭 Chẩn đoán globalId: cache ' + gidStats.cacheHit
           + ' · HTTP ' + gidStats.httpHit
           + ' · WS ' + gidStats.wsHit
           + ' · Ext ' + gidStats.extHit
@@ -6408,11 +7978,22 @@
           + ' · lần dò chưa ra ' + gidStats.unknown
           + ' · batch nạp ' + gidStats.batchMappings + '/' + gidStats.batchReturned + ' mapping (lỗi ' + gidStats.batchFail + ')'
           + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
-          + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
+          + ' · Ext p90 ' + (extLatP90() || 0) + 'ms → timeout ' + extTimeoutMs() + 'ms'
+          + ' · ACK p50/p90 ' + (sockAckP50() || 0) + '/' + sockAckP90() + 'ms → ngưỡng nhanh ' + fastAckMs() + 'ms'
+          + ' · bỏ nới lane (p50 > ' + SOCK_RAMP_P50_MAX_MS + 'ms) ' + sockRampSkipped + ' lần'
+          + ' · can_inbox=false ' + ((sendDiag && sendDiag.canInboxFalse) || 0) + '/' + ((sendDiag && sendDiag.canInboxSeen) || 0)
+           + ' · gate bỏ Ext no-gid ' + gidStats.gateSkip
+           + ' · chờ dò ngắn (server nói không có gid) ' + (gidStats.shortNoGidWait || 0) + ' ca'
+           + ' · chọn kênh: Ext-trước(socket chưa sync) ' + socketPickDiag.notReady
+           + ' / thiếu gid ' + socketPickDiag.noGid
+           + ' / Socket bị né (ACK chết) ' + socketPickDiag.deadSkip
+           + ' · dò lại ACK chết ' + socketPickDiag.probe + ' (hồi ' + socketPickDiag.probeOk + ')'
           + ' · lane HTTP ' + ctxFetchLane.getLimit()
           + ' / Ext dò ' + gidExtLane.getLimit()
           + ' / Ext gửi ' + extSendLane.getLimit()
           + ' / Socket/page ' + getPageSocketLaneRange());
+        // [v1.92.34] Lô đã chốt ⇒ chạy hậu kiểm 1545041 (chỉ đọc lịch sử, không bắn lại).
+        try { void startDeadUserRecheck(); } catch (eDU) { /* ignore */ }
       }
     } catch (e) { /* ignore */ }
   }
@@ -6426,7 +8007,7 @@
       return;
     }
     const c = getBatchSummaryCounts();
-    const isDoneAll = batchStats.loopFinished && (c.pending === 0 || state.stopRequested);
+    const isDoneAll = batchStats.loopFinished && (c.pendingSend === 0 || state.stopRequested);
     // Khi lô lớn còn ACK/bù nền, chỉ dựng lại tổng hợp 1 lần/giây; chốt cuối vẫn flush ngay.
     if (!isDoneAll && c.total > 200) {
       if (!summaryUiTimer) summaryUiTimer = setTimeout(flushBatchSummaryUI, 1000);
@@ -6436,10 +8017,34 @@
     flushBatchSummaryUI();
   }
 
+  /* [v1.92.35] SỐ "THÀNH CÔNG" PHẢI LÀ SỐ ĐÃ TỚI NƠI THẬT.
+   * Lô 14:28 (8 851 chat): dòng tiến độ in `thành công 8564/8851` (96,8 %) lúc 14:30:02,
+   * 3 giây sau TỔNG HỢP chốt 5 095 (57,6 %). Nguyên nhân: chế độ wave trả `{ok:true, fired:true}`
+   * NGAY KHI BẮN (chưa có ACK) nên biến `ok` trong vòng lặp cộng luôn; 3 411 ca ACK `rejected`
+   * về sau chỉ chốt ❌ ở nền mà không trừ `ok`. Nay tiến độ đọc `summaryCounters.ok*` — chỉ tăng
+   * khi `markDelivered()` thật sự chạy (ACK OK / API 200 / Ext trả success) và tự giảm khi lật lại. */
+  function confirmedOkCount() {
+    return summaryCounters.okApi + summaryCounters.okExt + summaryCounters.okSocket;
+  }
   function markDelivered(convId, via) {
     if (!convId) return;
     clearBgPending(convId);
     const ch = (via === 'ext' || via === 'extension') ? 'ext' : (via === 'socket' ? 'socket' : 'api');
+    // [v1.92.33] SỔ KIỂM CHỨNG: ghi MỌI lần đánh dấu "đã tới nơi" (kể cả lần trùng kênh ở dưới).
+    // 1 chat bị đánh dấu ≥ 2 lần ⇒ dấu hiệu xác nhận sai / gửi lặp ⇒ file .txt liệt kê riêng.
+    try {
+      let hist = deliverHits.get(convId);
+      if (!hist) { hist = []; deliverHits.set(convId, hist); }
+      const tNow = Date.now();
+      const last = hist[hist.length - 1];
+      // GỘP các lần gọi lặp CÙNG kênh trong 2 s (watchdog/ACK gọi lại — KHÔNG phải gửi lặp).
+      // Còn khác kênh, hoặc cách nhau > 2 s ⇒ ghi thành lần riêng: đó mới là dấu hiệu gửi lặp.
+      if (!last || last.by !== ch || (tNow - last.t) > 2000) {
+        hist.push({ t: tNow, by: ch });
+        if (hist.length > 20) hist.shift();
+        auditPush('✅', convId, '', 'đánh dấu ĐÃ TỚI NƠI qua ' + ch);
+      }
+    } catch (e0) { /* ignore */ }
     const prev = deliveredIds[convId];
     if (prev === ch) { updateBatchSummaryUI(); return; }
     if (prev === 'ext') summaryCounters.okExt = Math.max(0, summaryCounters.okExt - 1);
@@ -6448,6 +8053,16 @@
     if (finalFailedIds[convId]) { delete finalFailedIds[convId]; summaryCounters.fail = Math.max(0, summaryCounters.fail - 1); }
     if (uncertainIds[convId]) { delete uncertainIds[convId]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
     deliveredIds[convId] = ch;
+    dropManualResend(convId); // đã xác nhận tới nơi ⇒ khỏi danh sách gửi tay
+    delete rescueInFlight[convId]; // hết "đang cứu" — đã có kết luận
+    // [v1.92.40] Socket giao được ⇒ xoá sạch số lần mất tin của page (tự hồi, không cần TTL)
+    if (ch === 'socket') {
+      try {
+        const _st = sockRoute[String(String(convId).split('_')[0])];
+        if (_st) { _st.dlv++; _st.lost = 0; }
+      } catch (eSt2) { /* ignore */ }
+    }
+    softNotify('delivered'); // [v1.92.9] chỗ chờ "đã giao" thức ngay, khỏi chờ mù 220 ms
     // Lượt đã kết thúc bình thường (không bấm Dừng) thì sentIds đã được dọn ở cuối sendToAll —
     // ACK trễ KHÔNG được nạp lại, nếu không lượt sau bỏ qua oan gần hết chat (mất tin im lặng)
     if (convId && !(batchStats.loopFinished && !state.stopRequested)) {
@@ -6466,15 +8081,71 @@
     if (kind === 'fail') {
       // đã từng bị watchdog chốt ⚠ mà sau đó bù chốt lỗi hẳn → chuyển nhóm, không đếm 2 lần
       if (uncertainIds[convId]) { delete uncertainIds[convId]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
+      dropManualResend(convId); // đã chốt ❌ (khách không nhận) ⇒ không còn là "cần gửi tay"
+      delete rescueInFlight[convId];
+
       if (!finalFailedIds[convId]) { finalFailedIds[convId] = true; summaryCounters.fail++; }
     } else if (kind === 'uncertain') {
       if (!uncertainIds[convId] && !finalFailedIds[convId]) { uncertainIds[convId] = true; summaryCounters.unsure++; }
+      noteManualResend(convId); // ⚠ = máy không chắc đã gửi ⇒ vào danh sách gửi tay
     } else if (kind === 'skip') {
       if (!skippedLateIds[convId]) { skippedLateIds[convId] = true; summaryCounters.skipLate++; }
     }
     updateBatchSummaryUI();
   };
 
+  /* ===== NGÂN SÁCH THỬ LẠI SOCKET — TỰ ĐO RỒI TỰ ĐÓNG (v1.92.26) =====
+   * Thử lại Socket 1 lần chỉ có MỘT mục đích: phân biệt "burst-reject tạm thời" với
+   * "khách không nhận được". Lô 10:04 (2 413 chat, bản 1.92.25): thử lại 861 lần, cứu 0
+   * (ACK rejected 1 722 = 861 x 2) trong khi tổng lưu lượng socket là 3 223 lệnh thay vì
+   * 2 413 => 27% lưu lượng là công vô ích, kèm 861 dòng log và 861 ACK phải phân tích.
+   * Luật mới — đo rồi mới kết luận, không đoán:
+   *   - chưa thử đủ 40 ca            => vẫn thử lại như cũ;
+   *   - đã thử >= 40 ca mà cứu 0 VÀ tỉ lệ FB từ chối >= 10% (burst thật thì tỉ lệ thấp)
+   *                                  => ĐÓNG ngân sách: ca sau chốt ❌ ngay, ghi rõ;
+   *   - đã đóng vẫn dò lại 1 ca mỗi 200 ca bị bỏ; cứu được 1 ca là MỞ LẠI ngay.
+   */
+  const sockRetryBudgetState = { tried: 0, saved: 0, skipped: 0, sinceProbe: 0, closed: false, closePct: -1 };
+  function resetSockRetryBudget() {
+    resetSockAckRecent();
+    // [v1.92.29] Chuỗi no-ACK phải bắt đầu lại từ 0 mỗi lượt. Lô 13:42 (4 chat, 1 ca mất ACK)
+    // vẫn in "🐢 Socket no-ACK lặp 2 lần — giảm lane xuống 64" vì chuỗi 1 ca còn dư từ lô trước.
+    try {
+      Object.keys(socketPageLaneCtl).forEach(function (k) { socketPageLaneCtl[k].noAckStreak = 0; });
+    } catch (e) { /* ignore */ }
+    sockRetryBudgetState.tried = 0;
+    sockRetryBudgetState.saved = 0;
+    sockRetryBudgetState.skipped = 0;
+    sockRetryBudgetState.sinceProbe = 0;
+    sockRetryBudgetState.closed = false;
+    sockRetryBudgetState.closePct = -1;
+  }
+  const SOCK_RETRY_BUDGET_MIN = 40;
+  const SOCK_RETRY_PROBE_EVERY = 200;
+  // [v1.92.28] Đo trên CỬA SỔ GẦN NHẤT (200 ACK), không dùng tỉ lệ tích luỹ:
+  //   • < 15%  ⇒ lô gần như sạch, chuyện thử lại rất ít ⇒ cứ thử (không đóng);
+  //   • 15–85% ⇒ "nhiều khách chết" ⇒ đóng sau 40 ca (đúng mục tiêu);
+  //   • > 85%  ⇒ gần như MỌI ca đều bị từ chối = burst-reject/sự cố ⇒ KHÔNG đóng.
+  const SOCK_RETRY_MIN_REJECT_PCT = 15;
+  const SOCK_RETRY_MAX_REJECT_PCT = 85;
+  function sockRetryBudgetAllows(budget) {
+    if (!budget || !budget.closed) return true;
+    return budget.sinceProbe >= SOCK_RETRY_PROBE_EVERY;
+  }
+  function sockRetryBudgetNote(budget, outcome, rejectPct) {
+    if (!budget) return;
+    if (outcome === 'skipped') { budget.skipped++; budget.sinceProbe++; return; }
+    if (outcome === 'probe') { budget.sinceProbe = 0; return; }
+    if (outcome === 'tried') budget.tried++;
+    if (outcome === 'saved') { budget.saved++; budget.closed = false; budget.sinceProbe = 0; return; }
+    const pct = Number(rejectPct);
+    if (!budget.closed && budget.saved === 0 && budget.tried >= SOCK_RETRY_BUDGET_MIN
+        && pct >= SOCK_RETRY_MIN_REJECT_PCT && pct <= SOCK_RETRY_MAX_REJECT_PCT) {
+      budget.closed = true;
+      budget.closePct = Math.round(pct);
+      budget.sinceProbe = 0;
+    }
+  }
   function isRetryableLoss(err) {
     const s = String(err || '');
     // (#100) Không tìm thấy người dùng phù hợp = tài khoản FB không tồn tại → không kênh nào gửi được
@@ -6490,8 +8161,17 @@
   // thử lại, nhưng kênh CHƯA thử vẫn PHẢI thử tiếp (chuỗi như plan của app: api → extension ⇄ socket).
   // Cả Extension lẫn Socket đều hỗ trợ gửi cả chữ lẫn ảnh (cho chat inbox). Bình luận (comment) chỉ
   // hỗ trợ API/Extension. 'maybe'/đã đến nơi → DỪNG tuyệt đối (chống trùng).
-  function scheduleBuRetry(conv, text, photo, name, why, tried) {
+  function scheduleBuRetry(conv, text, photo, name, why, tried, opts) {
     if (!conv) return;
+    // [v1.92.30] `opts.ambiguous` = phán quyết lỗi là SUY LUẬN (không phải bằng chứng) ⇒ phải
+    // chứng minh vắng mặt trước khi bắn lần 2. `opts.sentAt` = mốc bắt đầu lần gửi đầu.
+    const buGated = !!(opts && opts.ambiguous);
+    // [v1.92.38] `opts.fromUncertain` = cứu ca ⚠ ĐÃ CÓ BẰNG CHỨNG vắng mặt (socket no-ACK).
+    // Chat vẫn nằm trong sổ ⚠ để lượt không bị mở lại (xem chú thích ở scheduleSocketVerify),
+    // nên phải cho đi qua cửa chặn "đã chốt ⚠ thì không bù" — nhưng CHỈ khi có cờ này.
+    const buFromUncertain = !!(opts && opts.fromUncertain);
+    const buSentAt = (opts && Number(opts.sentAt)) || Date.now();
+    const buVia = (opts && opts.via) || 'socket';
     if (buRetryTimer[conv.id]) return; // đã có chuỗi bù đang chờ — không chạy song song (chống gửi 2 lần)
     if (sockFiredPending.has(conv.id)) {
       // Socket đã bắn và ACK chưa chốt — bù kênh khác lúc này có thể gây TRÙNG câu. Chờ xác nhận nền chốt.
@@ -6503,28 +8183,59 @@
       logLine('✓ ' + name + ' — tin đã đến nơi (xác nhận) — không bù.');
       return;
     }
-    if (uncertainIds[conv.id] || finalFailedIds[conv.id]) {
+    if (finalFailedIds[conv.id] || (uncertainIds[conv.id] && !buGated && !buFromUncertain)) {
       // Đã có nơi chốt cuối cho chat này (watchdog chốt ⚠ quá hạn / đã chốt ❌) — chốt đó là
       // TUYỆT ĐỐI theo luật chống trùng: kết quả Socket về muộn không được kích bù nữa,
       // nếu không sẽ bắn lần 2 lên tin có thể đã đến nơi (lặp ít, chủ yếu tin ảnh chốt chậm)
-      logLine('✓ ' + name + ' — đã chốt trạng thái cuối (⚠/❌) — không bù thêm để tránh trùng.');
+      logFailGrouped(name, 'đã chốt trạng thái cuối (⚠/❌) — không bù thêm để tránh trùng', '✓', conv.id);
       return;
     }
     if (pendingBg[conv.id]) pendingBg[conv.id].at = Date.now(); // chuỗi bù còn đang chạy — gia hạn watchdog
     const triedCh = (tried || []).slice();
     const done = buRetryDone[conv.id] || (buRetryDone[conv.id] = []); // kênh ĐÃ bù trong lượt
     const hasExt = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
-    const baseCandidates = (conv.type === 'comment')
+    let baseCandidates = (conv.type === 'comment')
       ? ['ext']
       : (hasExt ? ['ext', 'socket'] : ['socket']);
+    // [v1.92.36] Page đang bị đánh dấu ACK CHẾT mà vẫn còn Extension ⇒ bù bằng Ext (có câu trả lời
+    // dứt khoát trong 1–3 s) thay vì bắn Socket rồi chờ hết hạn ACK ~5 s để rồi vẫn "không rõ".
+    // Lô 90 chat 15:44: ca Nguyễn Quỳnh mất 5 s đúng vì lý do này. Không đổi số lệnh gửi.
+    try {
+      const buPid = conv.pageId || String(conv.id || '').split('_')[0];
+      if (hasExt && buPid && isPageAckDead(buPid)) {
+        baseCandidates = baseCandidates.filter((x) => x !== 'socket');
+      }
+    } catch (eBs) { /* ignore */ }
     const remaining = baseCandidates.filter((c) => triedCh.indexOf(c) < 0 && done.indexOf(c) < 0);
     if (!remaining.length) {
+      /* [v1.92.40] ❌ OAN VÌ BỘ NGẮT QUÁ TẢI — vá đúng gốc của lô 9 455 chat (§45: "bỏ qua lúc Ext
+       * quá tải 1 526" ca, không ca nào từng được BẮN, tất cả bị tính ❌).
+       * Bộ ngắt của Ext chỉ nghỉ 8–15 s rồi tự đóng. Vậy: chat bị bộ ngắt chặn (chưa hề gửi) thì
+       * KHÔNG chốt ❌ — đặt ⚠ "chưa gửi" rồi hẹn bắn lại qua Ext sau 9 s (tối đa 2 lần). Nếu vẫn
+       * không xong thì mới tính ❌, và chat vẫn nằm trong danh sách gửi tay. */
+      const extAliveNow = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+      const lateN = buLateRetryCount[conv.id] || 0;
+      if (extAliveNow && conv.__extSkippedOverload && lateN < 2 && !state.stopRequested) {
+        buLateRetryCount[conv.id] = lateN + 1;
+        try { delete conv.__extSkippedOverload; } catch (eLo) { /* ignore */ }
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+        logFailGrouped(name, 'Extension đang nghỉ hồi sức (bộ ngắt quá tải) — chat CHƯA được gửi lần nào '
+          + '⇒ hẹn thử lại sau 9 s (lần ' + (lateN + 1) + '/2), không chốt ❌ oan', '⏳', conv.id);
+        const myLateRun = runSeq;
+        bgClock.after(9000, () => {
+          if (myLateRun !== runSeq || state.stopRequested) return;
+          if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+          scheduleBuRetry(conv, text, photo, name, 'thử lại sau khi Extension hồi sức', ['api', 'socket'],
+            { ambiguous: false, fromUncertain: true, via: 'ext', sentAt: Date.now() });
+        });
+        return;
+      }
       const seen = {};
       const names = triedCh.concat(done).filter((x) => (seen[x] ? false : (seen[x] = true)));
       if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-      logLine('❌ ' + name + ' — đã thử hết kênh (' + (names.join(', ') || 'không rõ') + ')'
+      logFailGrouped(name, 'đã thử hết kênh (' + (names.join(', ') || 'không rõ') + ')'
         + (conv.type === 'comment' ? ' — bình luận chỉ API/Extension gửi được (Socket không hỗ trợ)' : '')
-        + ' — không bù nữa (mỗi kênh đúng 1 lần)');
+        + ' — không bù nữa (mỗi kênh đúng 1 lần)', '❌', conv.id);
       return;
     }
     const myRun = runSeq;
@@ -6534,9 +8245,10 @@
     const isApi551 = /\(#551\)|Người này hiện không có mặt/i.test(String(why || ''));
     const hadDirectFail = !isNoAckRescue && (triedCh.indexOf('ext') > -1 || triedCh.indexOf('socket') > -1 || done.length > 0);
     const delay = hadDirectFail ? (150 + Math.min(buRetrySeq++, 6) * BU_SPREAD_MS) : BU_RETRY_EXT_MS;
-    logLine('⏳ ' + name + ' — ' + why + ' — đang bù'
-      + (remaining.length > 1 ? ' (Socket/Extension)' : (' qua ' + (remaining[0] === 'ext' ? 'Extension' : 'Socket'))) + '…');
-    buRetryTimer[conv.id] = setTimeout(() => {
+    // [v1.92.34] Gộp theo lý do như mọi dòng khác (lô 13:38 in 23 dòng ⏳ gần trùng nhau).
+    logFailGrouped(name, why + ' — đang bù'
+      + (remaining.length > 1 ? ' (Socket/Extension)' : (' qua ' + (remaining[0] === 'ext' ? 'Extension' : 'Socket'))) + '…', '⏳', conv.id);
+    buRetryTimer[conv.id] = bgClock.after(delay, () => {
       buRetryTimer[conv.id] = null;
       if (myRun !== runSeq) return; // có lượt gửi mới — bù của lượt cũ bỏ (tránh gửi lẫn 2 lượt)
       if (state.stopRequested) {
@@ -6545,20 +8257,20 @@
         return;
       }
       if (deliveredIds[conv.id]) return; // trong lúc chờ, tin đã đến nơi qua đường khác — thôi
-      if (uncertainIds[conv.id] || finalFailedIds[conv.id]) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2
+      if (finalFailedIds[conv.id] || (uncertainIds[conv.id] && !buGated && !buFromUncertain)) return; // watchdog đã chốt ⚠/❌ trong lúc chờ bù — không bắn lần 2 (trừ ca cứu có bằng chứng)
       const buCtx = { gidForceFind: hadDirectFail, isBuRetry: true, apiRejected551: isApi551 };
-      busEnqueue(async () => {
+      const actuallySendBu = () => busEnqueue(async () => {
         // Kiểm tra LẠI ngay trước khi bắn: trong lúc xếp hàng chờ lane (có thể cả phút ở
         // lô lớn), ACK của lần đầu có thể đã về hoặc watchdog đã chốt — kiểm tra ở timer
         // là chưa đủ, cứ bắn là LẶP (đây là nguồn của đoàn "bù thành công" cuối log)
         if (deliveredIds[conv.id]) {
           buStats.cancelled++;
-          logLine('✓ ' + name + ' — tin đã đến nơi trong lúc chờ bù — hủy bù (tránh trùng).');
+          logFailGrouped(name, 'tin đã đến nơi trong lúc chờ bù — hủy bù (tránh trùng)', '✓', conv.id);
           return { ch: null, delivered: true };
         }
-        if (uncertainIds[conv.id] || finalFailedIds[conv.id]) {
+        if (finalFailedIds[conv.id] || (uncertainIds[conv.id] && !buGated && !buFromUncertain)) {
           buStats.cancelled++;
-          logLine('✓ ' + name + ' — đã chốt trạng thái cuối trong lúc chờ bù — hủy bù (tránh trùng).');
+          logFailGrouped(name, 'đã chốt trạng thái cuối trong lúc chờ bù — hủy bù (tránh trùng)', '✓', conv.id);
           return { ch: null, delivered: true };
         }
         await prepareDirectCtx(conv, photo, buCtx);
@@ -6577,7 +8289,7 @@
         if (!out || !out.ch) {
           // bước chuẩn bị bù văng lỗi (lane trả {ok:false}) — phải chốt, không im lặng kẹt pending
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          logLine('❌ ' + name + ' — bù lỗi: ' + clip((out && out.error) || 'không rõ', 90));
+          logFailGrouped(name, 'bù lỗi: ' + clip((out && out.error) || 'không rõ', 90), '❌', conv.id);
           return;
         }
         const ch = out.ch;
@@ -6587,28 +8299,61 @@
           markDelivered(conv.id, ch);
           postSendSideEffects(conv);
           markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
+          if (conv.__extFallback1545) extTry1545.saved++; // [v1.92.41] Ext CỨU ĐƯỢC ca 1545041
           buStats.ok++;
           buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
-          logLine('✅ ' + name + ' — bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'));
+          logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅', conv.id);
         } else if (r && r.sent === 'maybe') {
+          /* [v1.92.43] NGÂN SÁCH DÒ EXT PHẢI ĐÓNG Ở CẢ NHÁNH NÀY.
+           * Log 16:52/17:03: dò Ext in 'thử 799 · cứu 0' và 'thử 1 431 · cứu 0' — tức ngân sách
+           * 200 ca KHÔNG BAO GIỜ đóng, vì ca Ext quá hạn rơi vào nhánh 'maybe' chứ không phải
+           * nhánh recipientUnavailable mà tôi chỉ gắn cờ đóng. Nay tính cả nhánh này. */
+          if (conv.__extFallback1545) noteExt1545Fail();
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
-          logLine('⚠ ' + name + ' — bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)');
+          logFailGrouped(name, 'bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)', '⚠', conv.id);
         } else if (r && r.recipientUnavailable && !hasMoreAfterSocket) {
+          if (conv.__extFallback1545) noteExt1545Fail(); // [v1.92.41] Ext cũng bị chặn — đo tiếp
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          logLine('❌ ' + name + ' — bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
-            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)');
+          // ĐÂY là nơi tín hiệu "khách không nhận được" xuất hiện nhiều nhất (Extension trả
+          // {"errorDescription":"Người này hiện không có mặt."}). Chỉ ĐẾM cho dòng chẩn đoán —
+          // KHÔNG lưu gì, KHÔNG lọc gì ở các lượt sau (cơ chế nhớ đã bị xoá ở v1.92.21).
+          sendDiag.recipientUnavailable++;
+          logFailGrouped(name, 'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
+            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — khách hiện không nhận được tin (không thử tiếp kênh khác)', '❌', conv.id);
         } else {
-          logLine('❌ ' + name + ' — bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
-            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — sang kênh kế nếu còn');
+          if (conv.__extFallback1545) noteExt1545Fail();
+          logFailGrouped(name, 'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được: '
+            + clip((r && r.error) || 'lỗi không rõ', 90) + ' — sang kênh kế nếu còn', '❌', conv.id);
           // CHUỖI BÙ: kênh kế CHƯA thử (mỗi kênh đúng 1 lần — không lặp kênh vừa thua)
           scheduleBuRetry(conv, text, photo, name,
             'bù ' + (ch === 'ext' ? 'Extension' : 'Socket') + ' không được', triedCh.concat([ch]));
         }
       }).catch((e) => {
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-        logLine('❌ ' + name + ' — bù lỗi: ' + (e && e.message || e));
+        logFailGrouped(name, 'bù lỗi: ' + (e && e.message || e), '❌', conv.id);
       });
-    }, delay);
+      /* [v1.92.30] CỔNG CHỨNG MINH VẮNG MẶT — chỉ cho phán quyết SUY LUẬN.
+       * Phán quyết là BẰNG CHỨNG (socket chết trước publish, lỗi trước khi bắn) đi thẳng:
+       * 0 request, 0 chờ ⇒ giữ nguyên tốc độ cũ. */
+      if (!buGated) { actuallySendBu(); return; }
+      noteBgPending(conv, 'bu-proof');
+      const afterProof = (v) => {
+        if (myRun !== runSeq) { clearBgPending(conv.id); return; }
+        if (v === 'yes') {
+          clearBgPending(conv.id);
+          buStats.cancelled++;
+          sendDiag.buProofCancelled++;
+          markDelivered(conv.id, buVia);
+          logFailGrouped(name, 'hội thoại ĐÃ CÓ tin vừa gửi ⇒ tin đã tới nơi, HỦY bù — KHÔNG gửi lần 2 (chặn lặp)', '✅', conv.id);
+          updateBatchSummaryUI();
+          return;
+        }
+        if (v === 'absent') logFailGrouped(name, 'chứng minh VẮNG MẶT (hội thoại không đổi sau lúc gửi) ⇒ bù an toàn', '🔎', conv.id);
+        else logFailGrouped(name, 'chưa chứng minh được vắng mặt ⇒ bù như cũ (ưu tiên không sót)', '🔎', conv.id);
+        actuallySendBu();
+      };
+      proveAbsentBeforeBu(conv, text, buSentAt).then(afterProof).catch(() => { actuallySendBu(); });
+    });
   }
 
   // Chốt ❌ KHÔNG bù — dùng cho mọi đường fail NGOÀI lỗi API bị từ chối rõ ràng
@@ -6658,25 +8403,284 @@
       .trim();
   }
 
-  function isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAt) {
-    if (!Array.isArray(msgs) || !msgs.length) return false;
-    const batchStart = (batchStats && batchStats.startedAt) || sentAt;
-    // Chỉ xét tin được tạo trong lượt gửi hiện tại (trừ 3s lệch đồng hồ) và từ lúc bắt đầu bắn chat này (trừ 5s):
-    // TUYỆT ĐỐI không nhìn lùi 60–75s về lượt gửi trước đó (tránh khớp nhầm tin của lượt cũ gây BÙ THIẾU)!
-    const minTime = Math.max(batchStart - 3000, sentAt - 5000);
-    return msgs.some((m) => {
-      if (!m || m.is_removed) return false;
-      if (!m.from || String(m.from.id) !== String(pageId)) return false; // chỉ tin DO PAGE gửi
+  /* ===== PHÂN XỬ LỊCH SỬ CHAT — 3 KẾT LUẬN, KHÔNG ĐOÁN (v1.91.73) =====
+   *   'yes'     : thấy ĐÚNG tin của page (khớp nội dung, hoặc khớp ảnh khi không có chữ)
+   *               tạo trong [sentAt-5s, now] → tin ĐÃ tới nơi.
+   *   'no'      : đọc được lịch sử VÀ có MỐC NƯỚC — tin mới nhất của cả chat vẫn cũ hơn
+   *               sentAt-3s → chưa có gì mới đi ra. Đây là bằng chứng DƯƠNG tính duy nhất
+   *               được phép dùng để kết luận "chưa gửi".
+   *   'unknown' : mọi trường hợp còn lại (không thấy tin nhưng lịch sử đã có tin mới hơn
+   *               sentAt, thiếu mốc giờ, lịch sử lạ…) → KHÔNG kết luận, KHÔNG bù.
+   *
+   * Hai lỗi của bản cũ đã sửa:
+   *   1) FALSE-POSITIVE: dòng "t >= sentAt-2000 && (normMsg || có ảnh)" coi MỌI tin của page
+   *      sau sentAt-2s là "đã gửi" — kể cả tin khác nội dung (tin của wave trước, quick reply…)
+   *      → chốt ✅ oan, tin thật KHÔNG BAO GIỜ được bù ⇒ mất tin im lặng.
+   *   2) FALSE-NEGATIVE: "không thấy tin" bị coi là "chưa gửi" chỉ sau 1 lần đọc ⇒ bù ⇒ LẶP CÂU
+   *      khi API lịch sử của Pancake trễ vài giây. Nay 'no' đòi hỏi mốc nước + đọc lặp.
+   * minTime vẫn chặn nhìn lùi về lượt trước (chống khớp nhầm tin cũ). */
+  /* [v1.92.27] KHỚP ẢNH — thay cho "có attachment là chốt".
+   * HAR: attachment trong lịch sử KHÔNG có trường id; chỉ có {type,url} và
+   * image_data{width,height} (230 mẫu: image_data 161 · ad 55 · comment 4 · khác 10).
+   * Ảnh ta gửi có content_id (đôi khi) + width/height đúng như request gửi đi, nên chỉ chốt khi:
+   *   • id khớp (cả hai cùng có), hoặc
+   *   • ĐÚNG cặp width×height trong image_data.
+   * Không đủ thông tin để khớp ⇒ KHÔNG chốt (để 'unknown' ⇒ giữ ⚠, không bao giờ bắn lại).
+   */
+  function attachmentMatches(m, photo) {
+    const items = photo && (Array.isArray(photo.items) ? photo.items : [photo]);
+    if (!Array.isArray(items) || !items.length) return false;
+    const ids = [];
+    const dims = [];
+    for (const p of items) {
+      if (!p) continue;
+      if (p.id) ids.push(String(p.id));
+      const w = Number(p.w) || 0;
+      const h = Number(p.h) || 0;
+      if (w && h) dims.push(w + 'x' + h);
+    }
+    if (!ids.length && !dims.length) return false;
+    const atts = Array.isArray(m.attachments) ? m.attachments : [];
+    for (const a of atts) {
+      if (!a) continue;
+      if (a.id && ids.indexOf(String(a.id)) > -1) return true;
+      const im = a.image_data || a.imageData;
+      if (im && dims.length) {
+        const key = (Number(im.width) || 0) + 'x' + (Number(im.height) || 0);
+        if (dims.indexOf(key) > -1) return true;
+      }
+    }
+    return false;
+  }
+
+  /* ===== [v1.92.29] BẰNG CHỨNG DƯƠNG CHO THREAD DÀI =====
+   * ĐO TRÊN TOÀN BỘ 12 HAR, đối chiếu chéo 3 cách độc lập:
+   *   • GET …/conversations/{id}/messages trả 25 tin **CŨ NHẤT**, sắp TĂNG DẦN — 89/89 response.
+   *   • 34 response trả đúng 25 tin: tin mới nhất trong đó cũ hơn lúc đọc TRUNG VỊ 4 330 s
+   *     (max ~295 ngày). Ghép `message_count` của list: thread 465 tin → 25 tin trả về chỉ
+   *     trải 2 ngày đầu; thread 39 tin → trải 3 ngày đầu.
+   *   ⇒ Với thread > 25 tin, tin vừa gửi **KHÔNG BAO GIỜ** nằm trong response ⇒ kiểm chứng
+   *     kiểu đọc lịch sử không thể nâng ⚠→✅ (đúng như đo: 0/26 lô 10:39, 0/1 lô 13:42).
+   *   • FB **không dội lại** tin page tự gửi qua WebSocket: 14/14 lần gửi không xuất hiện lại
+   *     trong 225 khung WS (trong khi tin của khách thì có) ⇒ không có khung ACK nào để bắt.
+   * Nguồn DUY NHẤT trong HAR có tin CUỐI:
+   *   GET /v1/conversations/customer/{psid}?pages[<pid>]=0
+   *   → conversations[] có `snippet` (= tin cuối), `updated_at`, `last_sent_by.id`, `message_count`.
+   *   Đo: 2/2 lần gọi đều phản ánh đúng tin vừa gửi, trễ 7,2 / 9,1 / 10,0 s (nhỏ, 1 request).
+   * LUẬT: chỉ ĐỌC. Khớp ⇒ nâng ⚠→✅. Không khớp ⇒ giữ ⚠. KHÔNG BAO GIỜ gửi lại từ đây.
+   */
+  function msgTimeMs(raw) {
+    const t = String(raw || '');
+    if (!t) return NaN;
+    // HAR: inserted_at = "2026-10-19T10:10:19.000000" — UTC, KHÔNG kèm Z, 6 chữ số phần lẻ.
+    return Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(t) ? t : t + 'Z');
+  }
+  function newestMsgTimeMs(msgs) {
+    let best = 0;
+    for (let i = 0; i < (msgs ? msgs.length : 0); i++) {
+      const t = msgTimeMs(msgs[i] && msgs[i].inserted_at);
+      if (!isNaN(t) && t > best) best = t;
+    }
+    return best;
+  }
+  function psidOf(conv, full) {
+    const f = full || conv || {};
+    const s = String(f.from_psid || f.fromPsid || (f.from && f.from.id) || '');
+    if (s) return s;
+    const id = String((conv && conv.id) || ''); // pageId_psid
+    const i = id.indexOf('_');
+    return i > 0 ? id.slice(i + 1) : '';
+  }
+  // `snippet` bị cắt ~50 ký tự và có thể dính "...." ở cuối ⇒ bỏ đuôi chấm trước khi so.
+  function snippetText(s) {
+    return normalizeMsgText(s).replace(/[.\u2026\s]+$/, '').trim();
+  }
+  function snippetVerdict(convs, convId, pageId, psid, want, sentAt) {
+    if (!Array.isArray(convs) || !convs.length) return 'unknown';
+    const w = normalizeMsgText(want);
+    // Text < 12 ký tự ("Dạ", "Ok") khớp bừa rất dễ ⇒ thà giữ ⚠ còn hơn chốt ✅ oan.
+    if (w.length < 12) return 'unknown';
+    const at = Number(sentAt) || 0;
+    const skew = (typeof serverSkewMs === 'number') ? serverSkewMs : 0;
+    for (let i = 0; i < convs.length; i++) {
+      const c = convs[i];
+      if (!c) continue;
+      const cid = String(c.id || '');
+      const pid = String(c.page_id || (cid.indexOf('_') > 0 ? cid.slice(0, cid.indexOf('_')) : ''));
+      if (pageId && pid && pid !== String(pageId)) continue;      // khác page ⇒ bỏ
+      const fromPsid = String(c.from_psid || (c.customers && c.customers[0] && c.customers[0].fb_id) || '');
+      const isThis = (cid && convId && cid === String(convId))
+        || (fromPsid && psid && fromPsid === String(psid) && (!pageId || pid === String(pageId)));
+      if (!isThis) continue;                                      // khác hội thoại ⇒ bỏ
+      const sn = snippetText(c.snippet);
+      if (!sn) continue;
+      const textOk = (sn === w)
+        || (sn.length >= 12 && w.indexOf(sn) === 0)               // snippet là phần ĐẦU của text (bị cắt)
+        || (w.length >= 12 && sn.indexOf(w) === 0);
+      if (!textOk) continue;
+      // Tin cuối phải MỚI — nếu không, một tin CÙNG NỘI DUNG gửi hôm trước sẽ bị tính "đã tới".
+      // updated_at dùng đồng hồ SERVER (nhanh hơn máy ~5–40 s) ⇒ trừ skew, cho dư 60 s.
+      const t = msgTimeMs(c.updated_at);
+      if (at && !isNaN(t) && t < at + skew - 60000) continue;
+      const by = c.last_sent_by && (c.last_sent_by.id || c.last_sent_by.uid);
+      if (by && pageId && String(by) !== String(pageId)) continue; // tin cuối do page/người khác gửi
+      return 'yes';
+    }
+    return 'unknown';
+  }
+  async function confirmViaSnippet(conv, full, pageId, convId, want, sentAtMs) {
+    try {
+      const psid = psidOf(conv, full);
+      if (!pageId || !psid) return 'unknown';
+      if (normalizeMsgText(want).length < 12) return 'unknown';
+      const url = apiBase() + '/v1/conversations/customer/' + encodeURIComponent(psid)
+        + '?pages[' + encodeURIComponent(pageId) + ']=0';
+      const res = await ctxFetchLane(() => fetchJson(url, 1, { timeoutMs: 8000 }));
+      if (!res || !res.ok || !res.data || res.data.success === false) return 'unknown';
+      const convs = res.data.conversations || (res.data.data && res.data.data.conversations) || [];
+      return snippetVerdict(convs, convId, pageId, psid, want, sentAtMs);
+    } catch (e) { return 'unknown'; }
+  }
+
+  /* ===== [v1.92.30] CỔNG "CHỨNG MINH VẮNG MẶT" TRƯỚC MỌI LẦN BẮN THỨ 2 =====
+   * LỖI GỐC CỦA VIỆC LẶP: bù chỉ được phép chạy khi `sent === false`, mà trong code có 6 nguồn trả
+   * `sent:false` — chỉ 3 nguồn là BẰNG CHỨNG (tin chưa từng được phát: socket chết trước publish,
+   * gate no-gid, upload ảnh lỗi, Ext đang nghỉ hồi sức), còn 3 nguồn là SUY LUẬN:
+   *   • Socket `markOptimisticMessageFailed` — khung không nói nó thuộc tin nào;
+   *   • Ext `success:false` CÓ kèm lý do — lý do có thể đến từ bước SAU khi chữ đã đi;
+   *   • API `success:false` / 4xx — lỗi có thể của bước phụ hoặc của gateway.
+   * Ba nguồn đó mà kết luận sai ⇒ bù ⇒ khách nhận 2 tin. Vì vậy: TRƯỚC khi bắn lần 2 cho một
+   * phán quyết SUY LUẬN, hỏi thẳng hội thoại 1–2 request (endpoint snippet, trễ đo được 7,2–10,0 s):
+   *   'yes'    → tin ĐÃ ở trong hội thoại ⇒ HỦY bù (đây là ca chặn được lặp);
+   *   'absent' → chứng minh vắng mặt (hội thoại KHÔNG hề đổi sau lúc gửi ≥ 30 s) ⇒ bù an toàn;
+   *   'unknown'→ không chứng minh được ⇒ bù như cũ (ưu tiên KHÔNG SÓT, giữ nguyên hành vi).
+   * Toàn bộ chạy ở buProbeLane + bgClock, KHÔNG giữ lane gửi ⇒ tốc độ lô không đổi. */
+  const BU_PROOF_WAIT_MS = 10000;   // phải chờ đủ mốc này kể từ lúc gửi rồi mới dám kết luận "vắng mặt"
+  const BU_PROOF_STALE_MS = 30000;  // hội thoại phải im ≥ 30 s trước lúc gửi (dư sức vượt độ trễ 10 s)
+  const buProofCache = new Map();   // convId|mốc → { at, promise } — 1 chat chỉ chứng minh 1 lần
+  const buProbeLane = makeLane(96); // [v1.92.43b] 32 → 96: cùng lý do trên, đọc lịch sử rất rẻ
+
+  function absenceVerdict(convs, convId, pageId, psid, want, sentAt, late) {
+    if (!Array.isArray(convs) || !convs.length) return 'unknown';
+    if (snippetVerdict(convs, convId, pageId, psid, want, sentAt) === 'yes') return 'yes';
+    if (!late) return 'unknown'; // dò sớm: "chưa thấy" KHÔNG có nghĩa là "chưa đi" (trễ 7–10 s)
+    const at = Number(sentAt) || 0;
+    if (!at) return 'unknown';
+    const skew = (typeof serverSkewMs === 'number') ? serverSkewMs : 0;
+    let hit = null;
+    for (let i = 0; i < convs.length; i++) {
+      const c = convs[i];
+      if (!c) continue;
+      const cid = String(c.id || '');
+      const pid = String(c.page_id || (cid.indexOf('_') > 0 ? cid.slice(0, cid.indexOf('_')) : ''));
+      if (pageId && pid && pid !== String(pageId)) continue;
+      const fromPsid = String(c.from_psid || (c.customers && c.customers[0] && c.customers[0].fb_id) || '');
+      const isThis = (cid && convId && cid === String(convId))
+        || (fromPsid && psid && fromPsid === String(psid) && (!pageId || pid === String(pageId)));
+      if (isThis) { hit = c; break; }
+    }
+    if (!hit) return 'unknown';
+    const t = msgTimeMs(hit.updated_at);
+    if (!t || isNaN(t)) return 'unknown';
+    if (t >= at + skew - BU_PROOF_STALE_MS) return 'unknown'; // hội thoại vừa động ⇒ không dám kết luận
+    return 'absent';
+  }
+
+  async function probeBuVerdict(conv, pageId, convId, want, sentAtMs, late) {
+    try {
+      const psid = psidOf(conv, peekConv(conv) || conv);
+      if (!psid || !pageId) return 'unknown';
+      const url = apiBase() + '/v1/conversations/customer/' + encodeURIComponent(psid)
+        + '?pages[' + encodeURIComponent(pageId) + ']=0';
+      const res = await buProbeLane(() => fetchJson(url, 1, { timeoutMs: 8000 }));
+      if (!res || !res.ok || !res.data || res.data.success === false) return 'unknown';
+      const convs = res.data.conversations || (res.data.data && res.data.data.conversations) || [];
+      return absenceVerdict(convs, convId, pageId, psid, want, sentAtMs, late);
+    } catch (e) { return 'unknown'; }
+  }
+
+  function proveAbsentBeforeBu(conv, text, sentAtMs) {
+    if (!conv || !conv.id) return Promise.resolve('unknown');
+    const want = String(text || '');
+    // Text < 12 ký tự ("Dạ", "Ok") khớp bừa rất dễ ⇒ không dùng snippet để kết luận.
+    if (normalizeMsgText(want).length < 12) return Promise.resolve('unknown');
+    const at = Number(sentAtMs) || Date.now();
+    const key = conv.id + '|' + Math.round(at / 20000);
+    const cached = buProofCache.get(key);
+    if (cached) { sendDiag.buProofCached++; return cached.promise; }
+    const entry = { at: Date.now(), promise: null };
+    entry.promise = (async () => {
+      try {
+        const fullC = peekConv(conv) || conv;
+        const pageId = (fullC && (fullC.page_id || fullC.pageId)) || conv.pageId || String(conv.id).split('_')[0];
+        if (!pageId) return 'unknown';
+        const v1 = await probeBuVerdict(conv, pageId, conv.id, want, at, false);
+        if (v1 === 'yes') { sendDiag.buProofPresent++; return 'yes'; } // chặn được 1 lần lặp
+        const target = at + BU_PROOF_WAIT_MS;
+        if (Date.now() < target) await sleepUntil(target, 'bu-proof');
+        const v2 = await probeBuVerdict(conv, pageId, conv.id, want, at, true);
+        if (v2 === 'yes') sendDiag.buProofPresent++;
+        else if (v2 === 'absent') sendDiag.buProofAbsent++;
+        else sendDiag.buProofUnknown++;
+        return v2;
+      } catch (e) { sendDiag.buProofUnknown++; return 'unknown'; }
+    })();
+    buProofCache.set(key, entry);
+    if (buProofCache.size > 4000) { // dọn bộ nhớ khi lô vài nghìn chat
+      const now = Date.now();
+      buProofCache.forEach((v, k) => { if (now - v.at > 120000) buProofCache.delete(k); });
+    }
+    return entry.promise;
+  }
+
+  function historyVerdict(msgs, pageId, want, photo, sentAt) {
+    /* [v1.92.25] PHÂN XỬ LỊCH SỬ CHỈ CÒN HAI KẾT LUẬN: yes (bằng chứng dương) và unknown.
+     * Đã BỎ hẳn kết luận 'no' ("mốc nước rỗng ⇒ chắc chắn chưa đi") vì nó là PHÁN ĐOÁN chứ
+     * không phải bằng chứng: nó so inserted_at (đồng hồ server) với publishedAt (đồng hồ máy),
+     * mà lệch giữa hai đồng hồ đo được lên tới hàng chục giây; API lịch sử lại trễ vài giây tới
+     * vài phút và chỉ trả tin mới sau khi thread được làm mới. Chính kết luận no đó là mắt xích
+     * tạo ra chuỗi gửi trùng ở lô 09:46 (§58). Nay "chưa thấy tin" = unknown ⇒ giữ ⚠.
+     */
+    if (!Array.isArray(msgs) || !msgs.length) return 'unknown';
+    const at = Number(sentAt) || 0;
+    if (!at) return 'unknown';
+    // Hiệu chỉnh lệch đồng hồ đã ĐO (header Date); không đo được thì 0.
+    const skew = (typeof serverSkewMs === 'number') ? serverSkewMs : 0;
+    const atServer = at + skew;
+    const batchStart = ((batchStats && batchStats.startedAt) || at) + skew;
+    const minTime = Math.max(batchStart - 3000, atServer - 5000);
+    for (let i = 0; i < msgs.length; i++) {
+      const m = msgs[i];
+      if (!m || m.is_removed) continue;
       const rawT = String(m.inserted_at || '');
-      if (!rawT) return false;
-      const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawT) ? rawT : rawT + 'Z');
-      if (isNaN(t) || t < minTime) return false;
-      const normMsg = normalizeMsgText(m.message);
-      if (want && (normMsg === want || normMsg.indexOf(want) > -1)) return true;
-      if (!want && photo && Array.isArray(m.attachments) && m.attachments.length > 0) return true;
-      if (t >= sentAt - 2000 && (normMsg || (Array.isArray(m.attachments) && m.attachments.length > 0))) return true;
-      return false;
-    });
+      if (!rawT) continue;
+      // HAR (batmesss/guisot/guikhachcu): inserted_at = "2026-10-19T10:10:19.000000" — UTC
+      // KHÔNG kèm Z, 6 chữ số phần lẻ; Date.parse của V8 nhận đúng dạng này (đã kiểm chứng).
+      const t = msgTimeMs(rawT);
+      if (isNaN(t)) continue;
+      if (!m.from || String(m.from.id) !== String(pageId)) continue; // chỉ tin DO PAGE gửi
+      // HAR: 1 311 tin lịch sử = 1 305 INBOX + 6 COMMENT. Bình luận KHÔNG phải tin inbox nên
+      // không được dùng để chốt "reply_inbox đã gửi".
+      if (m.type && String(m.type).toUpperCase() !== 'INBOX') continue;
+      if (t < minTime) continue;
+      const hasAtt = Array.isArray(m.attachments) && m.attachments.length > 0;
+      if (want) {
+        const normMsg = normalizeMsgText(m.message);
+        // [v1.92.27] KHỚP CHẶT: khớp ĐÚNG (sau chuẩn hoá) luôn là bằng chứng; khớp kiểu "chứa"
+        // chỉ nhận khi chuỗi ta gửi đủ dài (≥ 20 ký tự). Nếu không, một tin NGẮN ("Dạ", "Ok")
+        // sẽ khớp bừa với tin khác của page ⇒ chốt ✅ oan ⇒ mất tin im lặng.
+        if (normMsg && (normMsg === want || (want.length >= 20 && normMsg.indexOf(want) > -1))) return 'yes';
+      } else if (hasAtt && attachmentMatches(m, photo)) {
+        return 'yes';
+      }
+    }
+    // Không khớp được tin nào ⇒ 'unknown' (KHÔNG kết luận "chưa đi" — xem chú thích đầu hàm).
+    return 'unknown';
+  }
+
+  // Tương thích chỗ gọi cũ: chỉ coi là "đã tới" khi verdict chắc chắn 'yes'.
+  function isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAt) {
+    return historyVerdict(msgs, pageId, want, photo, sentAt) === 'yes';
   }
 
   function scheduleSocketVerify(conv, text, photo, publishedAtMs) {
@@ -6690,7 +8694,7 @@
     const nm = conv.name || conv.id;
     const sentAt = publishedAtMs || Date.now();
     const verifyDelay = (batchStats && batchStats.total > 50) ? 3000 : SOCK_VERIFY_DELAY_MS;
-    setTimeout(async () => {
+    const __sockVerifyBody = async () => {
       try {
         if (myRun !== runSeq) return; // đã sang lượt mới — giữ nguyên ⚠ lượt cũ, không bắn lẫn
         if (state.stopRequested) return; // đang dừng — không bắn cứu
@@ -6711,44 +8715,137 @@
           + '/conversations/' + encodeURIComponent(convId)
           + '/messages?customer_id=' + encodeURIComponent(custId)
           + '&user_view=true&is_new_api=true&separate_pos=true';
-        const res = await ctxFetchLane(() => fetchJson(url, 2));
-        if (!res || !res.ok || !res.data || res.data.success === false) {
-          verifyStats.unknown++;
-          logLine('🔎 ' + nm + ' — không kiểm chứng được tin Socket (đọc lịch sử lỗi) — giữ ⚠ như cũ, không gửi lại');
-          return;
-        }
-        try {
-          const hGid = gidFromPayload(res.data);
-          const tid = f.thread_id || f.threadId || conv.threadId || '';
-          if (hGid && typeof window.__botfakeSaveGid__ === 'function') {
-            window.__botfakeSaveGid__(convId, pageId, tid, String(hGid));
+        // ===== ĐỌC LẠI NHIỀU LẦN TRƯỚC KHI KẾT LUẬN =====
+        // API lịch sử của Pancake trễ vài giây so với thời điểm FB nhận tin qua Socket.
+        // Bản cũ đọc ĐÚNG 1 LẦN sau 1.5s (3s với lô >50) rồi kết luận "chưa tới" ⇒ bắn cứu
+        // ⇒ tin thật về sau đó ⇒ khách nhận 2 lần (đây chính là "bù gây lặp câu").
+        // Nay: chỉ kết luận 'no' khi thấy MỐC NƯỚC RỖNG ở HAI LẦN ĐỌC LIÊN TIẾP, cách nhau
+        // vài giây; 'yes' chốt ngay; còn lại giữ ⚠ (không bù).
+        let verdict = 'unknown';
+        let histTruncatedOld = false; // response đúng 25 tin VÀ tin mới nhất đã cũ ⇒ cửa sổ là ĐẦU thread
+        // [v1.91.88] Page đã đánh dấu kênh ACK chết ⇒ Socket gần như chắc chắn KHÔNG giao được
+        // (lô 08:19: 0/74 tin tới qua Socket). Vẫn phải kiểm chứng để không bù trùng, nhưng
+        // luật "2 lần đọc rỗng liên tiếp" đã đủ ⇒ rút 4 → 2 lần đọc, giảm nửa số request.
+        // [v1.92.24] Bỏ nhánh "page ACK chết ⇒ rút còn 2 lần đọc": lần đọc này giờ CHỈ để nâng
+        // ⚠ → ✅ (không còn bắn cứu) nên đọc thêm không thể gây trùng, chỉ giúp cứu thêm ca
+        // ACK trễ thật. Mọi page đọc cùng số lần.
+        const maxReads = (batchStats && batchStats.total > 50) ? 4 : 3;
+        /* [v1.92.38] Chạy CỔNG CHỨNG MINH VẮNG MẶT song song với các lần đọc lịch sử.
+         * Trước đây cổng chỉ được gọi SAU khi đọc xong (lô >50: đọc 4 lần tới mốc +15 s ⇒ cứu
+         * xong ~+19 s). Cổng bắt buộc phải chờ mốc gửi +10 s nên chạy song song thì kết quả về
+         * đúng ~+10 s bất kể số lần đọc. Không thêm request: đây chính là request mà cổng vẫn
+         * phải gọi sau đó, chỉ khác thời điểm. */
+        let proofP = null;
+        for (let attempt = 0; attempt < maxReads; attempt++) {
+          if (attempt > 0) {
+            await sleepUntil(Date.now() + (attempt === 1 ? 2000 : (attempt === 2 ? 4000 : 6000))); // [v1.92.9]
+            if (myRun !== runSeq || state.stopRequested) return;
+            if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
           }
-        } catch (e0) { /* ignore */ }
-        const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
-        if (!Array.isArray(msgs)) {
-          verifyStats.unknown++;
-          logLine('🔎 ' + nm + ' — không kiểm chứng được tin Socket (lịch sử lạ) — giữ ⚠ như cũ, không gửi lại');
-          return;
+          let res = null;
+          try { res = await ctxFetchLane(() => fetchJson(url, 2)); } catch (e) { res = null; }
+          if (!res || !res.ok || !res.data || res.data.success === false) {
+            if (attempt === 0) {
+              logFailGrouped(nm, 'chưa đọc được lịch sử (' + ((res && res.error) || 'lỗi') + ') — thử lại…', '🔎', conv.id);
+            }
+            continue;
+          }
+          try {
+            const hGid = gidFromPayload(res.data);
+            const tid = f.thread_id || f.threadId || conv.threadId || '';
+            if (hGid && typeof window.__botfakeSaveGid__ === 'function') {
+              window.__botfakeSaveGid__(convId, pageId, tid, String(hGid));
+            }
+          } catch (e0) { /* ignore */ }
+          const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
+          if (!Array.isArray(msgs)) continue;
+          verdict = historyVerdict(msgs, pageId, want, photo, sentAt);
+          if (verdict === 'yes') break; // có bằng chứng dương là dừng đọc ngay
+          if (attempt === 0 && !proofP) {
+            // đọc lần đầu đã không thấy ⇒ khởi động cổng chứng minh ngay (chạy nền tới mốc +10 s)
+            try { proofP = proveAbsentBeforeBu(conv, text, sentAt); } catch (ePp) { proofP = null; }
+          }
+          // [v1.92.29] Response đúng 25 tin + tin mới nhất đã cũ hơn 60 s ⇒ 25 tin này là ĐẦU
+          // thread (HAR: 34 ca như vậy, trung vị cũ hơn 4 330 s) ⇒ đọc thêm chỉ ra đúng 25 tin
+          // đó, tốn 2–3 request vô ích. Dừng và chuyển sang kiểm bằng `snippet`.
+          if (msgs.length >= 25) {
+            const newest = newestMsgTimeMs(msgs);
+            if (newest && (Date.now() - newest) > 60000) { histTruncatedOld = true; break; }
+          }
         }
-        const found = isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAt);
-        if (found) {
+        // [v1.92.29] Đường thay thế: 1 request hội thoại của khách → `snippet` = tin CUỐI.
+        if (verdict !== 'yes') {
+          const snip = await confirmViaSnippet(conv, f, pageId, convId, want, sentAt);
+          if (snip === 'yes') {
+            // Chốt luôn + thoát, không in thêm dòng "tin ĐÃ đến nơi" cho khỏi 2 dòng/ca.
+            verifyStats.found++;
+            markDelivered(conv.id, 'socket');
+            try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
+            logFailGrouped(nm, 'kiểm chứng bằng HỘI THOẠI: snippet = tin vừa gửi, do chính page này gửi — tính ✅ Socket', '🔎', conv.id);
+            return;
+          }
+        }
+        if (verdict === 'yes') {
           verifyStats.found++;
           markDelivered(conv.id, 'socket');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
-          logLine('🔎 ' + nm + ' — kiểm chứng: tin ĐÃ đến nơi (Socket chỉ mất ACK) — tính ✅ Socket');
+          logFailGrouped(nm, 'kiểm chứng: tin ĐÃ đến nơi (Socket chỉ mất ACK) — tính ✅ Socket', '🔎', conv.id);
           return;
         }
-        // Đọc được lịch sử mà không thấy tin → publish chưa hề tới FB (socket chết ngầm)
-        verifyStats.fired++;
-        sockVerifyFired[conv.id] = myRun;
-        reopenUncertain(conv.id);
-        releaseOutbound(conv.id); // tin chắc chưa đi → nhả khóa để kênh cứu được bắn (đúng luật khóa outbound)
-        noteBgPending(conv, 'verify-bu');
-        logLine('🔎 ' + nm + ' — kiểm chứng: CHƯA thấy tin trong lịch sử — bắn cứu 1 vòng qua Extension');
-        scheduleBuRetry(conv, text, photo, nm, 'Socket mất ACK (kiểm chứng chưa thấy tin)', ['socket']);
+        /* [v1.92.37] KHÔNG ĐƯỢC IM LẶNG ĐỂ MẤT TIN — ca Đinh Thị Loan (lô 3 chat 15:48):
+         * Socket bắn → không có ACK → đọc lịch sử 3 lần không thấy → theo luật 1.92.24/25 thì
+         * GIỮ ⚠ vĩnh viễn: khách không nhận được gì, script cũng không cứu, người dùng phải
+         * gửi tay. Nay đọc thêm **CỔNG CHỨNG MINH VẮNG MẶT** — đúng cổng đang dùng trước mỗi lần
+         * bù: dò MUỘN (≥ BU_PROOF_WAIT_MS = 10 s sau lúc gửi) + hội thoại phải IM ≥ 30 s và
+         * không đổi so với lúc gửi. Chỉ khi đó mới dám kết luận "tin chưa đi" ⇒ GỬI CỨU 1 LẦN
+         * qua kênh KHÁC (Extension), rồi khoá `sockVerifyFired` để không cứu vòng 2.
+         * Không chứng minh được ⇒ vẫn giữ ⚠ và đưa vào DANH SÁCH GỬI TAY (không im lặng nữa). */
+        let socksProof = 'unknown';
+        try { socksProof = await (proofP || proveAbsentBeforeBu(conv, text, sentAt)); } catch (ePv) { socksProof = 'unknown'; }
+        // Chỉ cứu được khi CÒN kênh khác: bù của script chỉ đi Extension/Socket, mà Socket vừa
+        // thất bại ⇒ cần Extension. Không có Extension thì giữ ⚠ (vào danh sách gửi tay),
+        // KHÔNG chốt ❌ oan — người dùng vẫn gửi tay được.
+        const hasExtNow = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+        if (socksProof === 'absent') {
+          // [v1.92.40] BẰNG CHỨNG MẤT TIN: cổng vừa chứng minh hội thoại không có tin ⇒ ghi sổ
+          // định tuyến của page. 2 lần liên tiếp như vậy ⇒ gỡ Socket khỏi kế hoạch page này.
+          try {
+            const _st = sockRouteOf(pageId);
+            if (_st) _st.lost++;
+          } catch (eSt3) { /* ignore */ }
+        }
+        if (socksProof === 'absent' && !hasExtNow) {
+          logFailGrouped(nm, 'kiểm chứng: hội thoại KHÔNG có tin nhưng KHÔNG còn kênh gửi (Extension chưa nối) — GIỮ ⚠, vào danh sách gửi tay', '🔎', conv.id);
+        }
+        if (socksProof === 'absent' && hasExtNow && myRun === runSeq && !state.stopRequested
+            && !deliveredIds[conv.id] && !finalFailedIds[conv.id]) {
+          sockVerifyFired[conv.id] = runSeq; // khoá: mỗi chat chỉ được cứu 1 lần / lượt
+          /* [v1.92.38] KHÔNG gọi reopenUncertain() nữa. Bản 1.92.37 mở lại sổ ⚠ ⇒
+           * summaryCounters.unsure-- ⇒ pendingSend = 1 ⇒ bảng TỔNG HỢP bị CHẶN thêm ~11–14 s
+           * chỉ để chờ một ca cứu — đúng cái chậm mà 1.92.36 vừa bỏ. Chat này đã CÓ kết luận
+           * (⚠) nên cứ để lượt chốt; khi cứu xong thì markDelivered/trackStatus tự chuyển
+           * ⚠ → ✅/❌ (cả hai hàm đều trừ unsure trước khi cộng nhóm mới). */
+          rescueInFlight[conv.id] = Date.now();
+          sockRescueStats.tried++;
+          logFailGrouped(nm, 'kiểm chứng: hội thoại KHÔNG có tin (đã chứng minh vắng mặt sau '
+            + ((Math.max(0, Date.now() - sentAt)) / 1000).toFixed(1).replace('.', ',')
+            + ' s) ⇒ GỬI CỨU 1 lần qua Extension', '🛟', conv.id);
+          scheduleBuRetry(conv, text, photo, nm,
+            'Socket không có ACK + đã chứng minh hội thoại không có tin', ['socket'],
+            { ambiguous: false, fromUncertain: true, via: 'socket', sentAt: sentAt });
+          return;
+        }
+        // [v1.92.25] Không có bằng chứng dương sau các lần đọc ⇒ GIỮ ⚠. Đây là đường duy nhất
+        // còn lại sau khi bỏ 'no' + bỏ "bắn cứu": không bao giờ gửi lại từ kiểm chứng.
+        // [v1.92.28] Chỉ tính "giữ ⚠" — trước đây tăng CẢ unknown lẫn held cho cùng một ca
+        // nên dòng tổng kết in "giữ ⚠ 5 · không kiểm chứng được 5" trong khi chỉ có 5 ca.
+        verifyStats.held = (verifyStats.held || 0) + 1;
+        logFailGrouped(nm, 'kiểm chứng: ' + (histTruncatedOld
+          ? 'lịch sử chỉ trả 25 tin CŨ NHẤT (thread dài) và hội thoại chưa hiện tin này'
+          : 'đọc ' + maxReads + ' lần chưa thấy tin') + ' — GIỮ ⚠, KHÔNG bắn lại (chống trùng)', '🔎', conv.id);
       } catch (e) {
         verifyStats.unknown++;
-        logLine('🔎 ' + nm + ' — kiểm chứng lỗi (' + (e && e.message || e) + ') — giữ ⚠ như cũ, không gửi lại');
+        logFailGrouped(nm, 'kiểm chứng lỗi (' + (e && e.message || e) + ') — giữ ⚠ như cũ, không gửi lại', '🔎', conv.id);
       } finally {
         delete sockVerifyPending[conv.id]; // nhả sổ chờ ở mọi lối ra — lượt chỉ được kết thúc sau khi kiểm chứng chốt xong
         // Dù kiểm chứng thấy/không thấy/lỗi cũng phải tính lại pending và
@@ -6757,7 +8854,8 @@
         try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
         try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
       }
-    }, verifyDelay);
+    };
+    bgClock.wait(verifyDelay).then(() => { enqueueSockVerify(__sockVerifyBody); });
   }
 
   // KIỂM CHỨNG SAU KHI EXTENSION TIMEOUT: lệnh Ext đã phát đi nhưng adapter
@@ -6765,18 +8863,41 @@
   // hàng đợi của Extension và đi sau đó — vì vậy kiểm chứng này CHỈ được phép
   // lật ⚠ thành ✅ khi thấy đúng tin trong lịch sử. Không thấy tin thì vẫn giữ
   // ⚠, không bắn cứu, không mở khóa outbound (tránh trùng tuyệt đối).
-  const EXT_VERIFY_DELAY_MS = 20000; // sau mốc adapter timeout 35s → tổng phân xử khoảng 55–60s
-  function scheduleExtTimeoutVerify(conv, text, photo, sentAtMs) {
+  const EXT_VERIFY_DELAY_MS = 20000; // [v1.92.6] adapter timeout nay 2,5–9 s (suy từ p90) → 20 s vẫn dư ~11 s trước khi phân xử
+  // [v1.91.78] ĐỌC LẠI THEO NHỊP GIÃN cho ca Extension quá hạn.
+  // Log lô 4296 tin: 27 ca kết thúc ở "⚠ bù không rõ kết quả" vì lần đọc DUY NHẤT
+  // (sau ~20s) chưa thấy tin — nhưng "chưa thấy" ở 20s KHÔNG phải bằng chứng "chưa đi":
+  // server Pancake thường chỉ trả tin mới sau khi thread được làm mới. Nay đọc lại thêm
+  // 2 lần ở nhịp giãn (≈+65s, ≈+185s). RÀNG BUỘC: các lần đọc lại CHỈ được lật ⚠ → ✅,
+  // không bao giờ bắn lại, không mở khóa gửi ⇒ không thể sinh tin trùng.
+  /* [v1.92.43] ĐUÔI XÁC NHẬN BÙ: BỎ LƯỢT DÒ LẠI 120 s.
+   * Số đo 2 lô lớn (1.92.42):
+   *   lô 7 073 chat : '🧯 Ext quá hạn 623 · kiểm chứng thấy tin 0 · chưa thấy trong lịch sử 516'
+   *   lô 13 204 chat: '847 · thấy tin 0 · 822'
+   * ⇒ 1 338 ca dò lại (20 s + 45 s + 120 s mỗi ca) CỨU ĐƯỢC 0 chat, nhưng giữ sổ ở trạng thái
+   * "chờ xác nhận" tới 3 phút sau khi lô xong. Giữ lại MỘT lượt 45 s (đủ cho adapter chậm p90
+   * 8,3 s + hàng đợi) rồi chốt thẳng ⚠ 'Ext quá hạn — chưa thấy tin'. */
+  const EXT_RECHECK_DELAYS = { 2: 45000, 1: 45000 };
+  function scheduleExtTimeoutVerify(conv, text, photo, sentAtMs, roundsLeft, recheck, delayOverride) {
     if (!conv || !conv.id || !sentAtMs) return;
     const want = normalizeMsgText(text);
     if (!want && !photo) return;
-    if (extVerifyPending[conv.id]) return;
     if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
     const myRun = runSeq;
-    extVerifyPending[conv.id] = myRun;
+    if (recheck) {
+      if (extRecheckPending[conv.id]) return;
+      extRecheckPending[conv.id] = myRun;
+    } else {
+      if (extVerifyPending[conv.id]) return;
+      extVerifyPending[conv.id] = myRun;
+    }
     const nm = conv.name || conv.id;
-    const delayMs = EXT_VERIFY_DELAY_MS + Math.floor(Math.random() * 5000); // rải nhịp khi timeout theo cụm
-    setTimeout(async () => {
+    // [v1.91.79] Chỉ còn 1 lần đọc lại: 3 lượt liên tiếp cho 'thấy tin 0' ⇒ đọc nhiều là vô ích,
+    // chỉ tốn request trên máy yếu.
+    const left = (typeof roundsLeft === 'number') ? roundsLeft : 1;
+    const isRecheck = !!recheck; // lần đọc lại: KHÔNG cộng vào thống kê chốt
+    const delayMs = (delayOverride || EXT_VERIFY_DELAY_MS) + Math.floor(Math.random() * 5000); // rải nhịp khi timeout theo cụm
+    bgClock.wait(delayMs).then(async () => {
       try {
         if (myRun !== runSeq) return;
         if (state.stopRequested) return;
@@ -6799,26 +8920,37 @@
           + '&user_view=true&is_new_api=true&separate_pos=true';
         const res = await ctxFetchLane(() => fetchJson(url, 1, { timeoutMs: 8000 }));
         if (!res || !res.ok || !res.data || res.data.success === false) {
-          extTimeoutStats.unknown++;
+          if (!isRecheck) extTimeoutStats.unknown++;
           return;
         }
         const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
-        if (!Array.isArray(msgs)) { extTimeoutStats.unknown++; return; }
-        const found = isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAtMs);
+        if (!Array.isArray(msgs)) { if (!isRecheck) extTimeoutStats.unknown++; return; }
+        let found = isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAtMs);
+        // [v1.92.29] Thread > 25 tin thì đọc lịch sử không bao giờ thấy tin mới ⇒ kiểm thêm
+        // bằng `snippet`. Chỉ nâng ⚠→✅, không bao giờ gửi lại.
+        if (!found) found = (await confirmViaSnippet(conv, f, pageId, convId, want, sentAtMs)) === 'yes';
         if (found) {
           extTimeoutStats.found++;
           markDelivered(conv.id, 'ext');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
-          logLine('🔎 ' + nm + ' — kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi — tính ✅ Ext');
+          logFailGrouped(nm, 'kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi — tính ✅ Ext', '🔎', conv.id);
           return;
         }
-        extTimeoutStats.notFound++;
+        if (!isRecheck) extTimeoutStats.notFound++;
         // Không log từng ca "chưa thấy" để tránh ngập log khi timeout theo cụm;
         // số tổng nằm ở dòng TỔNG HỢP. Vẫn giữ ⚠ và không bắn lại.
       } catch (e) {
-        extTimeoutStats.unknown++;
+        if (!isRecheck) extTimeoutStats.unknown++;
       } finally {
-        delete extVerifyPending[conv.id];
+        if (isRecheck) delete extRecheckPending[conv.id]; else delete extVerifyPending[conv.id];
+        // [v1.91.78] Hẹn lần đọc lại kế tiếp (chỉ đọc, không bắn).
+        try {
+          if (left > 0 && !state.stopRequested && runSeq === myRun
+              && !deliveredIds[conv.id] && !finalFailedIds[conv.id]) {
+            const nd = EXT_RECHECK_DELAYS[left] || 45000;
+            scheduleExtTimeoutVerify(conv, text, photo, sentAtMs, left - 1, true, nd);
+          }
+        } catch (e1) { /* ignore */ }
         // Ca Ext timeout đã được đếm ⚠ ngay khi timeout; kiểm chứng nền
         // chỉ có thể lật ✅ nếu thấy tin. Khi nó kết thúc mà không thấy
         // tin, vẫn phải tính lại pending để lượt gửi chốt hẳn, không treo
@@ -6826,7 +8958,171 @@
         try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
         try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
       }
-    }, delayMs);
+    });
+  }
+
+  /* ===== [v1.92.34] HẬU KIỂM CÁC CA CHỐT "1545041 — KHÁCH KHÔNG NHẬN ĐƯỢC" =====
+   * Lô 13:38 chốt ❌ 1 089 ca chỉ vì MỘT kênh (Ext) trả 1545041 — mà làn Ext của lô đó gửi
+   * 0 thành công, nên "khách chết" và "Ext hỏng" không phân biệt được. Người dùng chốt:
+   *   • trong lượt: kết luận NGAY, KHÔNG bù, KHÔNG kiểm chứng (để không bắn lặp);
+   *   • sau lô: TỰ ĐỘNG đọc lại lịch sử từng ca — thấy đúng tin ⇒ lật ✅ (kèm postSendSideEffects).
+   * Toàn bộ khối này CHỈ ĐỌC: không có lệnh gửi nào ⇒ không thể sinh tin trùng. */
+  const DEAD_RECHECK_MAX = 400;        // đọc tối đa 400 ca / lượt (phần dư để lượt sau, khỏi ngập request)
+  const DEAD_RECHECK_CONC = 8;         // 8 luồng đọc — chạy SAU lô nên không tranh làn gửi
+  const DEAD_RECHECK_DELAY_MS = 25000; // tin vừa đi cần thời gian vào lịch sử
+  const deadRecheckQueue = [];
+  let deadRecheckRunning = false;
+  function queueDeadUserRecheck(conv, text, photo, sentAtMs) {
+    try {
+      if (!conv || !conv.id) return;
+      if (deadRecheckQueue.length >= 5000) return;
+      const want = normalizeMsgText(text);
+      if (!want && !photo) return;
+      deadRecheckQueue.push({ conv: conv, want: want, photo: photo || null, sentAt: Number(sentAtMs) || Date.now() });
+    } catch (e) { /* ignore */ }
+  }
+  async function startDeadUserRecheck() {
+    if (deadRecheckRunning || !deadRecheckQueue.length) return;
+    deadRecheckRunning = true;
+    const myRun = runSeq;
+    const list = deadRecheckQueue.slice(0, DEAD_RECHECK_MAX);
+    deadRecheckQueue.splice(0, list.length);
+    let seen = 0, flipped = 0, unknown = 0;
+    try {
+      logLine('🔎 HẬU KIỂM ' + list.length + ' ca chốt ❌ vì "1545041 khách không nhận được": đọc lại lịch sử '
+        + 'sau ~' + Math.round(DEAD_RECHECK_DELAY_MS / 1000) + 's (CHỈ ĐỌC — không bắn lại; thấy tin ⇒ lật ✅).');
+      await bgClock.wait(DEAD_RECHECK_DELAY_MS + Math.floor(Math.random() * 5000));
+      const one = async (it) => {
+        if (myRun !== runSeq) return;
+        try {
+          let f = null;
+          try { f = peekConv(it.conv); } catch (e0) { f = null; }
+          f = f || it.conv;
+          const pageId = f.page_id || f.pageId || it.conv.pageId || String(it.conv.id || '').split('_')[0];
+          const convId = f.id || it.conv.id;
+          const custId = String(f.customerId || it.conv.customerId
+            || (f.customers && f.customers[0] && f.customers[0].id)
+            || (it.conv.customers && it.conv.customers[0] && it.conv.customers[0].id) || '');
+          if (!pageId) { unknown++; return; }
+          const url = apiBase() + '/v1/pages/' + pageId
+            + '/conversations/' + encodeURIComponent(convId)
+            + '/messages?customer_id=' + encodeURIComponent(custId)
+            + '&user_view=true&is_new_api=true&separate_pos=true';
+          const res = await ctxFetchLane(() => fetchJson(url, 1, { timeoutMs: 8000 }));
+          if (!res || !res.ok || !res.data || res.data.success === false) { unknown++; return; }
+          const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
+          if (!Array.isArray(msgs)) { unknown++; return; }
+          seen++;
+          let found = isMessageDeliveredInHistory(msgs, pageId, it.want, it.photo, it.sentAt);
+          if (!found) found = (await confirmViaSnippet(it.conv, f, pageId, convId, it.want, it.sentAt)) === 'yes';
+          if (!found) return;
+          flipped++;
+          markDelivered(convId, 'ext');
+          try { postSendSideEffects(it.conv); } catch (e2) { /* ignore */ }
+          auditPush('🔎', convId, it.conv.name || '', 'hậu kiểm 1545041: THẤY tin trong lịch sử ⇒ lật ✅ (không gửi lại)');
+          logFailGrouped(it.conv.name || convId,
+            'hậu kiểm 1545041: tin ĐÃ tới nơi (Ext báo không có mặt nhưng lịch sử có tin) — tính ✅, không gửi lại',
+            '🔎', convId);
+        } catch (e) { unknown++; }
+      };
+      let idx = 0;
+      const worker = async () => {
+        while (idx < list.length && myRun === runSeq) { const it = list[idx++]; await one(it); }
+      };
+      await Promise.all(Array.from({ length: DEAD_RECHECK_CONC }, () => worker()));
+    } catch (e) {
+      try { logLine('🔎 HẬU KIỂM 1545041 dừng giữa đường: ' + (e && e.message || e)); } catch (e2) { /* ignore */ }
+    } finally {
+      deadRecheckRunning = false;
+      try {
+        logLine('🔎 HẬU KIỂM 1545041 xong: đọc ' + seen + '/' + list.length + ' ca · thấy tin ⇒ lật ✅ '
+          + flipped + ' ca · không đọc được/chưa rõ ' + unknown
+          + (deadRecheckQueue.length ? ' · còn ' + deadRecheckQueue.length + ' ca để lượt sau' : '')
+          + (flipped ? ' — ' + flipped + ' ca này KHÔNG được gửi lại (tin đã có trong lịch sử).'
+            : ' — không ca nào có tin ⇒ chốt ❌ "khách không nhận được" là ĐÚNG.'));
+      } catch (e3) { /* ignore */ }
+    }
+  }
+
+  /* ===== KIỂM CHỨNG CA "KHÔNG RÕ KẾT QUẢ" (API timeout / 5xx / mất mạng) =====
+   * Trước đây ca này chỉ chốt ⚠ rồi BỎ — tin có thể chưa hề đi (timeout trước khi tới FB)
+   * và không bao giờ được bù ⇒ MẤT TIN. Nay kiểm chứng bằng nguồn ĐỘC LẬP (đọc lịch sử):
+   *   • 'yes' → tin đã tới → ✅ (ACK trễ)
+   *   • 'no'  (mốc nước rỗng 2 lần liên tiếp, đọc sau ≥9s) → chắc chắn chưa đi → bù 1 vòng
+   *   • còn lại → GIỮ ⚠, tuyệt đối không bắn mò (chống trùng)
+   * Chỉ chạy khi có nội dung để đối chiếu; mỗi chat 1 lần/lượt. */
+  const UNCERTAIN_VERIFY_FIRST_MS = 9000; // chờ 9s rồi đọc lần 1 (đủ để tin "đang bay" kịp vào lịch sử)
+  const UNCERTAIN_VERIFY_GAP_MS = 7000;   // đọc lần 2 sau 7s — xác nhận mốc nước rỗng
+  function scheduleUncertainVerify(conv, text, photo, sentAtMs, why) {
+    if (!conv || !conv.id) return;
+    const want = normalizeMsgText(text);
+    if (!want && !photo) return;
+    if (uncertainVerifyPending[conv.id]) return;
+    if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+    const myRun = runSeq;
+    uncertainVerifyPending[conv.id] = myRun;
+    const nm = conv.name || conv.id;
+    const sentAt = sentAtMs || Date.now();
+    bgClock.wait(UNCERTAIN_VERIFY_FIRST_MS).then(async () => {
+      try {
+        if (myRun !== runSeq || state.stopRequested) return;
+        if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+        let f = null;
+        try { f = peekConv(conv); } catch (e) { f = null; }
+        if (!f || !(f.page_id || f.pageId)) {
+          try { f = await ctxFull(conv, {}); } catch (e) { f = null; }
+        }
+        f = f || conv;
+        const pageId = f.page_id || f.pageId || conv.pageId || String(conv.id || '').split('_')[0];
+        const convId = f.id || conv.id;
+        const custId = String(f.customerId || conv.customerId
+          || (f.customers && f.customers[0] && f.customers[0].id)
+          || (conv.customers && conv.customers[0] && conv.customers[0].id) || '');
+        if (!pageId) return;
+        const url = apiBase() + '/v1/pages/' + pageId
+          + '/conversations/' + encodeURIComponent(convId)
+          + '/messages?customer_id=' + encodeURIComponent(custId)
+          + '&user_view=true&is_new_api=true&separate_pos=true';
+        let verdict = 'unknown';
+        let histTruncatedOld = false;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          if (attempt) {
+            await sleepUntil(Date.now() + UNCERTAIN_VERIFY_GAP_MS); // [v1.92.9] ngắt được khi Dừng
+            if (myRun !== runSeq || state.stopRequested) return;
+            if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+          }
+          let res = null;
+          try { res = await ctxFetchLane(() => fetchJson(url, 2)); } catch (e) { res = null; }
+          if (!res || !res.ok || !res.data || res.data.success === false) continue;
+          const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
+          if (!Array.isArray(msgs)) continue;
+          verdict = historyVerdict(msgs, pageId, want, photo, sentAt);
+          if (verdict === 'yes') break; // có bằng chứng dương là dừng đọc ngay
+          if (msgs.length >= 25) {
+            const newest = newestMsgTimeMs(msgs);
+            if (newest && (Date.now() - newest) > 60000) { histTruncatedOld = true; break; }
+          }
+        }
+        if (verdict !== 'yes') {
+          if ((await confirmViaSnippet(conv, f, pageId, convId, want, sentAt)) === 'yes') verdict = 'yes';
+        }
+        if (verdict === 'yes') {
+          markDelivered(conv.id, 'api');
+          try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
+          logFailGrouped(nm, 'kiểm chứng: tin ĐÃ tới (API chỉ trả lời trễ) — tính ✅ API', '🔎', conv.id);
+          return;
+        }
+        // [v1.92.25] Không có bằng chứng dương ⇒ GIỮ ⚠, không bao giờ gửi lại từ kiểm chứng.
+        verifyStats.held = (verifyStats.held || 0) + 1; // [v1.92.28] không đếm đôi (xem scheduleSocketVerify)
+        logFailGrouped(nm, 'kiểm chứng KHÔNG kết luận được (' + clip(why || 'không rõ', 60) + ') — giữ ⚠, KHÔNG bắn lại (chống trùng)', '🔎', conv.id);
+      } catch (e) {
+        // kiểm chứng lỗi → giữ nguyên ⚠
+      } finally {
+        delete uncertainVerifyPending[conv.id];
+        try { updateBatchSummaryUI(); } catch (e) { /* ignore */ }
+        try { markSendIdleIfSettled(); } catch (e) { /* ignore */ }
+      }
+    });
   }
 
   // Nhóm chat theo NỘI DUNG sẽ gửi: chat thuộc câu nào → ĐÚNG chữ của câu đó;
@@ -6851,12 +9147,179 @@
     return state.lastCopiedText || '';
   }
 
+  /* [v1.92.43] KHOÁ GỬI GIỮA CÁC TAB — chống "tranh nhau gửi".
+   * Mỗi tab là một bản script độc lập: mỗi tab mở client Socket riêng, tự dựng làn riêng (192 main
+   * + 384/page + 128 Ext) nhưng cùng dùng chung MỘT page Facebook và MỘT hạn mức ACK. Hai tab chạy
+   * cùng lúc = 2× làn trên cùng một kênh ⇒ ACK chậm gấp đôi, lane tự hạ, cả hai cùng chậm
+   * (đúng dấu hiệu: ACK TB 3 053 ms và lane 384→16 khi người dùng chạy nhiều tab).
+   * Nay: tab nào bấm Chạy trước thì giữ khoá (heartbeat 2 s, TTL 6 s); tab khác bị chặn kèm lời
+   * nhắn rõ. Bỏ chặn khi thật sự muốn: window.__botfakeAllowMultiTab__(true). */
+  const TAB_ID = 'tab_' + Math.random().toString(36).slice(2) + '_' + Date.now().toString(36);
+  /* [v1.92.43] Khoá TÍNH THEO PAGE: tranh chấp thật nằm ở ACK/làn của TỪNG page. Hai tab mở hai
+   * page khác nhau thì KHÔNG đụng nhau (mỗi tab một Socket client, một hạn mức ACK riêng) ⇒ vẫn
+   * cho chạy song song. Chỉ chặn khi hai tab cùng một page — đó mới là cảnh 2× làn trên 1 kênh. */
+  const SEND_LOCK_KEY_BASE = 'ssb_send_tab_lock_v2';
+  const SEND_LOCK_TTL_MS = 6000;
+  let sendLockTimer = null;
+  let allowMultiTab = false;
+  try { window.__botfakeAllowMultiTab__ = (v) => { allowMultiTab = !!v; return allowMultiTab; }; } catch (eMt) { /* ignore */ }
+  function sendLockKey() {
+    let pid = '';
+    try { pid = pageIdFromLocation ? pageIdFromLocation() : ''; } catch (e0) { pid = ''; }
+    return SEND_LOCK_KEY_BASE + (pid ? ':' + pid : '');
+  }
+  function readSendLock() {
+    try { return JSON.parse(localStorage.getItem(sendLockKey()) || 'null'); } catch (e) { return null; }
+  }
+  function writeSendLock() {
+    try {
+      localStorage.setItem(sendLockKey(), JSON.stringify({
+        tab: TAB_ID, at: Date.now(), total: (batchStats && batchStats.total) || 0,
+        href: String(location.href || '').slice(0, 120),
+      }));
+    } catch (e) { /* ignore */ }
+  }
+  const sleepMs = (ms) => new Promise((res) => setTimeout(res, ms));
+  async function acquireSendLock() {
+    if (allowMultiTab) return true;
+    const cur = readSendLock();
+    if (cur && cur.tab !== TAB_ID && (Date.now() - (cur.at || 0)) < SEND_LOCK_TTL_MS) {
+      logLine('🛑 TAB KHÁC ĐANG GỬI CÙNG PAGE NÀY (bắt đầu ' + Math.round((Date.now() - (cur.at || 0)) / 1000)
+        + 's trước, ' + (cur.total || 0) + ' chat) — không chạy song song: hai tab sẽ tranh cùng '
+        + 'một kênh Socket/ACK ⇒ cả hai chậm và dễ nhiễu. Chờ tab kia xong, hoặc '
+        + 'window.__botfakeAllowMultiTab__(true) nếu bạn thật sự muốn.');
+      return false;
+    }
+    /* Chống bấm gần như đồng thời ở 2 tab: localStorage KHÔNG có phép "ghi nếu chưa có" (CAS),
+     * nên cả hai tab đều ghi được. Cách chắc chắn: ghi → chờ 150 ms → ĐỌC LẠI. Tab nào thấy
+     * khoá mang ID của chính mình thì thắng; tab còn lại thấy ID người khác ⇒ nhường. Chỉ một
+     * tab chạy được, kể cả khi bấm cách nhau vài mili-giây. */
+    writeSendLock();
+    await sleepMs(150);
+    const chk = readSendLock();
+    if (!chk || chk.tab !== TAB_ID) {
+      const who = chk && chk.at ? Math.round((Date.now() - chk.at) / 1000) : 0;
+      logLine('🛑 Một tab KHÁC vừa giành quyền gửi page này cùng lúc (' + who
+        + 's trước) — tab này nhường để không tranh làn. Bấm lại khi tab kia xong.');
+      return false;
+    }
+    if (sendLockTimer) clearInterval(sendLockTimer);
+    writePeerPresence(true);
+    sendLockTimer = setInterval(() => {
+      if (!state.sending) { releaseSendLock(); return; }
+      writeSendLock();
+      writePeerPresence(true);
+    }, 2000);
+    return true;
+  }
+  function releaseSendLock() {
+    if (sendLockTimer) { clearInterval(sendLockTimer); sendLockTimer = null; }
+    try { writePeerPresence(false); } catch (eP) { /* ignore */ }
+    const cur = readSendLock();
+    if (cur && cur.tab === TAB_ID) { try { localStorage.removeItem(sendLockKey()); } catch (e) { /* ignore */ } }
+  }
+  try { window.__botfakeReleaseTabLock__ = releaseSendLock; } catch (eRl) { /* ignore */ }
+  /* [v1.92.43] CHIA NGÂN SÁCH SLOT GIỮA CÁC TAB ĐANG GỬI (khác page ⇒ KHÔNG chặn nhau, chỉ chia tải).
+   * Người dùng luôn chạy 2 page trên 2 tab. Hai tab không tranh ACK (mỗi page một client Socket),
+   * nhưng tranh CPU/network của CÙNG một máy: mỗi tab 192 slot main + 384/page + 128 Ext ⇒ tổng
+   * 384 slot main, mỗi slot là một chuỗi promise + fetch + logLine ⇒ main thread quá tải, callback
+   * trễ (đúng dòng '🫥 tab ẩn bị bóp … trễ 10 840 lần' của lô 16:11).
+   * Nay: tab tự đếm đồng nghiệp đang gửi (presence TTL 8 s) rồi chia đôi/ba ngân sách slot main:
+   *   1 tab  → 192 slot   (như cũ)
+   *   2 tab  →  96 mỗi tab ⇒ TỔNG vẫn 192, không nặng hơn chạy 1 tab
+   *   ≥3 tab →  64 mỗi tab
+   * Tab đang bị ẩn (không nhìn thấy) nhường thêm 25 % CPU cho tab đang xem. Đổi tay:
+   *   window.__botfakeMainSlotCap__(n)  (0 = tự động). */
+  try {
+    document.addEventListener('visibilitychange', () => { writePeerPresence(!!state.sending); }, false);
+  } catch (eVis) { /* ignore */ }
+  const PEERS_KEY = 'ssb_peers_v2';
+  const PEER_TTL_MS = 8000;
+  let mainCapOverride = 0;
+  try { window.__botfakeMainSlotCap__ = (n) => { mainCapOverride = Math.max(0, Number(n) || 0); return mainCapOverride || 'auto'; }; } catch (eCap) { /* ignore */ }
+  function readPeerMap() {
+    try { return JSON.parse(localStorage.getItem(PEERS_KEY) || '{}') || {}; } catch (e) { return {}; }
+  }
+  function writePeerPresence(running) {
+    try {
+      const m = readPeerMap();
+      const now = Date.now();
+      Object.keys(m).forEach((k) => { if (!m[k] || now - (m[k].at || 0) > PEER_TTL_MS) delete m[k]; });
+      if (running) m[TAB_ID] = { at: now, pid: (typeof pageIdFromLocation === 'function' ? pageIdFromLocation() : ''), running: true };
+      else delete m[TAB_ID];
+      localStorage.setItem(PEERS_KEY, JSON.stringify(m));
+    } catch (e) { /* ignore */ }
+  }
+  function peerSendingCount() {
+    const m = readPeerMap();
+    const now = Date.now();
+    let n = 0;
+    Object.keys(m).forEach((k) => {
+      const v = m[k];
+      if (k === TAB_ID || !v) return;
+      if (v.running && now - (v.at || 0) < PEER_TTL_MS) n++;
+    });
+    return n;
+  }
+  /* [v1.92.43b] KHÔNG CHIA ĐỀU NỮA — chia đều làm CẢ HAI tab chậm đi (96+96) đúng như người dùng
+   * phàn nàn "chạy 1 cái thì nhanh mà song song là lag". Nay: **tab đang xem giữ nguyên 192**,
+   * **tab bị ẩn nhường** (128) — vì tab ẩn không ai nhìn, còn tab đang xem phải nhanh.
+   *   peers = 0            → 192
+   *   peers = 1, đang xem  → 192   (tổng 320 = 1,67× một tab ⇒ song song VẪN NHANH HƠN)
+   *   peers = 1, đang ẩn   → 128
+   *   peers ≥ 2, đang xem  → 144   (3 tab: 144+112+112 = 368)
+   *   peers ≥ 2, đang ẩn   → 112
+   * Phần lag còn lại xử lý bằng cách BỎ việc vẽ/log vô ích ở tab ẩn (xem renderThrottled/logLine),
+   * chứ không cắt tốc độ gửi. */
+  function computeMainSlotCap(baseCap) {
+    if (mainCapOverride) return mainCapOverride;
+    const peers = peerSendingCount();
+    let hidden = false;
+    try { hidden = !!(document && document.hidden); } catch (e) { hidden = false; }
+    /* [v1.92.43b] 3 mức ưu tiên, không phải 2: TAB ĐANG GÕ (có focus) > tab hiện nhưng không
+     * focus (2 cửa sổ cạnh nhau) > tab ẩn. Nếu chỉ xét `document.hidden` thì 2 cửa sổ cạnh nhau
+     * đều "không ẩn" ⇒ mỗi tab 192, tổng 384 — đúng cấu hình gây lag. */
+    let focused = true;
+    try { focused = !!(document && document.hasFocus && document.hasFocus()); } catch (e) { focused = true; }
+    let cap = baseCap;
+    if (peers === 1) cap = hidden ? 128 : (focused ? baseCap : 144);
+    else if (peers >= 2) cap = hidden ? 112 : (focused ? 144 : 128);
+    cap = Math.max(48, Math.min(baseCap, cap));
+    return { cap, peers, hiddenTrim: hidden && peers > 0, focused };
+  }
+  let sendLockPending = false; // chặn bấm đúp TRONG 150 ms chờ kiểm khoá (state.sending chưa bật)
   async function sendToAll() {
     try { markSendIdleIfSettled(); } catch (e0) { /* ignore */ }
-    if (state.sending || state.confirmingSend) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
+    if (state.sending || state.confirmingSend || sendLockPending) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
+    sendLockPending = true;
+    try {
+      if (!(await acquireSendLock())) return;
+    } finally {
+      sendLockPending = false;
+    }
     if (state.sendListFrozen) {
       logLine('⏳ Danh sách đang được xử lý — chờ lượt gửi/cập nhật hiện tại hoàn tất rồi chạy lượt mới.');
       return;
+    }
+    // [v1.92.12] KHÔNG gửi khi danh sách còn ĐANG TẢI.
+    // Log 14:43:03–14:43:06: người dùng chốt chuỗi chọn (Nguyễn Hằng → Nguyễn Thanh), script
+    // bắt đầu quét danh sách, rồi bấm Gửi sau ~1s ⇒ gửi 37 chat trong lúc lượt quét 346 chat
+    // còn chạy, quét xong mới in "Không tìm thấy đủ 2 đầu chuỗi" (báo động giả — xem completeRange).
+    // Chuỗi chọn lúc đó mới chỉ có PHẦN đầu danh sách ⇒ có thể gửi THIẾU chat so với dải đã chọn.
+    // Nay: chờ ĐÚNG sự kiện quét xong (softNotify 'scan-done', không sleep mù) rồi mới chụp danh sách.
+    if (state.scanning) {
+      state.confirmingSend = true; // khóa bấm đúp trong lúc chờ
+      applyRunStopButtons();
+      logLine('⏳ Danh sách đang tải dở — chờ tải xong rồi mới chụp đúng danh sách để gửi (tránh gửi thiếu chat)…');
+      await waitCond(() => !state.scanning, 'scan-done', 180000);
+      state.confirmingSend = false;
+      if (state.scanning) {
+        applyRunStopButtons();
+        logLine('⛔ Danh sách vẫn đang tải — CHƯA gửi. Bấm ⏹ Dừng tải (hoặc chờ) rồi gửi lại.');
+        return;
+      }
+      logLine('▶ Danh sách đã tải xong — dùng đúng lựa chọn sau khi tải để gửi.');
+      render();
     }
     if (state.listIncomplete) {
       alert('Danh sách tải CHƯA ĐẦY ĐỦ nên chưa thể gửi.\nHãy bấm “⚡ Tải danh sách” để tải lại cho đủ rồi mới gửi.');
@@ -6865,20 +9328,7 @@
     }
     state.confirmingSend = true;
     // Chốt lần cuối ngay trước hộp xác nhận: kể cả checklist cũ/stale vẫn không đưa ID đã nhớ vào snapshot gửi.
-    let suppressedRemembered = 0;
-    state.matches.forEach((m) => {
-      if (m && isRememberedUnavailable(m.id)) {
-        if (m.checked) suppressedRemembered++;
-        m.checked = false;
-        m.knownUnavailable = true;
-      }
-    });
-    if (suppressedRemembered) {
-      state.listKey = '';
-      logLine('🧹 Đã tự bỏ chọn ' + suppressedRemembered + ' ID Socket unavailable đã nhớ trước khi tạo snapshot gửi.');
-      render();
-    }
-    const selectedSnapshot = state.matches.filter((m) => m && m.checked && !isRememberedUnavailable(m.id)).map((m) => ({ ...m }));
+    const selectedSnapshot = state.matches.filter((m) => m && m.checked).map((m) => ({ ...m }));
     if (!selectedSnapshot.length) {
       state.confirmingSend = false;
       applyRunStopButtons();
@@ -6903,8 +9353,9 @@
         const msgEl = shadow && shadow.getElementById('ssb-msg');
         typedText = (msgEl && msgEl.value || '').trim() || ((state.quickReply && state.quickReply.text) || '');
       }
-      // Nhường 20ms để chu kỳ keydown/keyup của phím Tab hoàn tất trước khi mở hộp thoại modal alert/confirm
-      await sleep(20);
+      // [v1.92.9] Nhường ĐÚNG một khung hình (rAF) thay vì 20 ms mù — chu kỳ keydown/keyup của Tab
+      // xong ở nhịp vẽ kế tiếp, không cần chờ đồng hồ.
+      await nextFrame();
       const imgState = state.image || null;
       let targets = selectedSnapshot.slice();
       {
@@ -6985,22 +9436,66 @@
     // không chặn đúp ở đây thì bấm lần 2 chạy song song lần 1 (log hiện 2 dòng lọc)
     state.sending = true;
     state.stopRequested = false;
+    // [v1.92.32] mỗi lượt gửi có sổ log riêng ⇒ "Copy log/.txt" chỉ ra đúng lượt này
+    logAllReset();
+    logGroupReset();
+    auditReset(); // [v1.92.33] sổ kiểm chứng từng chat cũng tính lại từ đầu mỗi lượt
+    // [v1.92.34] NẠP TÊN MỘT LẦN CHO CẢ DANH SÁCH: markDelivered()/watchdog chỉ có convId nên
+    // trước đây 2 951 dòng ✅ của lô 13:38 in tên "-" (không truy được ca gửi lặp theo tên).
+    // Nạp ở đây là đủ cho mọi kênh (Socket/API/Ext/bù/hậu kiểm) vì tất cả đều qua auditPush.
+    try {
+      (Array.isArray(targets) ? targets : []).forEach((c) => {
+        if (!c || !c.id) return;
+        const nm = c.name || c.customerName
+          || (c.customers && c.customers[0] && c.customers[0].name) || '';
+        if (nm && String(nm) !== String(c.id)) nameById[c.id] = String(nm);
+      });
+    } catch (eNm) { /* ignore */ }
+    try { deadRecheckQueue.length = 0; } catch (eDq) { /* ignore */ }
+    // [v1.92.35] LÀN SOCKET KHÔNG ĐƯỢC MANG TRẦN CỦA LÔ TRƯỚC.
+    // Lô 14:23 kết thúc ở [384×1]; lô 14:28 mở màn đã `lane 384×1` dù ACK p50 của lô trước là
+    // 2 449 ms. Vì limit đã bằng trần nên điều kiện `getLimit() < SOCKET_LANE_MAX` sai ngay từ
+    // đầu ⇒ C2 (`rampAllowed`) chưa từng được gọi — dòng "bỏ nới lane 0 lần" là 0 vô nghĩa.
+    // Nay mỗi lô tự đánh giá lại: p50 lô trước (ackLatRing giữ qua các lô) chưa đủ mẫu hoặc
+    // > 1 800 ms ⇒ hạ mọi làn page về BUS_PARALLEL_SOCKET (256) — đúng mức thiết kế; ACK nhanh
+    // thì trong lô làn tự leo lại 384. Muốn tắt: đặt LANE_CARRY_CLAMP = false.
+    try {
+      const LANE_CARRY_CLAMP = true;
+      if (LANE_CARRY_CLAMP) {
+        const p50Prev = sockAckP50();
+        const capStart = (!p50Prev || p50Prev > SOCK_RAMP_P50_MAX_MS) ? BUS_PARALLEL_SOCKET : SOCKET_LANE_MAX;
+        const clamped = [];
+        Object.keys(pageSocketLanes).forEach((pid) => {
+          const lane = pageSocketLanes[pid];
+          if (!lane || typeof lane.setLimit !== 'function') return;
+          const before = lane.getLimit();
+          if (before > capStart) { lane.setLimit(capStart); clamped.push(pid + ' ' + before + '→' + capStart); }
+        });
+        if (clamped.length) {
+          logLine('🐢 Làn Socket mang từ lô trước bị hạ về ' + capStart + ': ' + clamped.join(' · ')
+            + ' — ' + (p50Prev ? ('ACK p50 lô trước ' + p50Prev + 'ms > ' + SOCK_RAMP_P50_MAX_MS + 'ms')
+              : 'chưa đủ mẫu ACK')
+            + ' ⇒ lô mới khởi động ở mức an toàn, ACK nhanh thì lane tự leo lại.');
+        }
+      }
+    } catch (eLane) { /* ignore */ }
     if (preloadSelectedTimer) { clearTimeout(preloadSelectedTimer); preloadSelectedTimer = null; }
     preloadSelectedSeq++;
     applyRunStopButtons();
     startKeepAliveAudio();
     batchSkipApi = false;
     windowBlocked = 0;
+    try { bgClock.reset(); } catch (e0) { /* ignore */ }
     // trạng thái theo LƯỢT gửi: chat đã đến nơi trong lượt này không bao giờ bị gửi lại;
     // bù của lượt trước đang chờ sẽ tự hủy (runSeq) — không gửi lẫn vào lượt mới
     runSeq++;
-    unavailableAddedThisRun.clear();
     buRetrySeq = 0;
     Object.keys(buRetryDone).forEach((k) => { delete buRetryDone[k]; });
     Object.keys(deliveredIds).forEach((k) => { delete deliveredIds[k]; });
     Object.keys(claimedSendIds).forEach((k) => { delete claimedSendIds[k]; });
     Object.keys(outboundLock).forEach((k) => { delete outboundLock[k]; });
-    Object.keys(buRetryTimer).forEach((k) => { try { clearTimeout(buRetryTimer[k]); } catch (e0) { /* ignore */ } delete buRetryTimer[k]; });
+    // [v1.92.22] buRetryTimer giờ giữ HÀM HUỶ (bgClock.after) — gọi là huỷ, không có id số.
+    Object.keys(buRetryTimer).forEach((k) => { try { buRetryTimer[k](); } catch (e0) { /* ignore */ } delete buRetryTimer[k]; });
     sockFiredPending.clear();
     Object.keys(pendingBg).forEach((k) => { delete pendingBg[k]; });
     Object.keys(finalFailedIds).forEach((k) => { delete finalFailedIds[k]; });
@@ -7026,19 +9521,48 @@
     batchStats.skippedPre = 0;
     batchStats.startedAt = Date.now();
     batchStats.loopFinished = false;
+    batchStats.dispatchEndedAt = 0;
     buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
-    verifyStats.found = 0; verifyStats.fired = 0; verifyStats.unknown = 0;
+    logProgressMark.pct = 0; // [v1.92.31] mốc tiến độ tính lại từ đầu mỗi lượt
+    buQuietBudgetNote = 0;
+    // [v1.92.30] cổng chống lặp: reset sổ mỗi lượt (cache chứng minh cũng xoá để không dùng
+    // kết quả của lượt trước).
+    sendDiag.buProofGated = 0; sendDiag.buProofPresent = 0; sendDiag.buProofAbsent = 0;
+    sendDiag.buProofUnknown = 0; sendDiag.buProofCached = 0; sendDiag.buProofCancelled = 0;
+    try { buProofCache.clear(); } catch (eBp) { /* ignore */ }
+    verifyStats.found = 0; verifyStats.held = 0; verifyStats.unknown = 0;
+    try {
+      manualResendList.length = 0; sockRescueStats.tried = 0;
+      Object.keys(rescueInFlight).forEach((k) => delete rescueInFlight[k]);
+    } catch (eMr) { /* ignore */ }
     extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
     extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
     extSendCtl.probeInFlight = false; // lượt mới không được kẹt bởi thăm dò của lượt cũ đã dừng
+    resetStopSignal(); // [v1.92.9] lượt mới: tín hiệu Dừng phải sống lại
+    softNotify('ext-probe');
     resetGidStats();
-    Object.keys(sendDiag).forEach((k) => { sendDiag[k] = k === 'apiStatusCounts' ? Object.create(null) : 0; });
+    // [v1.92.10] FIX HỒI QUY (vào từ 1.92.7): reset cũ đặt MỌI khoá = 0, kể cả apiFetchSamples[].
+    // Sau đó timedFetch chạy `sendDiag.apiFetchSamples.push(...)` trong finally ⇒ 0.push KHÔNG phải
+    // hàm ⇒ văng ⇒ làn API ném 'Lỗi kênh:' ⇒ mọi tin API bị chấm "không rõ kết quả" rồi chờ kiểm
+    // chứng ~10s, dù HTTP 200 và tin ĐÃ tới. Reset nay theo KIỂU: mảng → rỗng, map → mới, số → 0.
+    Object.keys(sendDiag).forEach((k) => {
+      const cur = sendDiag[k];
+      if (k === 'apiStatusCounts' || (cur && typeof cur === 'object' && !Array.isArray(cur))) sendDiag[k] = Object.create(null);
+      else if (Array.isArray(cur)) cur.length = 0;
+      else sendDiag[k] = 0;
+    });
     Object.keys(waveDiag).forEach((k) => { waveDiag[k] = 0; });
+    Object.keys(socketPickDiag).forEach((k) => { socketPickDiag[k] = 0; });
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
     // Khởi động warmUpSockets + BATCH_GET_GLOBAL_ID NGAY TỪ ĐẦU (chạy song song với lọc tag + upload ảnh)
     try { warmUpSockets(targets, { forceBatch: true }); } catch (e) { /* ignore */ }
+    // [v1.91.75] warmUpSockets(targets) chỉ thấy các chat được đưa vào của lô hiện tại. Với
+    // 10k chat trải trên nhiều page, phải quét TOÀN BỘ danh sách để mỗi page đều được nạp
+    // BATCH_GET_GLOBAL_ID (1 lệnh/page, idempotent nhờ batchGidPromises/batchGidFetchedPages)
+    // TRƯỚC khi làn gửi bắt đầu — thay vì dò lẻ từng chat giữa lúc đang gửi (chậm + đói làn).
+    try { prefetchGidsForBatch(sendGroups); } catch (e) { /* ignore */ }
 
 
     // Chuẩn bị ảnh (nếu có): upload 1 lần → gắn attachment cho từng page
@@ -7182,6 +9706,7 @@
     waveDiag.plannedWaves = sendGroups.reduce((n2, g) => n2 + Math.ceil(g.list.length / WAVE_SIZE), 0);
     batchStats.total = totalAll;
     batchStats.startedAt = Date.now();
+    resetSockRetryBudget(); // [v1.92.26] ngân sách thử lại Socket đo lại từ đầu mỗi lượt
     updateBatchSummaryUI();
     const useWaves = totalAll > WAVE_SIZE;
     logLine(useWaves
@@ -7190,6 +9715,9 @@
 
     let ok = 0, fail = 0, done = 0, unsure = 0, firedN = 0;
     let lastSpeedLogAt = Date.now();
+    // [v1.92.32] cho dòng gộp biết tiến độ hiện tại (chỉ để IN log)
+    logGroupCtx = () => (done + '/' + totalAll);
+    logGroupReset();
     const quickEl0 = shadow && shadow.getElementById('ssb-quick');
     const quickOn = !!(quickEl0 && quickEl0.checked);
     waveDiag.quickEnabled = quickOn;
@@ -7270,9 +9798,11 @@
           skipPreCtx = true;
         }
       }
+      const _tPrep0 = Date.now();
       if (!skipPreCtx) {
         await ensureConvCtx(c);
       }
+      { const _p = Date.now() - _tPrep0; if (_p > 0) { try { waveDiag.slotPrepMs += _p; } catch (eS2) { /* ignore */ } } }
       const sendOpts = {
         quick: quickOn,
         awaitDirect: true,
@@ -7325,8 +9855,6 @@
       if (r && (r.deferredToExt || r.deferredToSocketRetry)) {
         return r;
       }
-      // Persistent skip is deliberately narrow: only the exact Socket confirmed-unavailable result.
-      rememberConfirmedSocketUnavailable(c, r);
       if (r && r.recipientUnavailable) sendDiag.recipientUnavailable++;
       if (itemOpts && (itemOpts.isSocketRetryPass || itemOpts.isExtBacklogPass)) clearBgPending(c.id);
       const via = r.ok ? (r.sendBy === 'direct' ? ' — gửi thẳng Socket/Ext'
@@ -7340,17 +9868,53 @@
         // Chỉ đánh dấu khi kênh XÁC NHẬN thành công thật (kể cả xác nhận nền — fireApiAndWatch).
         if (!r.fired) { markDelivered(c.id, r.sendBy || 'api'); postSendSideEffects(c); }
         if (r.fired) { firedN++; noteBgPending(c, r.sendBy); } // vào sổ watchdog — quá 90s tự chốt, không kẹt
-        logLine('✅ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — đã gửi' + via
-          + (r.fired ? ' (đang xác nhận nền)' : ''));
+        // [v1.92.31] KHÔNG in từng dòng "đã gửi" nữa — chỉ in mốc tiến độ (xem logProgress).
+        // [v1.92.35] `ok` ở đây là "đã phát" (ca fired chưa có ACK) ⇒ KHÔNG dùng để báo thành công.
+        const cOkNow = confirmedOkCount();
+        logProgress(done, totalAll, cOkNow, unsure, fail, Math.max(0, done - cOkNow - unsure - fail));
+      } else if (r.gated) {
+        // [v1.92.30] Phán đoán sai (không phải bằng chứng) ⇒ cổng chứng minh vắng mặt đang chạy
+        // ở làn riêng. Vẫn tính ⚠ (để sổ sách đúng) và vẫn ghi uncertainIds — cổng có quyền đi
+        // xuyên qua chốt đó vì nó dựa trên BẰNG CHỨNG, không phải phán đoán.
+        unsure++;
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+        logFailGrouped((c.name || c.id), r.error, '🔎', c.id);
       } else if (r.uncertain) {
         unsure++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
-        logLine('⚠ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error
-          + ' — không rõ tin đã đi chưa (không gửi thêm để tránh trùng)');
+        // [v1.92.34] Lý do từ làn gửi đã có sẵn câu "không gửi thêm để tránh trùng" ⇒ in thêm
+        // một lần nữa chỉ làm dòng log dài gấp đôi mà không thêm thông tin.
+        logFailGrouped((c.name || c.id),
+          r.error + (/tránh trùng/i.test(String(r.error || '')) ? '' : ' — không rõ tin đã đi chưa (không gửi thêm để tránh trùng)'),
+          '⚠', c.id);
+      } else if (r && r.extOverloaded && !photo
+                 && typeof window !== 'undefined' && window.__ExtensionAdapter__
+                 && typeof window.__ExtensionAdapter__.send === 'function'
+                 && (buLateRetryCount[c.id] || 0) < 2 && !state.stopRequested) {
+        /* [v1.92.40] ❌ OAN VÌ BỘ NGẮT QUÁ TẢI (gốc của lô 9 455 chat, §45: 1 526 ca).
+         * `extOverloaded` đã được tính từ trước nhưng KHÔNG AI ĐỌC — chat bị bộ ngắt Ext chặn
+         * trước khi bắn (chưa hề gửi) vẫn bị tính ❌. Bộ ngắt chỉ nghỉ 8–15 s.
+         * Nay: đặt ⚠ "chưa gửi", hẹn bắn lại qua Ext sau 9 s (tối đa 2 lần/chat), cùng lượt.
+         * Chỉ áp cho TIN CH: gửi lại ca ảnh phải dựng lại ảnh, không đáng đổi rủi ro. */
+        const lateN0 = buLateRetryCount[c.id] || 0;
+        buLateRetryCount[c.id] = lateN0 + 1;
+        unsure++;
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+        logFailGrouped((c.name || c.id), 'Extension nghẽn (bộ ngắt quá tải) chặn TRƯỚC KHI BẮN — chat CHƯA gửi lần nào'
+          + ' ⇒ không chốt ❌ oan, hẹn thử lại sau 9 s (lần ' + (lateN0 + 1) + '/2)', '⏳', c.id);
+        const myLateRun2 = runSeq;
+        const lateC = c;
+        bgClock.after(9000, () => {
+          if (myLateRun2 !== runSeq || state.stopRequested) return;
+          if (deliveredIds[lateC.id] || finalFailedIds[lateC.id]) return;
+          scheduleBuRetry(lateC, gtext, null, (lateC.name || lateC.id),
+            'thử lại sau khi Extension hồi sức', ['api'],
+            { ambiguous: false, fromUncertain: true, via: 'ext', sentAt: Date.now() });
+        });
       } else {
         fail++;
         if (r.windowClosed) windowBlocked++;
-        logLine('❌ [' + done + '/' + totalAll + '] ' + (c.name || c.id) + ' — ' + r.error);
+        logFailGrouped((c.name || c.id), r.error, '❌', c.id);
         // cửa sổ 24h VẪN bù kênh khác (Thanh Binh); kênh đã thử hết → scheduleBuRetry tự bỏ
         if (!r.uncertain && !r.recipientUnavailable && isRetryableLoss(r.error)) {
           const p2 = c.pageId || String(c.id).split('_')[0];
@@ -7365,11 +9929,15 @@
         lastSpeedLogAt = Date.now();
         const elapsedS = Math.max(1, (Date.now() - batchStats.startedAt) / 1000);
         const rate = done / elapsedS; // chat đã xử lý/giây từ đầu lượt
-        const successRate = ok / elapsedS;
+        // [v1.92.35] thành công = ĐÃ TỚI NƠI (không phải "đã phát"), phần còn lại là đang bay.
+        const cOkSpeed = confirmedOkCount();
+        const pendingSpeed = Math.max(0, done - cOkSpeed - unsure - fail);
+        const successRate = cOkSpeed / elapsedS;
         const remainS = rate > 0 ? Math.round((totalAll - done) / rate) : 0;
         const fmtDur = (sec) => sec >= 3600 ? (sec / 3600).toFixed(1) + ' giờ' : Math.max(1, Math.round(sec / 60)) + ' phút';
         logLine('📊 Đã xử lý ' + done + '/' + totalAll + ' · tốc độ xử lý ' + (rate * 60).toFixed(0) + '/phút'
-          + ' · thành công ' + ok + '/' + totalAll + ' (' + (successRate * 60).toFixed(0) + ' tin/phút)'
+          + ' · thành công ' + cOkSpeed + '/' + totalAll + ' (' + (successRate * 60).toFixed(0) + ' tin/phút)'
+          + (pendingSpeed ? ' · chờ xác nhận ' + pendingSpeed : '')
           + ' · dự kiến còn ~' + fmtDur(remainS) + ' nữa');
       }
       return r;
@@ -7387,12 +9955,44 @@
     // 🔥 [FIX-TỐC-ĐỘ] Nâng từ 96 → 192 main slots. Với sockFired: true, mỗi slot quay vòng ~10ms
     // → 192 × 100/s = 19.200/s theoretical, chỉ bị paceSocketPublish (4ms) chặn.
     // Ext tăng 32→128, Socket retry tăng 44→96 để bù khi có rejected hàng loạt.
+    // [v1.92.11] Hai hằng này KHÔNG còn dùng để chia việc — wave nay một hàng đợi chung.
+    // Giữ lại để đọc log cũ và để đối chiếu lịch sử (xem docs §43).
     const WAVE_MAIN_LANES = 4;
     const WAVE_PER_LANE = 48;
     const WAVE_MAIN_TOTAL_CAP = 192;
+    /* [v1.92.43] Trần slot main của TAB NÀY — tính lại ở đầu mỗi wave theo số tab đang gửi. */
+    let mainCap = WAVE_MAIN_TOTAL_CAP;
+    let lastLoggedMainCap = 0;
+    const refreshMainCap = () => {
+      const info = computeMainSlotCap(WAVE_MAIN_TOTAL_CAP);
+      mainCap = info.cap;
+      if (info.peers > 0 && info.cap !== lastLoggedMainCap) {
+        lastLoggedMainCap = info.cap;
+        logLine('🧩 Có ' + info.peers + ' tab khác đang gửi (page khác) — tab này dùng ' + info.cap
+          + '/' + WAVE_MAIN_TOTAL_CAP + ' slot main'
+          + (info.hiddenTrim ? ' (tab đang ẨN ⇒ nhường)' : (info.focused ? ' (tab đang gõ ⇒ ưu tiên)' : ' (tab hiện nhưng không focus ⇒ nhường)'))
+          + ' ⇒ chạy song song vẫn nhanh hơn chạy một tab mà không dồn CPU.');
+      } else if (info.peers === 0 && lastLoggedMainCap) {
+        lastLoggedMainCap = 0;
+        logLine('🧩 Không còn tab nào khác gửi — tab này trở lại ' + WAVE_MAIN_TOTAL_CAP + ' slot main.');
+      }
+      waveDiag.mainCapMinObserved = waveDiag.mainCapMinObserved
+        ? Math.min(waveDiag.mainCapMinObserved, mainCap) : mainCap;
+      return info;
+    };
     const WAVE_SOCKET_RETRY_WORKERS = 96;
     const WAVE_EXT_WORKERS = 128;
     const WAVE_EXT_BACKLOG_HIGH_WATER = 96;
+    /* [v1.92.42] TRẦN RIÊNG CHO VIỆC *CHẶN CỔNG PHÁT LỆNH* — không dùng 96 nữa.
+     * Lô 16:07 (11 954 chat, 1.92.38): 17 wave đầu chạy êm (8 368 chat trong ~195 s ≈ 43/s,
+     * Ext queue/active 0/0). Từ wave 18, ~2 300 chat dồn sang Extension (trần thật ~18 tin/s) ⇒
+     * `extBacklogQueue.length + activeExtWorkers > 96` đúng ở MỌI lần kiểm tra (nhịp 60 ms) ⇒
+     * cổng bị giữ **6 426 lần**, wave 19–24 mất 45–91 s MỖI wave dù `main đang bay 0` và
+     * `retry 0/0/0`. 6 wave cuối = **~400 s trong tổng 652 s** chỉ để chờ một hàng đợi chạy nền.
+     * Hàng đợi Ext KHÔNG làm lệnh phát nhanh hơn khi bị chặn — nó chỉ bị đẩy lùi. Nay cổng chỉ
+     * giữ khi hàng đợi Ext vượt 1 200 ca (mức an toàn bộ nhớ), phần còn lại để Ext chạy song song.
+     * Bất biến: KHÔNG tăng số làn Ext, KHÔNG đổi tốc độ gửi — chỉ bỏ việc bắt cả lô xếp hàng sau nó. */
+    const GATE_EXT_BACKLOG_LIMIT = 1200;
     const WAVE_API_BACKLOG_HIGH_WATER = 96;
 
     const runGroupWaves200 = async (gtext, fullList) => {
@@ -7436,7 +10036,7 @@
       // Fixed main semaphore: retain the tested 96-flight ceiling; only telemetry/UI work is throttled.
       const acquireMainSlot = () => {
         if (state.stopRequested) return Promise.resolve(false);
-        if (inFlightMainCount < WAVE_MAIN_TOTAL_CAP) {
+        if (inFlightMainCount < mainCap) {
           inFlightMainCount++;
           recordWavePressure();
           return Promise.resolve(true);
@@ -7488,6 +10088,40 @@
 
       const pushToSocketRetry = (item) => {
         if (!item || !item.c || !item.c.id) return;
+        // [v1.92.26] NGÂN SÁCH: hết ngân sách thì chốt ❌ ngay, không bắn thêm 1 lệnh socket
+        // mà 40 ca trước đã chứng minh là chắc chắn bị từ chối y hệt (lô 10:04: 0/861 cứu được).
+        const rejectPct = socketRejectPctRecent(); // [v1.92.28] cửa sổ 200 ACK gần nhất (-1 = chưa đủ mẫu)
+        if (!sockRetryBudgetAllows(sockRetryBudgetState)) {
+          sockRetryBudgetNote(sockRetryBudgetState, 'skipped', rejectPct);
+          sendDiag.sockRetryBudgetSkipped++;
+          clearBgPending(item.c.id);
+          releaseOutbound(item.c.id);
+          done++; fail++;
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(item.c.id, 'fail');
+          // [v1.92.32] Lô 20 259 chat từng in 5 178 dòng y hệt nhau (chỉ khác tên chat) ⇒ đây là
+          // nguồn phình log lớn nhất. Nay GỘP: cùng lý do ⇒ 1 dòng đếm / 2 giây, kèm [done/total],
+          // số chat và 4 tên ví dụ. Lý do đầy đủ in ở dòng đầu tiên của nhóm (buQuietBudgetNote === 1).
+          buQuietBudgetNote++;
+          logFailGrouped(item.c.name || item.c.id,
+            'Socket: FB từ chối lần 1 — KHÔNG thử lần 2 (đã thử ' + sockRetryBudgetState.tried
+              + ' ca, cứu được 0, từ chối gần đây '
+              + (sockRetryBudgetState.closePct >= 0 ? sockRetryBudgetState.closePct + '%' : '—')
+              + ' ⇒ thử nữa chỉ tốn lệnh)', '❌', item.c.id);
+          updateBatchSummaryUI();
+          checkWakeAllWaiters();
+          return;
+        }
+        if (sockRetryBudgetState.closed) sockRetryBudgetNote(sockRetryBudgetState, 'probe', rejectPct);
+        sockRetryBudgetNote(sockRetryBudgetState, 'tried', rejectPct);
+        // [v1.92.30] Khung `markOptimisticMessageFailed` là PHÁN ĐOÁN ⇒ chứng minh vắng mặt
+        // TRƯỚC khi bắn lại. Bắt đầu ngay tại đây để thời gian chờ (≈10 s) chạy SONG SONG với
+        // lúc item nằm trong hàng đợi — worker chỉ việc chờ kết quả, không tốn thêm lane.
+        if (!item.proof) {
+          try {
+            const pAt = (item.deferredCtx && item.deferredCtx.firstRejectedAt) || Date.now();
+            item.proof = proveAbsentBeforeBu(item.c, gtext, pAt);
+          } catch (e0) { item.proof = Promise.resolve('unknown'); }
+        }
         noteBgPending(item.c, 'wave200-socket-retry');
         const pid = item.c.pageId || String(item.c.id).split('_')[0];
         const deadStreak = socketConfirmedDeadStreak[pid] || 0;
@@ -7498,12 +10132,12 @@
         const waitMs = Math.max(0, coolTargetMs - (Date.now() - firstAt));
         if (waitMs <= 15) { enqueueReadySocketRetry(item); return; }
         pendingSocketCoolCount++;
-        const timerId = setTimeout(() => {
+        const timerId = bgClock.after(waitMs, () => {
           socketCoolTimers.delete(timerId);
           pendingSocketCoolCount = Math.max(0, pendingSocketCoolCount - 1);
           enqueueReadySocketRetry(item);
           checkWakeAllWaiters();
-        }, waitMs);
+        });
         socketCoolTimers.set(timerId, item);
       };
 
@@ -7546,6 +10180,22 @@
               releaseOutbound(item.c.id);
               continue;
             }
+            if (item.proof) {
+              let pv = 'unknown';
+              try { pv = await item.proof; } catch (e0) { pv = 'unknown'; }
+              if (pv === 'yes') {
+                clearBgPending(item.c.id);
+                releaseOutbound(item.c.id);
+                markDelivered(item.c.id, 'socket');
+                done++; ok++;
+                sendDiag.buProofCancelled++;
+                logFailGrouped((item.c.name || item.c.id),
+                  'FB báo "không gửi được" nhưng hội thoại ĐÃ CÓ tin ⇒ tin đã đi, KHÔNG bắn lần 2 (chặn lặp)', '✅', item.c.id);
+                updateBatchSummaryUI();
+                checkWakeAllWaiters();
+                continue;
+              }
+            }
             releaseOutbound(item.c.id);
             sendDiag.sockRetry++;
             const r = await sendOneAndLog(item.c, gtext, {
@@ -7554,7 +10204,7 @@
               isSocketRetryPass: true,
               deferredCtx: item.deferredCtx || {},
             });
-            if (r && r.ok && !r.skippedDup) sendDiag.sockRetryRecovered++;
+            if (r && r.ok && !r.skippedDup) { sendDiag.sockRetryRecovered++; sockRetryBudgetNote(sockRetryBudgetState, 'saved', 0); }
             else if (r && r.recipientUnavailable) sendDiag.sockRetryRejected++;
             else sendDiag.sockRetryOther++;
             if (r && r.deferredToExt) pushToExtBacklog({ c: item.c, deferredCtx: r.deferredCtx || item.deferredCtx || {} });
@@ -7619,8 +10269,8 @@
         const retryLoad = socketRetryQueue.length + activeSocketRetryWorkers + pendingSocketCoolCount;
         const extLoad = extBacklogQueue.length + activeExtWorkers;
         // 🔥 [FIX-TỐC-ĐỘ] Chỉ chờ khi có tải thật sự: lane bù API/Ext/Socket đều nhẹ → gap 0.
-        if (inFlightMainCount <= WAVE_MAIN_TOTAL_CAP * 0.6 && retryLoad <= 60 && extLoad <= 100) return 0;
-        if (inFlightMainCount <= WAVE_MAIN_TOTAL_CAP * 0.8 && retryLoad <= 100) return Math.min(WAVE_GAP, 30);
+        if (inFlightMainCount <= mainCap * 0.6 && retryLoad <= 60 && extLoad <= 100) return 0;
+        if (inFlightMainCount <= mainCap * 0.8 && retryLoad <= 100) return Math.min(WAVE_GAP, 30);
         return Math.min(Math.max(WAVE_GAP, 60), 120);
       };
       const totalWaves = Math.max(1, Math.ceil(fullList.length / WAVE_SIZE));
@@ -7630,12 +10280,13 @@
           const waveNo = Math.floor(waveStart / WAVE_SIZE) + 1;
           const waveStartedAt = Date.now();
           waveDiag.wavesStarted++;
-          const laneSize = Math.max(1, Math.ceil(waveSlice.length / WAVE_MAIN_LANES));
-          const laneChunks = [];
-          for (let lane = 0; lane < WAVE_MAIN_LANES; lane++) {
-            const chunk = waveSlice.slice(lane * laneSize, (lane + 1) * laneSize);
-            if (chunk.length) laneChunks.push(chunk);
-          }
+          refreshMainCap(); // [v1.92.43] mỗi wave chia lại slot theo số tab đang gửi
+          // [v1.92.11] BỎ CHIA KHÚC TĨNH. Bản cũ chia wave thành WAVE_MAIN_LANES khúc cố định, mỗi
+          // khúc một pool riêng ⇒ khúc nào nhiều ca chậm (FB từ chối → chờ ACK lâu) thì 48 làn của
+          // khúc đó ùn, còn 144 làn của 3 khúc kia HẾT VIỆC rồi ngồi không, wave chỉ kết thúc khi
+          // khúc chậm nhất xong. Log 14:27 (2 393 chat): wave→cổng TB 2 510 ms nhưng MAX 6 270 ms
+          // — chênh 2,5 lần, đúng dấu của mất cân bằng tĩnh. Nay cả wave dùng CHUNG một hàng đợi,
+          // 192 làn rút việc chung ⇒ làn rảnh nhận việc ngay, không chờ khúc khác.
           let waveDoneCount = 0;
           // 🔥 [FIX-TỐC-ĐỘ] Mở wave N+1 khi wave N đạt 40% (thay vì 78%) → gối wave sớm, tổng thời gian wave không bị "rỗng".
           const fastGateTarget = Math.max(1, Math.ceil(waveSlice.length * 0.4));
@@ -7659,34 +10310,51 @@
             const apiBacklog = apiSendLane.waitingCount();
             // Gate theo phần trăm cap hiện tại để bộ điều tiết vẫn gối wave đúng khi tự hạ luồng.
             // 🔥 [FIX-TỐC-ĐỘ] Cho phép ~92% cap trước khi chặn (thay vì 65%) — tận dụng hết slot.
-            const gateActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.92);
-            const fastActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.75);
-            const softActiveLimit = Math.floor(WAVE_MAIN_TOTAL_CAP * 0.85);
+            const gateActiveLimit = Math.floor(mainCap * 0.92);
+            const fastActiveLimit = Math.floor(mainCap * 0.75);
+            const softActiveLimit = Math.floor(mainCap * 0.85);
             // Có backpressure: không mở wave mới khi lane bù hoặc hàng đợi API đã quá sâu.
             if (inFlightMainCount > gateActiveLimit || retryBacklog > 80
-                || extBacklog > WAVE_EXT_BACKLOG_HIGH_WATER
-                || apiBacklog > WAVE_API_BACKLOG_HIGH_WATER) return;
+                || extBacklog > GATE_EXT_BACKLOG_LIMIT
+                || apiBacklog > WAVE_API_BACKLOG_HIGH_WATER) {
+              // [v1.92.28] Ghi lại LÝ DO chặn (đếm trên mỗi lần kiểm tra 60ms). Lô 10:21 có
+              // gate TB 6,8 s / max 22,96 s nhưng không biết ai giữ ⇒ thêm số đo thay vì đoán.
+              if (inFlightMainCount > gateActiveLimit) waveDiag.gateBlockInflight++;
+              else if (retryBacklog > 80) waveDiag.gateBlockRetry++;
+              else if (extBacklog > GATE_EXT_BACKLOG_LIMIT) waveDiag.gateBlockExt++;
+              else waveDiag.gateBlockApi++;
+              return;
+            }
             if (waveDoneCount >= waveSlice.length) { openGate(); return; }
             if (waveDoneCount >= fastGateTarget && inFlightMainCount <= fastActiveLimit) { openGate(); return; }
             if (Date.now() - waveStartedAt >= 1600 && waveDoneCount >= softGateTarget && inFlightMainCount <= softActiveLimit) openGate();
           };
           waveGateCheckFn = evaluateGate;
-          const gateTimer = setInterval(evaluateGate, 60);
+          const gateTimer = bgClock.every(60, evaluateGate);
           const gatePromise = new Promise((resolve) => { resolveGate = resolve; evaluateGate(); });
 
           const runMainItem = async (c) => {
             if (state.stopRequested) return null;
+            const _tAcq0 = Date.now();
             const gotMainSlot = await acquireMainSlot();
             if (!gotMainSlot) return null;
             try {
               let r;
+              const _tHold0 = Date.now();
               try { r = await sendOneAndLog(c, gtext, { fastOnly: true, wave200Mode: true }); }
               catch (e) { settleInternalError(c, e); return null; }
+              try {
+                waveDiag.slotN++;
+                waveDiag.slotAcquireMs += Math.max(0, _tHold0 - _tAcq0);
+                waveDiag.slotHoldMs += Math.max(0, Date.now() - _tHold0);
+              } catch (eS) { /* ignore */ }
               if (r && r.deferredToSocketRetry) pushToSocketRetry({ c, deferredCtx: r.deferredCtx || {} });
               else if (r && r.deferredToExt) pushToExtBacklog({ c, deferredCtx: r.deferredCtx || {} });
+
               else if (r && !r.ok && r.error && r.error.indexOf('Token') === 0) {
                 logLine('⛔ Dừng sớm vì token không còn hợp lệ.');
                 state.stopRequested = true;
+                fireStopSignal();
               }
               return r;
             } finally {
@@ -7697,15 +10365,15 @@
             }
           };
 
-          const lanePromises = laneChunks.map((chunk) => runPool(chunk, runMainItem, Math.min(WAVE_PER_LANE, chunk.length)));
-          const wavePromise = Promise.all(lanePromises);
+          // Một pool duy nhất: runPool đã rút việc động bằng biến next chung (không chia khúc).
+          const wavePromise = runPool(waveSlice, runMainItem, mainCap);
           allMainPromises.push(wavePromise);
           if (waveStart + WAVE_SIZE < fullList.length) {
             prefetchNextWaveGids(fullList.slice(waveStart + WAVE_SIZE, waveStart + 2 * WAVE_SIZE));
           }
           try { await gatePromise; }
           finally {
-            clearInterval(gateTimer);
+            try { gateTimer(); } catch (eGate) { /* ignore */ }
             if (waveGateCheckFn === evaluateGate) waveGateCheckFn = null;
           }
           if (waveStart + WAVE_SIZE < fullList.length && !state.stopRequested) {
@@ -7718,7 +10386,7 @@
               + ' · Socket/page active/wait ' + socketLaneNow.activeTotal + '/' + socketLaneNow.waitingTotal
               + ' (max/page ' + socketLaneNow.activeMaxPerPage + '/' + socketLaneNow.waitingMaxPerPage + '; lane ' + socketLaneNow.limits + ')'
               + ' · API đang chờ ' + apiSendLane.waitingCount() + ' — gap kế tiếp ' + smartGap + 'ms.');
-            if (smartGap > 0) await sleep(smartGap);
+            if (smartGap > 0) await sleepUntil(Date.now() + smartGap);
           } else if (!state.stopRequested) {
             const socketLaneNow = getPageSocketLaneStats();
             logLine('🌊 Wave ' + waveNo + '/' + totalWaves + ' — cổng cuối ' + waveDoneCount + '/' + waveSlice.length
@@ -7735,7 +10403,7 @@
         mainWavesLoopDone = true;
         if (state.stopRequested) {
           socketCoolTimers.forEach((item, timerId) => {
-            try { clearTimeout(timerId); } catch (e) { /* ignore */ }
+            try { if (typeof timerId === 'function') timerId(); } catch (e) { /* ignore */ }
             if (item && item.c && item.c.id) {
               clearBgPending(item.c.id);
               releaseOutbound(item.c.id);
@@ -7758,7 +10426,7 @@
             }
           }
         }
-        waveDiag.mainCapFinal = WAVE_MAIN_TOTAL_CAP;
+        waveDiag.mainCapFinal = mainCap;
         checkWakeAllWaiters();
       }
 
@@ -7770,6 +10438,12 @@
       try {
         await waitInitialGidWarmup(targets, 1500);
       } catch (e) { /* làm nóng lỗi không được làm hỏng lô */ }
+      // [v1.92.14] Lô lớn: chờ socket sync TRƯỚC wave đầu (lô nhỏ ≤50 chat giữ nguyên chiến lược
+      // "Ext ngay cho nhanh" — 3–4s chờ làm nho; đổi lại cả lô 9 455 chat đi làn chậm là lỗ lớn).
+      try {
+        const nTargets = (targets || []).length;
+        if (nTargets > 50) await waitSocketsReadyForSend(targets);
+      } catch (e) { /* chờ socket lỗi không được làm hỏng lô */ }
       // SW gửi inbox thất bại: jwt → #551; cookie jar → Invalid access_token. Chỉ tab pancake.vn.
       for (let gi = 0; gi < sendGroups.length && !state.stopRequested; gi++) {
         const g = sendGroups[gi];
@@ -7784,6 +10458,7 @@
     }
 
     batchStats.loopFinished = true;
+    batchStats.dispatchEndedAt = Date.now(); // [v1.92.10] mốc phát xong — tách khỏi đuôi xác nhận
     // Chưa chốt idle ở đây: còn tin đang xác nhận/bù ở nền — overlay giữ nguyên tới khi
     // markSendIdleIfSettled() chốt xong (pending = 0) mới ẩn
     try {
@@ -7810,6 +10485,7 @@
         });
       } catch (e) { /* ignore */ }
       const sumNow = getBatchSummaryCounts();
+      flushErrGroup(); // [v1.92.32] in nốt dòng gộp còn đang gom trước mốc 🏁
       logLine('🏁 Hoàn tất vòng phát lệnh: đã xác nhận ' + sumNow.okTotal + '/' + totalAll + ' thành công'
         + (sumNow.pending > 0 ? ' (còn ' + sumNow.pending + ' tin đang xác nhận/bù nền — bảng TỔNG HỢP sẽ tự chốt khi xong hết)' : '')
         + ', ' + sumNow.failTotal + ' lỗi.'
@@ -7854,6 +10530,8 @@
       existing.win.remove();
       delete floatWins[key];
       if (btnEl) btnEl.textContent = openLabel;
+      // [v1.92.31] thu nhỏ về panel ⇒ log vẫn ở cuối
+      try { requestAnimationFrame(() => logScrollToBottom()); } catch (e) { /* ignore */ }
       return false;
     }
     if (!contentEl || !contentEl.parentNode) return false;
@@ -7883,6 +10561,14 @@
     win.appendChild(bodyEl);
     win.appendChild(rsEl);
     shadow.appendChild(win);
+    // [v1.92.31] phóng to bảng log ⇒ đặt điểm nhìn ở cuối ngay khi mở
+    if (contentEl && contentEl.id === 'ssb-log') {
+      try {
+        flushLogUI(true);
+        requestAnimationFrame(() => logScrollToBottom(contentEl));
+        setTimeout(() => logScrollToBottom(contentEl), 120);
+      } catch (e) { /* ignore */ }
+    }
 
     // vị trí/cỡ: đã chỉnh thì giữ qua F5, chưa thì mặc định (lúc mở mới tính theo màn hình)
     let geo = null;
@@ -8016,9 +10702,11 @@
         .prog-stat.scan { color: #7dd3fc; }
         .summary-box { background: #132033; border: 1px solid #334155; border-radius: 8px; padding: 6px 8px;
                        font-size: 11px; line-height: 1.45; color: #e2e8f0; display: none; word-break: break-word; }
-        .log { background: #0b1220; border: 1px solid #334155; border-radius: 8px; padding: 8px;
-               max-height: 150px; overflow: auto; font-size: 10.5px; line-height: 1.55; color: #cbd5e1;
-               white-space: pre-wrap; word-break: break-word; }
+        /* [v1.92.31] 150 → 340px: đủ nhìn ~20 dòng một lúc và copy được đoạn dài.
+           Đệm dưới để dòng cuối không dính sát mép khi tự cuộn xuống. */
+        .log { background: #0b1220; border: 1px solid #334155; border-radius: 8px; padding: 8px 8px 14px;
+               min-height: 120px; max-height: min(340px, 42vh); overflow: auto; font-size: 10.5px; line-height: 1.55; color: #cbd5e1;
+               white-space: pre-wrap; word-break: break-word; overscroll-behavior: contain; }
         /* ===== cửa sổ PHÓNG TO (list/log): kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ ===== */
         .floatwin { position: fixed; z-index: 2147483647; background: #0f172a; color: #e2e8f0;
                     border: 1px solid #334155; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.55);
@@ -8084,12 +10772,13 @@
         <div class="head" id="ssb-head">
           <span class="title"><svg class="logo" viewBox="0 0 50 52" width="17" height="17" xmlns="http://www.w3.org/2000/svg"><path d="M10 2 L14 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><path d="M40 2 L36 11" stroke="#5865F2" stroke-width="5" stroke-linecap="round" fill="none"/><rect x="0" y="12" width="50" height="40" rx="6" fill="#5865F2"/><rect x="12" y="31" width="12" height="4" rx="2" fill="#fff"/><rect x="26" y="31" width="12" height="4" rx="2" fill="#fff"/></svg>BOTFAKE <span style="color:#64748b;font-weight:400;font-size:11px">v${APP_VERSION}</span></span>
           <button class="badge on" id="ssb-toggle" title="Bật/tắt tính năng">BẬT</button>
+          <button class="badge on" id="ssb-tab" title="Bật/tắt GỬI BẰNG PHÍM TAB — TẮT thì phím Tab chỉ chuyển ô như bình thường, muốn gửi bấm nút ▶">TAB: BẬT</button>
           <button class="minibtn" id="ssb-close" title="Tắt panel (F5 hoặc Alt+Shift+B để hiện lại)">✕</button>
           <button class="minibtn" id="ssb-min" title="Thu nhỏ">—</button>
         </div>
         <div class="body" id="ssb-body">
           <div class="row" style="align-items:center;gap:6px">
-            <button class="b b-green" id="ssb-send" style="flex:1" title="Bấm nút này hoặc nhấn phím Tab để chạy (có bảng xác nhận trước khi gửi)">▶ Chạy (Tab)</button>
+            <button class="b b-green" id="ssb-send" style="flex:1" title="Bấm nút này để chạy (có bảng xác nhận trước khi gửi). Muốn dùng phím Tab thì bật công tắc TAB trên tiêu đề.">▶ Chạy</button>
             <button class="b b-red" id="ssb-stop" disabled style="flex:1">⏹ Dừng</button>
           </div>
           <div class="prog"><i id="ssb-bar"></i></div>
@@ -8144,15 +10833,15 @@
             </div>
           </div>
           <div class="row" style="align-items:center;justify-content:space-between">
-            <span class="label">LOG</span>
-            <button class="minibtn" id="ssb-logzoom" title="Phóng to / thu nhỏ bảng log — kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ">⛶ Phóng to log</button>
+            <span class="label">LOG <span id="ssb-logcount" style="color:#64748b;font-weight:400;text-transform:none;letter-spacing:0">0 dòng</span></span>
+            <span style="display:flex;gap:4px;align-items:center">
+              <button class="minibtn" id="ssb-logcopy" title="Copy TOÀN BỘ log của lượt này (không chỉ phần đang thấy)">📋 Copy log</button>
+              <button class="minibtn" id="ssb-logsave" title="Tải file .txt: log gọn + SỔ KIỂM CHỨNG TỪNG CHAT (id, tên, mọi kết quả, giờ) — dùng để truy ca xác nhận sai gây gửi lặp">💾 .txt</button>
+              <button class="minibtn" id="ssb-logzoom" title="Phóng to / thu nhỏ bảng log — kéo tiêu đề để di chuyển, kéo góc dưới-phải để đổi cỡ">⛶ Phóng to</button>
+            </span>
           </div>
           <div class="summary-box" id="ssb-summary"></div>
           <div class="log" id="ssb-log"></div>
-          <div class="row" style="margin-top:6px;align-items:center;gap:6px;justify-content:flex-end">
-            <span class="hint">chỉ nhớ lỗi Socket xác nhận khách vắng mặt/đã khóa nick</span>
-            <button class="b b-gray" id="ssb-clear-unavailable" title="Xóa các ID lỗi đã nhớ; thao tác cần xác nhận hai lần">🧹 Xóa nhớ lỗi (0)</button>
-          </div>
         </div>
         <div class="rs" id="ssb-rs" title="Kéo góc này để đổi cỡ panel — đúp chuột để về mặc định"></div>
       </div>
@@ -8175,6 +10864,14 @@
       highlightRows(); // bật: tô lại / tắt: gỡ hết màu
       render();
     });
+    on('ssb-tab', 'click', () => {
+      state.tabSend = !state.tabSend;
+      try { localStorage.setItem('ssb_tab_send_on', state.tabSend ? '1' : '0'); } catch (e0) { /* ignore */ }
+      logLine(state.tabSend
+        ? '⌨️ ĐÃ BẬT: bấm phím Tab = mở hộp xác nhận gửi (vẫn hỏi trước khi gửi).'
+        : '⌨️ ĐÃ TẮT: phím Tab chỉ chuyển ô như bình thường, muốn gửi thì bấm nút ▶.');
+      render();
+    });
     on('ssb-min', 'click', () => {
       // thu nhỏ = biến panel thành BÓNG LOGO (con quỷ botfake) ở góc màn hình
       const wrapEl = root.getElementById('ssb-wrap');
@@ -8189,6 +10886,59 @@
       const bubble = root.getElementById('ssb-bubble');
       if (wrapEl) wrapEl.style.display = '';
       if (bubble) bubble.style.display = 'none';
+    });
+    // [v1.92.32] COPY / TẢI TOÀN BỘ LOG của lượt (đọc từ logAll, không phải phần đang thấy)
+    const copyTextToClipboard = (txt) => {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          return navigator.clipboard.writeText(txt).then(() => true).catch(() => false);
+        }
+      } catch (e) { /* rơi xuống cách cũ */ }
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = txt;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+        document.body.appendChild(ta);
+        ta.focus(); ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return Promise.resolve(!!ok);
+      } catch (e2) { return Promise.resolve(false); }
+    };
+    on('ssb-logcopy', 'click', () => {
+      flushErrGroup(); // [v1.92.32] in nốt dòng gộp đang chờ 2 giây để bản copy không thiếu dòng cuối
+      const txt = (logAll.length ? logAll : state.log).join('\n')
+        + '\n\n(Sổ kiểm chứng TỪNG CHAT — dùng khi nghi gửi lặp — nằm trong file "💾 .txt")';
+      copyTextToClipboard(txt).then((ok) => {
+        logLine(ok ? ('📋 Đã copy ' + logAll.length + ' dòng log vào clipboard')
+          : '⛔ Trình duyệt chặn clipboard — bấm "💾 .txt" để tải file thay thế');
+      });
+    });
+    on('ssb-logsave', 'click', () => {
+      try {
+        flushErrGroup();
+        // [v1.92.33] File .txt = log gọn + SỔ KIỂM CHỨNG TỪNG CHAT (không gộp). Đây là bản đủ để
+        // truy khi có ca xác nhận sai gây lặp: mỗi chat có id, tên, mọi kết quả và thời điểm.
+        const head = ['BOTFAKE ' + APP_VERSION + ' · log lượt gửi',
+          'Xuất lúc ' + fmtClock(Date.now()) + ' · ' + logAll.length + ' dòng log gọn · '
+          + auditRows.length + ' dòng sổ kiểm chứng',
+          'Mục 1: LOG GỌN (đúng như bảng log trên màn hình).',
+          'Mục 2: SỔ KIỂM CHỨNG TỪNG CHAT — không gộp, để tra ca xác nhận sai gây gửi lặp.',
+          ''].join('\n');
+        const txt = head + (logAll.length ? logAll : state.log).join('\n') + '\n\n' + buildAuditText() + '\n';
+        const d = new Date();
+        const stamp = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0')
+          + '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0') + String(d.getSeconds()).padStart(2, '0');
+        const blob = new Blob([txt], { type: 'text/plain;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'botfake-log-' + stamp + '.txt';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { try { URL.revokeObjectURL(a.href); a.remove(); } catch (e2) { /* ignore */ } }, 1000);
+        logLine('💾 Đã tải log ra file botfake-log-' + stamp + '.txt · ' + logAll.length + ' dòng log gọn + '
+          + auditRows.length + ' dòng sổ kiểm chứng từng chat');
+      } catch (e) { logLine('⛔ Không tạo được file log: ' + (e && e.message || e)); }
     });
     // phóng to bảng LOG / bảng LIST → cửa sổ nổi kéo thả + đổi cỡ (xem toggleFloat)
     on('ssb-logzoom', 'click', () => {
@@ -8561,16 +11311,6 @@
         logLine('📷 Đã dán ảnh từ clipboard: ' + (file.name || 'ảnh'));
       } catch (err) { /* ignore */ }
     });
-    on('ssb-clear-unavailable', 'click', () => {
-      if (state.sendListFrozen || state.confirmingSend) return;
-      const count = unavailableConversationIds.size;
-      if (!count) return;
-      if (!confirm('Xác nhận lần 1: xóa toàn bộ ' + count + ' ID đã nhớ là Socket xác nhận bị Facebook từ chối? Các chat đó sẽ có thể được chọn lại.')) return;
-      if (!confirm('Xác nhận lần cuối: bấm OK để xóa vĩnh viễn bộ nhớ lỗi này, hoặc Cancel để giữ nguyên.')) return;
-      const removed = clearRememberedUnavailableIds();
-      logLine('🧹 Đã xóa bộ nhớ ' + removed + ' ID unavailable; các chat vẫn để bỏ chọn, có thể tự tick lại.');
-      render();
-    });
     on('ssb-deselect-one', 'click', () => {
       if (!state.enabled || state.sendListFrozen || state.confirmingSend) return;
       state.deselectMode = !state.deselectMode;
@@ -8648,7 +11388,7 @@
       logLine('Đã xóa lựa chọn');
       render();
     });
-    on('ssb-scan', 'click', async () => {
+    on('ssb-scan', 'click', async (e) => {
       if (state.sendListFrozen) return;
       if (state.scanning) {
         state.scanStopRequested = true;
@@ -8656,7 +11396,8 @@
         applyScanButtons();
         return;
       }
-      await scanFullList({ full: true });
+      // [v1.92.43] SHIFT + bấm = buộc tải mới (bỏ qua cache danh sách)
+      await scanFullList({ full: true, force: !!(e && e.shiftKey) });
       render();
     });
     // Nhóm chat của lượt gửi gần nhất — chọn lại tại chỗ, không quét lại danh sách
@@ -8669,9 +11410,14 @@
       }
       const oldLog = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
       if (Array.isArray(oldLog) && oldLog.length) {
-        state.log = oldLog.slice(-300);
+        state.log = oldLog.slice(-1500);
+        // [v1.92.32] sau F5 vẫn copy/tải được cả phần log đã khôi phục
+        logAll.length = 0;
+        for (let li = 0; li < state.log.length; li++) logAll.push(state.log[li]);
         const elLog = root.getElementById('ssb-log');
         if (elLog) elLog.textContent = state.log.join('\n');
+        const cntEl = root.getElementById('ssb-logcount');
+        if (cntEl) cntEl.textContent = logAll.length + ' dòng';
       }
       const oldSum = localStorage.getItem(SUMMARY_LS_KEY) || '';
       if (oldSum) {
@@ -8788,7 +11534,7 @@
         if (previewEl) {
           previewEl.textContent = txt
             ? ('Đang có trên Clipboard: “' + clip(txt, 120) + '” — bấm ▶ Chạy (hoặc phím Tab) để xác nhận & gửi.')
-            : 'Khi bấm ▶ Chạy hoặc nhấn phím Tab, script sẽ tự lấy nội dung đang copy trên Clipboard và hiện hộp xác nhận trước khi gửi.';
+            : 'Khi bấm ▶ Chạy (hoặc phím Tab nếu đã bật công tắc TAB), script sẽ tự lấy nội dung đang copy trên Clipboard và hiện hộp xác nhận trước khi gửi.';
         }
         logLine('📋 Đã chuyển sang chế độ: GỬI BẰNG DỮ LIỆU TRÊN CLIPBOARD');
       } else {
@@ -8810,7 +11556,9 @@
         // Đường chốt cuối: exception nào thoát khỏi sendToAll cũng phải nhả nút + tắt overlay
         logLine('⛔ Lỗi ngoài dự kiến khi gửi: ' + (err && err.message || err) + ' — dừng lượt.');
         state.stopRequested = true;
+        fireStopSignal();
         batchStats.loopFinished = true;
+        batchStats.dispatchEndedAt = Date.now();
         markSendIdleIfSettled();
         if (!state.sending) {
           unfreezeSendChecklist();
@@ -8824,6 +11572,7 @@
     const requestStop = () => {
       if (!state.sending) return;
       state.stopRequested = true;
+      fireStopSignal(); // [v1.92.9] cắt ngay mọi chỗ đang chờ mềm
       try {
         if (extBgAvailable()) extCall({ type: 'BOTFAKE_BG_STOP' });
       } catch (e0) { /* ignore */ }
@@ -8890,23 +11639,304 @@
     // Log giữ tối đa 300 dòng; không ghi toàn bộ JSON vào localStorage mỗi 80ms khi chạy lô lớn.
     logPersistTimer = setTimeout(persistLogStorage, 1000);
   }
-  function flushLogUI() {
+  // Người dùng có đang ở sát đáy không? (nếu họ đã cuộn lên xem lỗi thì KHÔNG kéo họ xuống)
+  function logNearBottom(el) {
+    try { return (el.scrollHeight - el.scrollTop - el.clientHeight) <= 48; } catch (e) { return true; }
+  }
+  function logScrollToBottom(el) {
+    const e = el || (shadow && shadow.getElementById('ssb-log'));
+    if (!e) return;
+    try { e.scrollTop = e.scrollHeight; } catch (e2) { /* ignore */ }
+  }
+  /* [v1.92.32] NÉN LÝ DO LỖI LẶP — log mẫu cho thấy ~95 % khối lượng log là 3 câu lặp:
+   *   "Ext: Không tìm được global_id để gửi — bỏ qua Ext thread-only cho nhanh"
+   *   "socket: Không tìm thấy globalId thật cho Socket"
+   *   "api: (#10) Tin nhắn này được gửi ngoài khoảng thời gian cho phép. ... policy-overview"
+   * Chỉ ĐỔI CÁCH IN, không đổi kết quả và không bỏ thông tin: vẫn đủ mã lỗi (vd #10/#551).
+   * Đặt ở phạm vi module để cả sendOne (làn gửi) lẫn wave đều dùng được; KHÔNG đụng logic gửi. */
+  const ERR_ABBR = [
+    [/Ext: Không tìm được global_id để gửi[^|]*/g, 'Ext: không gid'],
+    [/Ext: Không tìm được globalId[^|]*/g, 'Ext: không gid'],
+    [/socket: Không tìm thấy globalId thật cho Socket/g, 'socket: không gid'],
+    [/\(#10\) Tin nhắn này được gửi ngoài khoảng thời gian[^|]*/g, '(#10) ngoài 24h'],
+    [/\(#551\) Người này hiện không có mặt\.?/g, '(#551) không có mặt'],
+    [/Trang này hiện không khả dụng[^|]*/g, 'trang không khả dụng'],
+    // [v1.92.34] RÚT GỌN chuỗi 1545041: adapter Ext / Socket chuyển nguyên khối JSON của FB
+    // vào lý do lỗi (98 byte) ⇒ mỗi dòng dài gấp ba mà không thêm thông tin nào so với mã.
+    [/\{[^{}]*"e_subcode"\s*:\s*1545041[^{}]*\}/g, '(#1545041) khách không nhận được'],
+    [/\{[^{}]*"e_code"\s*:\s*551[^{}]*\}/g, '(#551) không có mặt'],
+    [/INCORRECT THREAD/gi, 'sai thread (chưa chắc có globalId)'],
+  ];
+  const compressErr = (str) => {
+    let t = String(str == null ? '' : str);
+    for (let i = 0; i < ERR_ABBR.length; i++) { t = t.replace(ERR_ABBR[i][0], ERR_ABBR[i][1]); }
+    t = t.replace(/\s*\|\s*/g, ' | ').trim(); // chuỗi bị nén hay dính khoảng trắng quanh "|"
+    return clip(t, 140);
+  };
+  /* ================== SỔ KIỂM CHỨNG TỪNG CHAT (audit) ==================
+   * Yêu cầu: bảng log phải GỌN, NHƯNG khi có ca xác nhận sai gây GỬI LẶP thì phải còn đủ dấu vết
+   * để truy. Nên tách làm hai:
+   *   • Màn hình  = dòng gộp (1 dòng / 2 giây / lý do) — để nhìn.
+   *   • auditRows = MỌI kết quả từng chat, KHÔNG gộp, KHÔNG cắt theo cửa sổ hiển thị — xuất ra
+   *                 file "💾 .txt" (mục SỔ KIỂM CHỨNG) để truy ca lặp.
+   * Ghi ở đây chỉ là GHI NHẬN, không đổi kết quả gửi. */
+  const auditRows = [];
+  const AUDIT_MAX = 60000;
+  const nameById = Object.create(null);
+  const deliverHits = new Map();          // id chat → [{t, by}] mọi lần markDelivered
+  const pad2 = (n) => (n < 10 ? '0' + n : '' + n);
+  function fmtClock(ts) {
+    const d = new Date(ts);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  }
+  function auditPush(tag, cid, name, reason) {
+    try {
+      if (cid && name && String(name) !== String(cid)) nameById[cid] = name;
+      // [v1.92.34] TÊN KHÔNG ĐƯỢC RƠI: markDelivered()/watchdog chỉ biết convId nên gọi
+      // auditPush('✅', convId, '', …) ⇒ lô 13:38 in ra 2 951 dòng ✅ với tên "-" (không truy
+      // được ca gửi lặp theo tên). Nay tra nameById (nạp 1 lần cho cả danh sách ở đầu lượt).
+      const nmUse = name ? String(name) : (cid && nameById[cid] ? String(nameById[cid]) : '');
+      auditRows.push({ t: Date.now(), tag: tag, id: cid ? String(cid) : '', name: nmUse, reason: String(reason == null ? '' : reason) });
+      if (auditRows.length > AUDIT_MAX) auditRows.shift();
+    } catch (e) { /* ghi nhận lỗi không được làm hỏng luồng gửi */ }
+  }
+  function auditReset() { auditRows.length = 0; deliverHits.clear(); }
+  /* Xuất sổ kiểm chứng: (1) chat nghi gửi lặp, (2) dòng thời gian từng chat, (3) tổng theo chat. */
+  function buildAuditText() {
+    const out = [];
+    out.push('=== SỔ KIỂM CHỨNG TỪNG CHAT (' + auditRows.length + ' dòng, KHÔNG gộp, KHÔNG cắt) ===');
+    out.push('Dùng khi nghi XÁC NHẬN SAI gây gửi lặp: tra id/tên chat ở đây sẽ thấy đủ mọi kết quả');
+    out.push('(✅ tới nơi · ⚠ không rõ · ❌ lỗi · 🔎 kiểm chứng · 🔁 bắn lại · 🛟 chuyển làn) kèm giờ.');
+    if (!auditRows.length) {
+      out.push('⚠ SỔ ĐANG TRỐNG: sổ kiểm chứng nằm trong RAM, tải lại trang (F5) là mất. File .txt');
+      out.push('   xuất NGAY sau khi lượt gửi chốt (hoặc trước khi F5) mới có chi tiết từng chat.');
+    }
+    // [v1.92.37] DANH SÁCH GỬI TAY — để không bao giờ im lặng mất tin.
+    out.push('');
+    const _mz = { wait: [], rescuing: [] };
+    const _nowMr = Date.now();
+    manualResendList.forEach((m) => { (isRescuing(m.id, _nowMr) ? _mz.rescuing : _mz.wait).push(m); });
+    out.push('=== 🖐 CẦN GỬI TAY (' + _mz.wait.length + ' chat) — máy KHÔNG xác nhận được đã gửi ===');
+    if (!_mz.wait.length) {
+      out.push('(không có — mọi chat đều có kết quả chắc chắn: ✅ đã tới nơi hoặc ❌ khách không nhận)');
+    } else {
+      out.push('Các chat dưới đây kết thúc ở ⚠ "không rõ". Mở đúng hội thoại: CHƯA thấy tin thì gửi tay,');
+      out.push('ĐÃ thấy tin thì bỏ qua (đừng gửi lại — sẽ thành 2 tin cho khách).');
+      _mz.wait.slice(0, 2000).forEach((m) => {
+        out.push('   ' + m.id + ' · ' + (m.name || nameById[m.id] || '?') + ' · ' + fmtClock(m.t));
+      });
+      if (_mz.wait.length > 2000) out.push('   … còn ' + (_mz.wait.length - 2000) + ' chat');
+    }
+    if (_mz.rescuing.length) {
+      out.push('');
+      out.push('=== ⏳ ĐANG CỨU (' + _mz.rescuing.length + ' chat) — ĐỪNG GỬI TAY ===');
+      out.push('Script đã chứng minh hội thoại KHÔNG có tin và đang gửi cứu qua Extension (~10–13 s).');
+      out.push('Chờ dòng "🛟 … GỬI CỨU" / "🔎 Cập nhật sau khi chốt lượt" rồi hẵn quyết.');
+      _mz.rescuing.slice(0, 500).forEach((m) => {
+        out.push('   ' + m.id + ' · ' + (m.name || nameById[m.id] || '?') + ' · ' + fmtClock(m.t));
+      });
+    }
+    const dup = [];
+    deliverHits.forEach((hits, id) => { if (hits && hits.length > 1) dup.push({ id: id, hits: hits }); });
+    out.push('');
+    out.push('(chat bị đánh dấu "đã tới nơi" ≥2 lần KHÁC kênh hoặc cách nhau >2 s = dấu hiệu gửi lặp)');
+    out.push('⚠ NGHI GỬI LẶP: ' + dup.length + ' chat'
+      + (dup.length ? ' — chat bị đánh dấu "đã tới nơi" từ 2 lần trở lên:' : ' (không có — mỗi chat chỉ được đánh dấu "đã tới nơi" 1 lần)'));
+    dup.slice(0, 300).forEach((d) => {
+      out.push('   ' + d.id + ' · ' + (nameById[d.id] || '?') + ' · ' + d.hits.length + ' lần: '
+        + d.hits.map((h) => fmtClock(h.t) + ' qua ' + h.by).join(' ; '));
+    });
+    if (dup.length > 300) out.push('   … còn ' + (dup.length - 300) + ' chat (xem mục tổng theo chat)');
+    out.push('');
+    out.push('--- DÒNG THỜI GIAN (mỗi dòng = 1 kết quả của 1 chat) ---');
+    for (let i = 0; i < auditRows.length; i++) {
+      const r = auditRows[i];
+      out.push(fmtClock(r.t) + '  ' + r.tag + '  ' + (r.id || '-') + '  ' + (r.name || '-') + '  ' + r.reason);
+    }
+    // tổng theo chat: số lần đã tới nơi / không rõ / lỗi + kênh
+    const per = new Map();
+    for (let i = 0; i < auditRows.length; i++) {
+      const r = auditRows[i];
+      const k = r.id || ('?' + r.name);
+      let a = per.get(k);
+      if (!a) { a = { id: r.id, name: r.name, ok: 0, unsure: 0, fail: 0, other: 0, by: '', first: r.t, last: r.t }; per.set(k, a); }
+      if (r.tag === '✅') a.ok++; else if (r.tag === '⚠' || r.tag === '🔎') a.unsure++;
+      else if (r.tag === '❌') a.fail++; else a.other++;
+      if (!a.name && r.name) a.name = r.name;
+      a.last = r.t;
+    }
+    out.push('');
+    out.push('--- TỔNG THEO CHAT (' + per.size + ' chat có dấu vết) ---');
+    out.push('id · tên · #đã tới nơi · #không rõ/kiểm chứng · #lỗi · #khác · từ lúc → đến lúc');
+    const lastBy = new Map();
+    deliverHits.forEach((hits, id) => { if (hits && hits.length) lastBy.set(String(id), hits[hits.length - 1].by); });
+    per.forEach((a) => {
+      const by = lastBy.get(String(a.id)) || '';
+      out.push(a.id + ' · ' + (a.name || nameById[a.id] || '?') + ' · ' + a.ok + ' · ' + a.unsure + ' · ' + a.fail + ' · ' + a.other
+        + ' · ' + (by ? ('kênh ' + by + ' · ') : '') + fmtClock(a.first) + ' → ' + fmtClock(a.last));
+    });
+    return out.join('\n');
+  }
+
+  /* [v1.92.33] GỘP DÒNG TRÊN MÀN HÌNH — MỖI LÝ DO MỘT SỔ RIÊNG.
+   * Bản 1.92.32 chỉ có MỘT khe chờ: hai lý do xen kẽ nhau (vd "FB từ chối nhận tin" ↔ "KHÔNG
+   * thử lần 2") đẩy nhau ra liên tục ⇒ 93 dòng lỗi cho lô 2 251 chat. Nay mỗi lý do có sổ riêng
+   * nên xen kẽ kiểu gì cũng chỉ 1 dòng / 2 giây / lý do. */
+  let logGroupCtx = null; // runSend gán = () => done + '/' + totalAll
+  const errGroups = new Map();
+  const GROUP_FLUSH_MS = 2000;
+  const GROUP_MAX = 200;
+  const GROUP_LABEL = { '❌': 'cùng lỗi', '⚠': 'cùng lỗi', '🔎': 'cùng tình huống', '🛟': 'cùng tình huống', '🔁': 'cùng tình huống', '✅': 'cùng kết quả', '🛡': 'cùng tình huống', '⏳': 'cùng tình huống', '✓': 'cùng kết quả' };
+  /* Khoá nhóm: bỏ các con số ĐỔI THEO THỜI GIAN (đã thử 40→44 ca…) để không chẻ nhóm.
+   * Chỉ dùng cho việc GỘP; nội dung in ra vẫn lấy bản mới nhất (nên vẫn thấy "đã thử 44 ca"). */
+  const VOLATILE_NUM = [
+    [/đã thử \d+ ca/g, 'đã thử N ca'],
+    [/từ chối gần đây \d+%/g, 'từ chối gần đây N%'],
+    [/\(muộn \d+(?:[.,]\d+)?s\)/g, '(muộn Ns)'],
+    [/đọc \d+ lần/g, 'đọc N lần'],
+    [/sau \d+ ?ms/gi, 'sau N ms'],
+  ];
+  const groupKeyOf = (tag, t) => {
+    let k = t;
+    for (let i = 0; i < VOLATILE_NUM.length; i++) k = k.replace(VOLATILE_NUM[i][0], VOLATILE_NUM[i][1]);
+    return tag + '\u0001' + k;
+  };
+  function flushGroup(g) {
+    if (!g) return;
+    if (g.timer) { clearTimeout(g.timer); g.timer = null; }
+    if (!g.n) return;
+    if (errGroups.get(g.key) === g) errGroups.delete(g.key);
+    const head = (logGroupCtx ? '[' + logGroupCtx() + '] ' : '');
+    const what = GROUP_LABEL[g.tag] || 'cùng lỗi';
+    const names = g.names.length ? ' · vd: ' + g.names.join(', ') : '';
+    logLine(g.tag + ' ' + head + (g.n > 1
+      ? '×' + g.n + ' chat ' + what + ' — ' + g.display + names
+      : (g.names[0] ? g.names[0] + ' — ' : '') + g.display));
+    g.n = 0; g.names = [];
+  }
+  function flushErrGroup() {
+    const list = Array.from(errGroups.values());
+    for (let i = 0; i < list.length; i++) flushGroup(list[i]);
+  }
+  function logFailGrouped(name, reason, tag, cid) {
+    tag = tag || '❌';
+    const display = compressErr(reason);
+    auditPush(tag, cid, name, display);   // sổ kiểm chứng: KHÔNG gộp, ghi trước khi gộp màn hình
+    const k = groupKeyOf(tag, display);
+    const now = Date.now();
+    let g = errGroups.get(k);
+    if (!g) {
+      if (errGroups.size >= GROUP_MAX) flushGroup(errGroups.values().next().value);
+      g = { key: k, tag: tag, n: 0, names: [], display: display, timer: null };
+      errGroups.set(k, g);
+    }
+    g.n++;
+    g.display = display;                                   // hiện số liệu MỚI NHẤT
+    if (name && g.names.length < 4 && g.names.indexOf(name) < 0) g.names.push(name);
+    void now;
+    if (!g.timer) g.timer = setTimeout(() => flushGroup(g), GROUP_FLUSH_MS);
+  }
+  function logGroupReset() {
+    errGroups.forEach((g) => { if (g && g.timer) clearTimeout(g.timer); });
+    errGroups.clear();
+  }
+  /* [v1.92.33] Nới lane đi từng nấc +8 ⇒ lô 2 251 chat in 16 dòng liền nhau. Gom lại: chỉ in
+   * MỘT dòng sau khi nấc cuối đứng yên 2,5 s, kèm khoảng nới và số nấc. */
+  /* [v1.92.34] DÒNG 🐢 PHẢI CÓ NGHĨA: lô 13:38 in 55 dòng "🐢 … giảm lane page … xuống 64" và
+   * 1 dòng "xuống 307" — 55 dòng đầu là NO-OP (làn đã ở sàn 64, setLimit kẹp lại = 64). Nay:
+   *   • chỉ ghi khi `to < from` (giảm THẬT),
+   *   • gộp mọi nấc trong 2 s thành 1 dòng: "🐢 Socket no-ACK lặp 2 lần — lane page 123: 384 → 64 (3 lần hạ)". */
+  const laneDrop = new Map(); // pid → {from, to, steps, why, timer}
+  function logLaneDrop(pid, from, to, why) {
+    if (!(Number(to) < Number(from))) return;
+    const key = String(pid || '');
+    let r = laneDrop.get(key);
+    if (!r) { r = { from: from, to: to, steps: 0, why: why, timer: null }; laneDrop.set(key, r); }
+    r.to = to; r.steps++; r.why = why || r.why;
+    if (r.timer) clearTimeout(r.timer);
+    r.timer = setTimeout(() => {
+      laneDrop.delete(key);
+      try {
+        logLine('🐢 ' + r.why + ' — giảm lane page ' + key + ': ' + r.from + ' → ' + r.to
+          + (r.steps > 1 ? ' (' + r.steps + ' lần hạ)' : '') + '.');
+      } catch (e) { /* ignore */ }
+    }, 2000);
+  }
+  const laneRamp = new Map(); // pid → {from, to, steps, timer}
+  function logLaneRamp(pid, from, to) {
+    const key = String(pid || '');
+    let r = laneRamp.get(key);
+    if (!r) { r = { from: from, to: to, steps: 0, timer: null }; laneRamp.set(key, r); }
+    r.to = to; r.steps++;
+    if (r.timer) clearTimeout(r.timer);
+    r.timer = setTimeout(() => {
+      laneRamp.delete(key);
+      try {
+        logLine('⚡ Socket ACK nhanh ổn định — nới lane page ' + key + ': ' + r.from + ' → ' + r.to
+          + ' (' + r.steps + ' nấc)');
+      } catch (e) { /* ignore */ }
+    }, 2500);
+  }
+
+  function flushLogUI(forceBottom) {
     logFlushTimer = null;
     scheduleLogStorageSave();
+    const cnt = shadow && shadow.getElementById('ssb-logcount');
+    if (cnt) cnt.textContent = logAll.length + ' dòng';
     const el = shadow && shadow.getElementById('ssb-log');
     if (el) {
+      const stick = forceBottom || logNearBottom(el);
+      const prevTop = el.scrollTop;
       el.textContent = state.log.join('\n');
-      el.scrollTop = el.scrollHeight;
+      // [v1.92.31] Bám đáy như cũ ở chế độ bình thường; nếu người dùng đã cuộn lên đọc lỗi
+      // thì giữ nguyên vị trí thay vì giật xuống mỗi giây.
+      el.scrollTop = stick ? el.scrollHeight : prevTop;
     }
   }
   try { window.addEventListener('pagehide', persistLogStorage); } catch (e) { /* ignore */ }
 
+  /* [v1.92.31] Tiến độ thay cho từng dòng "✅ đã gửi".
+   * Lô 20 259 chat sinh 14 167 dòng "đã gửi" gần như trùng nhau ⇒ lỗi/mốc quan trọng bị đẩy
+   * khỏi tầm mắt và log phải cuộn hàng nghìn dòng. Nay chỉ in mốc: lô > 500 chat in mỗi 10%,
+   * lô nhỏ in mỗi 25% (vẫn thấy tiến độ, không mất thông tin vì TỔNG HỢP cuối có số chính xác). */
+  const logProgressMark = { pct: 0 };
+  function logProgress(done, total, ok, unsure, fail, inflight) {
+    const t = Number(total) || 0;
+    if (!t) return;
+    const d = Number(done) || 0;
+    const pct = Math.min(100, Math.floor((d * 100) / t));
+    const step = t > 500 ? 10 : 25;
+    if (pct < logProgressMark.pct + step || pct >= 100) return;
+    logProgressMark.pct = pct - (pct % step);
+    logLine('🟢 Đang gửi ' + d + '/' + t + ' (' + pct + '%) · ✅ ' + (ok || 0)
+      + (inflight ? ' · ⏳ chờ xác nhận ' + inflight : '')
+      + (fail ? ' · ❌ ' + fail : '') + (unsure ? ' · ⚠ ' + unsure : ''));
+  }
+
+  /* [v1.92.32] HAI SỔ SONG SONG:
+   *   • state.log  = cửa sổ hiển thị (1 500 dòng) — dựng lại DOM mỗi giây nên phải nhỏ.
+   *   • logAll     = TOÀN BỘ log của lượt (trần 60 000 dòng) — nút "📋 Copy log" / "💾 .txt"
+   *                  đọc từ đây, nên KHÔNG bao giờ bị cắt như copy phần đang nhìn thấy.
+   * Lý do: lô 9 335 chat sinh ~4 500 dòng; lô 20 259 chat sinh ~20 000 dòng ⇒ cửa sổ 1 500
+   * dòng luôn thiếu phần đầu. */
+  const logAll = [];
+  const LOG_ALL_MAX = 60000;
+  function logAllReset() { logAll.length = 0; }
+
+  // [STABLE] Chỉ in dòng tổng kết + tiến trình. Các dòng chẩn đoán dài (SOCKET/API/WAVE/globalId)
+  // đi qua logDiag() và bị tắt ở bản này để log cuối gọn, người dùng thường không cần đọc.
+  const DIAG_LOGS = !IS_STABLE_BUILD; // bản ổn định: false ⇒ tắt hết dòng chẩn đoán dài
+  function logDiag(s) { if (!DIAG_LOGS) return; try { logLine(s); } catch (e) { /* ignore */ } }
   function logLine(s) {
     const t = new Date();
     const hh = String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0')
       + ':' + String(t.getSeconds()).padStart(2, '0');
-    state.log.push('[' + hh + '] ' + s);
-    if (state.log.length > 300) state.log.shift();
+    const full = '[' + hh + '] ' + s;
+    logAll.push(full);
+    if (logAll.length > LOG_ALL_MAX) logAll.shift();
+    state.log.push(full);
+    // [v1.92.31] 300 → 1500 dòng: đủ giữ cả một lượt lớn để copy ra ngoài.
+    if (state.log.length > 1500) state.log.shift();
     const el = shadow && shadow.getElementById('ssb-log');
     if (!el) {
       try { localStorage.setItem(LOG_KEY, JSON.stringify(state.log)); } catch (e) { /* ignore */ }
@@ -8916,7 +11946,11 @@
     // Khi chạy lô lớn (>200 chat): chỉ cập nhật DOM log 1 lần/giây;
     // nhịp gửi/counters không bị chặn, chỉ phần trình bày log được gộp.
     if (state.sending && batchStats.total > 200) {
-      if (!logFlushTimer) logFlushTimer = setTimeout(flushLogUI, 1000);
+      /* [v1.92.43b] Tab đang ẨN mà có tab khác chạy: không ai nhìn panel này ⇒ gộp log 2,5 s/lần
+       * thay vì 1 s. Cắt CPU vẽ chữ của tab ẩn để tab đang xem không bị khựng. Số liệu gửi và
+       * logAll (để copy) KHÔNG đổi — chỉ nhịp vẽ DOM thưa hơn. */
+      const hiddenHeavy = !!(document && document.hidden) && peerSendingCount() > 0;
+      if (!logFlushTimer) logFlushTimer = setTimeout(flushLogUI, hiddenHeavy ? 2500 : 1000);
       return;
     }
     if (logFlushTimer) { clearTimeout(logFlushTimer); logFlushTimer = null; }
@@ -8950,11 +11984,6 @@
       const btn = shadow.getElementById(id);
       if (btn) btn.disabled = locked || (id === 'ssb-deselect-one' && !state.enabled);
     });
-    const clearUnavailable = shadow.getElementById('ssb-clear-unavailable');
-    if (clearUnavailable) {
-      clearUnavailable.textContent = '🧹 Xóa nhớ lỗi (' + unavailableConversationIds.size + ')';
-      clearUnavailable.disabled = locked || unavailableConversationIds.size === 0;
-    }
     if (send) {
       send.disabled = busy || locked;
       send.textContent = busy
@@ -8975,6 +12004,7 @@
     if (!batchStats.loopFinished && !state.stopRequested) return;
     if (state.stopRequested) {
       state.sending = false;
+      try { releaseSendLock(); } catch (eRl3) { /* ignore */ }
       unfreezeSendChecklist();
       applyRunStopButtons();
       stopKeepAliveAudio();
@@ -8983,12 +12013,13 @@
       return;
     }
     let pending = 0;
-    try { pending = getBatchSummaryCounts().pending; } catch (e) { pending = 0; }
+    try { pending = getBatchSummaryCounts().pendingSend; } catch (e) { pending = 0; }
     if (pending > 0) {
       applyRunStopButtons();
       return;
     }
     state.sending = false;
+    try { releaseSendLock(); } catch (eRl2) { /* ignore */ } // [v1.92.43] nhả khoá tab
     unfreezeSendChecklist();
     applyRunStopButtons();
     stopKeepAliveAudio();
@@ -9051,15 +12082,15 @@
     if (!shadow) return;
     // Kết quả confirmed-unavailable có thể được ghi nhớ trong lúc gửi; sau khi checklist mở lại,
     // hạ tick ngay nhưng không sửa snapshot đang khóa để tránh đổi người nhận giữa lượt.
-    if (!state.sendListFrozen) {
-      state.matches.forEach((m) => {
-        if (m && isRememberedUnavailable(m.id)) { m.knownUnavailable = true; m.checked = false; }
-      });
-    }
     const tgl = shadow.getElementById('ssb-toggle');
     if (tgl) {
       tgl.textContent = state.enabled ? 'BẬT' : 'TẮT';
       tgl.className = 'badge ' + (state.enabled ? 'on' : 'off');
+    }
+    const tglTab = shadow.getElementById('ssb-tab');
+    if (tglTab) {
+      tglTab.textContent = 'TAB: ' + (state.tabSend ? 'BẬT' : 'TẮT');
+      tglTab.className = 'badge ' + (state.tabSend ? 'on' : 'off');
     }
     const deselectBtn = shadow.getElementById('ssb-deselect-one');
     if (deselectBtn) {
@@ -9368,6 +12399,8 @@
   function onKeydown(e) {
     if (!e || e.__botfakeKeyHandled) return;
     const isTabKey = (e.key === 'Tab' || e.code === 'Tab' || e.keyCode === 9 || e.which === 9);
+    // Công tắc TAB đang TẮT ⇒ nhường phím Tab cho trang (không preventDefault, không kích hoạt gửi)
+    if (isTabKey && !state.tabSend && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) return;
     // Phím Tab: kích hoạt nút ▶ Chạy (luôn hiện hộp xác nhận trước khi gửi)
     if (isTabKey && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.isComposing) {
       if (!state.enabled || !isPancakeHost()) return;
@@ -9540,6 +12573,13 @@
       if (wrapEl) wrapEl.style.display = '';
       if (bubble) bubble.style.display = 'none';
     }
+    // [v1.92.31] Mở bảng log ⇒ đặt điểm nhìn ở CUỐI (chỗ log đang chạy), không phải đầu.
+    // Element vừa được hiện lại nên scrollHeight chỉ đúng sau 1 nhịp vẽ.
+    try {
+      flushLogUI(true);
+      requestAnimationFrame(() => logScrollToBottom());
+      setTimeout(() => logScrollToBottom(), 120);
+    } catch (e) { /* ignore */ }
   }
 
   extListen((m, _s, sendResponse) => {
