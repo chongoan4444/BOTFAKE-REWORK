@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.2-w200.113
+// @version      1.93.3-w200.114
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.2-W200.113'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.3-W200.114'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -4607,6 +4607,8 @@
     }
     sock.taskId = sock.taskId || 0;
     const lateApply = (opts && typeof opts.lateApply === 'function') ? opts.lateApply : null;
+    /* [v1.93.3] Xem chỗ gọi (sendViaSocket): ACK rejected = FB nói ĐỨT KHOÁT tin chưa đi. */
+    const onRejected = (opts && typeof opts.onRejected === 'function') ? opts.onRejected : null;
     const hasPhoto = Array.isArray(attFbIds) && attFbIds.length > 0;
     const hasText = !!(text && String(text).length > 0);
     const tasks = [];
@@ -4854,6 +4856,7 @@
       const failed = helper.findAllBlockActions(resp.step, 'markOptimisticMessageFailed') || [];
       if (failed.length && !replaced.length) {
         recordSocketAckOutcome('rejected', Date.now() - publishedAt, pageId);
+        if (!lateMode && onRejected) { try { onRejected(); } catch (eRJ) { /* ignore */ } }
         if (lateMode && lateApply) lateApply('rejected', Date.now() - publishedAt);
         return { kind: 'rejected' };
       }
@@ -4862,6 +4865,7 @@
       // mà phải báo 'photo_failed_text_ok' để sendViaSocket upload fbId mới và bắn bù riêng phần ảnh!
       if (hasPhoto && hasText && failed.length > 0 && replaced.length > 0) {
         recordSocketAckOutcome('rejected', Date.now() - publishedAt, pageId);
+        if (!lateMode && onRejected) { try { onRejected(); } catch (eRJ2) { /* ignore */ } }
         return { kind: 'photo_failed_text_ok' };
       }
       /* [v1.92.18] CHỐT ✅ PHẢI CÓ BẰNG CHỨNG DƯƠNG TÍNH.
@@ -5184,6 +5188,26 @@
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
         ctx.socketRetriedOnce = true;
         sendDiag.sockRetry++;
+        /* ═══ [v1.93.3] FB ĐÃ BÁO KHÔNG NHẬN ĐƯỢC ⇒ KHÔNG THỬ LẦN 2, CHỐT ❌ ═══
+         * ĐO ĐƯỢC trên log 21/11 21:05 (lô 4 266 chat, bản 1.93.2):
+         *   • SOCKET ACK rejected: 630 — người dùng xác nhận 630 ca đó "đều là chết thật"
+         *   • Nhưng sổ kiểm chứng chỉ có 18 dòng ❌; TỔNG HỢP ghi ❌ 18 · ⚠ 612
+         *   • 612 ca đó nằm trong 🖐 CẦN GỬI TAY nhưng có 0 dòng trong sổ kiểm chứng và
+         *     0 dòng trong "TỔNG THEO CHAT" ⇒ bị chốt bằng một đường KHÔNG ghi sổ.
+         * Gốc: ACK rejected đến ĐÚNG HẠN không được ghi vào `fbRejectedIds` (chỉ ACK MUỘN và
+         * API #551 được ghi) ⇒ ca đó đi tiếp vào làn bù Socket, và ở đây
+         * `isConfirmedUnavailable` = false vì `socketRetriedOnce` chưa bật ⇒ thử lần 2 vô ích,
+         * rồi chốt ⚠ ⇒ vào danh sách gửi tay.
+         * NAY: FB đã trả lời dứt khoát thì chốt ❌ ngay, KHÔNG vào danh sách gửi tay.
+         * Không thêm một lệnh gửi nào — đây là BỎ lần thử vô ích. */
+        if (isFbRejected(conv.id) && !ctx.apiRejected551) {
+          fbRejectStats.blockedBu = (fbRejectStats.blockedBu || 0) + 1;
+          return {
+            ok: false, sent: false, recipientUnavailable: true, fbRejected: true,
+            error: 'Socket: FB đã báo KHÔNG NHẬN ĐƯỢC (ACK rejected) — không thử lần 2',
+          };
+        }
+
         await sleepUntil(Date.now() + 220 + Math.floor(Math.random() * 130), 'delivered'); // [v1.92.9] đã giao thì thức ngay
         if (state.stopRequested) return { ok: false, sent: false, error: 'Đã dừng' };
         if (deliveredIds[conv.id]) return { ok: true, id: gid, sendBy: 'socket', sent: true };
@@ -5414,6 +5438,17 @@
                 return;
               }
               if (hasExt1545 && !extFallback1545Allowed()) {
+                /* [v1.93.3] FB ĐÃ BÁO KHÔNG NHẬN ĐƯỢC ⇒ ❌, KHÔNG vào danh sách gửi tay.
+                 * Chốt của người dùng: "chặn là chặn, gửi không được, gửi tay cũng không được".
+                 * Ca CHƯA từng bị FB từ chối (chỉ hết ngân sách dò Ext) vẫn giữ ⚠ như cũ —
+                 * đó là "máy không biết", không phải "khách chặn". */
+                if (isFbRejected(conv.id)) {
+                  fbRejectStats.blockedBu = (fbRejectStats.blockedBu || 0) + 1;
+                  if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+                  logFailGrouped(nm, 'FB đã báo KHÔNG NHẬN ĐƯỢC (Socket ACK rejected) ⇒ chốt ❌, KHÔNG vào danh sách gửi tay', '🚫', conv.id);
+                  releaseOutbound(conv.id);
+                  return;
+                }
                 // Đã đo xong: Extension cũng không cứu được ⇒ ⚠ "chưa gửi" để người dùng gửi tay
                 if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
                 /* [v1.92.66] IN SỐ THẬT — xem khối chú thích dài ở `extFallback1545Allowed()`.
@@ -5580,7 +5615,13 @@
             SOCK_FIRED_RELEASE
               ? (rawKind) => settleAndFinalize(rawKind && rawKind.kind ? rawKind : { kind: 'noack' }, false)
               : null,
-            { lateApply: onLateAck });
+            { lateApply: onLateAck,
+              /* [v1.93.3] ACK REJECTED PHẢI ĐƯỢC GHI NHẬN NGAY TẠI CHỖ FB TRẢ LỜI.
+               * Trước bản này `noteFbRejected()` chỉ được gọi cho ACK **MUỘN** (onLateAck) và cho
+               * API #551. ACK rejected đến ĐÚNG HẠN thì không ai ghi ⇒ cổng `isFbRejected` không
+               * bao giờ thấy ⇒ ca đó rơi xuống làn bù Socket → bị chốt ⚠ "chưa xác nhận" ⇒ vào
+               * danh sách GỬI TAY dù FB đã nói rõ khách không nhận được. */
+              onRejected: () => noteFbRejected(conv.id, 'Socket ACK rejected = FB từ chối nhận tin') });
         })
           .then((rawSync) => {
             if (notifySlotStarted) {
