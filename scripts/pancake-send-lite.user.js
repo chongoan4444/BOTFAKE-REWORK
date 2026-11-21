@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.9-w200.120
+// @version      1.93.10-w200.121
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.9-W200.120'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.10-W200.121'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6032,6 +6032,25 @@
          * — nhờ vậy `deadUser` vẫn khớp "không có mặt". Nhưng `fbErrorCode` là SỐ nằm trong
          * object lồng, không bao giờ đọc được ở dạng phẳng.
          * Nay đọc cả hai tầng. */
+        /* ═══ [v1.93.10] `d` CÓ THỂ LÀ CHUỖI JSON, KHÔNG PHẢI OBJECT ═══
+         * ĐO TRÊN 28 LOG — 16 142 dòng lỗi Ext, CHỈ 2 hình dạng:
+         *   16 094  Extension không gửi được ({"errorDescription":"Người này hiện không có mặt.","fbErrorCode":N})
+         *       48  Extension không gửi được (INCORRECT THREAD)
+         * Cả hai là **CHUỖI**, không phải object: chúng đi qua adapter của app
+         * (`__ExtensionAdapter__` — không có trong repo) nên bị JSON.stringify một lần nữa.
+         * Hệ quả: `d.fbErrorCode` = undefined ⇒ `_fbErrNum` LUÔN = 0 (mọi bản trước 1.93.10).
+         * Nay: nếu `d` là chuỗi mà bắt đầu bằng `{` thì JSON.parse để đọc được SỐ.
+         * Đây là đọc thêm, KHÔNG đổi phán quyết: chuỗi `why` phía dưới vẫn giữ nguyên
+         * (nên mọi đường đang dựa vào regex chuỗi không bị ảnh hưởng). */
+        if (d && typeof d === 'string' && /^\s*\{/.test(d)) {
+          try {
+            const pj = JSON.parse(d);
+            if (pj && typeof pj === 'object') {
+              d = pj;
+              if (res) res.data = pj;
+            }
+          } catch (ePj) { /* không phải JSON — giữ nguyên chuỗi */ }
+        }
         const _ee = (d && typeof d.error === 'object' && d.error) ? d.error : null;
         let why = d.errorDescription
           || (_ee && _ee.errorDescription)
@@ -6141,7 +6160,28 @@
           || 0
         ) || 0;
         const _whyStr = String(why || '');
-        if (_fbErrNum === 3252001 || _fbErrNum === 1390008
+        /* ═══ [v1.93.10] ĐỌC `canRetryUsingSocket` — TRƯỚC ĐÂY CHƯA TỪNG ĐỌC ═══
+         * Nguồn `sendInbox` (0.5.62):
+         *   case"retryUsingSocket": return v({success:!1, canRetryUsingSocket:!0,
+         *                                  retryReason:"blocked_3252001", fbErrorCode:H.error})
+         * Extension TRẢ CỜ NÀY Ở 3 NHÁNH (`getErrorHandler`):
+         *   (i)  `t.error === 1545012 && a === 1`  → tức ĐÃ TỪNG thử lại mà VẪN lỗi
+         *   (ii) IG `error_payload:true` không kèm `error`
+         *   (iii)`3252001` | `1390008`
+         * Script trước bản này KHÔNG đọc cờ ⇒ gộp (i) vào "tạm thời" như lần 1.
+         * (i) KHÁC NGHĨA với 1545012 lần đầu:
+         *        lần 1 = lỗi tạm thời ⇒ extension tự upload lại rồi gửi lại (không chốt ❌) ✔
+         *        lần 2 = vẫn lỗi sau khi đã upload lại ⇒ extension HẾT đường, đề nghị đi Socket
+         *     Vẫn KHÔNG phải bằng chứng "khách chết" ⇒ KHÔNG chốt ❌, KHÔNG ghi sổ từ chối.
+         *     Chỉ đổi: (a) ghi số đo riêng, (b) câu cảnh báo nói đúng "đã thử lại vẫn lỗi".
+         * (iii) mới là FB chặn page ⇒ ghi sổ (giữ nguyên như 1.93.7). */
+        const _canSock = !!(d && (d.canRetryUsingSocket === true || /blocked_3252001/i.test(_whyStr)));
+        const _retry2 = _canSock && (_fbErrNum === 1545012 || /1545012/.test(_whyStr));
+        if (_retry2) {
+          try { extTimeoutStats.fbRetry2 = (extTimeoutStats.fbRetry2 || 0) + 1; } catch (eR2) { /* ignore */ }
+        }
+        if ((_canSock && !_retry2 && (_fbErrNum === 3252001 || _fbErrNum === 1390008))
+            || _fbErrNum === 3252001 || _fbErrNum === 1390008
             || /3252001|1390008/.test(_whyStr)) {
           try { noteFbRejected(conv.id, 'Extension: FB CHẶN PAGE (uploadBlocked 7 ngày) — mã ' + (_fbErrNum || why)); } catch (eFbR2) { /* ignore */ }
         } else if (deadUser) {
@@ -6165,6 +6205,7 @@
           // (đọc lại lịch sử; thấy tin ⇒ lật ✅). Các nguồn recipientUnavailable khác (#100…)
           // không đụng tới.
           deadUserHint: deadUser,
+          fbRetryExhausted: _retry2,
           gidUnknown: gidUnknownThread,
           discoveryState: (ctx && ctx.gidDiscoveryState) || 'unknown',
           error: errStr,
@@ -9774,7 +9815,8 @@
   /* [v1.93.2] `claimedUnverified` = số ca Extension báo success nhưng CHƯA có bằng chứng tin đã
    * tới (trước đây những ca này được đánh ✅ ngay). `notFound` = đã đọc lại lịch sử hết lượt mà
    * KHÔNG thấy tin ⇒ chốt ❌. `unknown` = không đọc được lịch sử ⇒ giữ ⚠ + gửi tay (không chốt oan). */
-  const extTimeoutStats = { timeout: 0, skipped: 0, found: 0, notFound: 0, unknown: 0, claimedUnverified: 0, claimedDenied: 0 }; // theo lượt — in ở dòng TỔNG HỢP
+  const extTimeoutStats = { timeout: 0, skipped: 0, found: 0, notFound: 0, unknown: 0, claimedUnverified: 0, claimedDenied: 0, fbRetry2: 0 }; // theo lượt — in ở dòng TỔNG HỢP
+  // [v1.93.10] fbRetry2 = extension trả canRetryUsingSocket + mã 1545012 = ĐÃ upload lại mà VẪN lỗi
   let bgWatchdogTimer = null;
   // ⚡ [FIX-5] Với bắn-nhả 192 slot, đuôi hàng đợi retry Socket/Ext có thể chờ >90s khi lô lớn.
   // 180s đủ dung sai — không chốt ⚠ oan khi lane còn việc thật.
@@ -10080,8 +10122,11 @@
                 ? ' · thử lại tạm thời ' + sendDiag.transientRetries + ' ca (cứu ' + (sendDiag.transientRetryOk || 0) + ')'
                 : '')
             : '')
-          + ((extTimeoutStats.timeout || extTimeoutStats.skipped || extTimeoutStats.found || extTimeoutStats.notFound || extTimeoutStats.unknown)
+          + ((extTimeoutStats.timeout || extTimeoutStats.skipped || extTimeoutStats.found || extTimeoutStats.notFound || extTimeoutStats.unknown || extTimeoutStats.fbRetry2)
             ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy trong lịch sử ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
+              + (extTimeoutStats.fbRetry2
+                ? ' | 🔁 Ext đã upload lại mà VẪN lỗi 1545012 (canRetryUsingSocket) ' + extTimeoutStats.fbRetry2 + ' ca — KHÔNG phải khách chết, không chốt ❌'
+                : '')
               + (extTimeoutStats.claimedUnverified
                 ? ' | 🔍 Ext báo success nhưng CHƯA xác nhận ' + extTimeoutStats.claimedUnverified + ' ca · đọc lại lịch sử: thấy tin ' + extTimeoutStats.found + ' · KHÔNG thấy ⇒ chốt ❌ ' + extTimeoutStats.claimedDenied + ' ca (không gửi tay)'
                 : '')
@@ -12093,6 +12138,7 @@
     extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
     extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
     extTimeoutStats.claimedUnverified = 0; extTimeoutStats.claimedDenied = 0;
+  extTimeoutStats.fbRetry2 = 0;
     try { extClaimSuccess.clear(); } catch (eCS) { /* ignore */ }
     try { Object.keys(extClaimUnsure).forEach(function (k) { delete extClaimUnsure[k]; }); } catch (eCU) { /* ignore */ }
     extSendCtl.probeInFlight = false; // lượt mới không được kẹt bởi thăm dò của lượt cũ đã dừng

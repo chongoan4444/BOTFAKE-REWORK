@@ -521,3 +521,70 @@ Chưa có HAR nào bắt response **HTML** — 12 HAR chỉ chứa API JSON. Vì
 cách A sẽ tìm ra `resource_map`. Điều đã chứng minh: nó **rẻ** (regex trên dữ liệu đã có, 0 request
 mới), **chỉ đọc** (không thể sinh tin trùng), và khi không tìm thấy thì **không ảnh hưởng** đường
 gửi nào.
+
+## 11. `d` là CHUỖI + `canRetryUsingSocket` chưa từng đọc (1.93.10)
+
+### 11.1 Bằng chứng: shape lỗi thật trên 28 log (16 142 dòng)
+
+```
+16 094  Extension không gửi được ({"errorDescription":"Người này hiện không có mặt.","fbErrorCode":N})
+    48  Extension không gửi được (INCORRECT THREAD)
+```
+
+**Chỉ 2 hình dạng, cả hai là CHUỖI.** Không phải object ⇒ `d.fbErrorCode` = `undefined`
+⇒ `_fbErrNum` **luôn = 0** ở mọi bản trước 1.93.10 (kể cả bản 1.93.8 vừa "sửa" `Number()`).
+
+Nguyên nhân: kết quả đi qua `__ExtensionAdapter__` của app (không có trong repo) nên bị
+`JSON.stringify` thêm một lần.
+
+**Sửa:** nếu `d` là chuỗi và bắt đầu bằng `{` thì `JSON.parse(d)` rồi gán lại `d` + `res.data`.
+Đọc thêm, **không đổi phán quyết** — chuỗi `why` giữ nguyên nên mọi đường đang dựa vào regex chuỗi
+không bị ảnh hưởng.
+
+### 11.2 `canRetryUsingSocket` — script chưa từng đọc (0 lần)
+
+Extension trả cờ này ở 3 nhánh `getErrorHandler`:
+
+| nhánh | điều kiện | nghĩa |
+|---|---|---|
+| (i) | `t.error === 1545012 && a === 1` | **ĐÃ** upload lại mà VẪN lỗi |
+| (ii) | IG `error_payload:true`, không kèm `error` | IG |
+| (iii) | `3252001` \| `1390008` | FB **chặn page** |
+
+Trước 1.93.10 script gộp (i) vào "tạm thời" như lần 1. Nay tách:
+
+- **(i) 1545012 lần 2** ⇒ **KHÔNG** chốt ❌, **KHÔNG** ghi sổ từ chối (chưa phải bằng chứng khách
+  chết) — chỉ đếm riêng `extTimeoutStats.fbRetry2` và in ở TỔNG HỢP.
+- **(iii)** ⇒ ghi sổ chặn page (giữ nguyên như 1.93.7).
+
+### 11.3 Đối chứng 8/8 (`/tmp/v7.js`, payload đúng hình dạng CHUỖI của log thật)
+
+| payload | số bóc | lần 2 | khách chết | ghi sổ |
+|---|---|---:|---|---|
+| `1545041` | 1545041 | – | **true** | ✅ "FB từ chối nhận tin" |
+| `3252001` | 3252001 | – | false | ✅ "FB CHẶN PAGE" |
+| `1390008` | 1390008 | – | false | ✅ "FB CHẶN PAGE" |
+| `1545012` + canSock | 1545012 | **true** | false | **KHÔNG** |
+| `1545012` thường | 1545012 | false | false | **KHÔNG** |
+| `1545006` | 1545006 | false | false | **KHÔNG** |
+| `INCORRECT THREAD` | – | – | – | **KHÔNG** |
+| `execute task timeout` | – | – | – | **KHÔNG** |
+
+### 11.4 Việc đã cân nhắc và **TỪ CHỐI** làm
+
+Dùng 4 dấu hiệu "page bị chặn" của `Xc` (`"Bạn tạm thời bị chặn"`, `CometErrorRoot.react`,
+2 câu "nội dung không khả dụng") để làm sổ chặn page.
+
+**Lý do từ chối:** script **không bao giờ** fetch Facebook (đo: 22 lần `apiBase()`, 4 lần
+`business.facebook.com` đều là **chú thích**) ⇒ `harvestDocIdsFromHtml` chỉ nhìn thấy HTML của
+Pancake ⇒ 4 chuỗi đó **không bao giờ** xuất hiện. Làm sẽ là code chết.
+
+### 11.5 Đã loại trừ dứt điểm 2 đường gửi còn lại
+
+| đường | ai dựng | script có gửi lệnh đó? |
+|---|---|---|
+| `m.facebook.com/messages/send/` (`Bm`) | chỉ qua `.catch(km)` khi `attachmentType` **lạ** | **KHÔNG** (7 loại đều xử lý trước) |
+| `m.facebook.com/a/comment.php` (`Gl`) | `SEND_STICKER_COMMENT` | **KHÔNG** (`grep = 0`) |
+
+⇒ Đường gửi Facebook mà script chạm = **2/5**: `ee.sendInbox` (messaging/send) và
+`Te.send` (GraphQL comment).
