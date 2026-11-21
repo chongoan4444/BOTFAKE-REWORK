@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.7-w200.118
+// @version      1.93.8-w200.119
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.7-W200.118'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.8-W200.119'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3161,12 +3161,53 @@
       accessToken: token,
     };
     if (photo && photo.url) payload.photoUrl = photo.url;
+    /* ═══════════════ [v1.93.8] ĐỌC ĐÚNG HANDLER SEND_COMMENT CỦA EXTENSION ═══════════════
+     * Nguồn: 0.5.62_0/assets/background.js
+     *
+     *   case"UPLOAD_INBOX_PHOTO":  ae.startCheck(_, D);          // D() gửi, D(s) = switch profile rồi gửi
+     *   case"SEND_COMMENT":        ae.startCheck(pageId, _, !0, !0);
+     *
+     *   static startCheck(e, t, a = !0, r = !1) {   // e=pageId  t=hàm gửi
+     *     const s = () => ae.startCheck(e, t, a, !0);   // retry KHÔNG kèm cờ r
+     *     r ? new ae(e, a).init().then(()=>{}).catch(()=>{}).finally(t)   // ← BỎ QUA KẾT QUẢ
+     *       : t(s);
+     *   }
+     *
+     * Hệ quả (đo được bằng code, không suy đoán):
+     *  a) `new ae(pageId, confirmProfile=true).init()` = **đổi profile Facebook sang page**.
+     *     `checkValidProfile()` đọc `business.facebook.com`; nếu `confirmProfile && !currentProfile.id`
+     *     (handler fanpage / HTML đổi cấu trúc / 429 / ≥500) ⇒ `switchNoResponse = true; return`
+     *     ⇒ `switchResult` KHÔNG BAO GIỜ được gán ⇒ `finally(t)` chạy `t(s)` với cờ `r = true`
+     *     ⇒ lần 2 cũng chỉ `init()` rồi `finally(t)` ⇒ **KHÔNG BAO GIỜ GỬI BÌNH LUẬN**,
+     *     mà `t` (là hàm gửi) vẫn được gọi nên nếu `t` là hàm "gửi + báo kết quả" thì có thể
+     *     báo SAI. Đây là lý do phải đọc kết quả thật trước khi tin.
+     *
+     *  b) `getProfileSetting()` dùng `G(html, '{"require":…RelayPrefetchedStreamCache…')`;
+     *     nếu HTML không còn khối đó ⇒ `t = []` ⇒ `currentProfile = {}` ⇒ rơi đúng vào (a).
+     *
+     *  c) `UPLOAD_INBOX_PHOTO` gọi `D()` (rỗng) ⇒ KHÔNG switch profile; chỉ ảnh bình luận
+     *     đi nhánh này. ⇒ Câu "mất globalId" là **của nhánh upload ảnh**, không phải nhánh gửi.
+     *
+     * Vì vậy KHÔNG được coi "không có res.success" là "không rõ" một cách mù quáng:
+     * `res.data` là `undefined` ⇒ extension KHÔNG hề báo gửi xong (nó chỉ switch profile rồi
+     * im lặng) ⇒ có thể coi là CHƯA GỬI, nhưng phải kiểm chứng bằng lịch sử trước khi chốt. */
     try {
       const res = await adapter.send(payload, { timeout: 35000 });
       if (res && res.success) {
         return { ok: true, id: (res.data && (res.data.timestamp || res.data.id)) || '' };
       }
-      return { ok: false, sent: 'maybe', error: 'Extension không phản hồi' };
+      /* [v1.93.8] `SEND_COMMENT_FAILURE` của extension KHÔNG có trường `error`
+       * (`e.port.postMessage({type:"SEND_COMMENT_FAILURE",taskId})` — nhánh .catch) hoặc
+       * chỉ có `message` (`message: b.message`). Đọc đủ cả hai, đừng chỉ đọc `error`. */
+      const d = (res && res.data) || {};
+      const why = d.message || d.errorMessage || d.error || d.reason || d.code || '';
+      if (!why) {
+        /* Không có lý do + không có data = hình dạng "extension chỉ switch profile rồi im lặng"
+         * (mục a ở trên). Chưa có bằng chứng đã gửi ⇒ KHÔNG được chốt ❌ cũng KHÔNG được bù
+         * mù: trả 'maybe' để cổng chứng minh vắng mặt quyết định (đúng luật chống trùng). */
+        return { ok: false, sent: 'maybe', error: 'Extension không báo kết quả bình luận (SEND_COMMENT_FAILURE rỗng) — không gửi thêm' };
+      }
+      return { ok: false, sent: 'maybe', error: 'Extension không gửi được bình luận (' + why + ')' };
     } catch (e) {
       return { ok: false, sent: 'maybe', error: 'Extension lỗi: ' + (e && e.message || e) };
     }
@@ -6008,7 +6049,22 @@
           noteExtSendOutcome('timeout', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
           extTimeoutStats.timeout++;
           if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt);
-          return { ok: false, sent: 'maybe', error: 'Extension không phản hồi (quá hạn) — không gửi thêm để tránh trùng' };
+          /* ═══ [v1.93.8] "KHÔNG PHẢN HỒI" Ở ĐÂY LÀ HẾT 2,5 s CỦA **TA**, KHÔNG PHẢI CỦA EXTENSION ═══
+           * ĐO TRÊN 28 LOG: câu này xuất hiện **2 588 lần** — nhóm "không rõ" lớn thứ nhì.
+           * Nguồn extension (`0.5.62_0/assets/background.js`):
+           *   `ao = 35e3`  ·  `Wc(fn, e = ao - 5e3)`  ⇒ mỗi lệnh có **30 s** ngân sách
+           *   `sendInbox`: `const w = g ? ro(g) : "NO_TIMEOUT"; if (w === null)
+           *                return b({success:false, retryReason:"execute task timeout"})`
+           * ⇒ Trước 30 s, extension KHÔNG BAO GIỜ tự bỏ lệnh. Vậy khi ta bỏ chờ ở 2,5 s thì
+           *   lệnh VẪN ĐANG CHẠY bên trong extension — nó có thể thành công ở giây thứ 5, 20, 29.
+           * Đó là lý do log ghi "Ext quá hạn 114 · kiểm chứng thấy tin 69" (60 % tin ĐÃ đến nơi).
+           * ⇒ Câu chữ cũ ("Extension không phản hồi") là SAI SỰ THẬT: phải nói rõ đây là hạn chờ
+           *   CỦA TA và extension còn đang chạy. Không đổi nhánh quyết định (vẫn 'maybe' + kiểm
+           *   chứng nền, tuyệt đối không bắn lại) — chỉ đổi câu chữ cho khỏi bị đọc sai
+           *   thành "extension chết". */
+          return { ok: false, sent: 'maybe',
+            error: 'Hết hạn chờ CỦA TOOL sau ' + Math.round((Date.now() - extSendStartedAt) / 100) / 10
+              + 's (Extension tự có 30 s và VẪN ĐANG CHẠY) — không gửi thêm để tránh trùng' };
         }
         const errStr = 'Extension không gửi được' + (why ? ' (' + why + ')' : '');
         // Lệnh Ext là lệnh GỬI THẬT vào đúng thread: Facebook trả minh bạch 1545041 /
@@ -6056,8 +6112,16 @@
          *     lỗi ảnh. KHÔNG phải bằng chứng khách chết ⇒ không chốt ❌.
          *
          * Chỉ (B) mới được ghi sổ "FB từ chối". (A) và (C) giữ nguyên đường cũ. */
-        const _fbErrNum = Number((d && (d.fbErrorCode || d.error))
-          || (_ee && _ee.fbErrorCode) || 0) || 0;
+        /* [v1.93.8] SỬA LỖI CỦA CHÍNH BẢN 1.93.7: `Number(...)` bọc NGOÀI chuỗi `||` nên khi
+         * `d.error` là OBJECT thì `Number(object)` = NaN ⇒ `NaN || 0` = 0 ⇒ mã lồng
+         * `d.error.fbErrorCode` KHÔNG BAO GIỜ đọc được. Lấy số TRƯỚC, bọc Number SAU. */
+        const _fbErrNum = Number(
+          (d && d.fbErrorCode)
+          || (_ee && _ee.fbErrorCode)
+          || (d && typeof d.error === 'number' ? d.error : 0)
+          || (d && typeof d.code === 'number' ? d.code : 0)
+          || 0
+        ) || 0;
         const _whyStr = String(why || '');
         if (_fbErrNum === 3252001 || _fbErrNum === 1390008
             || /3252001|1390008/.test(_whyStr)) {

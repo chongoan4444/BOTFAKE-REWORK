@@ -349,3 +349,91 @@ getGlobalUserId(e){let t=to(e,["pageId","threadId","threadKey","isBusiness",
 ```
 
 `to()` chỉ copy 6 key rồi gán cứng `convId:null` ⇒ script gửi **giống hệt** app. Không sửa gì.
+
+## 9. Đào sâu: `ae.startCheck` và ngân sách 30 s (1.93.8)
+
+### 9.1 `startCheck` — nhánh `r = true` BỎ QUA KẾT QUẢ
+
+```js
+static startCheck(e, t, a = !0, r = !1) {          // e = pageId, t = hàm gửi
+  const s = () => ae.startCheck(e, t, a, !0);      // retry KHÔNG kèm cờ r
+  r ? (C.log("SWITCH_PROFILE_BUT_NOT_HANDLE_ERROR"),
+       new ae(e, a).init().then(()=>{}).catch(()=>{}).finally(t))   // ← kết quả bị bỏ
+    : (C.log("FIRST_TRY_DOING_TASK_WITHOUT_SWITCH_PROFILE"), t(s));
+}
+```
+
+`ae` = `ProfileSwitcher` (`self.ProfileSwitcher=ae`) — nó **đổi profile Facebook sang page**
+(`checkValidProfile()` đọc `business.facebook.com`, gọi `switchProfile`).
+
+| nơi gọi | có switch profile? |
+|---|---|
+| `case "SEND_COMMENT"` → `ae.startCheck(pageId, _, !0, !0)` | **CÓ** (và bỏ qua kết quả) |
+| `case "UPLOAD_INBOX_PHOTO"` → `ae.startCheck(_, D)` (rỗng) | **KHÔNG** |
+| `case "REPLY_INBOX_PHOTO"` | **KHÔNG** (`le(pageId).sendInbox`) |
+
+⇒ Câu `Ext: Không tìm được global_id để gửi` (150 lần trong log) thuộc nhánh **upload ảnh**,
+không phải nhánh gửi tin.
+
+### 9.2 Khi nào `init()` "im lặng thành công"
+
+```js
+async checkValidProfile() {
+  const {html, response} = await this.readMainPage();
+  if (response?.status >= 500 || response?.status === 429) { this.switchNoResponse = true; return; }
+  if (html) {
+    const {currentProfile, profiles} = await this.getProfileSetting(html);
+    if (this.confirmProfile && !currentProfile?.id) { this.switchNoResponse = true; return; }
+    ...
+  }
+}
+```
+
+`getProfileSetting` dùng `G(html, '{"require":…RelayPrefetchedStreamCache…')`. Nếu HTML không còn
+khối đó ⇒ `[]` ⇒ `currentProfile = {}` ⇒ `switchNoResponse = true; return` ⇒ **`switchResult`
+không bao giờ được gán** ⇒ `init()` resolve ⇒ `.then(()=>{})` ⇒ `.finally(t)` chạy `t(s)`.
+
+`Hh = new Set(["ok","not_needed","not_found"])` dùng để kiểm ở `$h` (đường *INVITE_LIKE_PAGE*),
+**không** áp cho `startCheck` ⇒ `startCheck` nuốt mọi kết quả.
+
+### 9.3 Ngân sách thời gian thật của extension = 30 s
+
+```js
+ao = 35e3
+Wc = (fn, e = ao - 5e3) => { ... r[a] = true; setTimeout(() => { r[a] = false }, e); fn(a); }
+ro = (n) => { ... if (r) { const s = ao - (now - a); return s > 0 ? s : null; } else return null; }
+sendInbox: const w = g ? ro(g) : "NO_TIMEOUT";
+           if (w === null) return b({success:false, retryReason:"execute task timeout"});
+```
+
+⇒ Trước **30 s**, extension **không bao giờ** tự bỏ lệnh. Script bỏ chờ ở **2,5 s**.
+
+**Đo trên 28 log:** câu `Extension không phản hồi` = **2 588 lần** — nhóm "không rõ" lớn thứ nhì.
+Và đo trước đó (bản 1.91.98): `Ext quá hạn 114 · kiểm chứng thấy tin 69` ⇒ **60 % tin ĐÃ đến nơi**.
+Nguyên nhân: ta bỏ chờ khi extension còn đang chạy.
+
+1.93.8 không đổi nhánh quyết định (vẫn `'maybe'` + kiểm chứng nền, tuyệt đối không bắn lại),
+chỉ sửa **câu chữ** cho đúng sự thật: *"Hết hạn chờ CỦA TOOL sau 2,5s (Extension tự có 30 s và
+VẪN ĐANG CHẠY)"*.
+
+### 9.4 Sửa lỗi của chính 1.93.7
+
+```js
+// SAI (1.93.7): Number() bọc ngoài chuỗi || ⇒ d.error là object ⇒ Number(obj)=NaN ⇒ NaN||0=0
+Number((d && (d.fbErrorCode || d.error)) || (_ee && _ee.fbErrorCode) || 0) || 0
+// ĐÚNG (1.93.8): lấy số trước, bọc Number sau
+Number((d&&d.fbErrorCode) || (_ee&&_ee.fbErrorCode)
+       || (typeof d.error === 'number' ? d.error : 0) || 0) || 0
+```
+
+Đối chứng 7 payload: `1545041 lồng` → `1545041` · `3252001 lồng/phẳng` → `3252001` ·
+`1390008 lồng` → `1390008` · `retryReason only` → `0` · `null` → `0`. **7/7 đúng.**
+
+Kiểm ngược quyết định:
+
+| payload | ghi sổ |
+|---|---|
+| `1545041`, `1545006`, `#100` | TỪ CHỐI |
+| `3252001`, `1390008` | CHẶN PAGE |
+| `1545012` (tạm thời) | **không ghi** — đúng, vì extension tự upload lại rồi gửi lại |
+| `execute task timeout`, `null` | **không ghi** |
