@@ -437,3 +437,87 @@ Kiểm ngược quyết định:
 | `3252001`, `1390008` | CHẶN PAGE |
 | `1545012` (tạm thời) | **không ghi** — đúng, vì extension tự upload lại rồi gửi lại |
 | `execute task timeout`, `null` | **không ghi** |
+
+## 10. `doc_id` — gốc thật của "batch nạp 0/0" (1.93.9)
+
+### 10.1 Chuỗi phụ thuộc
+
+```js
+// ① batch chặn ngay nếu thiếu doc_id
+class Ct { async init(){ if (!O.get(rt, st)) return Promise.reject(`Missing doc_id ${rt} or ${st}`); } }
+rt = "MessengerThreadlistWebGraphQLQuery"   st = "MessengerThreadlistQuery"
+
+// ② O = self.GraphQLDocId (class Ll) — CHỈ nạp bằng 2 đường
+constructor(){ this.docIdsMap = this.populateDocIdsMap(); }        // localStorage
+async getDocIdsFromLocalStorage(){ q.getItem("GraphQLDocId_docIdsMap"); }
+preloadDocIds(e){ ... await ee.preloadDocIds(e) ... }              // fetch HTML FB → bóc
+
+// ③ bóc thật sự (makeResourceMap) — CHỈ regex trên HTML
+let t = G(e,'"resource_map":');  t.length || (t = G(e,'"rsrcMap":'));
+Array.from(e.matchAll(/setResourceMap\(([^)]+), \[\]\)/g)) ...
+
+// ④ TTL 5 giờ
+kl = 3600*1e3*5     has() quá hạn ⇒ delete()
+```
+
+Script trước 1.93.9: `docIdsMap` **0** · `isFeatureReady` **0** · `"resource_map"` **0** ·
+`PRELOAD_DOC_IDS` **0** ⇒ `doc_id` chưa bao giờ có ⇒ `Ct.init()` luôn reject ⇒ `batch nạp 0/0`
+ở **mọi** log. Và `Ee` (dò lẻ) cũng dùng `O.get(rt,st)` / `O.get(ge)` ⇒ dò lẻ cũng hỏng theo.
+
+### 10.2 Tên doc_id thật (trích nguyên văn từ bundle)
+
+| hằng | giá trị | dùng cho |
+|---|---|---|
+| `rt` | `MessengerThreadlistWebGraphQLQuery` | **batch** + `findThread` |
+| `st` | `MessengerThreadlistQuery` | **batch** |
+| `Jt` | `PagesManagerInboxAdminAssignerRootQuery` | `Ee` nguồn ① |
+| `Zt` | `PagesManagerInboxQueryUtilCommItemHeaderMercuryQuery` | `Ee` nguồn ② |
+| `ge` | `BizInboxCustomerRelaySearchSourceQuery` | `Ee` nguồn ④ (tìm theo tên) |
+| `Da`/`Sa` | `MessengerThreadsWebGraphQLQuery` / `MessengerThreadsQuery` | LOAD_FACEBOOK_MESSAGES |
+| `ta` | `CometProfileSwitchMutation` | `switchProfile` (SEND_COMMENT) |
+
+`ia.inbox = [Jt, Zt]` ⇒ `isFeatureReady('inbox')` chỉ đòi 2 mã đầu.
+
+### 10.3 Cách A — bóc từ HTML đã có trong tay (không thêm request)
+
+Bọc `window.fetch` (đã có sẵn wrapper) → `res.clone().text()` → `harvestDocIdsFromHtml`.
+Bóc 3 dạng: `"resource_map":{…}`, `"rsrcMap":{…}`, `setResourceMap({…}, [])`.
+Chỉ nhận tên có trong bảng `DOCID_KEEP` (14 tên thật) hoặc kết thúc `GraphQLQuery`.
+Ghi qua `GraphQLDocId.set(name, value)` — hàm này tự lưu localStorage + TTL 5 giờ.
+
+**Đối chứng 5 kịch bản:**
+
+| HTML | kết quả |
+|---|---|
+| `"resource_map":{…2 mã thật…, "RácKhácQuery"}` | **+2**, rác **không** lưu, `docIdReady()` = **true** |
+| `"rsrcMap":{…doc_id…}` | **+1** |
+| `setResourceMap({…}, [])` | **+1** |
+| không có resource_map / chuỗi ngắn / `null` | **0**, không lỗi |
+| JSON hỏng | **0**, không crash |
+
+### 10.4 Cách B — hỏi extension, **mặc định TẮT**
+
+Không gửi thẳng `PRELOAD_DOC_IDS`: switch của extension 0.5.62 **không có case đó** (đã liệt kê
+86 case). Gửi thẳng = im lặng, và "im lặng" sẽ bị hiểu thành "không rõ" ⇒ sinh ⚠ (đúng bài học
+`BATCH_GET_GLOBAL_ID`).
+
+Nay dùng tên riêng `PRELOAD_DOC_IDS_CANDIDATE`, bật bằng
+`window.__botfakeTryPreloadDocIds__ = true`, và **luôn đọc kết quả**: nếu `docIdReady()` sai thì
+ghi rõ "extension không nạp được" chứ không coi là thành công.
+
+### 10.5 Phân biệt 2 nguyên nhân batch rỗng
+
+```js
+const whyNoList = docIdReady()
+  ? 'extension TRẢ LỜI nhưng không có data.threadsWithGlobalId (lệnh lạ/phiên bản khác)'
+  : 'THIẾU doc_id ⇒ extension reject "Missing doc_id" (chưa chạy được lần nào)';
+```
+
+Trước đây cả hai đều in `lỗi 0` nên **không thể** phân biệt.
+
+### 10.6 Cái CHƯA chứng minh được
+
+Chưa có HAR nào bắt response **HTML** — 12 HAR chỉ chứa API JSON. Vì vậy tôi **không** khẳng định
+cách A sẽ tìm ra `resource_map`. Điều đã chứng minh: nó **rẻ** (regex trên dữ liệu đã có, 0 request
+mới), **chỉ đọc** (không thể sinh tin trùng), và khi không tìm thấy thì **không ảnh hưởng** đường
+gửi nào.

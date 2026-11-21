@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.8-w200.119
+// @version      1.93.9-w200.120
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.8-W200.119'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.9-W200.120'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3378,6 +3378,24 @@
           if (isSend) { f = recFields(init.body); t0 = Date.now(); }
         } catch (e3) { isSend = false; }
         const p = origFetch.apply(this, arguments);
+        /* ═══ [v1.93.9] BÓC doc_id TỪ MỌI RESPONSE TEXT — KHÔNG THÊM REQUEST NÀO ═══
+         * `harvestDocIdsFromHtml` chỉ là regex trên chuỗi đã có trong tay. Đặt ở đây để mọi
+         * trang HTML (Pancake SPA, business.facebook.com, trang nội bộ) đều được quét.
+         * Chỉ đọc: không sửa response, không chặn, không gửi gì. */
+        try {
+          if (p && typeof p.then === 'function') {
+            p.then(function (res) {
+              try {
+                const ct = (res && res.headers && res.headers.get && res.headers.get('content-type')) || '';
+                if (!ct || /html|text|javascript/i.test(ct)) {
+                  res.clone().text().then(function (txt) {
+                    try { harvestDocIdsFromHtml(txt, 'net'); } catch (e9) { /* ignore */ }
+                  }, function () { /* ignore */ });
+                }
+              } catch (e8) { /* ignore */ }
+            }, function () { /* ignore */ });
+          }
+        } catch (e7) { /* ignore */ }
         if (isSend) {
           try {
             p.then(function (res) {
@@ -8740,6 +8758,201 @@
   // 1 lệnh/page thay vì dò từng chat. Chỉ đánh dấu "đã nạp" khi THÀNH CÔNG; lần
   // gọi hỏng/timeout được phép gọi lại ở lượt sau hoặc trước Pass 2, vì IndexedDB
   // của Extension liên tục được loadThread/gửi tay bổ sung thêm mapping mới.
+  /* ═══════════════════ [v1.93.9] DOC_ID — GỐC CỦA "batch nạp 0/0" ═══════════════════
+   * BẰNG CHỨNG (0.5.62_0/assets/background.js):
+   *   class Ct {                                  // BATCH_GET_GLOBAL_ID
+   *     async init(){ if (!O.get(rt, st)) return Promise.reject(`Missing doc_id ${rt} or ${st}`); ... }
+   *   }
+   *   rt = "MessengerThreadlistWebGraphQLQuery"   st = "MessengerThreadlistQuery"
+   *
+   * `O` = `self.GraphQLDocId` (class Ll). Nó CHỈ nạp doc_id bằng 2 đường:
+   *   ① constructor → populateDocIdsMap() → q.getItem("GraphQLDocId_docIdsMap")   (localStorage)
+   *   ② preloadDocIds() → fetch "business.facebook.com/latest/inbox/facebook?asset_id=…"
+   *      → makeResourceMap(html) → G(html,'"resource_map":') (hoặc '"rsrcMap":')
+   *      + setResourceMap\(([^)]+), \[\]\)
+   *   TTL: `kl = 3600*1e3*5` = **5 giờ** — quá hạn thì `has()` tự xoá.
+   *
+   * Script này trước đây: docIdsMap 0 · isFeatureReady 0 · "resource_map" 0 · KHÔNG gửi
+   * PRELOAD_DOC_IDS ⇒ doc_id chưa bao giờ có ⇒ BATCH_GET_GLOBAL_ID luôn reject
+   * "Missing doc_id" ⇒ đúng với `batch nạp 0/0` ở MỌI log.
+   * Và vì `Ee` (dò gid từng chat) cũng dùng `O.get(rt,st)` / `O.get(ge)`, đường dò LẺ cũng
+   * hỏng theo ⇒ 2 246 ca/lô `Ext: không gid`.
+   *
+   * Cách A dưới đây KHÔNG cần đăng nhập Facebook: chỉ regex trên HTML đã có trong tay.
+   * Toàn bộ khối này là đường CHỈ ĐỌC — không gửi tin, không thể sinh tin trùng. */
+
+  /* TÊN doc_id THẬT — trích nguyên văn từ 0.5.62_0/assets/background.js (không đoán).
+   *   rt = "MessengerThreadlistWebGraphQLQuery"                        → BATCH + findThread
+   *   st = "MessengerThreadlistQuery"                                  → BATCH
+   *   Jt = "PagesManagerInboxAdminAssignerRootQuery"                    → Ee nguồn ①
+   *   Zt = "PagesManagerInboxQueryUtilCommItemHeaderMercuryQuery"       → Ee nguồn ②
+   *   ge = "BizInboxCustomerRelaySearchSourceQuery"                     → Ee nguồn ④ (tìm theo tên)
+   *   Da = "MessengerThreadsWebGraphQLQuery" / Sa = "MessengerThreadsQuery" → LOAD_FACEBOOK_MESSAGES
+   *   ta = "CometProfileSwitchMutation"                                 → switchProfile (SEND_COMMENT)
+   *   ia.inbox = [Jt, Zt]  ⇒ `isFeatureReady('inbox')` chỉ đòi 2 mã này */
+  const DOCID_KEEP = {
+    MessengerThreadlistWebGraphQLQuery: 1,
+    MessengerThreadlistQuery: 1,
+    PagesManagerInboxAdminAssignerRootQuery: 1,
+    PagesManagerInboxQueryUtilCommItemHeaderMercuryQuery: 1,
+    BizInboxCustomerRelaySearchSourceQuery: 1,
+    MessengerThreadsWebGraphQLQuery: 1,
+    MessengerThreadsQuery: 1,
+    BizInboxCommentThreadListContainerQuery: 1,
+    BizInboxCommentDetailViewHeaderContainerQuery: 1,
+    InstagramMessageThreadsWebGraphQLQuery: 1,
+    InstagramMessageThreadItemsWebGraphQLQuery: 1,
+    InstagramMessageThreadItemsQuery: 1,
+    BizInboxSearchResultListContainerQuery: 1,
+    BizInboxSearchResultFacebookListQuery: 1,
+  };
+  const docIdStats = { seenHtml: 0, htmlWithMap: 0, saved: 0, loadedFromLs: 0, viaExtOk: 0, viaExtEmpty: 0 };
+  const DOCID_NAMES = DOCID_KEEP;   // giữ tên cũ cho chỗ dùng bên dưới
+
+  function docIdApi() {
+    const api = window.GraphQLDocId;
+    if (!api || typeof api.set !== 'function' || typeof api.has !== 'function') return null;
+    return api;
+  }
+  function docIdReady() {
+    const api = docIdApi();
+    if (!api) return false;
+    try {
+      return typeof api.isFeatureReady === 'function'
+        ? !!api.isFeatureReady('inbox')
+        : !!(api.has('MessengerThreadlistWebGraphQLQuery') || api.has('MessengerThreadlistQuery'));
+    } catch (e) { return false; }
+  }
+  /* CÁCH A — bóc {"resource_map":…} / {"rsrcMap":…} từ HTML BẤT KỲ.
+   * Danh sách tên cần lấy: ưu tiên bảng tĩnh DOCID_KEEP; nếu chưa biết tên thì gom theo
+   * hậu tố *GraphQLQuery* (doc_id thật của FB luôn có dạng đó). */
+  function harvestDocIdsFromHtml(html, where) {
+    if (!html || typeof html !== 'string' || html.length < 500) return 0;
+    if (!html.includes('resource_map') && !html.includes('rsrcMap') && !html.includes('setResourceMap(')) return 0;
+    docIdStats.seenHtml++;
+    const api = docIdApi();
+    if (!api) return 0;
+    let saved = 0;
+    const take = (name, val) => {
+      if (!name || !val) return;
+      const n = String(name), v = String(val);
+      if (!/GraphQLQuery|GraphQL|Query$/.test(n)) return;
+      let keep = false;
+      if (DOCID_KEEP[n]) keep = true;
+      else if (DOCID_NAMES && DOCID_NAMES[n]) keep = true;
+      else if (/GraphQLQuery$/.test(n)) keep = true;   // dạng chuẩn của FB
+      if (!keep) return;
+      try { api.set(n, v); saved++; } catch (e) { /* ignore */ }
+    };
+    // 1) khối JSON: "resource_map":{...}  ·  "rsrcMap":{...}
+    for (const key of ['"resource_map":', '"rsrcMap":']) {
+      let at = html.indexOf(key);
+      while (at > -1) {
+        const brace = html.indexOf('{', at + key.length - 1);
+        if (brace > -1) {
+          // quét ngoặc cân bằng, bỏ qua chuỗi
+          let depth = 0, inStr = false, esc = false, end = -1;
+          for (let i = brace; i < html.length && i < brace + 400000; i++) {
+            const c = html[i];
+            if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+            if (c === '"') { inStr = true; continue; }
+            if (c === '{') depth++;
+            else if (c === '}') { depth--; if (depth === 0) { end = i; break; } }
+          }
+          if (end > brace) {
+            try {
+              const obj = JSON.parse(html.slice(brace, end + 1));
+              Object.keys(obj).forEach((k) => {
+                const v = obj[k];
+                if (v && typeof v === 'object') take(k, v.value || v.doc_id || v.docId);
+                else take(k, v);
+              });
+            } catch (e) { /* khối hỏng — bỏ */ }
+          }
+        }
+        at = html.indexOf(key, at + key.length);
+      }
+    }
+    // 2) setResourceMap({...}, [])
+    try {
+      const re = /setResourceMap\((\{[\s\S]{0,200000}?\}),\s*\[\]\)/g;
+      let m;
+      while ((m = re.exec(html)) !== null) {
+        try {
+          const obj = JSON.parse(m[1]);
+          Object.keys(obj).forEach((k) => {
+            const v = obj[k];
+            if (v && typeof v === 'object') take(k, v.value || v.doc_id || v.docId);
+            else take(k, v);
+          });
+        } catch (e) { /* ignore */ }
+      }
+    } catch (e) { /* ignore */ }
+    if (saved) {
+      docIdStats.htmlWithMap++;
+      docIdStats.saved += saved;
+      try {
+        logLine('🧩 [doc_id] +' + saved + ' từ HTML (' + where + ') ⇒ '
+          + (docIdReady() ? 'ĐÃ ĐỦ, batch/dò-lẻ dùng được' : 'chưa đủ bộ cần thiết'));
+      } catch (e) { /* ignore */ }
+    }
+    return saved;
+  }
+  /* Nhận HTML từ mọi nguồn ta đã tải (không thêm request nào). */
+  function harvestDocIdsFromResponse(res) {
+    try {
+      if (!res) return 0;
+      const t = typeof res === 'string' ? res : (res.text || res.html || '');
+      return harvestDocIdsFromHtml(t, 'response');
+    } catch (e) { return 0; }
+  }
+  /* CÁCH B — hỏi extension nạp hộ. DÙNG TÊN RIÊNG, MẶC ĐỊNH TẮT.
+   * Lý do không gửi thẳng 'PRELOAD_DOC_IDS': switch của extension 0.5.62 KHÔNG có case đó
+   * (đã grep 86 case), nên gửi thẳng là rỗng mà không biết. Tên riêng buộc ta phải ĐỌC kết quả
+   * và không bao giờ được coi "không trả lời" là "đã nạp". */
+  function tryPreloadDocIdsViaExt(pid) {
+    if (!window.__botfakeTryPreloadDocIds__) return Promise.resolve(false);
+    const adapter = window.__ExtensionAdapter__;
+    if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(false);
+    if (!pid) return Promise.resolve(false);
+    return Promise.resolve()
+      .then(() => adapter.send({ type: 'PRELOAD_DOC_IDS_CANDIDATE', pageId: String(pid), isBusiness: false }, { timeout: 6000 }))
+      .then((res) => {
+        const ok = docIdReady();
+        if (ok) {
+          docIdStats.viaExtOk++;
+          try { logLine('🧩 [doc_id] extension có phản hồi (res=' + (res && res.success ? 'success' : 'không success')
+            + ') và doc_id ĐÃ ĐỦ ⇒ batch dùng được'); } catch (e) { /* ignore */ }
+        } else {
+          docIdStats.viaExtEmpty++;
+          try { logLine('🧩 [doc_id] extension KHÔNG nạp được (case lạ ⇒ nhiều khả năng extension bỏ qua)'
+            + ' — không tính là lỗi gửi, đường batch vẫn tắt'); } catch (e) { /* ignore */ }
+        }
+        return ok;
+      })
+      .catch(() => { docIdStats.viaExtEmpty++; return false; });
+  }
+  async function ensureDocIds(pid) {
+    if (docIdReady()) return true;
+    // ① localStorage do extension giữ (đọc thẳng, không đụng gì)
+    try {
+      const raw = window.localStorage && window.localStorage.getItem('GraphQLDocId_docIdsMap');
+      if (raw) {
+        const api = docIdApi();
+        const obj = JSON.parse(raw);
+        let n = 0;
+        Object.keys(obj || {}).forEach((k) => {
+          const v = obj[k] && (obj[k].value || obj[k]);
+          if (v && api && DOCID_KEEP[k]) { try { api.set(k, String(v)); n++; } catch (e) { /* ignore */ } }
+        });
+        if (n) { docIdStats.loadedFromLs += n; }
+      }
+    } catch (e) { /* ignore */ }
+    if (docIdReady()) return true;
+    // ② hỏi extension (mặc định tắt)
+    return tryPreloadDocIdsViaExt(pid);
+  }
+
   function requestBatchGlobalIds(pid, force) {
     if (!pid || typeof pid === 'object') return Promise.resolve(0);
     const pageId = String(pid || '').trim();
@@ -8748,7 +8961,12 @@
     if (batchGidFetchedPages[pageId]) return Promise.resolve(0);
     const adapter = window.__ExtensionAdapter__;
     if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(0);
-    const promise = Promise.resolve().then(() => adapter.send({
+    /* [v1.93.9] `Ct.init()` của extension reject ngay `Missing doc_id` nếu chưa nạp.
+     * Không bảo đảm doc_id thì mọi lần gọi batch đều vô ích ⇒ gọi đúng 1 lần trước. */
+    if (!docIdReady()) {
+      try { logLine('🧩 [doc_id] chưa có ⇒ batch sẽ bị extension từ chối "Missing doc_id"; thử nạp trước…'); } catch (e) { /* ignore */ }
+    }
+    const promise = Promise.resolve().then(() => ensureDocIds(pageId)).then(() => adapter.send({
       type: 'BATCH_GET_GLOBAL_ID',
       pageId: pageId,
       // Khớp payload app (@897543): app luôn kèm timeRangeMin. Gửi 0 = lấy mọi mốc,
@@ -8774,6 +8992,14 @@
        * Đường này CHỈ ĐỌC (không gửi tin) ⇒ nới nó không thể sinh tin trùng. */
       if (!Array.isArray(list)) {
         gidStats.batchFail++;
+        /* [v1.93.9] PHÂN BIỆT 2 NGUYÊN NHÂN — trước đây cả hai đều in "lỗi 0" nên không thể biết.
+         *   a) thiếu doc_id ⇒ extension reject "Missing doc_id …"  (KHÔNG BAO GIỜ chạy được)
+         *   b) extension trả success nhưng không có data.threadsWithGlobalId  (lệnh lạ)
+         * Hai nguyên nhân có cách sửa KHÁC NHAU ⇒ phải in ra. */
+        const whyNoList = docIdReady()
+          ? 'extension TRẢ LỜI nhưng không có data.threadsWithGlobalId (lệnh lạ/phiên bản khác)'
+          : 'THIẾU doc_id ⇒ extension reject "Missing doc_id" (chưa chạy được lần nào)';
+        try { logLine('🧩 [doc_id] batch rỗng — ' + whyNoList); } catch (e) { /* ignore */ }
         return 0;
       }
       if (!list.length) return 0;
