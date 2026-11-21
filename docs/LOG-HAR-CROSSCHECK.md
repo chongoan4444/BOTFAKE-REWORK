@@ -97,3 +97,46 @@ Theo log thật, dòng tổng kết của cơ chế "dò Ext cho ca FB từ ch�
 | 1.93.3 | ACK rejected ⇒ ❌ ngay, không vào gửi tay | 630 − 18 = 612 khớp tuyệt đối |
 | 1.93.4 | bỏ lượt đọc lại 45 s + ca đã chứng minh vắng mặt | 1 338 ca dò lại ⇒ 0 ca cứu |
 | 1.93.5 | `#551` ⇒ ❌ ngay, không dò Ext, không hậu kiểm 25 s, không gửi tay | HAR 0/6 · log 0/8 782 |
+
+## 6. "bất globalId" — tìm ra 2 lỗi code thật (1.93.6)
+
+### 6.1 đường nạp gid hàng loạt chưa bao giờ nạp được gì
+
+Mọi log đều in:
+
+```
+🧭 Chẩn đoán globalId: … batch nạp 0/0 mapping (lỗi 0) …
+```
+
+`batchReturned = 0` **và** `batchFail = 0` cùng lúc. Hai số chỉ cùng bằng 0 khi nhánh
+`!Array.isArray(list)` không chạy (nó cộng `batchFail`) **và** mảng cũng rỗng.
+
+Nguyên nhân: `requestBatchGlobalIds()` đặt `batchGidFetchedPages[pageId] = true` **trước** khi
+kiểm `list`, nên page bị khoá vĩnh viễn trong phiên — mọi lần sau `return Promise.resolve(0)`.
+Nhánh `.catch` (timeout 2 s) cũng khoá y như vậy. Chú thích của chính hàm ghi
+*"Chỉ đánh dấu 'đã nạp' khi THÀNH CÔNG"* — code làm ngược.
+
+Hệ quả: đường nạp gid **hàng loạt** (1 lệnh/page) chết ⇒ mọi chat phải dò lẻ từng con. Đây là
+lý do 2 246 ca/lô phải dò gid và đuôi lô bị kéo dài.
+
+Sửa: chỉ khoá page khi mảng trả về **khác rỗng**; timeout thì cho phép gọi lại.
+Đây là đường **chỉ đọc** ⇒ không thể sinh tin trùng.
+
+### 6.2 `HTTP 0` trong chẩn đoán là số ẢO
+
+0/28 log có `HTTP n` khác 0, dù cùng dòng đó in `cache 10976` / `cache 11796`. Điều kiện đếm
+cũ là `entry.gidSource === 'http'`, nhưng `gidSource` nhận `'conv'` khi đọc từ đối tượng hội
+thoại ⇒ gần như không bao giờ đúng ⇒ HTTP trả gid vẫn bị tính vào `cache`.
+
+⇒ Mọi kết luận trước đây kiểu "HTTP không trả gid" **không có căn cứ**. Sửa để đếm mọi nguồn
+(không phải cache). Chỉ sửa số đo.
+
+### 6.3 HAR xác nhận: không có nguồn gid mới để lấy
+
+- `GET …/messages` trả `"global_id": null` cho đúng ca bị `#551` (giải base64 entry #55
+  `batmesss.har`). Server **thật sự** không có gid cho ca đó.
+- `POST /customers/{psid}/update_global_id` chỉ **ghi** gid, không trả.
+- `pancake_exception_log` chỉ chứa gid app **đã có sẵn** từ `findGlobalIdForConv` — không phải
+  nguồn mới.
+- `profile_info` chỉ ghi thông tin cá nhân, không trả gid.
+- `api` + `socket` (làn dò gid) **không có** trong HAR (0 lần) — chưa có ground truth.

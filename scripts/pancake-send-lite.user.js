@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.5-w200.116
+// @version      1.93.6-w200.117
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.5-W200.116'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.6-W200.117'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -2838,7 +2838,15 @@
           entry.fetched = true;
           entry.httpState = entry.gid ? 'ok-gid' : 'ok-no-gid';
           entry.httpError = '';
-          if (entry.gid && entry.gidSource === 'http') gidStats.httpHit++;
+          /* [v1.93.6] ĐẾM ĐỦ MỌI NGUỒN — TRƯỚC ĐÂY CHỈ ĐẾM `gidSource === 'http'`.
+           * ĐO ĐƯỢC: 0/28 log có `HTTP n` khác 0, trong khi chính các dòng đó in
+           * `cache 10976` · `cache 11796` — tức HTTP ĐÃ trả gid nhưng bị tính vào cache.
+           * Xem đường gán: `gidSource` nhận 'conv' (khi đọc từ đối tượng hội thoại) và
+           * 'server-no-gid'/'http-unknown' — nên điều kiện `=== 'http'` gần như không bao
+           * giờ đúng. Chẩn đoán in 0 ⇒ mọi kết luận "HTTP không trả gid" đều VÔ CĂN CỨ.
+           * Nay: đếm mọi gid mà request HTTP này mang về (trừ khi nó chỉ đọc lại cache).
+           * Chỉ sửa SỐ ĐO, không đổi nhánh gửi/bù nào. */
+          if (entry.gid && entry.gidSource !== 'cache') gidStats.httpHit++;
           else if (!entry.gid) gidStats.httpNoGid++;
           noteGidHttpResult(true, 200, latencyMs);
         } else {
@@ -8612,12 +8620,28 @@
       timeRangeMin: 0,
     }, { timeout: 2000 })).then((res) => {
       delete batchGidPromises[pageId];
-      batchGidFetchedPages[pageId] = true;
       const list = res && res.success && res.data && res.data.threadsWithGlobalId;
+      /* ═══ [v1.93.6] ĐỪNG ĐÁNH DẤU "ĐÃ NẠP" KHI CHƯA NẠP ĐƯỢC GÌ ═══
+       * ĐO ĐƯỢC trên TOÀN BỘ 28 log (không có ngoại lệ):
+       *   `🧭 Chẩn đoán globalId: … batch nạp 0/0 mapping (lỗi 0) …`
+       * ⇒ `batchReturned = 0` và `batchFail = 0` cùng lúc. Hai số đó chỉ cùng bằng 0 khi
+       * nhánh `!Array.isArray(list)` KHÔNG chạy (nó cộng batchFail) và list cũng rỗng.
+       * Nghĩa là lệnh trả `success` nhưng KHÔNG có `data.threadsWithGlobalId` — và vì dòng
+       * ngay trên đã đặt `batchGidFetchedPages[pageId] = true` TRƯỚC khi kiểm, page bị khoá
+       * VĨNH VIỄN trong phiên: mọi lần gọi sau đều `return Promise.resolve(0)`
+       * (dòng `if (batchGidFetchedPages[pageId]) return`).
+       * Chú thích của chính hàm này ghi "Chỉ đánh dấu 'đã nạp' khi THÀNH CÔNG" — code làm
+       * NGƯỢC lại. Đây là đường nạp global_id HÀNG LOẠT duy nhất (1 lệnh/page thay vì dò
+       * từng chat), nên khoá nó = mọi chat sau phải dò lẻ từng con.
+       * Nay: chỉ khoá khi THẬT SỰ nhận được danh sách khác rỗng. Lỗi/không có dữ liệu thì
+       * lần sau còn gọi lại được (batchGidPromises vẫn chống gọi trùng trong 1 thời điểm).
+       * Đường này CHỈ ĐỌC (không gửi tin) ⇒ nới nó không thể sinh tin trùng. */
       if (!Array.isArray(list)) {
         gidStats.batchFail++;
         return 0;
       }
+      if (!list.length) return 0;
+      batchGidFetchedPages[pageId] = true;
       gidStats.batchReturned += list.length;
       let applied = 0;
       list.forEach((it) => {
@@ -8633,9 +8657,11 @@
       }
       return applied;
     }).catch(() => {
+      /* [v1.93.6] Timeout/lỗi mạng KHÔNG phải "đã nạp xong" — xem chú thích đầu hàm.
+       * Trước đây nhánh này cũng khoá page vĩnh viễn ⇒ một lần Ext quá hạn 2 s là cả lô
+       * mất luôn đường nạp global_id hàng loạt. */
       gidStats.batchFail++;
       delete batchGidPromises[pageId];
-      batchGidFetchedPages[pageId] = true;
       return 0;
     });
     batchGidPromises[pageId] = promise;
