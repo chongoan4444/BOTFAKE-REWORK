@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.10-w200.121
+// @version      1.93.11-w200.122
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.10-W200.121'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.11-W200.122'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3194,7 +3194,18 @@
     try {
       const res = await adapter.send(payload, { timeout: 35000 });
       if (res && res.success) {
-        return { ok: true, id: (res.data && (res.data.timestamp || res.data.id)) || '' };
+        /* [v1.93.11] HỢP ĐỒNG THẬT CỦA `SEND_COMMENT_SUCCESS` (0.5.62, case"SEND_COMMENT"):
+         *   e.port.postMessage({type:"SEND_COMMENT_SUCCESS", taskId:I,
+         *                        messageId:b.message_id, timestamp:b.timestamp})
+         * và `Te.send()` trả `{success:!0, message_id: c.data.comment_create.feedback_comment_edge.node.legacy_fbid, timestamp: …}`.
+         * ⇒ trường là **`messageId`**, KHÔNG phải `id`. Trước bản này đọc `timestamp || id`
+         *   ⇒ `timestamp` là số mili giây (không phải id tin) và `id` không tồn tại ⇒
+         *   `res.data.id` LUÔN rỗng. Không ảnh hưởng phán quyết (vẫn `ok:true`), nhưng mất
+         *   id để đối chiếu lịch sử về sau. */
+        const _dd = (res.data && typeof res.data === 'object') ? res.data : {};
+        /* `res.convId/globalUserId` cũng có trong payload nhưng KHÔNG dùng để chốt đã tới —
+         * giữ nguyên đường "success ≠ đã tới" của 1.93.2 (đọc lại lịch sử mới ✅). */
+        return { ok: true, id: (_dd.messageId || _dd.message_id || _dd.id || '') || '' };
       }
       /* [v1.93.8] `SEND_COMMENT_FAILURE` của extension KHÔNG có trường `error`
        * (`e.port.postMessage({type:"SEND_COMMENT_FAILURE",taskId})` — nhánh .catch) hoặc
@@ -4402,10 +4413,22 @@
           //     FAILURE tạm thời ở lần 1 (hoặc WebSocket loadThread đang cuộn gần tới). Vì vậy nghỉ
           //     250ms, kiểm tra lại WebSocket cache rồi thử lại GET_GLOBAL_ID_FOR_CONV đúng 1 lần trước
           //     khi kết luận extFinderRespondedNoGid = true.
-          const callExtFinderOnce = () => Promise.resolve().then(() => adapter.send(
-            Object.assign({ type: 'GET_GLOBAL_ID_FOR_CONV' }, finderPayload),
-            { timeout: extWaitMs }
-          ));
+          /* ═══ [v1.93.11] BẢO ĐẢM doc_id TRƯỚC KHI DÒ GID ═══
+           * `Ee.getGlobalIdFromInbox()` (0.5.62) cần doc_id ở CẢ 4 nguồn:
+           *   ① `O.get(Jt)`  PagesManagerInboxAdminAssignerRootQuery
+           *   ② `O.get(Zt)`  PagesManagerInboxQueryUtilCommItemHeaderMercuryQuery (+ cquick_token)
+           *   ③ `O.get(rt,st)` MessengerThreadlist…Query  ⇒ findThread()
+           *   ④ `O.get(ge)`   BizInboxCustomerRelaySearchSourceQuery ⇒ tìm theo TÊN
+           * Thiếu doc_id ⇒ cả 4 nguồn chết ⇒ `Ee.init()` reject KHÔNG LÝ DO
+           * ⇒ đúng hình dạng "Ext: không gid" (2 246 ca/lô).
+           * Trước bản này `ensureDocIds()` CHỈ được gọi trong `requestBatchGlobalIds`.
+           * Nay gọi đúng 1 lần trước lệnh dò (idempotent, chỉ đọc, 0 request mới). */
+          const callExtFinderOnce = () => Promise.resolve()
+            .then(() => (docIdReady() ? null : ensureDocIds(finderPayload.pageId).catch(() => null)))
+            .then(() => adapter.send(
+              Object.assign({ type: 'GET_GLOBAL_ID_FOR_CONV' }, finderPayload),
+              { timeout: extWaitMs }
+            ));
           callExtFinderOnce().then(async (res) => {
             let val = (res && res.success && res.data && res.data.globalId
               && String(res.data.globalId) !== badGid) ? String(res.data.globalId) : '';

@@ -588,3 +588,74 @@ Pancake ⇒ 4 chuỗi đó **không bao giờ** xuất hiện. Làm sẽ là cod
 
 ⇒ Đường gửi Facebook mà script chạm = **2/5**: `ee.sendInbox` (messaging/send) và
 `Te.send` (GraphQL comment).
+
+## 12. Bảng tổng hợp toàn bộ kết luận về extension 0.5.62 (1.93.9 → 1.93.11)
+
+### 12.1 ĐÃ ÁP VÀO SCRIPT
+
+| # | phát hiện | nguồn extension | phiên bản |
+|---|---|---|---|
+| 1 | `Ct.init()` reject `Missing doc_id` ⇒ batch chưa từng chạy | `if(!O.get(rt,st)) return Promise.reject(...)` | 1.93.9 |
+| 2 | `preloadDocIds` bóc `"resource_map"`/`"rsrcMap"`/`setResourceMap(` | `makeResourceMap` | 1.93.9 |
+| 3 | TTL doc_id **5 giờ** (`kl = 3600*1e3*5`) | `Ll.has()` | 1.93.9 |
+| 4 | 14 tên doc_id THẬT (rt/st/Jt/Zt/ge/Da/Sa…) | khai báo hằng | 1.93.9 |
+| 5 | `d` lỗi là **CHUỖI JSON** ⇒ `_fbErrNum` luôn 0 | 28 log, 2 hình dạng | 1.93.10 |
+| 6 | `canRetryUsingSocket` chưa từng đọc; tách `1545012` lần 2 | `getErrorHandler` | 1.93.10 |
+| 7 | `ensureDocIds()` **chưa** được gọi ở đường **dò gid** (chỉ ở batch) | `Ee.getGlobalIdFromInbox` cần 4 nguồn | 1.93.11 |
+| 8 | `SEND_COMMENT_SUCCESS` trả `messageId`, script đọc `timestamp\|\|id` ⇒ rỗng | `case"SEND_COMMENT"` | 1.93.11 |
+
+### 12.2 ĐÃ ĐỌC — KHÔNG CẦN SỬA
+
+| # | phát hiện | lý do |
+|---|---|---|
+| 1 | `success` có thể sinh từ `error_payload` (`isResponseSuccess` kiểm `error_payload` TRƯỚC `actions[0].message_id`; `A&&B\|\|C` khiến `undefined\|\|error_payload` = truthy) | Script đã KHÔNG tin `res.success` từ 1.93.2 (⚠ + đọc lại lịch sử) ⇒ đã chặn sẵn |
+| 2 | `makeParsable` chỉ bóc `for(;;);`, không bóc `while(1);` | Mọi endpoint script gọi đều trả JSON của Pancake; extension tự parse |
+| 3 | `se.buildHeaders()` rỗng nếu HTML thiếu `MercuryServerRequestsConfig` | Phía extension; script không gửi request Facebook |
+| 4 | `generateUsid()` trả `null` | Idempotency do `offline_threading_id` + `message_id` đảm nhiệm; script đã gửi đúng |
+| 5 | `sendInbox` retry đệ quy (restartInbox / reuploadPhotos) — 1 lệnh app → N POST | Chỉ làm **tăng** khả năng tới; script đã chờ 2,5 s + kiểm chứng |
+| 6 | `Wc` đặt `setTimeout(30 s)` rỗng ruột | Chỉ là dấu mốc; script đã biết ngân sách 30 s |
+| 7 | `ot()` dedupe `preloadDocIds` (20 s) | Có lợi — script gọi idempotent |
+| 8 | `Te.send()` `catch` trả `{success:!1}` **rỗng** (mất lý do) | Script đã xử lý `'maybe'` + không gửi lại |
+| 9 | `Lm.aquire()` gõ sai | Chỉ ảnh hưởng `Am` (Zalo) |
+
+### 12.3 ĐÃ LOẠI TRỪ (không thể chạm máy)
+
+| đường | lý do |
+|---|---|
+| `Bm` — `m.facebook.com/messages/send/` | chỉ vào qua `.catch(km)` khi `attachmentType` **lạ**; 7 loại đều xử lý trước |
+| `Gl` — `m.facebook.com/a/comment.php` | chỉ dựng từ `SEND_STICKER_COMMENT` — script **không** gửi (grep = 0) |
+| Instagram / LINE / Zalo / lịch hẹn / livestream (~23 class) | script không gửi lệnh tương ứng |
+
+### 12.4 TỪ CHỐI LÀM (có lý do đo được)
+
+**Dùng 4 dấu hiệu "page bị chặn" của `Xc` làm sổ chặn page.**
+Script **không bao giờ** fetch Facebook (22 lần `apiBase()`, 4 lần `business.facebook.com` đều là
+**chú thích**) ⇒ `harvestDocIdsFromHtml` chỉ thấy HTML Pancake ⇒ 4 chuỗi đó không bao giờ xuất
+hiện. Làm sẽ là code chết.
+
+### 12.5 CÒN NGỎ (cần dữ liệu thật, không sửa được bằng suy luận)
+
+| # | vấn đề | vì sao chưa sửa |
+|---|---|---|
+| 1 | `__ExtensionAdapter__` bọc `success` thế nào, `error` là object hay chuỗi | **Không có trong repo** (thuộc build app Pancake) |
+| 2 | `ctx.loggedIn` của `Oc.listen()` không thấy phép gán nào trong bundle | Có thể gán động; chưa xác nhận được |
+| 3 | `ACK_HOLD_CEIL_MS = 6000` đã bị chạm trần (min ACK 4 192 ms, p50 9 090–10 619 ms, 100 % là "muộn") | Sửa = **nới** hạn chờ ⇒ trái nguyên tắc "không nới đường sinh tin trùng" |
+| 4 | `1545012` lần 2 = "hết đường" hay "từ chối hẳn" | Extension không nói rõ; chỉ đếm, không chốt |
+| 5 | Sổ chặn upload 7 ngày **theo page** | Chưa có log nào cho thấy `3252001`/`1390008` (đo 28 log = **0**) |
+| 6 | Nâng hạn chờ tool 2,5 s → gần 30 s | Chưa có `p90` riêng của làn Ext trong lô mới |
+
+### 12.6 Đính chính một kết luận SAI của tôi
+
+Tôi từng nói: *"`Vt` đọc `convName` nhưng khai báo `customerName` ⇒ `allowSearchByName` luôn
+undefined"*. Đọc lại `findThread` cho thấy **sai**:
+
+```js
+let I = x.find(w => { …
+  if (a) { const S = …messaging_actor.name; return S.includes(a) } });   // ← lượt CHÍNH dùng `a`
+!I && a && bn(this.pageId) && (I = x.find(…))                            // ← `bn` chỉ gate lượt PHỤ
+```
+
+`customerName` được dùng ở lượt **chính**; `bn()` chỉ chặn lượt **phụ** (thử lại sau khi danh sách
+đã tải). Và `getGlobalIdFromInbox` truyền `customerName: this.customerName` — đúng tham số.
+
+⇒ Không sửa gì. Ghi lại để lần sau không "sửa" theo kết luận sai này.
