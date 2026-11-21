@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.92.66-w200.112
+// @version      1.93.1-w200.112
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.92.66-W200.112'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.1-W200.112'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3510,6 +3510,12 @@
         }
         // BÁO RÕ KẾT QUẢ THẬT — không bao giờ "báo gửi" xong im lặng khi request đã bị từ chối.
         // Bù ĐÚNG 1 lần/kênh qua kênh CHƯA thử (Ext → Socket — đúng plan của app).
+        /* [v1.93.1] NGUỒN THỨ HAI của "FB đã báo không nhận": API từ chối dứt khoát.
+         * Log 21/11: 4 ca còn lại trong nhóm bù oan đi đúng đường này — API trả "(#551) Người này
+         * hiện không có mặt", vẫn được bù Socket rồi Ext, rồi đánh ✅. Chỉ ghi sổ khi lỗi là
+         * DỨT KHOÁT (`isDefinitiveNotSent` — hàm có sẵn: #551 / ngoài 24h / #10 kiểm soát thread
+         * / #100 không tồn tại). Lỗi tạm thời KHÔNG ghi ⇒ vẫn bù bình thường như cũ. */
+        if (isDefinitiveNotSent(msg)) noteFbRejected(conv.id, 'API từ chối: ' + clip(msg, 70));
         logLine('⚠ ' + nm + ' — API từ chối (' + clip(msg, 90) + ')'
           + (win ? ' — ngoài cửa sổ 24h' : ''));
         scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + clip(msg, 90) + ')', ['api'],
@@ -5001,6 +5007,9 @@
           if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
           const nm1 = conv.name || conv.id;
           sendDiag.sockLateRejected = (sendDiag.sockLateRejected || 0) + 1;
+          /* [v1.93.1] ĐÂY LÀ BẰNG CHỨNG MẠNH NHẤT TRONG CẢ LƯỢT: FB trả lời trực tiếp rằng tin
+           * CHƯA ĐI. Ghi lại để cổng chứng minh vắng mặt không bù vào ca này lần nữa. */
+          noteFbRejected(conv.id, 'ACK muộn = FB từ chối (' + Math.round(latencyMs) + 'ms)');
           logFailGrouped(nm1, 'ACK muộn = FB TỪ CHỐI (' + Math.round(latencyMs) + 'ms sau khi gửi) — tin chưa đi, bù 1 lần', '🔁', conv.id);
           scheduleBuRetry(conv, text, photo, nm1, 'Socket bị FB từ chối (ACK muộn)', ['socket'],
             { ambiguous: false, via: 'socket', sentAt: Date.now() - Math.max(0, latencyMs) });
@@ -9083,6 +9092,33 @@
   }
   const verifyStats = { found: 0, held: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP (held = giữ ⚠, không bắn lại)
   const sockRescueStats = { tried: 0 }; // [v1.92.37] số ca đã chứng minh vắng mặt ⇒ gửi cứu 1 lần
+  /* ═══ [v1.93.1] FB ĐÃ BÁO "KHÔNG NHẬN ĐƯỢC" THÌ KHÔNG BÙ NỮA ═══
+   * ĐO ĐƯỢC trên log 21/11 19:44 (lô 4 281 chat, CÓ sổ kiểm chứng 10 717 dòng):
+   *   • 573 ca có dòng `🔁 ACK muộn = FB TỪ CHỐI (…) — tin chưa đi`   ← FB NÓI RÕ chưa nhận
+   *   • 577 ca có dòng `🛟 … ⇒ GỬI CỨU 1 lần qua Extension`
+   *   • GIAO NHAU: 573/577 — tức gần như TOÀN BỘ ca bị bù là ca FB đã báo không nhận.
+   * Chuỗi sự kiện mỗi ca (lấy thẳng từ sổ kiểm chứng):
+   *   1. Socket bắn   → ⚠ "không có ACK"
+   *   2. +12 s        → 🔁 "ACK muộn = FB TỪ CHỐI — tin CHƯA ĐI"
+   *   3. +vài s       → 🛟 "hội thoại KHÔNG có tin (chứng minh vắng mặt)"   ← đúng, vì nó chết
+   *   4.              → ⏳ "đang bù qua Extension"  ⇒ bù vào ca ĐÃ BIẾT LÀ CHẾT
+   *   5.              → ✅ "đánh dấu ĐÃ TỚI NƠI qua ext"  ⇒ tự mâu thuẫn với bước 2
+   * Nguyên nhân: `socksProof === 'absent'` chỉ nói "hội thoại không đổi". Nó KHÔNG phân biệt
+   *   (a) kênh gửi còn sống, khách chưa nhận  → bù là ĐÚNG
+   *   (b) FB đã trả lời dứt khoát "không nhận được" → bù là VÔ ÍCH (và sinh ✅ sai)
+   * Nay tách (b) ra bằng một sổ riêng, ghi tại đúng chỗ FB trả lời từ chối.
+   * AN TOÀN: chỉ THÊM một điều kiện DỪNG. Không nới bất kỳ điều kiện gửi nào, không đổi
+   * cổng chứng minh vắng mặt, không đổi số lần gửi của bất kỳ ca nào khác. Ca bị chặn bù
+   * vẫn được chốt ❌ + vào danh sách gửi tay y như ca ❌ bình thường (không im lặng mất tin). */
+  const fbRejectedIds = new Map(); // convId → { at, why } FB đã trả lời dứt khoát "chưa nhận được"
+  function noteFbRejected(convId, why) {
+    if (!convId) return;
+    try { fbRejectedIds.set(String(convId), { at: Date.now(), why: String(why || '') }); } catch (e) { /* ignore */ }
+  }
+  function isFbRejected(convId) {
+    try { return !!(convId && fbRejectedIds.has(String(convId))); } catch (e) { return false; }
+  }
+  const fbRejectStats = { blockedBu: 0 }; // số lần chặn được 1 lần bù vô ích
   /* [v1.92.37] DANH SÁCH GỬI TAY — mọi chat kết thúc ở ⚠ ("không rõ"): máy KHÔNG dám nói đã gửi.
    * Trước đây những ca này chỉ nằm im trong sổ ⚠, người dùng không biết chat nào cần bấm tay.
    * Nay gom lại, in ở 💾 .txt và đếm ở dòng TỔNG HỢP. Không gửi gì thêm — chỉ để người đọc. */
@@ -9519,6 +9555,9 @@
             ? ' | 🔎 Kiểm chứng ACK: đã đến nơi ' + verifyStats.found + ' · giữ ⚠ (không bắn lại) ' + verifyStats.held
               + ' · không kiểm chứng được ' + verifyStats.unknown
               + (sockRescueStats.tried ? ' · 🛟 chứng minh vắng mặt ⇒ gửi cứu 1 lần ' + sockRescueStats.tried : '')
+              /* [v1.93.1] Cổng mới phải TỰ KHAI. Số này càng lớn thì càng nhiều lần bù vô ích
+               * đã chặn được (log 21/11: 577 ca bù, 573 trong đó là ca FB đã báo không nhận). */
+              + (fbRejectStats.blockedBu ? ' · 🚫 FB báo không nhận ⇒ KHÔNG bù ' + fbRejectStats.blockedBu + ' ca (chốt ❌, vào gửi tay)' : '')
             : '')
           + ((sendDiag.buProofGated || sendDiag.buProofPresent || sendDiag.buProofCancelled)
             ? ' | 🛡 Cổng chống lặp: chặn bù mù ' + sendDiag.buProofGated + ' ca · tin ĐÃ tới (hủy bù) ' + sendDiag.buProofCancelled
@@ -10642,6 +10681,30 @@
         if (socksProof === 'absent' && !hasExtNow) {
           logFailGrouped(nm, 'kiểm chứng: hội thoại KHÔNG có tin nhưng KHÔNG còn kênh gửi (Extension chưa nối) — GIỮ ⚠, vào danh sách gửi tay', '🔎', conv.id);
         }
+        /* [v1.93.1] FB ĐÃ BÁO KHÔNG NHẬN ⇒ KHÔNG GỬI CỨU.
+         * Log 21/11 19:44: 573/577 ca "chứng minh vắng mặt ⇒ gửi cứu" chính là ca FB vừa trả
+         * lời "từ chối nhận tin". Bù vào đó không cứu được tin nào — nó chỉ sinh thêm một lần
+         * gửi chắc chắn thất bại, rồi tự đánh ✅ qua ext (xem sổ: sau ✅ ext KHÔNG có dòng nào).
+         * Nay: chốt ❌ + vào danh sách gửi tay, KHÔNG bù. Người dùng vẫn thấy chat này. */
+        if (socksProof === 'absent' && isFbRejected(conv.id)
+            && myRun === runSeq && !state.stopRequested
+            && !deliveredIds[conv.id] && !finalFailedIds[conv.id]) {
+          fbRejectStats.blockedBu = (fbRejectStats.blockedBu || 0) + 1;
+          const _info = fbRejectedIds.get(String(conv.id)) || {};
+          /* Dùng ĐÚNG hàm chốt trạng thái có sẵn (nó tự trừ ⚠ rồi cộng ❌, tự chuyển nhóm, tự
+           * vẽ lại bảng). Không tự sửa `summaryCounters` bằng tay — đó là cách sinh lệch sổ. */
+          try { window.__botfakeTrackStatus__(conv.id, 'fail'); } catch (eTk) {
+            if (!finalFailedIds[conv.id]) { finalFailedIds[conv.id] = true; summaryCounters.fail++; }
+            if (uncertainIds[conv.id]) { delete uncertainIds[conv.id]; summaryCounters.unsure = Math.max(0, summaryCounters.unsure - 1); }
+          }
+          /* `__botfakeTrackStatus__(..., 'fail')` GỠ chat khỏi danh sách gửi tay (vì ❌ là kết
+           * luận chắc chắn). Nhưng ở CA NÀY ta muốn người dùng thấy: FB báo không nhận, khách
+           * nhiều khả năng đã chết ⇒ vẫn đưa vào danh sách để họ tự quyết. */
+          noteManualResend(conv.id);
+          logFailGrouped(nm, 'FB đã báo KHÔNG NHẬN ĐƯỢC (' + (String(_info.why || '').slice(0, 70) || 'từ chối nhận tin')
+            + ') ⇒ KHÔNG gửi cứu — chốt ❌, vào danh sách GỬI TAY', '🚫', conv.id);
+          return;
+        }
         if (socksProof === 'absent' && hasExtNow && myRun === runSeq && !state.stopRequested
             && !deliveredIds[conv.id] && !finalFailedIds[conv.id]) {
           sockVerifyFired[conv.id] = runSeq; // khoá: mỗi chat chỉ được cứu 1 lần / lượt
@@ -11384,6 +11447,8 @@
     verifyStats.found = 0; verifyStats.held = 0; verifyStats.unknown = 0;
     try {
       manualResendList.length = 0; sockRescueStats.tried = 0;
+      try { fbRejectedIds.clear(); } catch (eFbr) { /* ignore */ }
+      fbRejectStats.blockedBu = 0;
       /* [v1.92.66] PHẢI xoá cả hai chỉ mục — nếu không, lần note lại CÙNG chat ở lượt sau sẽ bị
        * `manualResendIds.has()` chặn (bỏ sót chat cần gửi tay) hoặc `dropManualResend()` xoá
        * nhầm vị trí. Đây là bẫy im lặng: chỉ lộ ra khi chạy 2 lượt liên tiếp trên cùng máy. */
