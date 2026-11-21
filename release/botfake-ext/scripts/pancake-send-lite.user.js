@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.1-w200.112
+// @version      1.93.2-w200.113
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.1-W200.112'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.2-W200.113'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5874,7 +5874,31 @@
             }
           } catch (e) { /* ignore */ }
         }
-        return { ok: true, id: (res.data && (res.data.timestamp || res.data.convId)) || '', sendBy: 'extension', sent: true };
+        /* ═══ [v1.93.2] `success` CỦA EXTENSION KHÔNG PHẢI BẰNG CHỨNG TIN ĐÃ TỚI ═══
+         * ĐO ĐƯỢC trên log 21/11 20:28 (lô 4 271 chat, bản 1.93.1, có sổ kiểm chứng 11 035 dòng):
+         *   • 554 ca `🛟 … ⇒ GỬI CỨU 1 lần qua Extension` → 554 ca `✅ đánh dấu ĐÃ TỚI NƠI qua ext`
+         *   • 0 dòng `🧯 Ext quá hạn` · 0 `Extension không gửi được` · 0 `bù không được`
+         *   • 0 lần nào đọc lại lịch sử cho các ca đó
+         *   • độ trễ 🛟 → ✅ p50 613 ms (mà ngay trước đó cổng vừa ĐO "hội thoại KHÔNG có tin")
+         * Người dùng mở Pancake kiểm 3 ca mẫu (Phạm Lí, Nguyễn Quý, Thiểm Nga): KHÔNG có tin.
+         * ⇒ `res.success` chỉ nói "Extension nhận lệnh và không báo lỗi", KHÔNG nói khách đã nhận.
+         *
+         * NAY: nhánh success đi ĐÚNG đường của nhánh timeout bên dưới — đánh ⚠ "chưa xác nhận",
+         * đăng ký đọc lại lịch sử; thấy đúng tin ⇒ mới ✅; hết lượt đọc mà không thấy ⇒ chốt ❌
+         * và KHÔNG đưa vào danh sách gửi tay (chốt của người dùng: "chặn là chặn").
+         *
+         * KHÔNG đổi số lệnh gửi của bất kỳ ca nào: ca này KHÔNG bị bắn lại lần 2 — chỉ khác chỗ
+         * ghi nhận kết quả (⚠ chờ kiểm chứng thay vì ✅ ngay). Đây là điều kiện CHẶT HƠN. */
+        /* KHÔNG gọi noteExtSendOutcome lần nữa: ngay phía trên (dòng `if (res && res.success)`) đã
+         * gọi 1 lần rồi. Gọi 2 lần ⇒ `fastStreak` tăng gấp đôi ⇒ làn Ext tự nới 2× nhanh hơn thiết
+         * kế — đúng loại lỗi "Ext nhanh mà cứu 0" mà 1.92.45 vừa vá. */
+        extTimeoutStats.claimedUnverified++;
+        if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt, 1, false, 0, true);
+        return {
+          ok: false, sent: 'maybe', sendBy: 'extension', extClaimedSuccess: true,
+          id: (res.data && (res.data.timestamp || res.data.convId)) || '',
+          error: 'Extension báo success — CHƯA xác nhận tin đã tới (đang đọc lại lịch sử, không gửi lại)',
+        };
       }
       if (res && res.success === false) {
         // Trong __ExtensionAdapter__.send (@715835), khi setTimeout hết giờ nó trả về { success: false, data: null }
@@ -9272,7 +9296,10 @@
     verifyPendingCount.ext = 0;
     verifyPendingCount.uncertain = 0;
   }
-  const extTimeoutStats = { timeout: 0, skipped: 0, found: 0, notFound: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP
+  /* [v1.93.2] `claimedUnverified` = số ca Extension báo success nhưng CHƯA có bằng chứng tin đã
+   * tới (trước đây những ca này được đánh ✅ ngay). `notFound` = đã đọc lại lịch sử hết lượt mà
+   * KHÔNG thấy tin ⇒ chốt ❌. `unknown` = không đọc được lịch sử ⇒ giữ ⚠ + gửi tay (không chốt oan). */
+  const extTimeoutStats = { timeout: 0, skipped: 0, found: 0, notFound: 0, unknown: 0, claimedUnverified: 0, claimedDenied: 0 }; // theo lượt — in ở dòng TỔNG HỢP
   let bgWatchdogTimer = null;
   // ⚡ [FIX-5] Với bắn-nhả 192 slot, đuôi hàng đợi retry Socket/Ext có thể chờ >90s khi lô lớn.
   // 180s đủ dung sai — không chốt ⚠ oan khi lane còn việc thật.
@@ -9580,6 +9607,9 @@
             : '')
           + ((extTimeoutStats.timeout || extTimeoutStats.skipped || extTimeoutStats.found || extTimeoutStats.notFound || extTimeoutStats.unknown)
             ? ' | 🧯 Ext quá hạn ' + extTimeoutStats.timeout + ' · kiểm chứng thấy tin ' + extTimeoutStats.found + ' · chưa thấy trong lịch sử ' + extTimeoutStats.notFound + ' · không kiểm chứng được ' + extTimeoutStats.unknown + ' · bỏ qua lúc Ext quá tải ' + extTimeoutStats.skipped
+              + (extTimeoutStats.claimedUnverified
+                ? ' | 🔍 Ext báo success nhưng CHƯA xác nhận ' + extTimeoutStats.claimedUnverified + ' ca · đọc lại lịch sử: thấy tin ' + extTimeoutStats.found + ' · KHÔNG thấy ⇒ chốt ❌ ' + extTimeoutStats.claimedDenied + ' ca (không gửi tay)'
+                : '')
               + ' · phản hồi MUỘN (đã tính ✅) ' + extLateStats.ok + ' · muộn-mà-lỗi ' + extLateStats.fail
               + ' · im lặng hẳn ' + extLateStats.silent
             : '')
@@ -10095,6 +10125,16 @@
           buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
           // [v1.92.52] noAudit = true: markDelivered() ngay trên đã ghi ✅ vào sổ cho cùng lần gửi này.
           logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅', conv.id, true);
+        } else if (r && r.sent === 'maybe' && r.extClaimedSuccess) {
+          /* ═══ [v1.93.2] EXT BÁO `success` KHI BÙ: KHÔNG CHỐT ✅ ═══
+           * Đây chính là đường sinh ra 554 ca ✅ giả của lô 21/11 20:28: r.ok=true ⇒
+           * markDelivered ⇒ ✅ + `dropManualResend()` ⇒ chat biến mất khỏi danh sách gửi tay
+           * dù chưa có một bằng chứng nào là khách đã nhận.
+           * Nay: giữ ⚠ "chưa xác nhận" + ghi sổ `extClaimSuccess` để lượt đọc lịch sử quyết định
+           * (đã đăng ký trong sendViaExtension). Thấy tin ⇒ ✅ · hết lượt không thấy ⇒ ❌.
+           * KHÔNG gửi thêm lệnh nào — số lần gửi của ca này không đổi. */
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+          logFailGrouped(name, 'bù qua Extension: Extension báo success nhưng CHƯA xác nhận — giữ ⚠, đọc lại lịch sử (không gửi lại)', '⚠', conv.id);
         } else if (r && r.sent === 'maybe') {
           /* [v1.92.43] NGÂN SÁCH DÒ EXT PHẢI ĐÓNG Ở CẢ NHÁNH NÀY.
            * Log 16:52/17:03: dò Ext in 'thử 799 · cứu 0' và 'thử 1 431 · cứu 0' — tức ngân sách
@@ -10705,6 +10745,14 @@
             + ') ⇒ KHÔNG gửi cứu — chốt ❌, vào danh sách GỬI TAY', '🚫', conv.id);
           return;
         }
+        /* [v1.93.2] CA EXTENSION KHAI SUCCESS: KHÔNG để cổng nội suy biến nó thành ✅.
+         * Đã có 1 lượt đọc lịch sử THẬT đang chạy cho chính ca này (scheduleExtTimeoutVerify);
+         * nếu cổng ở đây cũng kết luận 'absent' thì có 2 nguồn cùng phán một ca. Giữ ⚠, để lượt
+         * đọc thật quyết định (thấy tin ⇒ ✅ · hết lượt không thấy ⇒ ❌). */
+        if (socksProof === 'absent' && extClaimSuccess.has(String(conv.id))) {
+          verifyStats.held = (verifyStats.held || 0) + 1;
+          return;
+        }
         if (socksProof === 'absent' && hasExtNow && myRun === runSeq && !state.stopRequested
             && !deliveredIds[conv.id] && !finalFailedIds[conv.id]) {
           sockVerifyFired[conv.id] = runSeq; // khoá: mỗi chat chỉ được cứu 1 lần / lượt
@@ -10766,11 +10814,32 @@
    * "chờ xác nhận" tới 3 phút sau khi lô xong. Giữ lại MỘT lượt 45 s (đủ cho adapter chậm p90
    * 8,3 s + hàng đợi) rồi chốt thẳng ⚠ 'Ext quá hạn — chưa thấy tin'. */
   const EXT_RECHECK_DELAYS = { 2: 45000, 1: 45000 };
-  function scheduleExtTimeoutVerify(conv, text, photo, sentAtMs, roundsLeft, recheck, delayOverride) {
+  /* [v1.93.2] SỔ CHO CA EXTENSION KHAI `success` MÀ CHƯA CÓ BẰNG CHỨNG.
+   * `extClaimSuccess`  : convId → true, đang chờ đọc lại lịch sử để xác nhận.
+   * `extClaimUnsure`   : convId → true, có ÍT NHẤT một lượt đọc KHÔNG đọc được lịch sử ⇒ KHÔNG
+   *                      được chốt ❌ (đó là "máy không biết", không phải "khách chặn").
+   * Cả hai chỉ dùng để GHI NHẬN; không đổi số lệnh gửi nào. */
+  const extClaimSuccess = new Set();
+  const extClaimUnsure = Object.create(null);
+  /* [v1.93.2] `claimedOk` = ca Extension báo success nhưng CHƯA có bằng chứng (xem sendViaExtension).
+   * Khi đó: đánh ⚠ "chưa xác nhận" ngay, KHÔNG vào danh sách gửi tay (đang đọc lại); hết lượt đọc
+   * mà không thấy tin ⇒ chốt ❌ trong `finally` (xem dưới). `recheck` giữ nguyên nghĩa cũ. */
+  function scheduleExtTimeoutVerify(conv, text, photo, sentAtMs, roundsLeft, recheck, delayOverride, claimedOk) {
     if (!conv || !conv.id || !sentAtMs) return;
     const want = normalizeMsgText(text);
     if (!want && !photo) return;
     if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
+    // Đánh ⚠ ngay (chỉ 1 lần, ở lượt đọc đầu) — để bảng TỔNG HỢP và danh sách gửi tay phản ánh
+    // đúng "chưa xác nhận", không phải ✅.
+    if (claimedOk && !recheck) {
+      extClaimSuccess.add(String(conv.id));
+      delete extClaimUnsure[String(conv.id)];
+      try {
+        logFailGrouped(conv.name || conv.id,
+          'Extension báo success nhưng KHÔNG có bằng chứng tin đã tới — đánh ⚠, đọc lại lịch sử (không gửi lại)', '⚠', conv.id);
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+      } catch (eCk) { /* ignore */ }
+    }
     const myRun = runSeq;
     if (!markExtVerify(conv.id, recheck)) return; // [v1.92.56] đi qua bộ đếm O(1)
     const nm = conv.name || conv.id;
@@ -10803,10 +10872,15 @@
         const res = await ctxFetchLane(() => fetchJson(url, 1, { timeoutMs: 8000 }));
         if (!res || !res.ok || !res.data || res.data.success === false) {
           if (!isRecheck) extTimeoutStats.unknown++;
+          extClaimUnsure[String(conv.id)] = true; // [v1.93.2] không đọc được ⇒ không được chốt ❌
           return;
         }
         const msgs = res.data.messages || (res.data.data && res.data.data.messages) || null;
-        if (!Array.isArray(msgs)) { if (!isRecheck) extTimeoutStats.unknown++; return; }
+        if (!Array.isArray(msgs)) {
+          if (!isRecheck) extTimeoutStats.unknown++;
+          extClaimUnsure[String(conv.id)] = true; // [v1.93.2]
+          return;
+        }
         let found = isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAtMs);
         // [v1.92.29] Thread > 25 tin thì đọc lịch sử không bao giờ thấy tin mới ⇒ kiểm thêm
         // bằng `snippet`. Chỉ nâng ⚠→✅, không bao giờ gửi lại.
@@ -10823,8 +10897,30 @@
         // số tổng nằm ở dòng TỔNG HỢP. Vẫn giữ ⚠ và không bắn lại.
       } catch (e) {
         if (!isRecheck) extTimeoutStats.unknown++;
+        extClaimUnsure[String(conv.id)] = true; // [v1.93.2] lỗi đọc ⇒ không được chốt ❌
       } finally {
         clearExtVerify(conv.id, isRecheck); // [v1.92.56] nhả sổ + GIẢM bộ đếm
+        /* [v1.93.2] HẾT LƯỢT ĐỌC LẠI MÀ KHÔNG THẤY TIN (ca Extension khai success) ⇒ CHỐT ❌.
+         * Người dùng chốt: "tôi bảo chặn là chặn, gửi không được, gửi tay cũng không được".
+         * ⇒ Không giữ ⚠, KHÔNG đưa vào danh sách gửi tay. Chỉ chốt khi đã đọc HẾT các lượt và
+         * mọi lượt đều đọc ĐƯỢC lịch sử mà không thấy tin (`extTimeoutStats.unknown` không tăng,
+         * đánh dấu qua `extClaimUnsure[conv.id]`) — nếu có lượt nào không đọc được thì GIỮ ⚠ để
+         * anh tự xem, vì đó là "máy không biết", không phải "khách chặn".
+         * KHÔNG gửi thêm lệnh nào: đây chỉ là đường GHI NHẬN kết quả. */
+        const _claimKey = String(conv.id);
+        if (extClaimSuccess.has(_claimKey)) {
+          if (left <= 0 && !deliveredIds[conv.id] && !finalFailedIds[conv.id]
+              && !extClaimUnsure[_claimKey]) {
+            try {
+              extClaimSuccess.delete(_claimKey);
+              extTimeoutStats.claimedDenied++;
+              if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+              dropManualResend(conv.id); // người dùng: chặn là chặn ⇒ KHÔNG gửi tay
+              logFailGrouped(nm,
+                'Extension báo success nhưng đọc lại lịch sử KHÔNG thấy tin ⇒ CHỐT ❌ (khách không nhận được — không gửi tay)', '🚫', conv.id);
+            } catch (eCd) { /* ignore */ }
+          }
+        }
         // [v1.91.78] Hẹn lần đọc lại kế tiếp (chỉ đọc, không bắn).
         try {
           if (left > 0 && !state.stopRequested && runSeq === myRun
@@ -11482,6 +11578,9 @@
     waveDiag.slotN = 0; waveDiag.slotAcquireMs = 0; waveDiag.slotPrepMs = 0; waveDiag.slotHoldMs = 0;
     extTimeoutStats.timeout = 0; extTimeoutStats.skipped = 0; extTimeoutStats.found = 0;
     extTimeoutStats.notFound = 0; extTimeoutStats.unknown = 0;
+    extTimeoutStats.claimedUnverified = 0; extTimeoutStats.claimedDenied = 0;
+    try { extClaimSuccess.clear(); } catch (eCS) { /* ignore */ }
+    try { Object.keys(extClaimUnsure).forEach(function (k) { delete extClaimUnsure[k]; }); } catch (eCU) { /* ignore */ }
     extSendCtl.probeInFlight = false; // lượt mới không được kẹt bởi thăm dò của lượt cũ đã dừng
     resetStopSignal(); // [v1.92.9] lượt mới: tín hiệu Dừng phải sống lại
     softNotify('ext-probe');
