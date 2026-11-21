@@ -251,3 +251,101 @@ Script bắt lỗi này ở dạng chuỗi và có nhánh riêng (`incorrectThre
 3. **Chưa chứng minh** phần nào trong 3 tham số thiếu là nguyên nhân thật. Muốn biết phải xem
    `C.error("FAIL TO GET GLOBAL ID --> INCORRECT THREAD …")` trong console của **extension**
    (service worker), không có trong log của userscript.
+
+## 8. Đối chiếu script ↔ extension `0.5.62_0` — 3 sửa ở 1.93.7
+
+Đường gửi + trả lỗi của extension, đọc từng bước:
+
+```
+content script  →  port "pancake_tab"  →  service worker
+                                            case "REPLY_INBOX_PHOTO"
+                                              → le(pageId)          （InboxNormal instance）
+                                              → sendInbox(...)
+                                                  → getGlobalUserId()  (nếu thiếu globalUserId)
+                                                  → buildSendParams()  (specific_to_list, message_id…)
+                                                  → de("https://business.facebook.com/messaging/send/", …)
+                                                  → isResponseSuccess / getErrorHandler
+                                              → sendInboxSuccess / sendInboxFail
+                                            → postMessage REPLY_INBOX_PHOTO_{SUCCESS,FAILURE}
+```
+
+### 8.1 `sendInboxFail` chỉ có MỘT trường `error`
+
+```js
+sendInboxFail(e,t,a,r){return s=>{console.log(s);
+  e.port.postMessage({type:"REPLY_INBOX_PHOTO_FAILURE",taskId,pageId,convId,error:s})}}
+```
+
+`s` nhận 3 hình dạng từ `sendInbox`:
+
+| nhánh | `s` |
+|---|---|
+| `cannotRetry` | `{errorDescription, fbErrorCode}` |
+| hết hạn nội bộ | `{success:false, retryReason:"execute task timeout"}` |
+| `retryUsingSocket` | `{success:false, canRetryUsingSocket:true, retryReason:"blocked_3252001", fbErrorCode}` |
+| lỗi mạng / sai URL | `undefined` |
+
+**Shape thật** suy ra từ chính log (không đoán): log in
+`Extension không gửi được ({"errorDescription":…,"fbErrorCode":1545041})` và chuỗi được dựng bằng
+`' (' + why + ')'` ⇒ `why` **chính là object lồng đó**, tức `d.error` là object.
+
+Script cũ đọc `d.errorMessage || d.error || d.reason || d.code` ⇒ `d.error` là object nên rơi vào
+`JSON.stringify` ⇒ `deadUser` vẫn khớp (nhờ chuỗi "không có mặt"), **nhưng `fbErrorCode` là số nằm
+trong object lồng nên không bao giờ đọc được**, và `retryReason` thì bị bỏ qua hoàn toàn.
+
+### 8.2 `execute task timeout` = tin CHẮC CHẮN chưa đi
+
+```js
+const w = g ? ro(g) : "NO_TIMEOUT";
+if (w === null) return b({success:false, retryReason:"execute task timeout"});
+```
+
+`ro(g)` trả `null` khi mốc hết hạn của chính lệnh đã qua ⇒ `return` NGAY, **trước** `buildSendParams`
+và **trước** `de(...)` (lệnh fetch gửi tin). Không một byte nào tới Facebook.
+
+Script cũ: `retryReason` không được đọc ⇒ `why === ''` ⇒ rơi vào nhánh "success:false không kèm lý
+do" ⇒ `sent:'maybe'` + ⚠ + **vào danh sách gửi tay**. Nay: ❌ chắc chắn. (Chặt hơn, không sinh trùng.)
+
+### 8.3 Ba mã FB từ chối khác — phải phân biệt
+
+```js
+const r = [1357004, 1545012, 1545006, 3252001, 1390008];
+checkCanReuploadPhotos(t) = t.error===1545012
+  && ["Tạm thời không thực hiện được","Temporary Failure"].includes(t.errorSummary)
+  && ["Đã xảy ra lỗi tạm thời, vui lòng thử lại.",
+      "There was a temporary error, please try again."].includes(t.errorDescription)
+```
+
+| mã | extension làm gì | phải hiểu là |
+|---|---|---|
+| `1545012` + đúng bộ ba trên | úp lại ảnh rồi gửi lại (`reuploadPhotos`) | **lỗi TẠM THỜI** — KHÔNG chốt ❌ |
+| `1545006` | úp lại ảnh (`reuploadPhotos`) | lỗi ảnh — KHÔNG chốt ❌ |
+| `3252001` / `1390008` | `retryUsingSocket` + `setUploadBlocked` **7 ngày** (`wl = 6048e5`) | **FB chặn page** ⇒ ghi sổ từ chối |
+| `1357004` | nhánh `restartInbox` | không kết luận |
+
+Đo trên 28 log: `3252001` = 0 · `1390008` = 0 · `1545012` = 0 · `1357004` = 0 · `1545006` = **13**.
+
+### 8.4 Đối chứng (không phải suy luận)
+
+| payload | cách cũ | 1.93.7 |
+|---|---|---|
+| `{error:{…1545041}}` | `'{…}'` → deadUser ✓ | không đổi |
+| `{error:{…1545006}}` | `'{…}'` → deadUser ✓ | không đổi |
+| `{error:1545012,…}` | `'1545012'` | không đổi |
+| `{error:3252001,…}` | `'3252001'` | **+ ghi sổ CHẶN PAGE** |
+| `{retryReason:"execute task timeout"}` | `''` ⇒ **KHÔNG RÕ** | **❌ chắc chắn chưa gửi** |
+| `null` (adapter timeout) | `''` ⇒ KHÔNG RÕ | KHÔNG RÕ (giữ nguyên) |
+
+Kiểm ngược 5 ca phổ biến: `deadUser` **giữ nguyên 5/5**, chỉ thêm hành vi cho 2 nhóm mới.
+
+### 8.5 Rút lại một kết luận sai của tôi
+
+Trước tôi nói script "thiếu `convId`" khi dò global_id. **Sai.** App cũng gửi `null`:
+
+```js
+getGlobalUserId(e){let t=to(e,["pageId","threadId","threadKey","isBusiness",
+  "conversationUpdatedTime","customerName"]);
+  return Object.assign(t,{postId:null,convId:null,convType:"INBOX"}), new Ee(t).init()}
+```
+
+`to()` chỉ copy 6 key rồi gán cứng `convId:null` ⇒ script gửi **giống hệt** app. Không sửa gì.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.6-w200.117
+// @version      1.93.7-w200.118
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.6-W200.117'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.7-W200.118'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5952,9 +5952,52 @@
       if (res && res.success === false) {
         // Trong __ExtensionAdapter__.send (@715835), khi setTimeout hết giờ nó trả về { success: false, data: null }
         const d = res.data || {};
-        let why = d.errorMessage || d.error || d.reason || d.code || '';
+        /* ═══ [v1.93.7] ĐỌC ĐỦ CÁC TRƯỜNG LỖI MÀ EXTENSION THẬT SỰ TRẢ ═══
+         * Nguồn: 0.5.62_0/assets/background.js — `sendInboxFail(e,t,a,r){...postMessage({
+         *   type:"REPLY_INBOX_PHOTO_FAILURE", taskId, pageId, convId, error: s})}`
+         * ⇒ mọi lý do nằm trong **`s`**, và `s` chỉ có 3 hình dạng:
+         *   cannotRetry          → {errorDescription, fbErrorCode}          (app đọc `H.error`)
+         *   execute task timeout → {success:false, retryReason:"execute task timeout"}
+         *   retryUsingSocket     → {success:false, canRetryUsingSocket:true,
+         *                           retryReason:"blocked_3252001", fbErrorCode}
+         *   lỗi mạng / sai URL   → `undefined`
+         * Trước bản này script CHỈ đọc errorMessage/error/reason/code ⇒ trượt `errorDescription`
+         * (vẫn tình cờ bắt được nhờ chuỗi "không có mặt"), TRƯỢT HOÀN TOÀN `retryReason` và
+         * `fbErrorCode` ⇒ ca `execute task timeout` (extension BỎ lệnh, tin CHẮC CHẮN chưa đi)
+         * bị xếp vào "không rõ" thay vì ❌. */
+        /* SHAPE THẬT — suy ra từ chính log (không đoán):
+         * log in `Extension không gửi được ({"errorDescription":"…","fbErrorCode":1545041})`
+         * và đoạn dựng chuỗi là `' (' + why + ')'` ⇒ **`why` CHÍNH LÀ object lồng đó**.
+         * Bóc tiếp: `d.error` là object `{errorDescription, fbErrorCode}`.
+         * Vì `typeof why === 'object'` nên khối JSON.stringify ngay dưới đã biến nó thành chuỗi
+         * — nhờ vậy `deadUser` vẫn khớp "không có mặt". Nhưng `fbErrorCode` là SỐ nằm trong
+         * object lồng, không bao giờ đọc được ở dạng phẳng.
+         * Nay đọc cả hai tầng. */
+        const _ee = (d && typeof d.error === 'object' && d.error) ? d.error : null;
+        let why = d.errorDescription
+          || (_ee && _ee.errorDescription)
+          || d.errorMessage || d.error || d.reason
+          || d.retryReason || d.code || d.fbErrorCode
+          || (_ee && _ee.fbErrorCode) || '';
         if (why && typeof why !== 'string') {
           try { why = JSON.stringify(why); } catch (e2) { why = ''; } // không bao giờ lộ "[object Object]"
+        }
+        /* ═══ [v1.93.7] EXTENSION BỎ LỆNH VÌ HẾT HẠN = TIN CHẮC CHẮN CHƯA ĐI ═══
+         * `sendInbox`: `const w = g ? ro(g) : "NO_TIMEOUT"; if (w === null)
+         *    return b({success:false, retryReason:"execute task timeout"})`
+         * `ro(g)` trả `null` khi mốc hết hạn của chính lệnh ĐÃ QUA ⇒ code `return` NGAY,
+         * TRƯỚC cả `buildSendParams` và `de(...)` (là lệnh fetch gửi tin).
+         * ⇒ chưa có byte nào tới Facebook. Đây là ❌ chắc chắn, KHÔNG phải "không rõ".
+         * Trước bản này `retryReason` không được đọc nên `why === ''` ⇒ rơi xuống nhánh
+         * "success:false không kèm lý do" ⇒ `sent:'maybe'` + đánh ⚠ + vào danh sách gửi tay.
+         * Đây là đường CHẶT HƠN (⚠ → ❌), không thể sinh tin trùng. */
+        if (/execute task timeout/i.test(String(why || ''))) {
+          noteExtSendOutcome('responded', extSendPermit, extSendStartedAt ? Date.now() - extSendStartedAt : null);
+          if (!ownLock) releaseOutbound(conv.id);
+          return {
+            ok: false, sent: false, definiteFail: true,
+            error: 'Extension BỎ lệnh (hết hạn nội bộ) — tin CHƯA gửi, chốt ❌',
+          };
         }
         if (!why) {
           // success:false mà KHÔNG kèm lý do = đúng hình dạng adapter trả khi HẾT GIỜ chờ
@@ -5990,7 +6033,36 @@
          * NAY: 1545041 là FB trả lời DỨT KHOÁT ⇒ ghi sổ `noteFbRejected()` để mọi cổng sau chặn,
          * và bỏ hậu kiểm 25 s (đường CHỈ ĐỌC, bỏ không thể sinh tin trùng, không thể chốt ✅ oan).
          * 1545012 (lỗi TẠM THỜI của FB) KHÔNG bị coi là dứt khoát — vẫn đi đường cũ. */
-        if (deadUser) {
+        /* ═══ [v1.93.7] BA MÃ FB TỪ CHỐI KHÁC — ĐỌC TỪ `getErrorHandler` CỦA EXTENSION ═══
+         * Extension coi 5 mã này là lỗi phía FB và xử lý riêng:
+         *   `const r = [1357004, 1545012, 1545006, 3252001, 1390008]`
+         * nhưng chúng KHÔNG cùng nghĩa — extension tự phân biệt:
+         *
+         *  A) `checkCanReuploadPhotos(t)` = ĐÚNG BỘ BA này cùng lúc:
+         *       error === 1545012
+         *       errorSummary ∈ {"Tạm thời không thực hiện được", "Temporary Failure"}
+         *       errorDescription ∈ {"Đã xảy ra lỗi tạm thời, vui lòng thử lại.",
+         *                            "There was a temporary error, please try again."}
+         *     ⇒ đây là lỗi TẠM THỜI thật ⇒ extension upload lại ảnh rồi gửi lại
+         *       (`reuploadPhotos`, hoặc `reuploadPhotosByApi` nếu page đang bị chặn upload).
+         *       TUYỆT ĐỐI KHÔNG được chốt ❌ — tin có thể gửi được ở lần sau.
+         *
+         *  B) `error === 3252001` hoặc `error === 1390008` ⇒ extension trả
+         *       `canRetryUsingSocket:true, retryReason:"blocked_3252001"`
+         *     và `setUploadBlocked` ghi page vào sổ chặn upload **7 NGÀY** (`wl = 6048e5`).
+         *     Đây là FB CHẶN PAGE ⇒ không kênh nào gửi được.
+         *
+         *  C) `error === 1545006` ⇒ extension upload lại ảnh (`reuploadPhotos`), coi như
+         *     lỗi ảnh. KHÔNG phải bằng chứng khách chết ⇒ không chốt ❌.
+         *
+         * Chỉ (B) mới được ghi sổ "FB từ chối". (A) và (C) giữ nguyên đường cũ. */
+        const _fbErrNum = Number((d && (d.fbErrorCode || d.error))
+          || (_ee && _ee.fbErrorCode) || 0) || 0;
+        const _whyStr = String(why || '');
+        if (_fbErrNum === 3252001 || _fbErrNum === 1390008
+            || /3252001|1390008/.test(_whyStr)) {
+          try { noteFbRejected(conv.id, 'Extension: FB CHẶN PAGE (uploadBlocked 7 ngày) — mã ' + (_fbErrNum || why)); } catch (eFbR2) { /* ignore */ }
+        } else if (deadUser) {
           try { noteFbRejected(conv.id, 'Extension trả 1545041 = FB từ chối nhận tin'); } catch (eFbR) { /* ignore */ }
         }
         // INCORRECT THREAD khi CHƯA có globalUserId thật: lệnh Ext lúc đó thiếu
