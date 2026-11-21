@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.4-w200.115
+// @version      1.93.5-w200.116
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.4-W200.115'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.5-W200.116'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5970,6 +5970,21 @@
         // 1545041 là FB TỪ CHỐI, không phụ thuộc việc có gid hay không. Trước đây ca CÓ gid rơi
         // vào nhánh `ambiguous` ⇒ bị đem đi chứng minh vắng mặt + bù kênh khác (vô ích, 1 089 ca).
         const deadUser = /1545041|Người này hiện không có mặt|Không tìm thấy người dùng/i.test(String(why || ''));
+        /* ═══ [v1.93.5] EXT TRẢ 1545041 ⇒ GHI SỔ "FB ĐÃ TỪ CHỐI" + KHÔNG ĐỌC LẠI 20 s ═══
+         * ĐO ĐƯỢC trên 28 log: đây là câu lỗi ❌ xuất hiện NHIỀU NHẤT trong toàn bộ log
+         *   534 dòng `❌ … Ext: Extension không gửi được ({"errorDescription":"Người này hiện
+         *   không có mặt.","fbErrorCode":1545041})`
+         *   307 dòng `❌ … bù Extension không được: … không có mặt`
+         *   222 dòng `⚠ … đã đo N ca thì Extension cũng bị chặn ⇒ GIỮ ⚠, vào danh sách gửi tay`
+         * Người dùng đã kiểm: nhóm này KHÔNG nhận được tin (chặn / khóa nick).
+         * Trước bản này: Ext trả 1545041 ⇒ `deadUser` = true ⇒ vẫn `queueDeadUserRecheck()`
+         * (đợi 25 s rồi đọc lại lịch sử) và nhóm bù kế vẫn chạy ⇒ tốn thời gian, sinh ⚠ gửi tay.
+         * NAY: 1545041 là FB trả lời DỨT KHOÁT ⇒ ghi sổ `noteFbRejected()` để mọi cổng sau chặn,
+         * và bỏ hậu kiểm 25 s (đường CHỈ ĐỌC, bỏ không thể sinh tin trùng, không thể chốt ✅ oan).
+         * 1545012 (lỗi TẠM THỜI của FB) KHÔNG bị coi là dứt khoát — vẫn đi đường cũ. */
+        if (deadUser) {
+          try { noteFbRejected(conv.id, 'Extension trả 1545041 = FB từ chối nhận tin'); } catch (eFbR) { /* ignore */ }
+        }
         // INCORRECT THREAD khi CHƯA có globalUserId thật: lệnh Ext lúc đó thiếu
         // globalUserId nên có thể không định vị được thread dù thread vẫn tồn tại.
         // Bằng chứng _app @903213 cho thấy khâu dò không cung cấp được "xác nhận
@@ -8039,6 +8054,24 @@
       }
       if (r.recipientUnavailable || /\(#100\)|Không tìm thấy người dùng phù hợp/i.test(r.error || '')) {
         recycleUnusedFbId(pid0, ctx);
+        /* ═══ [v1.93.5] FB ĐÃ BÁO KHÔNG NHẬN ĐƯỢC ⇒ CẮT BÙ LUÔN, KHÔNG DÒ EXT, KHÔNG GỬI TAY ═══
+         * ĐO ĐƯỢC trên 28 log — đây là nhóm lỗi thật nhiều nhất:
+         *   534 dòng `❌ … Ext: Extension không gửi được (… "Người này hiện không có mặt." …)`
+         *   307 dòng `❌ … bù Extension không được: … không có mặt`
+         *   262 dòng `🛟 Socket: FB từ chối — chuyển Extension 1 lần` + `⏳ … đang bù qua Extension…`
+         *   222 dòng `⚠ … đã đo N ca thì Extension cũng bị chặn ⇒ GIỮ ⚠, vào danh sách gửi tay`
+         * Người dùng đã kiểm: nhóm này KHÔNG nhận được tin. Ngân sách dò Ext cũng đã tự đo và
+         * đóng (`extFallback1545Allowed()` trả false) — tức chính code đã kết luận "Ext cũng bị
+         * chặn", nhưng vẫn còn 3 nhánh nữa tiếp tục dò/bù/gửi tay.
+         * NAY: `isFbRejected()` (đã được ghi ở sendViaExtension / API #551 / ACK rejected) là
+         * chốt chặn cuối ⇒ chốt ❌ ngay, KHÔNG chuyển Ext, KHÔNG vào danh sách gửi tay.
+         * Không thêm một lệnh gửi nào — đây là BỎ các lần thử đã được đo là 0/N cứu được.
+         * Ca KHÔNG có dấu FB-từ-chối (vd only `#100` chưa qua Ext) vẫn đi đường cũ. */
+        if (isFbRejected(conv.id) && !conv.__extFallback1545) {
+          fbRejectStats.blockedBu = (fbRejectStats.blockedBu || 0) + 1;
+          return { ok: false, sent: false, recipientUnavailable: true, fbRejected: true,
+            tried: triedCh.slice(), error: 'FB đã báo KHÔNG NHẬN ĐƯỢC — cắt bù (không dò Ext, không gửi tay)' };
+        }
         /* [v1.92.41] "NGƯỜI NÀY HIỆN KHÔNG CÓ MẶT" (1545041) là lỗi CỦA KÊNH, không phải bằng
          * chứng khách chặn: Socket đã bị từ chối như vậy 5 800 lần trong 2 lô 16:07/16:11, trong
          * khi Extension — đi qua tab Facebook thật — gửi được 186 tin. Chưa có tin nào được gửi
@@ -8065,6 +8098,14 @@
            * 3 611 lần trong khi `extTry1545.tried` = 0 và KHÔNG có dòng 🔒 nào ⇒ chưa từng đo
            * 200 ca nào. Nay in SỐ THẬT, và nói đúng việc đang xảy ra: ca này CHƯA được thử qua
            * Ext (vì ngân sách đang đóng), nên nó vẫn có thể gửi được nếu bạn gửi tay. */
+          /* [v1.93.5] FB ĐÃ BÁO KHÔNG NHẬN ĐƯỢC (1545041) ⇒ ❌, KHÔNG vào danh sách gửi tay.
+           * Chốt của người dùng: "cái nào báo lỗi thật thì cắt bù luôn, khỏi tốn thời gian".
+           * Giữ ⚠ chỉ cho ca CHƯA từng bị FB từ chối. */
+          if (isFbRejected(conv.id)) {
+            fbRejectStats.blockedBu = (fbRejectStats.blockedBu || 0) + 1;
+            return { ok: false, sent: false, recipientUnavailable: true, fbRejected: true,
+              tried: triedCh.slice(), error: 'FB đã báo KHÔNG NHẬN ĐƯỢC (1545041) — chốt ❌, không gửi tay' };
+          }
           return {
             ok: false, sent: false, uncertain: true, tried: triedCh.slice(),
             error: 'FB báo "người này hiện không có mặt" · ngân sách dò Ext đang ĐÓNG (đã định bắn '
@@ -8074,7 +8115,12 @@
         }
         // [v1.92.34] Chốt ❌ NGAY (không bù, không kiểm chứng trong lượt — chống gửi lặp),
         // nhưng ghi vào sổ để SAU LÔ tự đọc lại lịch sử: nếu tin thật ra đã tới thì lật ✅.
-        if (r.deadUserHint) queueDeadUserRecheck(conv, text, photo, Date.now());
+        /* [v1.93.5] KHÔNG HẬU KIỂM 25 s CHO CA FB ĐÃ TRẢ LỜI DỨT KHOÁT.
+         * Số đo 2 lô của chính cơ chế này (1.92.42): 1 338 ca dò lại ⇒ 0 ca thấy tin.
+         * Người dùng đã kiểm: nhóm 1545041 KHÔNG nhận được tin ⇒ hậu kiểm chỉ tốn thời gian.
+         * Ca CÓ từ chối nhưng KHÔNG phải 1545041 (`deadUserHint` từ nguồn khác) vẫn hậu kiểm
+         * như cũ — đường này CHỈ ĐỌC nên giữ lại không hại gì. */
+        if (r.deadUserHint && !isFbRejected(conv.id)) queueDeadUserRecheck(conv, text, photo, Date.now());
         return { ok: false, sent: false, recipientUnavailable: true, tried: triedCh.slice(), error: tried.join(' | ') };
       }
       // Nếu vừa dùng from_psid phỏng đoán (ctx.gidFromPsid === true) hoặc lỗi thiếu globalId/thread_id:
