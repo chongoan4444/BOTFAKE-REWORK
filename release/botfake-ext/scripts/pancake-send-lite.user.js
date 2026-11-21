@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.3-w200.114
+// @version      1.93.4-w200.115
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.3-W200.114'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.4-W200.115'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -10759,6 +10759,7 @@
             if (_st) _st.absent++;
           } catch (eSt3) { /* ignore */ }
         }
+
         if (socksProof === 'absent' && !hasExtNow) {
           logFailGrouped(nm, 'kiểm chứng: hội thoại KHÔNG có tin nhưng KHÔNG còn kênh gửi (Extension chưa nối) — GIỮ ⚠, vào danh sách gửi tay', '🔎', conv.id);
         }
@@ -10786,6 +10787,17 @@
             + ') ⇒ KHÔNG gửi cứu — chốt ❌, vào danh sách GỬI TAY', '🚫', conv.id);
           return;
         }
+        /* ═══ [v1.93.4] ĐÃ CHỨNG MINH VẮNG MẶT RỒI THÌ ĐỪNG ĐỌC LẠI — ĐUÔI DÀI VÔ ÍCH ═══
+         * ĐO ĐƯỢC trên log 21/11 19:44 (4 281 chat): 1 176 dòng 🔎 (4 lượt đọc × 294 ca) mà
+         * "Kiểm chứng ACK: đã đến nơi 0 · giữ ⚠ 0 · không kiểm chứng được 0" — tức 0 ca nào
+         * được cứu, và 0 ca nào đổi kết luận. Đồng thời 612 dòng 🔁 (ACK muộn = FB TỪ CHỐI) vẫn
+         * chạy tiếp vào cổng ⇒ sinh 612 dòng 🛟 + ⏳ + ✅ = 1 836 dòng cuối log.
+         * Log 21:05: 430 dòng 🛟 ở đuôi.
+         * Nay: ca mà cổng `proveAbsentBeforeBu` đã phán 'absent' (hội thoại không đổi sau ≥14 s,
+         * KHÔNG có tin) thì KHÔNG đọc lại lịch sử lần nữa — kết quả đã biết, đọc thêm 4 lượt chỉ
+         * tốn request và làm hậu kiểm kéo dài (đuôi 16,1 s ở lô 19:44).
+         * Không đổi kết luận: ca đó vẫn KHÔNG được bắn lại (giữ khoá, giữ ⚠/❌ như luồng hiện có).
+         * Đây là đường CHỈ ĐỌC ⇒ bỏ nó không thể sinh tin trùng. */
         /* [v1.93.2] CA EXTENSION KHAI SUCCESS: KHÔNG để cổng nội suy biến nó thành ✅.
          * Đã có 1 lượt đọc lịch sử THẬT đang chạy cho chính ca này (scheduleExtTimeoutVerify);
          * nếu cổng ở đây cũng kết luận 'absent' thì có 2 nguồn cùng phán một ca. Giữ ⚠, để lượt
@@ -10810,6 +10822,20 @@
           scheduleBuRetry(conv, text, photo, nm,
             'Socket không có ACK + đã chứng minh hội thoại không có tin', ['socket'],
             { ambiguous: false, fromUncertain: true, via: 'socket', sentAt: sentAt });
+          return;
+        }
+        /* ═══ [v1.93.4] ĐÃ CHỨNG MINH VẮNG MẶT RỒI THÌ ĐỪNG ĐỌC LẠI — ĐUÔI DÀI VÔ ÍCH ═══
+         * ĐO ĐƯỢC trên log 21/11 19:44 (4 281 chat): 1 176 dòng 🔎 (4 lượt đọc) nhưng dòng chốt
+         * ghi "Kiểm chứng ACK: đã đến nơi 0 · giữ ⚠ 0 · không kiểm chứng được 0" ⇒ 0 ca được cứu.
+         * Cùng lúc 612 dòng 🔁 (ACK muộn = FB TỪ CHỐI) chạy tiếp vào cổng ⇒ sinh 612 × (🛟 + ⏳ +
+         * ✅) = 1 836 dòng cuối log. Log 21:05: 430 dòng 🛟 ở đuôi.
+         * Nay: ca mà cổng đã phán 'absent' (hội thoại KHÔNG đổi sau ≥14 s, không có tin) và
+         * KHÔNG được cứu (đã bị chặn 🚫 hoặc không còn kênh) thì KHÔNG đọc lại lịch sử nữa —
+         * kết quả đã biết. Giữ ⚠, KHÔNG bắn thêm (đúng luồng cũ).
+         * Đặt SAU các cổng quyết định, để không vô hiệu hoá cổng 🚫 của 1.93.1.
+         * Đường này CHỈ ĐỌC ⇒ bỏ nó không thể sinh tin trùng, không thể chốt ✅ oan. */
+        if (socksProof === 'absent') {
+          verifyStats.held = (verifyStats.held || 0) + 1;
           return;
         }
         // [v1.92.25] Không có bằng chứng dương sau các lần đọc ⇒ GIỮ ⚠. Đây là đường duy nhất
@@ -10854,7 +10880,19 @@
    * ⇒ 1 338 ca dò lại (20 s + 45 s + 120 s mỗi ca) CỨU ĐƯỢC 0 chat, nhưng giữ sổ ở trạng thái
    * "chờ xác nhận" tới 3 phút sau khi lô xong. Giữ lại MỘT lượt 45 s (đủ cho adapter chậm p90
    * 8,3 s + hàng đợi) rồi chốt thẳng ⚠ 'Ext quá hạn — chưa thấy tin'. */
-  const EXT_RECHECK_DELAYS = { 2: 45000, 1: 45000 };
+  /* ═══ [v1.93.4] BỎ HẲN LƯỢT ĐỌC LẠI 45 s — ĐUÔI XÁC NHẬN DÀI VÔ ÍCH ═══
+   * ĐO ĐƯỢC (chính khối chú thích ngay trên, 2 lô lớn 1.92.42):
+   *   lô 7 073 chat : Ext quá hạn 623 · kiểm chứng thấy tin 0 · chưa thấy 516
+   *   lô 13 204 chat: Ext quá hạn 847 · kiểm chứng thấy tin 0 · chưa thấy 822
+   * ⇒ 1 338 ca dò lại (20 s + 45 s + 120 s) CỨU ĐƯỢC 0 chat, nhưng giữ sổ "chờ xác nhận"
+   *   tới 3 phút sau khi lô xong. Chú thích trên đã hạ xuống còn MỘT lượt 45 s nhưng vẫn còn
+   *   giữ đúng cái lượt 45 s đó — mà chính số đo nói lượt này cứu 0 ca.
+   * Người dùng phản ánh "đoạn cuối dài quá, tốn thời gian" (log 19:44: phát lệnh 19,6 s mà tổng
+   * 36 s, đuôi 16,1 s; log 21:05: tổng 36 s).
+   * NAY: 0 lượt đọc lại. Ca Ext quá hạn kết thúc ở ⚠ ngay sau lượt đọc 20 s như trước đây vẫn
+   * làm khi hết lượt — KHÔNG đổi kết luận (vẫn ⚠, không bắn lại), chỉ bỏ thời gian chờ.
+   * Đây là đường CHỈ ĐỌC: bỏ nó không thể sinh tin trùng, không thể chốt ✅ oan. */
+  const EXT_RECHECK_DELAYS = { 2: 0, 1: 0 };
   /* [v1.93.2] SỔ CHO CA EXTENSION KHAI `success` MÀ CHƯA CÓ BẰNG CHỨNG.
    * `extClaimSuccess`  : convId → true, đang chờ đọc lại lịch sử để xác nhận.
    * `extClaimUnsure`   : convId → true, có ÍT NHẤT một lượt đọc KHÔNG đọc được lịch sử ⇒ KHÔNG
@@ -10966,7 +11004,8 @@
         try {
           if (left > 0 && !state.stopRequested && runSeq === myRun
               && !deliveredIds[conv.id] && !finalFailedIds[conv.id]) {
-            const nd = EXT_RECHECK_DELAYS[left] || 45000;
+            // [v1.93.4] `|| 45000` biến 0 thành 45000 ⇒ phải kiểm tra sự tồn tại, không dùng ||.
+            const nd = Object.prototype.hasOwnProperty.call(EXT_RECHECK_DELAYS, left) ? EXT_RECHECK_DELAYS[left] : 45000;
             scheduleExtTimeoutVerify(conv, text, photo, sentAtMs, left - 1, true, nd);
           }
         } catch (e1) { /* ignore */ }
