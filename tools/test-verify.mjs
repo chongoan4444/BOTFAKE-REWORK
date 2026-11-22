@@ -2153,11 +2153,22 @@ const _preSrc = stripComments(SRC);
   const i = _preSrc.indexOf('const runMainItem = async (c) =>');
   check('[prebind] tìm thấy runMainItem', i > 0, true);
   const seg = i > 0 ? _preSrc.slice(i, i + 4000) : '';
-  const iBind = seg.indexOf('bindPhotoForConv(');
+  const iBind = seg.indexOf('ensurePreBind(');
   const iSlot = seg.indexOf('acquireMainSlot()');
-  check('[prebind] runMainItem có gọi bindPhotoForConv', iBind > 0, true);
-  check('[prebind] bindPhotoForConv chạy TRƯỚC acquireMainSlot',
+  check('[prebind] runMainItem chờ pre-bind qua ensurePreBind', iBind > 0, true);
+  check('[prebind] chờ pre-bind TRƯỚC acquireMainSlot (chờ bind mà KHÔNG giữ ghế)',
     iBind > 0 && iSlot > 0 && iBind < iSlot, true);
+  /* ═══ BẪY THỨ HAI ĐÃ TỰ BẮT: KHÔNG ĐƯỢC `await` CẢ WAVE TRƯỚC `runPool` ═══
+   * `await` khâu pre-bind cả wave TRƯỚC `runPool(waveSlice…)` làm tổng thời gian =
+   * Σ(bind_wave + phát_wave) ⇒ 3 wave = 3 × (5,7 s bind + phát) ⇒ CHẬM HƠN bản gốc
+   * (log 12:34 là 29,4 s). Phải CHỒNG LẤN: khâu wave chỉ khởi động, không await. */
+  const iWavePre = _preSrc.indexOf('const preList = waveSlice.filter');
+  const iPoolB = _preSrc.indexOf('runPool(waveSlice, runMainItem, mainCap)');
+  const segPre = iWavePre > 0 ? _preSrc.slice(iWavePre, iWavePre + 1600) : '';
+  check('[prebind] khâu pre-bind wave KHÔNG await (chỉ khởi động, chồng lấn với phát)',
+    /await\s+Promise\.all\(preList/.test(segPre) || /await\s+runPool\(preList/.test(segPre), false);
+  check('[prebind] khâu pre-bind wave vẫn nằm TRƯỚC runPool (để kịp chồng lấn)',
+    iWavePre > 0 && iPoolB > 0 && iWavePre < iPoolB, true);
 }
 
 // (3) Wave pre-bind cả lô TRƯỚC khi mở pool slot

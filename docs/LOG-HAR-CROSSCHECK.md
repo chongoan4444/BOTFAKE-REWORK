@@ -3133,9 +3133,15 @@ Hai số phụ khớp nhau và cùng chỉ về một chỗ:
 
 * `sendGroups` dựng `c.__photoArg` cho từng chat **trước mọi wave** (nơi duy nhất biết
   `qrPhotoByPage` / `fbIdByPage` / `apiFbIdsByPage` / `contentIdByPage`).
-* Mỗi wave: `runPool(preList, bindPhotoForConv, 192)` chạy **trước** `runPool(waveSlice, runMainItem, mainCap)`.
-* `runMainItem` vẫn gọi `bindPhotoForConv` trước `acquireMainSlot()` (0 ms nếu wave đã bind) —
-  để ca phát sinh giữa lượt không bị bỏ sót.
+* Mỗi wave **KHỞI ĐỘNG** (không `await`) pre-bind cho cả wave bằng `ensurePreBind(c)`.
+* `runMainItem` `await ensurePreBind(c)` **trước** `acquireMainSlot()` ⇒ worker chờ bind mà
+  **không giữ ghế**; 191 worker khác vẫn phát bình thường ⇒ tổng ≈ max(bind, phát).
+
+> ⚠️ **BẪY THỨ HAI ĐÃ TỰ BẮT — `await` CẢ WAVE LÀ CHẬM HƠN BẢN GỐC.**
+> Bản đầu `await runPool(preList, …)` trước `runPool(waveSlice, …)`: tổng thời gian =
+> Σ(bind_wave + phát_wave). Với log 12:34 (3 wave, bind 5,7 s/wave) ⇒ 3 × (5,7 s + phát)
+> ≈ **46 s**, tệ hơn 29,4 s ban đầu. Phải CHỒNG LẤN: khâu wave chỉ khởi động, `runMainItem`
+> mới là chỗ chờ. Có test khoá (`khâu pre-bind wave KHÔNG await`).
 * Kết quả bind đi vào `preBoundFbIds` (map theo `conv.id`); `sendOne` đọc **một lần**
   (`takePreBoundFbId`, lấy ra là xoá) rồi nạp `ctx.nonReusableFbId` ⇒ `uploadOneTimePhoto`
   trả 0 ms trong slot.
@@ -3166,5 +3172,9 @@ riêng, và `sendOne` chỉ nạp vào `ctx` **sau** khối chọn tuyến. Có 
 
 * `dùng lại được` (preBindHit) `≈` số ca có ảnh ⇒ bản vá CÓ hiệu lực.
 * `preBindHit = 0` mà `lần bind ngoài slot > 0` ⇒ bind một đằng gửi một nẻo (đúng lỗi §48.5).
-* `còn lại` phải **tụt** đúng chừng phần đã dời (log này: 2 142 → ~1 050 ms), tức tốc độ phát
-  kỳ vọng ~82 → **~150–190 lệnh/giây** trên cùng máy/lô.
+* `còn lại` phải **tụt** đúng chừng phần đã dời (log này: 2 142 → ~1 050 ms). Trần vật lý
+  trên cùng máy/lô: bind 2 625 giây-làn ÷ 192 làn = **13,7 s**; clamp theo ACK 1 490 ms ×
+  2 411 ÷ 256 = **14,0 s** ⇒ kỳ vọng **≈ 14–16 s** (tức ~150–175 lệnh/giây) so với 29,4 s.
+  Nếu ra đúng ~14 s thì cả hai nút cổ chai (bind ảnh và làn Socket) đều đã hết; bước sau muốn
+  nhanh hơn phải hạ `SOCKET_MIN_PACE_MS` (4 ms/page) hoặc giảm phí HTTP mỗi ca — **không** nới
+  làn nữa.

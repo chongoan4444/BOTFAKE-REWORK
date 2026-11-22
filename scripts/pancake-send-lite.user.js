@@ -5595,6 +5595,19 @@
     if (Date.now() - (v.at || 0) > PREBOUND_TTL_MS) return null; // quá cũ ⇒ bỏ, để đường gửi tự bind
     return v;
   }
+  /** Promise pre-bind của MỘT chat — chỉ tạo một lần, dùng chung cho khâu khởi động wave và
+   *  cho `runMainItem`. `runMainItem` await TRƯỚC `acquireMainSlot()` ⇒ chờ bind mà KHÔNG
+   *  giữ ghế. Đây là điểm khác biệt quyết định so với bản `await` cả wave (xem chú thích ở
+   *  vòng wave: await cả wave thì tổng = Σ(bind + phát)). */
+  function ensurePreBind(conv) {
+    if (!conv || !conv.id || !conv.__photoArg) return Promise.resolve(null);
+    if (!conv.__preBindP) {
+      conv.__preBindP = Promise.resolve()
+        .then(() => bindPhotoForConv(conv, conv.__photoArg))
+        .catch(() => null);
+    }
+    return conv.__preBindP;
+  }
   async function bindPhotoForConv(conv, photoOverride) {
     const photo = photoOverride || (conv && conv.__photoArg);
     if (!conv || !conv.id || !photo) return null;
@@ -5608,8 +5621,13 @@
     const pageId = conv.pageId || String(conv.id).split('_')[0];
     if (!pageId) return null;
     const ctx = conv.__preCtx || (conv.__preCtx = {});
+    /* ĐO ĐÚNG CHỖ NÀY: mỗi lần bind thật (bỏ qua ca đã có fbId / đã bind) ⇒ `preBindN` +1,
+     * `preBindMs` + thời gian. Đây là số "đã dời được bao nhiêu việc ra ngoài ghế", cộng với
+     * `preBindHit` (số ca lấy lại được ở `sendOne`) thành cặp nghiệm thu §48.6. */
+    const _tBind = Date.now();
     try {
       const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
+      try { waveDiag.preBindN++; waveDiag.preBindMs += Math.max(0, Date.now() - _tBind); } catch (eBD) { /* ignore */ }
       if (up && up.ok && up.fbId) {
         const ids = (up.fbIds && up.fbIds.length) ? up.fbIds.slice() : [up.fbId];
         /* KHÔNG GHI vào `photo` (xem chú thích ở đầu hàm): đặt `photo.fbId` làm `noApiPhoto`
@@ -14509,7 +14527,11 @@
              *   • bind lỗi ⇒ `photo.__bindFail`, nhánh dưới trả `null` ⇒ `sendOne` chạy đúng
              *     đường cũ (tự bind lại / báo lỗi như trước). KHÔNG có đường mới nào để "gửi
              *     chữ trơ" khi thiếu ảnh. */
-            { const _tPre0 = Date.now(); if (photo) { try { await bindPhotoForConv(c); } catch (ePre) { /* bind lỗi ⇒ đường cũ xử lý */ } } try { waveDiag.preBindMs += Math.max(0, Date.now() - _tPre0); waveDiag.preBindN++; } catch (ePre2) { /* ignore */ } }
+            /* Chờ ĐÚNG promise pre-bind của chat này TRƯỚC khi chiếm ghế (xem `ensurePreBind`).
+             * Thường đã xong từ khâu khởi động wave ⇒ ~0 ms; ca phát sinh giữa lượt thì bind ở
+             * đây, vẫn NGOÀI ghế. Đo `preBindMs` = phần THẬT SỰ còn phải bind sau khi đã chiếm
+             * ghế ở nhánh trong slot (xem `uploadOneTimePhoto` trong `sendViaSocket`). */
+            if (photo) { try { await ensurePreBind(c); } catch (ePre) { /* bind lỗi ⇒ đường cũ xử lý */ } }
             const _tAcq0 = Date.now();
             const gotMainSlot = await acquireMainSlot();
             if (!gotMainSlot) return null;
@@ -14546,7 +14568,7 @@
             }
           };
 
-          /* ═══ [v1.93.16] PRE-BIND ẢNH CẢ WAVE TRƯỚC KHI MỞ SLOT ═══
+          /* ═══ [v1.93.16] PRE-BIND ẢNH — CHỒNG LẤN VỚI KHÂU PHÁT, KHÔNG CHẶN TRƯỚC NÓ ═══
            * ĐO TỪ LOG 12:34 (2 411 chat × 1 ảnh): bind 1 088 ms/ca × 2 412 ca = 2 625 giây-làn;
            * với làn 96 thì SÀN CỨNG của khâu phát là 27,3 s — và cả lượt phát chỉ 29,4 s
            * ⇒ **93 % thời gian phát là CHỜ BIND**, không phải bắn. Bằng chứng phụ cùng log:
@@ -14554,26 +14576,27 @@
            * `mainCap 192` không thể là nút cổ chai. `⏱ GIỮ SLOT … còn lại 2 142 ms` chính là
            * phần bind nằm TRONG ghế.
            *
-           * Nay mỗi wave bind trước, song song, ngoài ghế:
-           *   • vẫn đi qua ĐÚNG `photoUploadLane` (nay 192) ⇒ tải lên Pancake vẫn bị điều tiết;
-           *   • ca không ảnh / đã có fbId ⇒ `bindPhotoForConv` trả 0 ms;
-           *   • bind lỗi ⇒ `__bindFail` ⇒ trong slot tự bind lại đúng đường cũ (không mất tin);
-           *   • `runMainItem` vẫn gọi `bindPhotoForConv` (0 ms nếu wave đã bind) để ca phát
-           *     sinh (chat thêm giữa lượt) không bị bỏ sót.
-           * KHÔNG đổi cổng chặn nào, KHÔNG thêm lệnh GỬI nào: đây là khâu chuẩn bị ảnh. */
+           * ⚠️ BẢN NHÁP ĐẦU `await` KHÂU NÀY TRƯỚC `runPool(waveSlice…)` — SAI, ĐÃ SỬA:
+           * await trước mỗi wave làm tổng = Σ(bind_wave + phát_wave) ⇒ 3 wave = 3 × (5,7 s bind
+           * + phát) ⇒ **chậm hơn bản gốc**. Nay khâu này CHỈ KHỞI ĐỘNG (không await), và
+           * `runMainItem` await ĐÚNG promise của chat nó TRƯỚC `acquireMainSlot()`:
+           *   • worker chờ bind mà KHÔNG giữ ghế ⇒ 191 worker khác vẫn phát bình thường;
+           *   • bind chạy song song với phát, tổng ≈ max(bind, phát) ≈ 14 s thay vì 27 s;
+           *   • tải HTTP vẫn bị `photoUploadLane` (192) điều tiết, không phải mở thêm làn.
+           * Lỗi bind ⇒ promise resolve null ⇒ trong slot tự bind lại đúng đường cũ. */
           try {
             if (photo && waveSlice.length) {
               const preList = waveSlice.filter((c0) => c0 && c0.id && c0.__photoArg).slice(0, PREBIND_MAX_PER_WAVE);
               if (preList.length) {
                 const _tPreW = Date.now();
-                await runPool(preList, async (c0) => {
-                  if (state.stopRequested || !c0 || !c0.__photoArg) return;
-                  try { await bindPhotoForConv(c0, c0.__photoArg); } catch (ePreW) { /* lỗi ⇒ đường cũ */ }
-                }, PREBIND_PARALLEL).catch(() => {});
-                try {
-                  waveDiag.preBindWallMs += Math.max(0, Date.now() - _tPreW);
-                  waveDiag.preBindWallWaves++;
-                } catch (ePW) { /* ignore */ }
+                Promise.all(preList.map((c0) => ensurePreBind(c0)))
+                  .then(() => {
+                    try {
+                      waveDiag.preBindWallMs += Math.max(0, Date.now() - _tPreW);
+                      waveDiag.preBindWallWaves++;
+                    } catch (ePW) { /* ignore */ }
+                  })
+                  .catch(() => { /* pre-bind không bao giờ được làm hỏng wave */ });
               }
               if (waveSlice.length > PREBIND_MAX_PER_WAVE) {
                 logLine('🧷 Wave ' + waveNo + ': ' + waveSlice.length + ' chat, trần pre-bind ' + PREBIND_MAX_PER_WAVE
