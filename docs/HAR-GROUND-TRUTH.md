@@ -5506,3 +5506,47 @@ không sinh vòng lặp ghi).
 `tools/_check_mini.mjs` in thêm `bubbleBadgeFont` / `bubbleBadgeBig` đọc `getComputedStyle` +
 `getBoundingClientRect` trong DOM thật (**chưa chạy được** ở phiên này: sandbox thiếu
 `node_modules`/Chromium).
+
+### §48.7 [v1.93.18] BẢN ỔN ĐỊNH — LOG CUỐI CHỈ CÒN MỘT DÒNG
+
+Bản ổn định (`scripts/pancake-send-stable.user.js`) **sinh tự động** bằng
+`node tools/make-stable.mjs` — không bao giờ sửa tay (sửa tay là lệch bản gốc ngay lần sau).
+Muốn đổi logic gửi thì sửa bản gốc rồi chạy lại lệnh sinh.
+
+**Yêu cầu người dùng (chốt nguyên văn):** *"bản stable log chỉ cần hiện số thành công/số thất
+bại + tốc độ, không cần chi tiết dài dòng"* — chọn **1 dòng duy nhất**, **cắt hết** số liệu kỹ
+thuật, **giữ** dòng tiến trình giữa lượt.
+
+Trước bản này, cuối mỗi lượt bản ổn định vẫn in 2 dòng rất dài: khối `📊 TỔNG HỢP` (93 dòng
+code) + `⚡ TỐC ĐỘ` (32 dòng code), mỗi dòng in ra 400–1 200 ký tự với 🛟/🖐/🛡/⏳/🧭/📡.
+
+Nay cuối lượt chỉ còn:
+
+```
+📊 XONG: ✅ 460/1753 tin (26.2%) · ❌ 2 · ⚠ 1291 · ⏱ 10s · 175.3 tin/giây
+```
+
+Bị tắt ở bản ổn định (đi qua `logDiag`, `DIAG_LOGS = !IS_STABLE_BUILD`):
+
+| dòng | nội dung |
+|---|---|
+| `⚡ TỐC ĐỘ` | PHÁT…/giây, đuôi xác nhận, đã chốt, mẫu số, bỏ qua |
+| `🌊 WAVE` | wave, cap, giữ slot, giữ cổng, pre-bind, chờ việc xong |
+| `📡 SOCKET` | ACK OK/rejected/no-ACK, buckets, retry |
+| `🔔 CỬA SỔ NGHE ACK` | giữ slot/nghe/hết hạn/p90/p95 |
+| `🌐 API NỀN` | queued/started/fetch, HTTP, queue wait |
+| `🧭 Chẩn đoán globalId` | cache/HTTP/WS/Ext, batch, lane |
+| `🫥 CHẠY NỀN` | setTimeout/Worker, tab ẩn, bị bóp |
+
+**Cách làm — nhánh `if`, không cắt biểu thức.** Chèn
+`if (IS_STABLE_BUILD) logLine('📊 XONG…'); else logLine('📊 TỔNG HỢP…')` ngay trước lời gọi cũ.
+Đã thử cách cắt giữa biểu thức 93 dòng bằng thay-chuỗi-nguyên-văn: neo không khớp ⇒ sinh thất
+bại, và lần sửa sau chắc chắn làm hỏng. Nhánh `if` chỉ **thêm** một điều kiện đọc hằng số nên
+`node --check` luôn xanh, biểu thức cũ còn nguyên cho bản gốc.
+
+**Không đổi số:** cả hai bản đọc cùng `getBatchSummaryCounts()` và cùng `elapsedSec` ⇒ cùng một
+kết quả, chỉ khác cách trình bày. Không thêm/không bớt lệnh gửi nào.
+
+**Khoá bằng test** (`tools/test-verify.mjs`, nhóm `[stable]`, mutation-verified 3 ca):
+dòng `📊 XONG` phải có đủ ✅/%/❌/⚠/tốc độ; dòng cũ phải nằm sau `else`; 6 dòng chẩn đoán phải
+đi qua `logDiag` và **không** được có `logLine`; bản gốc **không** được lẫn nhánh `IS_STABLE_BUILD`.

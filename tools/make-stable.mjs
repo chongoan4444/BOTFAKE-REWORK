@@ -130,11 +130,33 @@ rep('  function extCall(payload, waitMs) {',
 /* 7. Log cuối gọn ---------------------------------------------------------- */
 for (const [a, b, label] of [
   ["logLine('⚡ TỐC ĐỘ: '", "logDiag('⚡ TỐC ĐỘ: '", 'diag-tocdo'],
+  // [v1.93.18] Dòng ⏱ "Phát lệnh … chờ xác nhận … tổng" chỉ là số liệu kỹ thuật ⇒ bản ổn định
+  // cũng tắt. Người dùng chốt: log cuối CHỈ cần số thành công/thất bại + tốc độ.
+  ["logLine('🫥 CHẠY NỀN: '", "logDiag('🫥 CHẠY NỀN: '", 'diag-chaynen'],
   ["logLine('🌊 WAVE: script '", "logDiag('🌊 WAVE: script '", 'diag-wave'],
   ["logLine('📡 SOCKET: ACK OK/rejected/no-ACK '", "logDiag('📡 SOCKET: ACK OK/rejected/no-ACK '", 'diag-socket'],
   ["logLine('🌐 API NỀN: queued(nền)/started(nền+đồng bộ)/fetch '", "logDiag('🌐 API NỀN: queued(nền)/started(nền+đồng bộ)/fetch '", 'diag-api'],
   ["logLine('🧭 Chẩn đoán globalId: cache '", "logDiag('🧭 Chẩn đoán globalId: cache '", 'diag-gid'],
 ]) rep(a, b, label);
+
+/* 7b. [v1.93.18] DÒNG TỔNG KẾT GỌN — 1 DÒNG DUY NHẤT ------------------------ */
+// Người dùng chốt: "bản stable log chỉ cần hiện số thành công/số thất bại + tốc độ, không cần
+// chi tiết dài dòng". Bản gốc in 2 dòng rất dài (khối 📊 TỔNG HỢP 93 dòng code + ⚡ TỐC ĐỘ 32
+// dòng code; mỗi dòng in ra dài 400–1 200 ký tự với 🛟/🖐/🛡/⏳/🧭/📡…).
+//
+// CÁCH LÀM: chèn một nhánh `if (IS_STABLE_BUILD)` NGAY TRƯỚC lời gọi cũ, KHÔNG cắt biểu thức.
+// Lý do: cắt giữa biểu thức 93 dòng bằng thay-chuỗi-nguyên-văn là cách chắc chắn làm hỏng bản
+// gốc lẫn bản ổn định ở lần sửa sau (đã thử: neo không khớp ⇒ sinh thất bại). Nhánh `if` chỉ
+// THÊM một điều kiện đọc hằng số — biểu thức cũ còn nguyên, `node --check` luôn xanh.
+//
+// Giữ đúng 4 thứ người dùng cần: ✅ thành công/tổng (%) · ❌ lỗi · ⚠ không rõ · thời gian + tốc độ.
+// KHÔNG đổi số: cùng `c` (getBatchSummaryCounts), cùng `elapsedSec` ⇒ hai bản báo cùng kết quả.
+const STABLE_SUMMARY = `if (IS_STABLE_BUILD) logLine('📊 XONG: ✅ ' + c.okTotal + '/' + c.total + ' tin (' + pct + '%)'
+          + ' · ❌ ' + c.failTotal + ' · ⚠ ' + c.unsureTotal
+          + ' · ⏱ ' + elapsedSec + 's · ' + (elapsedSec > 0 ? (c.settled / elapsedSec).toFixed(1) : '0') + ' tin/giây');
+        else logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total`;
+rep("logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total",
+  STABLE_SUMMARY, 'stable-summary');
 
 /* 8. Ghi / kiểm tra -------------------------------------------------------- */
 if (CHECK) {
