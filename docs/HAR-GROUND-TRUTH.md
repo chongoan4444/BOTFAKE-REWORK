@@ -1,7 +1,26 @@
 # Sự thật gốc rút từ HAR (12 file, ~59 MB)
 
 Tài liệu này ghi lại **mọi kết luận đã kiểm chứng bằng dữ liệu HAR**, để không phải suy đoán lại.
-Cập nhật: 2026-11-11, script 1.91.80.
+Cập nhật: 2026-11-11, script 1.93.19.
+
+---
+
+## ⛔ QUY TẮC SỬA CODE (chốt 22/11 — người dùng chỉ đạo, KHÔNG tự đảo)
+
+> **"từ giờ quay về sửa bản head thôi, bản stable bảo sửa mới sửa"**
+
+| | |
+|---|---|
+| **Sửa mặc định** | `scripts/pancake-send-lite.user.js` — **bản HEAD/gốc**, mọi thay đổi logic đều vào đây |
+| **Bản stable** | `scripts/pancake-send-stable.user.js` — **CHỈ sửa khi được bảo rõ** |
+| **Sửa bản stable bằng cách** | *không bao giờ* sửa thẳng file; sửa `tools/make-stable.mjs` / `tools/build.mjs` rồi chạy lại generator |
+| **Sau mỗi lần sửa bản gốc** | chạy `node tools/make-stable.mjs` để bản stable đi theo (đây là *sinh lại*, không phải *sửa bản stable*) |
+
+Nghĩa là: bản stable là **sản phẩm dẫn xuất**, tự động hưởng mọi bản vá của bản gốc. Chỉ khi
+người dùng nói rõ "sửa bản stable" thì mới đụng vào `make-stable.mjs` để thêm phép biến đổi riêng.
+
+---
+
 
 ## 0. Phạm vi chính xác (đã đếm lại)
 
