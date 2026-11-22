@@ -6,18 +6,24 @@
 
 ## 0. Kết luận trước, chứng minh sau
 
-**Lô này KHÔNG hỏng.** Sổ kiểm chứng của cùng file ghi **5 241/5 281 chat có ≥ 1 dòng ✅**
-(99,2 %), chỉ **40 chat** còn ⚠. Con số `15,5 %` mà người dùng đọc được là **dòng chốt in
-quá sớm**, không phải số tin đã gửi.
+> **⚠ SỬA LẠI 23/11 — bản §0 đầu tiên đã SAI, xin lỗi.**
+> Bản đầu tôi đọc sổ kiểm chứng và kết luận "99,2 % đã tới nơi". **Người dùng kiểm bằng mắt:
+> hơn 4 000 chat KHÔNG nhận được tin** — đúng. Các dòng `✅ đánh dấu ĐÃ TỚI NƠI qua ext` đó là
+> **✅ GIẢ** (§7). Bài học: sổ kiểm chứng tự ghi ✅ thì không thể dùng sổ đó để chứng minh ✅.
 
-| Chỉ số | Dòng `📊 TỔNG HỢP` (17:37:34) | Sổ kiểm chứng (đọc hết file) |
+**Lô này HỎNG thật.** Trong 5 281 chat:
+
+| Chỉ số | Số đo | Nguồn |
 |---|---|---|
-| Đã tới nơi | 818 (15,5 %) | **5 241 (99,2 %)** |
-| Còn ⚠ | 4 463 | **40** |
-| Kênh cuối | API 397 · Ext 421 | API 397 · **Ext 4 844** |
-| Giờ dòng ✅ cuối | — | **17:45:13** (trễ **458 s** so với dòng chốt) |
+| Socket bắn nhưng **0 phản hồi** | 4 884 lần · ACK `0/0/4884` | `📡 SOCKET` |
+| Được "GỬI CỨU qua Extension" | 4 844 ca | sổ: `🛟 … GỬI CỨU 1 lần` |
+| Dòng `✅ … đánh dấu ĐÃ TỚI NƠI qua ext` | 4 844 — **KHÔNG có lệnh gửi nào tương ứng** | §7 |
+| Lệnh Ext thật sự hoàn tất | **0** (`🧯 Ext quá hạn` 0 · `Ext báo success` 0 · `gửi THÀNH CÔNG qua Extension` 0) | log gọn |
+| API thật sự OK | 397 | `🌐 API NỀN` |
+| Người dùng phải gửi lại bằng tay | **hơn 4 000** | người dùng xác nhận |
 
-Ba lỗi code thật đã tìm ra và vá (v1.93.20 / W200.130), mỗi lỗi có số đo riêng ở §2–§4.
+Ba lỗi code **báo cáo sai** (vá ở v1.93.20 / W200.130): §2 · §3 · §4. **Một lỗi gây hậu quả
+thật** — cả lô bị đẩy sang Ext và chốt ✅ khống (vá ở v1.93.21 / W200.131): §7 · §8.
 
 ## 1. ĐO ĐƯỢC — bảng số của lô
 
@@ -125,3 +131,80 @@ chốt** khi `bgUnsettled > 0 || countRescuing() > 0`, có in lý do hoãn 1 l�
    xấp xỉ nhau. Lệch > 1 % là bảng chốt vẫn in sớm.
 5. `🧷 PRE-BIND ẢNH … dùng lại được 0 ca · hụt 4 867` — nếu vẫn 0 thì pre-bind **chưa có tác
    dụng**, và `📷 bind fbId TB 3 038 ms/ca` vẫn là chi phí nằm trong slot.
+
+---
+
+# PHẦN BỔ SUNG 23/11 — vì sao cả lô bị đẩy sang Extension và vì sao sổ ghi ✅ khống
+
+## 7. Lỗi gây hậu quả thật: `dupBlockedResult()` trả `ok:true` cho ca CHƯA bắn
+
+**ĐO ĐƯỢC** (log 22/11, lô 5 281 chat):
+
+| Dòng | Số |
+|---|---|
+| `✅ … bù THÀNH CÔNG qua Extension` (đếm `×N`, 100 dòng gộp) | **4 843** |
+| `✅ đánh dấu ĐÃ TỚI NƠI qua ext` | **4 844** |
+| `🧯 Ext quá hạn` / `Ext báo success…` / `gửi THÀNH CÔNG qua Extension` | **0 / 0 / 0** |
+| `🌐 API NỀN`: fetch / OK | 422 / **397** |
+| `📡 SOCKET` ACK | **0** |
+
+Nếu 4 843 ca kia thật sự được Extension gửi thành công thì làn Ext **phải** in ít nhất một
+trong ba dòng chẩn đoán của nó. Cả ba đều **0** ⇒ không có lệnh nào hoàn tất ⇒ các dòng ✅ đó
+**không có lệnh gửi nào tương ứng**. Khớp với việc người dùng kiểm bằng mắt: hơn 4 000 chat
+vẫn chưa nhận tin, phải gửi lại bằng tay.
+
+**GỐC (code):** `dupBlockedResult(convId)` trả
+`{ ok: true, sendBy: deliveredIds[convId] || 'dup-block', sent: true, fired: true, dupBlocked: true }`
+— tức **"đã bị chặn vì trùng"** lại được khai báo là **"đã gửi"**. `sendOneAndLog` có nhánh
+riêng cho `dupBlocked` (nên dòng tổng hợp của vòng chính không sai), nhưng **nhánh bù** thì
+không: nó chỉ đọc `if (r && r.ok) markDelivered(conv.id, ch)` ⇒ ca **không bắn gì** được ghi
+✅ rồi `dropManualResend()` ⇒ chat biến mất khỏi danh sách gửi tay. Đây là loại lỗi tệ nhất:
+báo đã gửi trong khi chưa gửi.
+
+Ngoài ra `markDelivered()` **không nhả `outboundLock`**, nên khoá còn lại của lần bắn trước
+biến chính ca đã-giao (hoặc đang-bay) thành `dupBlocked` ở mọi chuỗi bù về sau — nguồn thứ hai
+của cùng hiện tượng.
+
+**VÁ (v1.93.21):**
+1. `dupBlockedResult()` ⇒ `ok:false`, `sent:'maybe'`, `uncertain:true`, `dupBlocked:true`.
+   Không bắn thêm lệnh nào — vẫn chặn trùng y như cũ.
+2. Nhánh bù: `if (r && r.ok && !r.dupBlocked)` mới được `markDelivered`.
+3. `markDelivered()` nhả `outboundLock` ngay tại nguồn sự thật (đã giao). Nhả ở đây **không**
+   mở đường trùng vì `acquireOutbound()` đã tự chặn bằng `deliveredIds`.
+
+## 8. Vì sao cả lô bị đẩy sang Extension — chuỗi nhân quả có số đo
+
+Không phải "ưu tiên Ext" (thứ tự làn vẫn đúng). Chuỗi thật:
+
+1. **Socket bắn 4 884 lần, page không trả một `/ls_resp` nào.**
+   `peak Socket/page active 151/151` trong khi trần làn 256 ⇒ **không phải làn chặn**.
+   Mỗi ca chờ hết hạn giữ slot ⇒ chốt ⚠.
+2. **Mỗi ca ⚠ đăng ký kiểm chứng** (`scheduleSocketVerify`) → cổng `proveAbsentBeforeBu()`.
+   Log ghi `🧭 … đọc thẳng FB: tin 610 · gid 0 · cứu 0` và `HTTP 0` globalId ⇒ **đường xác
+   nhận độc lập không chạy được**. Lô này gửi ảnh cho **5 306/5 281** chat, nên
+   `photoMovedVerdict()` không bao giờ trả `'yes'`; `absenceVerdict()` rơi xuống `'absent'`
+   chỉ vì `updated_at` cũ hơn mốc gửi.
+3. **`socksProof === 'absent' && hasExtNow` ⇒ `🛟 GỬI CỨU 1 lần qua Extension` cho 4 844 ca.**
+   Đây chính là "cả lô bị đẩy hết vào extension".
+4. Nhánh bù đó chốt ✅ qua `dupBlockedResult()` ⇒ sổ ghi ✅ khống (§7).
+
+**VÁ (v1.93.21):** thêm `socketZeroAckRescueAllowed(pageId)` — khi page đã bắn
+≥ `SOCK_ZERO_ACK_MIN = 30` lần mà **0 ACK thật**, cổng chỉ cho cứu tối đa
+`SOCK_ZERO_ACK_RESCUE_MAX = 40` ca (giữ mẫu, không bỏ sót ca lẻ); phần còn lại **GIỮ ⚠ + vào
+danh sách gửi tay**, in 1 dòng `🛟 Socket 0 ACK suốt lượt … KHÔNG tự bắn cứu qua Extension`.
+Đây là **thu hẹp** đường bắn thêm, không mở đường nào ⇒ không thể sinh tin trùng.
+
+Hai hằng số trên là **ngưỡng đo từ chính log này** (4 844 ca cứu trên 4 844 ca 0 ACK) và
+**phải đo lại** ở lô sau:
+- nếu phần lớn ca cứu vẫn tới nơi thật ⇒ nâng `SOCK_ZERO_ACK_RESCUE_MAX`;
+- nếu cứu 0 % ⇒ hạ về 0 (tắt hẳn đường cứu khi 0 ACK).
+
+## 9. Nghiệm thu lần chạy sau — 4 con số quyết định
+
+1. `🛟 Socket 0 ACK suốt lượt … KHÔNG tự bắn cứu` **> 0** ⇒ cổng mới có tác dụng.
+2. `✅ … bù THÀNH CÔNG qua Extension` **phải ≤ số lệnh Ext thật sự hoàn tất**. Nếu lại lớn hơn,
+   đọc ngay `🧯 Ext quá hạn` / `Ext báo success` / `gửi THÀNH CÔNG qua Extension`.
+3. Dòng `🛡 Chặn trùng` + `dupBlocked` — ca `dupBlocked` **không được** xuất hiện trong sổ với ✅.
+4. Đối chiếu **TỔNG THEO CHAT** (`#đã tới nơi > 0`) với số người dùng kiểm bằng mắt trên Pancake.
+   Hai số này là nguồn duy nhất đáng tin cho "đã tới nơi"; dòng ✅ của sổ chỉ đáng tin sau khi
+   mục 1–3 sạch.

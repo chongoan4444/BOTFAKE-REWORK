@@ -2472,6 +2472,30 @@ check('[v1.93.20] cổng hoãn chốt có trần thời gian (không treo báo c
 check('[v1.93.20] dòng 📡 tự diễn giải "no-ACK ≠ chưa gửi"',
   /no-ACK = CHƯA BIẾT \(frame đã publish/.test(SRC), true);
 
+/* ═══ [v1.93.21] CHỐNG TÁI PHÁT "✅ GIẢ" VÀ "CỨU HÀNG LOẠT QUA EXT" ═══
+ * ĐO ĐƯỢC (log 22/11 17:35–17:45, lô 5 281 chat, bản 1.93.19):
+ *   • 4 843 dòng `✅ … bù THÀNH CÔNG qua Extension` trong khi làn Ext KHÔNG có lệnh nào
+ *     hoàn tất (🧯 Ext quá hạn 0 · Ext báo success… 0 · gửi THÀNH CÔNG qua Extension 0); người
+ *     dùng kiểm bằng mắt: hơn 4 000 chat KHÔNG nhận được tin.
+ *   • Nguồn: `dupBlockedResult()` trả `ok:true` cho ca CHƯA bắn lệnh nào.
+ *   • `📡 ACK 0/0/4884` rồi 4 844 ca `🛟 GỬI CỨU qua Extension`. */
+check('[v1.93.21] dupBlockedResult KHÔNG trả ok:true (nguồn ✅ giả)',
+  /return \{ ok: false, id: '', sendBy: deliveredIds\[convId\] \|\| 'dup-block', sent: 'maybe'/.test(SRC), true);
+check('[v1.93.21] nhánh bù không chốt ✅ cho ca dupBlocked',
+  /if \(r && r\.ok && !r\.dupBlocked\) \{/.test(SRC), true);
+check('[v1.93.21] markDelivered nhả outboundLock (khoá sót biến ca đã giao thành dupBlocked)',
+  /try \{ delete outboundLock\[convId\]; \}/.test(SRC), true);
+check('[v1.93.21] có cổng chặn cứu hàng loạt khi Socket 0 ACK',
+  /function socketZeroAckRescueAllowed/.test(SRC), true);
+check('[v1.93.21] cổng 0-ACK có ngưỡng mẫu + trần cứu (hằng số đo được)',
+  /SOCK_ZERO_ACK_MIN = \d+;/.test(SRC) && /SOCK_ZERO_ACK_RESCUE_MAX = \d+;/.test(SRC), true);
+check('[v1.93.21] nhánh GỬI CỨU có đi qua cổng 0-ACK',
+  /_zeroAckGate\.ok/.test(SRC), true);
+check('[v1.93.21] đếm ACK thật theo page (đầu vào của cổng)',
+  /pageAckGot\[_p\] = \(pageAckGot\[_p\] \|\| 0\) \+ 1/.test(SRC), true);
+check('[v1.93.21] đếm số lần bắn Socket theo page (mẫu số của cổng)',
+  /pageSockSent\[_pidS\] = \(pageSockSent\[_pidS\] \|\| 0\) \+ 1/.test(SRC), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));

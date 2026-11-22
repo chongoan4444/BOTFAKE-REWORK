@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.20-w200.130
+// @version      1.93.21-w200.131
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.20-W200.130'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.21-W200.131'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6098,6 +6098,8 @@
         if (!acquireOutbound(conv.id)) return dupBlockedResult(conv.id);
         sockFiredPending.add(conv.id);
         try {
+          const _pidS = String(conv.pageId || String(conv.id || '').split('_')[0] || '');
+          if (_pidS) pageSockSent[_pidS] = (pageSockSent[_pidS] || 0) + 1; // [v1.93.21] mẫu số của cổng 0-ACK
           const _st = sockRouteOf((conv.pageId || String(conv.id || '').split('_')[0]));
           if (_st) _st.sent++;
         } catch (eSt) { /* ignore */ }
@@ -8806,6 +8808,32 @@
     // Khớp 100% với __sendBySocketCacheFB__ trong _app (@927067 & @937200):
     // Ưu tiên bắn qua Socket trước khi WebSocket đang kết nối (hoặc đang khởi động ở đầu lượt lô lớn) VÀ ĐÃ CÓ global_id THẬT (hasRealGid)!
     // Tuyệt đối không ưu tiên Socket khi chưa có global_id thật (vì Socket không nhận from_psid).
+    /* ═══ [v1.93.21] VÌ SAO CẢ LÔ RƠI VÀO EXTENSION — ĐO ĐƯỢC, KHÔNG SUY ĐOÁN ═══
+     * Log 22/11 17:35–17:45 (lô 5 281 chat, bản 1.93.19):
+     *   • `📡 SOCKET: ACK OK/rejected/no-ACK 0/0/4884` — 4 884 lần bắn Socket, **0 ACK**.
+     *   • `🌊 peak Socket/page active total/per-page 151/151`, `limits cuối [256×3]`
+     *     ⇒ làn KHÔNG chặn (trần 256), page chỉ đạt 151 frame in-flight.
+     *   • Sổ kiểm chứng: 4 844 dòng `🛟 … đã chứng minh vắng mặt ⇒ GỬI CỨU 1 lần qua Extension`,
+     *     rồi 4 844 dòng `✅ đánh dấu ĐÃ TỚI NƠI qua ext`.
+     *   • KHÔNG một dòng nào của làn gửi Ext: `🧯 Ext quá hạn` 0 · `Ext báo success…` 0 ·
+     *     `gửi THÀNH CÔNG qua Extension` 0 ⇒ 4 844 dòng ✅ đó không do làn Ext gửi thành công.
+     *
+     * CHUỖI NHÂN QUẢ (mỗi mắt xích có số đo ở trên):
+     *   ① Socket bắn 4 884 lần, không lần nào có `/ls_resp` ⇒ chờ hết hạn giữ slot rồi chuyển ⚠.
+     *   ② Mỗi ca ⚠ đăng ký `scheduleSocketVerify` → cổng `proveAbsentBeforeBu()` đọc snippet
+     *      Pancake. Log ghi `🧭 … đọc thẳng FB: tin 610 · gid 0 · cứu 0` ⇒ đường đọc lại lịch
+     *      sử không xác nhận được tin nào ⇒ cổng phán `absent`.
+     *   ③ Nhánh `socksProof === 'absent' && hasExtNow` ⇒ `🛟 GỬI CỨU 1 lần qua Extension` cho
+     *      TOÀN BỘ 4 844 ca. Đây chính là "cả lô bị đẩy hết vào extension".
+     *   ④ Nhánh bù chốt ✅ qua `dupBlockedResult()` (đã vá ở v1.93.21) ⇒ sổ ghi ✅ trong khi
+     *      không có tin nào được xác nhận.
+     *
+     * ⇒ CHỖ CẦN SỬA KHÔNG PHẢI "ưu tiên Ext": thứ tự làn ở đây vẫn đúng. Chỗ sai là **cổng
+     * `absent` cho qua quá dễ** khi chính page đang có 0 ACK — lô này gửi ảnh cho 5 306/5 281
+     * ca nên `photoMovedVerdict` không bao giờ trả 'yes', và `absenceVerdict` rơi xuống
+     * 'absent' chỉ vì `updated_at` cũ hơn mốc gửi. Trong khi đó bằng chứng NGƯỢC lại có thật:
+     * tin tới được qua Ext sau đó. Xem `socketZeroAckRescueAllowed()`.
+     */
     const preferSocket = sockReady && hasRealGid && (hint === 'socket' || hasRealGid);
     const first = preferSocket ? 'socket' : 'ext';
     const second = preferSocket ? 'ext' : 'socket';
@@ -10687,6 +10715,11 @@
       if (kind === 'ok') sendDiag.socketAckOk++;
       else if (kind === 'rejected') sendDiag.socketAckRejected++;
       else if (kind === 'noack') sendDiag.socketNoAck++;
+      /* [v1.93.21] ĐẾM ACK THẬT THEO PAGE — đầu vào của `socketZeroAckRescueAllowed()`.
+       * Chỉ 'ok'/'rejected' mới là ACK (no-ACK là bộ đếm giờ của TA nổ, không phải phản hồi FB). */
+      if (kind === 'ok' || kind === 'rejected') {
+        try { const _p = String(pageId || ''); if (_p) pageAckGot[_p] = (pageAckGot[_p] || 0) + 1; } catch (eAG) { /* ignore */ }
+      }
       noteSockAckRecent(kind); // [v1.92.28] cửa sổ 200 ACK gần nhất (dùng cho ngân sách thử lại)
       // [v1.92.29] Ca 'noack' mang thời gian HẾT HẠN CHỜ (vd 5 263 ms), không phải ACK thật:
       // lô 13:42 in "ACK TB/max 5263/5263 · bucket ≥5s = 1" cho một ca mất ACK ⇒ p50/p90 lệch
@@ -10929,7 +10962,39 @@
     pumpSockVerify();
   }
   const verifyStats = { found: 0, held: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP (held = giữ ⚠, không bắn lại)
-  const sockRescueStats = { tried: 0 }; // [v1.92.37] số ca đã chứng minh vắng mặt ⇒ gửi cứu 1 lần
+  const sockRescueStats = { tried: 0, zeroAckHold: 0 }; // [v1.92.37] số ca đã chứng minh vắng mặt ⇒ gửi cứu 1 lần
+  /* ═══ [v1.93.21] CỔNG CHẶN "CỨU HÀNG LOẠT QUA EXT" KHI SOCKET CHƯA TỪNG TRẢ ACK ═══
+   * ĐO ĐƯỢC (log 22/11, lô 5 281 chat): `ACK OK/rejected/no-ACK 0/0/4884` — page không trả
+   * MỘT `/ls_resp` nào trong cả lượt; rồi 4 844 ca được `🛟 GỬI CỨU 1 lần qua Extension`.
+   * Khi cả page có 0 ACK thì "hội thoại không đổi" KHÔNG phải bằng chứng "tin chưa đi":
+   *   • `proveAbsentBeforeBu` chỉ dựa vào snippet Pancake + photoMoved; log ghi
+   *     `đọc thẳng FB: tin 610 · gid 0` ⇒ đường xác nhận độc lập không chạy được.
+   *   • Nếu cổng sai thì mỗi ca sinh THÊM một lần gửi (Ext) ⇒ đúng nguồn gửi trùng.
+   * NAY: page đã bắn ≥ SOCK_ZERO_ACK_MIN lần mà vẫn 0 ACK ⇒ chỉ cho cứu tối đa
+   * SOCK_ZERO_ACK_RESCUE_MAX ca (giữ mẫu, không bỏ sót ca lẻ); phần còn lại GIỮ ⚠ và vào
+   * danh sách GỬI TAY để người dùng thấy ngay, thay vì máy tự bắn cứu hàng loạt.
+   * Đây là THU HẸP đường bắn thêm, không mở đường nào. Hai hằng là ngưỡng ĐO TỪ LOG NÀY
+   * (4 844 ca cứu trên 4 844 ca 0 ACK) ⇒ phải đo lại lô sau: cứu mà phần lớn tới nơi thật thì
+   * nâng trần; cứu 0 % thì hạ về 0.
+   */
+  const SOCK_ZERO_ACK_MIN = 30;        // ≥30 lần bắn Socket mà 0 ACK mới đủ mẫu kết luận
+  const SOCK_ZERO_ACK_RESCUE_MAX = 40; // số ca tối đa được bắn cứu khi page đang 0 ACK
+  const pageSockSent = {};             // [v1.93.21] pageId → số lần đã bắn Socket (lượt này)
+  const pageAckGot = {};               // [v1.93.21] pageId → số ACK thật nhận được (ok+rejected)
+  const pageZeroAckRescueUsed = {};    // [v1.93.21] pageId → số ca đã cho cứu trong chế độ 0 ACK
+  function socketZeroAckRescueAllowed(pageId) {
+    try {
+      const pid = String(pageId || '');
+      if (!pid) return { ok: true, zeroAck: false };
+      const got = pageAckGot[pid] || 0;
+      const sent = pageSockSent[pid] || 0;
+      if (got > 0) return { ok: true, zeroAck: false, sent: sent };
+      if (sent < SOCK_ZERO_ACK_MIN) return { ok: true, zeroAck: false, sent: sent };
+      const used = pageZeroAckRescueUsed[pid] || 0;
+      if (used >= SOCK_ZERO_ACK_RESCUE_MAX) return { ok: false, zeroAck: true, sent: sent, used: used };
+      return { ok: true, zeroAck: true, sent: sent, used: used };
+    } catch (e) { return { ok: true, zeroAck: false }; }
+  }
   /* ═══ [v1.93.1] FB ĐÃ BÁO "KHÔNG NHẬN ĐƯỢC" THÌ KHÔNG BÙ NỮA ═══
    * ĐO ĐƯỢC trên log 21/11 19:44 (lô 4 281 chat, CÓ sổ kiểm chứng 10 717 dòng):
    *   • 573 ca có dòng `🔁 ACK muộn = FB TỪ CHỐI (…) — tin chưa đi`   ← FB NÓI RÕ chưa nhận
@@ -11210,8 +11275,25 @@
   // v1.82.6 — khóa tin đang bay: đã POST/publish thì kênh khác không bắn thêm, trừ khi kênh trước
   // XÁC NHẬN thất bại (releaseOutbound). 'maybe' giữ khóa → không gửi lần 2.
   function dupBlockedResult(convId) {
-    // [v1.92.28] `dupBlocked` để nơi gọi ĐẾM được là "đã chặn trùng", không nhầm thành 1 lệnh gửi thật.
-    return { ok: true, id: '', sendBy: deliveredIds[convId] || 'dup-block', sent: true, fired: true, dupBlocked: true };
+    /* ═══ [v1.93.21] `ok:true` Ở ĐÂY LÀ NGUỒN CỦA HÀNG NGHÌN DÒNG ✅ GIẢ ═══
+     * ĐO ĐƯỢC (log 22/11 17:35–17:45, lô 5 281 chat, bản 1.93.19):
+     *   • `📊 … ✅ 818 (15.5%) [API: 397 · Ext: 421]` — nhưng nhánh bù đã ghi
+     *     **4 843 dòng `✅ … bù THÀNH CÔNG qua Extension`** (đếm `×N` trong 100 dòng gộp),
+     *     tức số ✅ KHÔNG đến từ 421 lần bắn thành công mà từ chỗ khác.
+     *   • Cùng file: `🌐 API NỀN: 422 fetch · OK 397`; `📡 SOCKET: 0 ACK`;
+     *     `🧭 … đọc thẳng FB: tin 610 · gid 0 · cứu 0` (0 ca đọc được lịch sử FB);
+     *     `🧯 Ext quá hạn` KHÔNG được in (0 ca timeout).
+     *   • 4 844 dòng `✅ đánh dấu ĐÃ TỚI NƠI qua ext` — mà nhánh trả `ok:true` của
+     *     `sendViaExtension` (có `messageId`) và nhánh `res.success` đều đã bị 1.93.2/1.93.14
+     *     chặn không chốt ✅ nữa ⇒ 4 844 ca đó KHÔNG đi qua đường nào ở trên.
+     * GỐC: hàm này trả `ok:true` + `fired:true`. Mọi nơi gọi đều đọc đúng hai trường đó
+     * (nhánh bù: `if (r && r.ok) markDelivered(conv.id, ch)`), nên ca **KHÔNG hề bắn lệnh nào**
+     * (chỉ vì khoá outbound còn) bị ghi ✅ + `dropManualResend()` ⇒ biến mất khỏi danh sách
+     * gửi tay. Đúng loại lỗi tệ nhất: báo đã gửi trong khi chưa gửi.
+     * NAY: `ok:false` + `dupBlocked:true` + `sent:'maybe'` (KHÔNG rõ) ⇒ nơi gọi đưa ca này
+     * vào diện kiểm chứng, không chốt ✅. KHÔNG thêm lệnh gửi nào (vẫn chặn trùng như cũ). */
+    return { ok: false, id: '', sendBy: deliveredIds[convId] || 'dup-block', sent: 'maybe', fired: false, dupBlocked: true,
+      uncertain: true, error: 'Đã có lệnh gửi cho chat này đang bay — KHÔNG bắn thêm (chống trùng), chưa có xác nhận' };
   }
   function acquireOutbound(convId) {
     if (!convId) return true;
@@ -11781,6 +11863,11 @@
   function markDelivered(convId, via) {
     if (!convId) return;
     clearBgPending(convId);
+    /* [v1.93.21] ĐÃ GIAO ĐƯỢC ⇒ KHOÁ NGOÀI HẾT VIỆC.
+     * `acquireOutbound()` chặn khi `deliveredIds[convId]` đã có, nên nhả ở đây KHÔNG mở đường
+     * gửi trùng; ngược lại khoá còn sót là thứ biến ca "đã giao" thành `dupBlockedResult()`
+     * ở mọi chuỗi bù về sau. Nhả ngay tại nguồn sự thật (đã giao) là chỗ duy nhất đúng. */
+    try { delete outboundLock[convId]; } catch (eOL) { /* ignore */ }
     const ch = (via === 'ext' || via === 'extension') ? 'ext' : (via === 'socket' ? 'socket' : 'api');
     // [v1.92.33] SỔ KIỂM CHỨNG: ghi MỌI lần đánh dấu "đã tới nơi" (kể cả lần trùng kênh ở dưới).
     // 1 chat bị đánh dấu ≥ 2 lần ⇒ dấu hiệu xác nhận sai / gửi lặp ⇒ file .txt liệt kê riêng.
@@ -12100,7 +12187,11 @@
         const ch = out.ch;
         const r = out.r;
         const hasMoreAfterSocket = (ch === 'socket') && !isApi551 && remaining.some((c) => c !== 'socket' && triedCh.indexOf(c) < 0 && done.indexOf(c) < 0);
-        if (r && r.ok) {
+        /* [v1.93.21] `r.dupBlocked` ⇒ CHƯA hề bắn lệnh nào ⇒ TUYỆT ĐỐI không chốt ✅.
+         * Đo được: 4 843 dòng `bù THÀNH CÔNG qua Extension` của lô 5 281 chat trong khi
+         * 📡 Socket 0 ACK · 🌐 API chỉ 397 OK · 🧯 Ext quá hạn 0 ⇒ số ✅ đó không có lệnh nào
+         * tương ứng. Nay ca này đi đường "không rõ" như các ca chưa xác nhận khác. */
+        if (r && r.ok && !r.dupBlocked) {
           markDelivered(conv.id, ch);
           postSendSideEffects(conv);
           markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
@@ -12955,6 +13046,26 @@
         if (socksProof === 'absent' && extClaimSuccess.has(String(conv.id))) {
           verifyStats.held = (verifyStats.held || 0) + 1;
           return;
+        }
+        /* ═══ [v1.93.21] CHỖ SINH RA 4 844 CA "GỬI CỨU QUA EXTENSION" CỦA LÔ 5 281 ═══
+         * Đo được: page có `ACK 0/0/4884` (0 phản hồi) mà cả 4 844 ca đều qua nhánh này ⇒
+         * mỗi ca sinh THÊM một lệnh gửi qua Ext. Khi chính page chưa từng trả ACK thì
+         * "hội thoại không đổi" không đủ tư cách làm bằng chứng "tin chưa đi".
+         * Nay: page đang 0 ACK ⇒ chỉ cho cứu tối đa SOCK_ZERO_ACK_RESCUE_MAX ca; phần còn lại
+         * GIỮ ⚠ + vào danh sách gửi tay (người dùng thấy), KHÔNG tự bắn cứu hàng loạt.
+         * Đây là THU HẸP đường bắn thêm — không thể sinh tin trùng. */
+        const _zeroAckGate = (socksProof === 'absent' && hasExtNow)
+          ? socketZeroAckRescueAllowed(pageId)
+          : { ok: true, zeroAck: false };
+        if (!_zeroAckGate.ok) {
+          sockRescueStats.zeroAckHold++;
+          try { noteManualResend(conv.id); } catch (eMR) { /* ignore */ }
+          logFailGrouped(nm, 'Socket 0 ACK suốt lượt (' + (_zeroAckGate.sent || 0) + ' lần bắn, 0 phản hồi) — '
+            + 'KHÔNG tự bắn cứu qua Extension (đã cho cứu ' + SOCK_ZERO_ACK_RESCUE_MAX + ' ca mẫu) ⇒ GIỮ ⚠, vào danh sách gửi tay', '🛟', conv.id);
+          return;
+        }
+        if (_zeroAckGate.zeroAck && _zeroAckGate.ok) {
+          try { pageZeroAckRescueUsed[String(pageId)] = (pageZeroAckRescueUsed[String(pageId)] || 0) + 1; } catch (eZU) { /* ignore */ }
         }
         if (socksProof === 'absent' && hasExtNow && myRun === runSeq && !state.stopRequested
             && !deliveredIds[conv.id] && !finalFailedIds[conv.id]) {
