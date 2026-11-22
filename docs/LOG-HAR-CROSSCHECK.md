@@ -1938,3 +1938,42 @@ khỏi dò lại bằng `GET_GLOBAL_ID_FOR_CONV` (đắt hơn) hay `MAKE_MESSENG
 bảo đảm `loadMessages` sẵn sàng; ext tự gọi `He.preloadDocIds` khi chưa ready
 (`O.isFeatureReady("loadMessages")` = `has(Da) || has(Sa)`). Nếu thiếu ⇒ reject `Missing doc_id`
 ⇒ trả `null` ⇒ **không ảnh hưởng phán quyết cũ**.
+
+---
+
+## 30. BẢNG PHỦ ĐÚNG THỰC TẾ — 9/9 lệnh đã đối soát (không phải 14/68)
+
+### 30.1 Đính chính cách đếm trước đây
+
+Bảng cũ ghi "14/68 case đã đối soát". **Sai cả tử số và mẫu số**, vì nó đếm cả tên xuất hiện
+trong **chú thích**. Đếm đúng (`grep "type: *'X'"` = lệnh thật sự gửi):
+
+| Số | Lệnh script GỬI | Trạng thái |
+|---|---|---|
+| 1 | `PRELOAD_DOC_IDS` | ✔ §27 — sửa timeout 4 000 → 25 000 (ext không `await`) |
+| 2 | `BATCH_GET_GLOBAL_ID` | ✔ §27.3 — 2 điều kiện `Ct.init` (`Missing doc_id`, `"There is a running job"`), `timeRangeMin:0` đúng |
+| 3 | `GET_GLOBAL_ID_FOR_CONV` | ✔ trả `globalId` **top-level**; rẻ nhất (không `await Z()`) |
+| 4 | `REPLY_INBOX_PHOTO` | ✔ §26/§28 — `jc`/`getErrorHandler`, `success` không `messageId` = `error_payload` |
+| 5 | `MAKE_MESSENGER_LINK` | ✔ §27.4 — `uiVersion:6` cứng ⇒ luôn đi `Ee.init()`; timeout 14 000 |
+| 6 | `UPLOAD_INBOX_PHOTO` | ✔ `ae.startCheck(_,D)` với `r=!1` ⇒ lần đầu KHÔNG đổi profile |
+| 7 | `SEND_COMMENT` | ✔ `ae.startCheck(_,_,!0,!0)` ⇒ đổi profile ngay; script đã để 35 000 ms |
+| 8 | `ENABLE_FIND_THREAD_BY_USERNAME` | ✔ §25 — `self["findThreadByUsername_"+pageId]`, đọc bởi `bn()` |
+| 9 | `LOAD_FACEBOOK_MESSAGES` | ✔ §29 — MỚI dùng; chuẩn hoá cách đọc + lấy gid miễn phí |
+
+⇒ **9/9 = 100% lệnh script gửi đã đối soát với `0.5.62_0/assets/background.js`.**
+
+**56 case còn lại: script KHÔNG gửi một lệnh nào trong số đó** (grep `type: 'X'` = 0). Đó không
+phải "chưa đối soát" mà là **không dùng** — gồm LINE/Zalo/appointment/comment-edit/sticker/
+product-pin/crawl. Riêng nhóm `LISTEN_WS`/`LISTEN_INBOX`/`STOP_LISTEN_*`/`PLZ_DONT_STOP_*` là
+**extension tự chạy**, script không điều khiển; và theo §25.1 luồng đó **đang chết**
+(`ctx.loggedIn` không bao giờ được gán).
+
+### 30.2 Điều KHÔNG chứng minh được (phải nói rõ)
+
+- **Không đọc được** `chrome.storage.local` của extension từ trang ⇒ không thể kiểm `doc_id`
+  đã nạp hay chưa; chỉ biết qua phản hồi `BATCH_GET_GLOBAL_ID`.
+- **Không biết `uiVersion` thật** của từng page (ext tự dò `za.get(pageId)`); script gửi cứng 6.
+- **Không có `messageId` của FB** cho ca gửi bằng Socket ⇒ `/rescue_mode_inbox` (§25.2) chỉ áp
+  dụng được cho ca đã đi qua Extension.
+- **`LOAD_FACEBOOK_MESSAGES` cần `[Da,Sa]`** — bộ doc_id KHÁC `[Jt,Zt,rt,st]`; nếu ext chưa nạp
+  thì lệnh reject `Missing doc_id`, script trả `null` và giữ phán quyết cũ (không sai thêm).
