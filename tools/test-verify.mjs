@@ -1931,6 +1931,19 @@ check('[ext] thiếu thread_id ⇒ trả đúng mã của app (`noThreadIdFound`
 check('[ext] `noThreadIdFound` thuộc nhóm DỨT KHOÁT CHƯA GỬI (không chờ cổng 10 s)',
   /function isDefinitiveNotSent[\s\S]{0,900}?noThreadIdFound/i.test(stripComments(SRC)), true);
 
+/* ═══ (O) [v1.93.15] `LOAD_FACEBOOK_MESSAGES` phải gửi ĐÚNG tên `globalUserId` ═══
+ * ext `class He` (@117423): `constructor({…, globalUserId:l}){ this.globalId = l; … }` ⇒ ext đọc
+ * **`globalUserId`**, KHÔNG đọc `globalId`. App thật (`loadFacebookMessages` @866417) gửi
+ * `globalId: d.Z.get(t.id)` ⇒ ext BỎ QUA ⇒ app luôn trả giá `new Ee(...).init()` dò lại gid.
+ * Script gửi đúng tên ⇒ ext bỏ hẳn bước dò. Test khoá để không ai "sửa" thành `globalId`
+ * (tên nghe hợp lý hơn nhưng SAI — chính app đang sai chỗ này). */
+check('[He] payload gửi `globalUserId` (không phải `globalId`)',
+  /type: 'LOAD_FACEBOOK_MESSAGES'[\s\S]{0,1400}?globalUserId: gidForHe/.test(stripComments(SRC)), true);
+check('[He] KHÔNG gửi `globalId:` trong payload LOAD_FACEBOOK_MESSAGES',
+  /type: 'LOAD_FACEBOOK_MESSAGES'[\s\S]{0,1400}?[^d]globalId: /.test(stripComments(SRC)), false);
+check('[He] gid lấy từ sổ trước khi hỏi ext (peekFastGlobalId)',
+  /const gidForHe = \(function \(\) \{[\s\S]{0,300}?peekFastGlobalId\(conv, fullC/.test(stripComments(SRC)), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));

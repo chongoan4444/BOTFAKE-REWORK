@@ -2714,6 +2714,10 @@
      * `fbDirectSavedGid` = số lần lấy được `globalId` từ chính phản hồi đó (nguồn gid THẬT,
      * không phụ thuộc `ENABLE_FIND_THREAD_BY_USERNAME`, không cần 4 nguồn `Ee.init`). */
     fbDirectMessages: 0, fbDirectSavedGid: 0,
+    /* [v1.93.15] Số lần gửi `globalUserId` cho `LOAD_FACEBOOK_MESSAGES` để ext KHỎI tự dò gid
+     * (`He.getGlobalId()` trả `this.globalId` ngay). App thật KHÔNG làm được điều này vì gửi
+     * sai tên trường (`globalId` thay vì `globalUserId`). */
+    fbDirectGidSkippedResolve: 0,
     /* [v1.93.15] Số ca THIẾU `updated_at`. Với các ca này `conversationUpdatedTime` phải lùi 1 ngày
      * (xem chú thích ở `updMs`), vì nó là `before` của `findThread` chứ không phải mốc lọc. */
     updMissing: 0,
@@ -11817,9 +11821,35 @@
       const hit = fbMsgCache.get(ck);
       if (hit && Date.now() - hit.at < 8000) return hit.promise;
       const entry = { at: Date.now(), promise: null };
-      /* `platform: 'facebook'` ⇒ case của ext KHÔNG xoá `customerName` và KHÔNG đổi pageId
-       * (`r.data.platform != "instagram_official" && (r.data.customerName = void 0)` — chỉ xoá tên,
-       *  không ảnh hưởng). `before: undefined` ⇒ lấy 40 tin MỚI NHẤT. */
+      /* ═══ [v1.93.15] PAYLOAD KHỚP `class He` (@117423 của ext 0.5.62) ═══
+       * Constructor thật:
+       *   class He{constructor({pageId, threadId, threadKey, isBusiness, before, platform,
+       *                         customerName, conversationUpdatedTime, globalUserId})
+       *     { this.globalId = globalUserId; … } }
+       * và `loadFacebookMessages()`:
+       *   const a = await this.getGlobalId();          // = this.globalId NẾU có
+       *   return { messages: (await graphqlbatch({batchName:"MessengerGraphQLThreadFetcher",
+       *            graphqlQueries: this.getGraphqlQueries(a, this.before)}))[0]…, globalId: a }
+       *   getGraphqlQueries(e,t){ const a=O.get(Da,Sa); … {doc_id:a,
+       *            query_params:{id:e, load_messages:!0, message_limit:40, before:t}} }
+       * BA ĐIỀU RÚT RA:
+       *  ① Tên trường là **`globalUserId`** (KHÔNG phải `globalId`). App thật
+       *     (`loadFacebookMessages` @866417) lại gửi `globalId: d.Z.get(t.id)` — ext BỎ QUA
+       *     ⇒ app luôn trả giá `new Ee(...).init()` để tự dò gid. Script gửi ĐÚNG TÊN
+       *     `globalUserId` ⇒ ext bỏ hẳn bước dò ⇒ nhanh hơn app ở đúng ca này. Nếu sổ chưa
+       *     có gid thì KHÔNG gửi trường đó (ext tự dò y như app — không sai).
+       *  ② `before` là con trỏ lùi: `before: undefined` ⇒ 40 tin MỚI NHẤT (đúng thứ ta cần
+       *     cho cổng chống lặp). KHÔNG truyền `before` — giữ nguyên hành vi này.
+       *  ③ `_SUCCESS` trả `{messages, globalId}` ⇒ `res.data.globalId` là gid THẬT (đã đọc).
+       * `threadKey/isBusiness/convType/postId/convId`: `He` KHÔNG khai báo, ext case chỉ sửa
+       * `pageId` (IGD) và `customerName` rồi đưa phần còn lại vào constructor ⇒ trường thừa bị
+       * bỏ qua, VÔ HẠI. Giữ để tương thích ext bản khác. */
+      const gidForHe = (function () {
+        try {
+          const g = peekFastGlobalId(conv, fullC, '');
+          return (g && /^\d+$/.test(String(g))) ? String(g) : '';
+        } catch (ePg) { return ''; }
+      })();
       entry.promise = ad.send({
         type: 'LOAD_FACEBOOK_MESSAGES',
         pageId: String(pageId),
@@ -11828,6 +11858,7 @@
         isBusiness: true,
         platform: 'facebook',
         customerName: (fullC && (fullC.name || fullC.customerName)) || conv.name || '',
+        ...(gidForHe ? { globalUserId: gidForHe } : {}),
         /* [v1.93.15] xem chú thích ở `updMs`: thiếu mốc thì LÙI 1 NGÀY, không dùng "bây giờ". */
         conversationUpdatedTime: (function () {
           const raw = String((fullC && (fullC.updated_at || fullC.conversationUpdatedTime)) || '');
@@ -11837,7 +11868,10 @@
         convType: 'INBOX', postId: null, convId: null,
       }, { timeout: 20000 }).then((res) => {
         if (!res || !res.success || !res.data || !Array.isArray(res.data.messages)) return null;
-        try { gidStats.fbDirectMessages++; } catch (e) { /* ignore */ }
+        try {
+          gidStats.fbDirectMessages++;
+          if (gidForHe) gidStats.fbDirectGidSkippedResolve++;
+        } catch (e) { /* ignore */ }
         /* ═══ [v1.93.14] `globalId` TỪ CHÍNH PHẢN HỒI NÀY = NGUỒN GID THẬT, MIỄN PHÍ ═══
          * `He.getGlobalId()` trả gid của hội thoại (`this.globalId` nếu app truyền vào, nếu không
          * thì `new Ee({…convType:"INBOX"}).init()` — đúng 4 nguồn Jt/Zt/rt-st/ge của ext).

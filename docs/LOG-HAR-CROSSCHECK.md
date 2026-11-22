@@ -2378,3 +2378,73 @@ tới ext) ⇒ không cần cổng chờ 10 s, được đi kênh kế ngay.
 
 **Test khoá (2 kịch bản `(N)`):** có `noThreadIdFound: true`; và `isDefinitiveNotSent` phủ nó.
 `npm test`: **395**.
+
+---
+
+## 37. `LOAD_FACEBOOK_MESSAGES`: app gửi SAI TÊN TRƯỜNG — script sửa thành `globalUserId`
+
+### 37.1 Hợp đồng thật của `class He` (ext 0.5.62, @117423)
+
+```js
+class He{constructor({pageId, threadId, threadKey, isBusiness, before, platform,
+                      customerName, conversationUpdatedTime, globalUserId:l})
+  { this.globalId = l; … } }                                  // ← ext đọc `globalUserId`
+
+async loadFacebookMessages(){
+  O.isFeatureReady("loadMessages") || await He.preloadDocIds({pageId, isBusiness});
+  const a = await this.getGlobalId();                          // = this.globalId NẾU có
+  return { messages: (await t.graphqlbatch({batchName:"MessengerGraphQLThreadFetcher",
+             graphqlQueries: this.getGraphqlQueries(a, this.before)}))[0]
+             .data.message_thread.messages.nodes,
+           globalId: a }; }
+
+async getGlobalId(){ if (this.globalId) return this.globalId;   // ← DÙNG THẲNG nếu có
+  let e = to(this, ["pageId","threadId","threadKey","isBusiness","conversationUpdatedTime"]);
+  return Object.assign(e, {postId:null, convId:null, convType:"INBOX"}), new Ee(e).init(); }
+
+getGraphqlQueries(e,t){ const a = O.get(Da,Sa);                  // ← doc_id KHÁC [Jt,Zt,rt,st]
+  if (!a) throw `Missing doc_id ${Da} or ${Sa}`;
+  return [{doc_id:a, query_params:{id:e, load_messages:!0, message_limit:40, before:t}}]; }
+```
+
+### 37.2 App thật gửi `globalId` — ext KHÔNG đọc, nên luôn dò lại
+
+```js
+// _app-…v6.js @866417
+async function j({conversation:t, before:n, platform:a, customerName:r, platformExtraInfo:o}){
+  if (!await l.Z.checkConnection({silent:!0})) return {success:!1, error:"extensionDisconnected"};
+  const {data:i, success:s} = await l.Z.send({
+    type:"LOAD_FACEBOOK_MESSAGES", pageId:t.page_id, threadId:t.thread_id,
+    globalId: d.Z.get(t.id),                    // ← SAI TÊN: `He` chỉ đọc `globalUserId`
+    before:n, platform:a, customerName:r,
+    conversationUpdatedTime: Date.parse(`${t.updated_at}Z`), platformExtraInfo:o });
+  return s ? {success:!0, data:i.messages} : {success:!1, error:"extensionFailure"}; }
+```
+
+⇒ `this.globalId === undefined` ⇒ `He.getGlobalId()` rơi xuống `new Ee({…convType:"INBOX"}).init()`
+tức **đi trọn 4 nguồn dò gid** (Jt/Zt/findThread/getUserInboxByName). Với hội thoại thiếu
+`thread_id` thì đó chính là ca `INCORRECT THREAD` (§35.2) ⇒ **app cũng hỏng ở đây**, không chỉ script.
+
+### 37.3 ĐÃ SỬA (script nhanh hơn app ở đúng ca này)
+
+```js
+const gidForHe = (function(){ const g = peekFastGlobalId(conv, fullC, '');
+  return (g && /^\d+$/.test(String(g))) ? String(g) : ''; })();
+ad.send({ type:'LOAD_FACEBOOK_MESSAGES', pageId, threadId, threadKey, isBusiness:true,
+          platform:'facebook', customerName,
+          ...(gidForHe ? { globalUserId: gidForHe } : {}) }, { timeout: 20000 })
+```
+- Có gid trong sổ ⇒ gửi **đúng tên** `globalUserId` ⇒ `He.getGlobalId()` trả ngay ⇒ ext **bỏ hẳn**
+  `Ee.init()` (tiết kiệm 1 lần dò 4 nguồn + 1 request `sync_missing_thread_id`).
+- Chưa có ⇒ **không** gửi trường đó ⇒ ext tự dò y như app (không sai, không tệ hơn).
+- `before` **không** truyền ⇒ `undefined` ⇒ 40 tin MỚI NHẤT (đúng thứ cổng chống lặp cần).
+- Trường thừa (`threadKey/isBusiness/convType/postId/convId`): `He` không khai báo, ext case chỉ
+  sửa `pageId` (IGD) + `customerName` ⇒ bị bỏ qua, vô hại.
+- `_SUCCESS` trả `{messages, globalId}` ⇒ `res.data.globalId` vẫn là gid thật đã đọc từ §34.
+
+Đếm mới: `gidStats.fbDirectGidSkippedResolve`.
+**Test khoá (3 kịch bản `(O)`):** gửi `globalUserId`; **không** gửi `globalId:`; gid lấy từ sổ trước.
+
+> Lưu ý phạm vi: nhánh này (`fetchFbMessagesDirect`) chỉ chạy trong cổng chứng minh vắng mặt
+> (`probeBuVerdict`) — **0 lần** trong 31 log đã đo, nên đây là sửa ĐÚNG ĐẮN chứ không phải
+> nguyên nhân của lỗi đang thấy. Ghi rõ để không ai kỳ vọng nó cải thiện số liệu lô ngay.
