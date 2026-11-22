@@ -1590,3 +1590,72 @@ số đo: `Ext: Extension không phản hồi` phần lớn là **chờ hàng**,
 14 case đã đối soát: 7 case script gửi + `ENABLE_FIND_THREAD_BY_USERNAME` + `WAKE_UP` +
 `CHECK_EXTENSION` + `REPORT_EXTENSION_STATUS` + `PREINITIALIZE_PAGES` + `GET_FB_MSG` +
 `LISTEN_INBOX` (kèm `class Oc` + `/rescue_mode_inbox`).
+
+---
+
+## 26. `jc()` + `getErrorHandler()` — vì sao 3 547 ca ⚠ và ext KHÔNG bù ảnh
+
+### 26.1 `jc = n => ![1545041].includes(n.error)` — ext tự coi `1545041` là lỗi
+
+```js
+jc = n => ![1545041].includes(n?.error);        // @24390, cách ao=35e3 đúng 58 byte
+const Q = jc(H);                                 // H = parseFbRes(response)
+switch (await this.getErrorHandler(a, H, I)) { … }
+```
+`jc(H) === false` ⇔ `H.error === 1545041`.
+
+### 26.2 Bảng quyết định THẬT của `getErrorHandler`
+
+```js
+getErrorHandler(e, t, a) {                       // a = số lần thử
+  const r = [1357004, 1545012, 1545006, 3252001, 1390008];
+  if (t?.error === 1545012 && a === 1) return "retryUsingSocket";       // "FALLBACK REPLY BY WS"
+  if (!t) return "restartInbox";
+  if (t?.payload?.error_payload === true && ["instagram","instagram_official"].includes(this.platform) && !t.error)
+      return "retryUsingSocket";
+  if (r.includes(t.error))
+      return this.checkCanReuploadPhotos(t) || t.error === 1545006
+        ? (await this.isUploadBlocked(e) ? "reuploadPhotosByApi" : "reuploadPhotos")
+        : (t.error === 3252001 || t.error === 1390008 ? "retryUsingSocket" : "restartInbox");
+  return "cannotRetry";                          // ← 1545041 RƠI VÀO ĐÂY
+}
+```
+
+| `error` | Nhánh | Hệ quả |
+|---|---|---|
+| `1545012`, lần 1 | `retryUsingSocket` | ext tự gửi lại bằng WS |
+| `1357004` / `1545006` | `reuploadPhotos`, `3252001`/`1390008` → `retryUsingSocket` | bù ảnh 1 lần |
+| `3252001`, `1390008` | `retryUsingSocket` | ext tự gửi lại |
+| **`1545041`** | `cannotRetry` | **ext BỎ, không gửi lại, không bù** |
+| mọi mã khác | `cannotRetry` | ext BỎ |
+
+⇒ Bán kính ảnh hưởng đúng bằng **nguyên nhân 3 547 ca ⚠ của script**:
+`ACK rejected 3 552 − FB-báo-không-nhận 5 = 3 547`.
+`1545041` = ext **không** bù, script **không** bù ⇒ 3 547 ca là **chung một nguyên nhân**.
+
+### 26.3 `jc` còn bị dùng làm điều kiện `restartInbox`
+
+```js
+case "restartInbox": {
+  C.warning("FAIL TO SEND MESSAGE TO FACEBOOK --> RESTARTING INBOX NORMAL AND RETRY"),
+  this.init(a, !0)
+      .then(() => Q && Ze(t))     // Q = jc(H) ⇒ CHỈ gửi lại khi error !== 1545041
+      .then(() => this.init(a))
+      …
+}
+```
+Với `1545041` thì `Q === false` ⇒ **không** `Ze()` (không gửi lại). Nhưng nhánh này
+không tới được vì `1545041` đã ra `cannotRetry` ngay.
+
+### 26.4 `Z()` — ext tự reset mỗi 11 lệnh
+
+```js
+Z = async () => { let n = await q.getItem("requestCount") || 0;
+  n > 10 ? (await q.setItem("requestCount", 0), await Fs()) : await q.setItem("requestCount", ++n) }
+Fs = async () => { for (let t of Object.keys(await so())) { let a = await k("https://"+t, {headers:{…same-origin…}});
+    a ? (t === "www.facebook.com" && it.ctxFromHtml(a), e[t] = !0, await In(e)) : (e[t] = !1, await In(e)) } }
+```
+Cứ **11 lệnh** ext đi `GET https://www.facebook.com` … cho **mọi** host trong `so()`,
+tuần tự. Ở lô 8 572 chat đây là chi phí ẩn cộng dồn — cộng với hàng đợi tuần tự (§25.3)
+giải thích `Ext p90 0ms → timeout 7000ms`.
+`REPLY_INBOX_PHOTO` **có** `await Z()` đầu case; `GET_GLOBAL_ID_FOR_CONV`/`BATCH_GET_GLOBAL_ID`/`MAKE_MESSENGER_LINK` **không**.
