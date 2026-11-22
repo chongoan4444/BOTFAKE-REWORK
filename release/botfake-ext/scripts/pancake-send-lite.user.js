@@ -6898,9 +6898,31 @@
         for (const it of bindItems) {
           if (!it.url) { extFbIds.length = 0; break; }
           const sep = it.url.indexOf('?') > -1 ? '&' : '?';
+          /* ═══ [v1.93.15] `uploadId` KHÔNG bắt buộc nhưng ext ĐỌC nó ═══
+           * ext case `UPLOAD_INBOX_PHOTO` destructure:
+           *   const {pageId:_, convId:g, taskId:I, uploadId:y, photoUrl:b, name:v, platform:A} = r.data;
+           * và TRẢ LẠI y trong cả `_SUCCESS` (`uploadId:y, fbId:R.fbid, previewUri:R.previewUri`)
+           * và `_FAILURE` (`uploadId:y`) — tức nó là **khoá đối chiếu** để biết phản hồi ứng với
+           * ảnh nào khi upload song song. App thật (`j(e)`) KHÔNG gửi (`{pageId, photoUrl, name,
+           * platform}`) nên ta cũng không bắt buộc — nhưng gửi vào là vô hại và làm phản hồi
+           * truy vết được trong log. `convId` thì ext chỉ dùng cho nhánh
+           * `instagram_direct` (`ha.getInboxInstance`) ⇒ với facebook KHÔNG cần.
+           *
+           * RỦI RO ĐÃ BIẾT, KHÔNG TỰ SỬA (cần đo trước):
+           *   case này bọc trong `ae.startCheck(_, D)` với `startCheck(e,t,a=!0,r=!1)`:
+           *     static startCheck(e,t,a=!0,r=!1){ const s=()=>{ae.startCheck(e,t,a,!0)};
+           *       r ? (SWITCH_PROFILE…) : (C.log("FIRST_TRY_DOING_TASK_WITHOUT_SWITCH_PROFILE"), t(s)) }
+           *   ⇒ `nó GỌI `t` (upload) TRƯỚC, và nếu `t` gọi `s` (= thử lại sau khi chuyển profile)
+           *   thì upload chạy **lần 2**. Ở `SEND_COMMENT` script đã truyền `!0,!0` để CHẶN vòng
+           *   thử lại này; `UPLOAD_INBOX_PHOTO` KHÔNG có tham số đó (luôn `a=!0,r=!1`).
+           *   Hệ quả: 1 lần upload lỗi có thể sinh **2 request upload**. KHÔNG phải tin trùng
+           *   (upload không tạo tin), chỉ tốn băng thông; và `fbId` trả về vẫn dùng được.
+           *   Script không điều khiển được tham số này (nó nằm trong case của ext) ⇒ ghi nhận. */
+          const _upId = 'botfake:' + pageId + ':' + Date.now() + ':' + Math.floor(Math.random() * 1e6);
           const extRes = await extSendLane(() => adapter.send({
             type: 'UPLOAD_INBOX_PHOTO',
             pageId: pageId,
+            uploadId: _upId,
             photoUrl: it.url + sep + 'random=' + Math.random(),
             name: 'image_' + Date.now() + '.jpg',
             platform: detectPlatform(pageId) || 'facebook',

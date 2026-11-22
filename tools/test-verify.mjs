@@ -2019,6 +2019,19 @@ check('[ext] sendViaExtension cũng không từ chối khi thiếu gid (đếm r
 check('[ext] nhánh thiếu gid ở sendOne rơi xuống cứu hộ thread_id, không return',
   /try \{ gidStats\.extThreadOnlySent\+\+; \} catch \(eG3\)/.test(stripComments(SRC)), true);
 
+/* ═══ (V) [v1.93.15] `UPLOAD_INBOX_PHOTO`: đúng 4 trường của app + `uploadId` để đối chiếu ═══
+ * App `j(e)`: `{type, pageId, photoUrl: url + random, name, platform}` — 4 trường.
+ * ext trả `uploadId` lại trong cả `_SUCCESS` và `_FAILURE` ⇒ khoá đối chiếu khi upload song song.
+ * `convId` chỉ dùng cho nhánh `instagram_direct` ⇒ KHÔNG thêm cho facebook. */
+const _upSeg = (function () {
+  const C = stripComments(SRC);                       // phải strip TRƯỚC khi cắt, nếu không
+  const i = C.indexOf("type: 'UPLOAD_INBOX_PHOTO'");  // chú thích dài sẽ đẩy payload ra ngoài
+  return i < 0 ? '' : C.slice(i, i + 700);
+})();
+check('[upload] có uploadId (khoá đối chiếu phản hồi)', /uploadId: _upId/.test(_upSeg), true);
+check('[upload] giữ random= chống cache như app', /'random=' \+ Math\.random\(\)/.test(_upSeg), true);
+check('[upload] không thêm convId cho facebook', /convId/.test(_upSeg), false);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));

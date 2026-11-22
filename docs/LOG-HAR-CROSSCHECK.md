@@ -1578,12 +1578,38 @@ chrome.runtime.onConnect.addListener(function(n){ … let t = Promise.resolve();
 ⇒ `REPLY_INBOX_PHOTO` ∈ `Mm` nhưng **∉** `Gm` ⇒ lấy token thất bại vẫn chạy (`accessToken = null`).
 ⇒ `GET_GLOBAL_ID_FOR_CONV` / `BATCH_GET_GLOBAL_ID` / `PRELOAD_DOC_IDS` / `MAKE_MESSENGER_LINK` /
 `UPLOAD_INBOX_PHOTO` **∉ `Mm`** ⇒ KHÔNG qua `Ac` ⇒ đi ngay.
-⇒ NHƯNG mọi lệnh đều bị **serialize** bởi `t = c`. Ở lô 8 572 chat, script bắn 192 lệnh song song
-thì extension xử lý **tuần tự** ⇒ phần lớn thời gian chờ là xếp hàng, không phải xử lý.
-Đây là lý do `Ext p90 0ms → timeout 7000ms` và đỉnh `Ext dò 4 (đỉnh 14)`.
+### 25.3b ĐÍNH CHÍNH (v1.93.15) — ext KHÔNG xử lý lệnh tuần tự
 
-**Không sửa** — script không điều khiển được hàng đợi nội bộ extension. Ghi nhận để đọc đúng
-số đo: `Ext: Extension không phản hồi` phần lớn là **chờ hàng**, không phải ext chết.
+Bản trước viết "mọi lệnh đều bị serialize bởi `t = c`" và quy `Ext: Extension không phản hồi`
+cho "chờ hàng đợi nội bộ". **SAI.** Đọc lại từng dòng:
+
+```js
+const s = r.data.type, i = Ns(tab.url), o = Mm.has(s),
+      c = t.then(() => o ? Ac(n.sender, r.data.accessToken, r.data.cookieSession === true) : null);
+t = c.catch(() => null);        // ← chuỗi nối tiếp CHỈ gồm bước LẤY TOKEN (Ac)
+const l = await c;              // ← await chỉ tới lúc token có
+if (o) { if (!l && Gm.has(s)) return; r.data.accessToken = l }
+switch (s) { … }                // ← KHÔNG được nối vào `t`
+```
+
+`t` chỉ nối `Ac`. `switch` **không** nằm trong chuỗi đó ⇒ hai lệnh gửi liên tiếp **không** chờ
+nhau chạy xong. Kết luận đúng:
+
+- Lệnh **∉ `Mm`** (`UPLOAD_INBOX_PHOTO`, `GET_GLOBAL_ID_FOR_CONV`, `BATCH_GET_GLOBAL_ID`,
+  `PRELOAD_DOC_IDS`, `MAKE_MESSENGER_LINK`) ⇒ `c = t.then(() => null)` ⇒ chạy **ngay, song song**.
+- Lệnh **∈ `Mm`** (`SEND_COMMENT`, `REPLY_INBOX_PHOTO`, `LISTEN_*`, …) ⇒ chờ `Ac` xong (mỗi lần
+  đọc cookie) rồi vào `switch`; các `switch` của chúng vẫn chạy **song song** sau khi token về.
+
+Điều này **sửa lại** một kết luận dùng để giải thích số đo ở nhiều mục trước: `Ext p90 0ms →
+timeout 7000ms` **không** phải do xếp hàng tuần tự. Nguyên nhân thật, theo thứ tự khả năng:
+1. lệnh ∈ `Mm` mà `Ac` chậm/không lấy được token (với `SEND_COMMENT`/`REPLY_INBOX_PHOTO` vẫn
+   chạy với `accessToken = null`, nhưng đã mất thời gian chờ);
+2. tab Facebook của page không mở/chưa đăng nhập ⇒ `le(pageId)` treo;
+3. chính case của ext gọi mạng tới Facebook chậm — đây mới là `Ext p90` thật.
+
+**Muốn tối ưu tiếp:** phải đo riêng `Ext p90` cho lệnh ∈ `Mm` và ∉ `Mm` trong cùng lô. Hiện
+script chỉ có **một** số `Ext p90` gộp ⇒ chưa chứng minh được thành phần nào chiếm phần lớn.
+Đừng lặp lại kết luận "chờ hàng đợi" khi chưa có phép đo đó.
 
 ### 25.4 Cập nhật bảng phủ
 
@@ -2757,3 +2783,54 @@ Nếu muốn đi thẳng API cho nhóm này (bỏ 1 lượt chờ Ext vô ích),
 cần đo riêng trước khi làm.
 
 **Test khoá (3 kịch bản `(U)`).** `npm test`: **416**.
+
+---
+
+## 42. `UPLOAD_INBOX_PHOTO`: payload đúng, nhưng ext có thể upload 2 LẦN
+
+### 42.1 Payload — script khớp app
+
+```js
+// _app-…v6.js  j(e)   ← đường app dùng
+let t = e.photos.map(({url:n, name:a}) => { const r = Math.round(100*Math.random());
+  const o = n.includes("?") ? n + "&random=".concat(r) : n + "?random=".concat(r);
+  return u.Z.send({ type:"UPLOAD_INBOX_PHOTO", pageId:e.pageId, photoUrl:o, name:a, platform:e?.platform }); });
+return (t = await Promise.all(t)).every(({success:t, data:n}) => t && n.fbId)
+  ? { success:!0, data:t.map(e=>e.data.fbId) } : { success:!1, error:"extensionFailure" };
+```
+App gửi **4 trường**: `pageId`, `photoUrl` (kèm `random=` chống cache), `name`, `platform`.
+Script gửi đúng 4 trường đó + `uploadId` ⇒ **khớp**.
+
+`uploadId`: ext `destructure` nó và **trả lại** trong cả `_SUCCESS` (`uploadId:y, fbId:R.fbid,
+previewUri:R.previewUri`) và `_FAILURE` (`uploadId:y`) — tức là khoá đối chiếu phản hồi. App
+không gửi, script **thêm vào** (vô hại, làm log truy vết được).
+
+`convId`: ext chỉ dùng cho nhánh `instagram_direct` (`ha.getInboxInstance`) ⇒ với **facebook
+KHÔNG cần**. Đừng thêm.
+
+### 42.2 Rủi ro: `ae.startCheck(_, D)` có thể gọi upload LẦN 2
+
+```js
+// ext 0.5.62
+case "UPLOAD_INBOX_PHOTO": { await Z();
+  const {pageId:_, convId:g, taskId:I, uploadId:y, photoUrl:b, name:v, platform:A} = r.data;
+  const D = w => { (A==="instagram_direct" ? ha.getInboxInstance : le)(_).then(S => {
+      S.upload(b, _, v, A, i).then(R => { … _SUCCESS … }).catch(R => { w ? w() : _FAILURE }) }) … };
+  A === "instagram_direct" ? D() : ae.startCheck(_, D); break }
+
+static startCheck(e, t, a = !0, r = !1) {
+  const s = () => { ae.startCheck(e, t, a, !0) };          // ← lần 2, sau khi đổi profile
+  r ? (C.log("SWITCH_PROFILE_BUT_NOT_HANDLE_ERROR"), new ae(e,a).init()…finally(t))
+    : (C.log("FIRST_TRY_DOING_TASK_WITHOUT_SWITCH_PROFILE"), t(s)); }
+```
+
+`startCheck` **gọi `t` trước** (upload lần 1) và truyền cho `t` một hàm `s` để **thử lại**; nếu
+`t` gọi `s` thì `startCheck` chạy lại **sau khi chuyển profile** ⇒ upload **lần 2**.
+`SEND_COMMENT` script đã truyền `ae.startCheck(_, _, !0, !0)` để **chặn** vòng đó; case
+`UPLOAD_INBOX_PHOTO` **không** có tham số ⇒ luôn `a=!0, r=!1`.
+
+**Hệ quả:** một lần upload lỗi có thể sinh **2 request upload**. Đây **không** phải tin trùng
+(upload không tạo tin) — chỉ tốn băng thông; `fbId` trả về vẫn dùng được.
+**Script không sửa được** (tham số nằm trong case của ext) ⇒ ghi nhận, không giả định "1 lệnh = 1 request".
+
+**Test khoá:** payload có `uploadId`; vẫn giữ `random=` và `platform`; không thêm `convId`.
