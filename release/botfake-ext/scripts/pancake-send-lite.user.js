@@ -789,6 +789,62 @@
     return location.origin.replace(/\/$/, '') + '/api';
   }
 
+  /* ═══ [v1.93.15] `sync_missing_thread_id` — ĐƯỜNG CỨU KHI HỘI THOẠI KHÔNG CÓ `thread_id` ═══
+   * Nguồn app THẬT (`_app-…v6.js` @985925):
+   *   let eF = …, (e=pageId, t=convId, n) => {
+   *     let { auth:{ accessToken: o } } = a();
+   *     let n = await (0,T.Koh)("https://pages.fm/api/v1/pages/" + e
+   *                             + "/conversations/" + t + "/sync_missing_thread_id?access_token=" + o);
+   *     let a = null;
+   *     if (n.success && n.thread_id) { a = n.thread_id;
+   *       r(setThreadId({ pageId:e, conversationId:t, threadId:a, threadKey:n.thread_key }));
+   *       p.Z.set(t, null); }                       // ← XOÁ cache gid của hội thoại đó
+   *     return a };
+   *   window.__syncMissingThreadId__ = eF;
+   *
+   * BẰNG CHỨNG THẬT (HAR `guisot.har`, 2 lần, HTTP 200):
+   *   GET https://pancake.vn/api/v1/pages/898735919982398/conversations/
+   *                898735919982398_28877217668608600/sync_missing_thread_id?
+   *   → {"success":true,"thread_id":"1474059909116660","thread_key":"t_1597054761634327"}
+   *
+   * VÌ SAO ĐÂY LÀ ĐƯỜNG CỨU ĐÚNG — nối trực tiếp vào 4 nguồn gid của `Ee.getGlobalIdFromInbox`:
+   *   • nguồn ① `Jt` cần `this.threadId`
+   *   • nguồn ② `Zt` cần `this.threadId` **và** `this.threadKey` **và** `t.cquick_token`
+   *   • nguồn ③ `findThread` cần `customerName`/`threadId`
+   *   ⇒ Hội thoại THIẾU `thread_id` thì cả ① ② ③ đều không chạy (chỉ còn ④ khớp-theo-TÊN).
+   *   Endpoint này TRẢ ĐÚNG `thread_id` + `thread_key` ⇒ mở lại được ①②③.
+   *   Đây là câu trả lời cho nhóm `HTTP không có gid 56` / `Ext trả không có gid` / 14 ca
+   *   "Không tìm được global_id để gửi" mà 4 nguồn cùng bó tay.
+   *
+   * CHỈ ĐỌC (GET, không tạo tin). Trả `{ threadId, threadKey }` hoặc `null`.
+   * Giới hạn: 1 lần/hội thoại/phiên (endpoint gọi xong là hội thoại đã có thread_id nên
+   * gọi lại vô nghĩa), và chỉ gọi khi hội thoại THẬT SỰ thiếu `thread_id`. */
+  const syncThreadIdTried = new Set();
+  function syncMissingThreadId(pageId, convId) {
+    return Promise.resolve().then(() => {
+      const pid = String(pageId || '');
+      const cid = String(convId || '');
+      if (!pid || !cid) return null;
+      const key = pid + '|' + cid;
+      if (syncThreadIdTried.has(key)) return null;
+      syncThreadIdTried.add(key);
+      const url = apiBase() + '/v1/pages/' + encodeURIComponent(pid)
+        + '/conversations/' + encodeURIComponent(cid)
+        + '/sync_missing_thread_id?access_token=' + encodeURIComponent(getToken());
+      return fetchJson(url, 1, { timeoutMs: 8000 }).then((r) => {
+        if (!r || !r.ok || !r.data || r.data.success !== true) return null;
+        const tid = r.data.thread_id;
+        const tkey = r.data.thread_key;
+        if (!tid || !/^\d+$/.test(String(tid))) return null;
+        try { gidStats.threadIdSynced++; } catch (e) { /* ignore */ }
+        /* App XOÁ cache gid của hội thoại này (`p.Z.set(t, null)`) vì threadKey vừa đổi ⇒
+         * gid cũ (nếu có) tính theo thread cũ. Script không có cache gid "tạm" như app,
+         * nhưng ghi đè threadKey vào bản ghi để các nguồn ①②③ dùng đúng khoá mới. */
+        return { threadId: String(tid), threadKey: tkey ? String(tkey) : ('t_' + String(tid)) };
+      }).catch(() => null);
+    });
+  }
+
   /* ============================ ACCESS TOKEN ============================ */
 
   // Trang Pancake gửi access_token trong query của mọi request /api/v1/...
@@ -2661,6 +2717,12 @@
     /* [v1.93.15] Số ca THIẾU `updated_at`. Với các ca này `conversationUpdatedTime` phải lùi 1 ngày
      * (xem chú thích ở `updMs`), vì nó là `before` của `findThread` chứ không phải mốc lọc. */
     updMissing: 0,
+    /* [v1.93.15] Số ca được `sync_missing_thread_id` trả về `thread_id` thật ⇒ mở lại được
+     * nguồn gid ①②③ của `Ee.getGlobalIdFromInbox` (trước đó cả 3 đều không chạy vì thiếu threadId). */
+    threadIdSynced: 0,
+    /* [v1.93.15] Số ca `sync_missing_thread_id` CỨU ĐƯỢC thật (có gid sau khi chạy lại vòng dò).
+     * Đây là thước đo trực tiếp của nhóm `HTTP không có gid 56`. */
+    threadIdSyncSaved: 0,
   };
   function resetGidStats() {
     Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
@@ -4264,6 +4326,7 @@
     const hasExtFinder = typeof window.findGlobalIdForConv === 'function'
       || !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
 
+
     // Giải phóng nhánh WebSocket NGAY LẬP TỨC ở 0ms khi nhánh Extension đã kết thúc (tránh giữ chân worker),
     // nhưng giữ PENDING_MESSAGES[pKey] sống hết chu kỳ 30s để MqttHelper.loadThread (@825088) không bị cắt ở trang 1!
     const cutWsShort = () => {
@@ -4292,6 +4355,55 @@
     const wsWaitMs = hasExtFinder ? extWaitMs : (shortNoGidWait ? GID_NOGID_SHORT_WAIT_MS : 6000);
     const extStartDelayMs = discoveryPass === 2 ? 0 : 80;
     const raceTasks = [];
+
+    /* ═══ [v1.93.15] THIẾU `thread_id` ⇒ GỌI `sync_missing_thread_id` (nhánh BỔ SUNG) ═══
+     * Đây không phải "nguồn gid thứ 5": nó KHÔNG trả gid, nó trả `thread_id` + `thread_key`.
+     * Nhưng 3/4 nguồn dò gid của extension ĐỀU CẦN `threadId`:
+     *   nguồn ① `Jt`  : cần `this.threadId`
+     *   nguồn ② `Zt`  : cần `this.threadId` + `this.threadKey` + `t.cquick_token`
+     *   nguồn ③ `findThread`: cần `customerName`/`threadId` (+ `timeCursor`)
+     * ⇒ Hội thoại thiếu `thread_id` thì ①②③ cùng không chạy ⇒ chỉ còn ④ khớp-theo-TÊN
+     *   (và ④ lại rất dễ trả `INCORRECT THREAD`).
+     * Endpoint này lấp đúng chỗ đó ⇒ mở lại ①②③.
+     *
+     * CHỈ GỌI KHI THẬT SỰ THIẾU `threadId` — hội thoại có rồi thì bỏ qua (không tốn request).
+     * Trả `{threadId, threadKey}` hoặc `null`; `firstNonNull` chỉ nhận string/number nên phải
+     * bọc lại đúng kiểu ⇒ dùng hàm riêng, đẩy vào `raceTasks` dưới dạng chuỗi threadId. */
+    if (!threadId) {
+      raceTasks.push((async () => {
+        try {
+          const synced = await syncMissingThreadId(pageId, full && (full.id || full.convId) || conv.id);
+          if (!synced || !synced.threadId) return null;
+          /* Ghi lại vào bản ghi hội thoại để các nhánh SAU (kể cả lượt gửi lại) dùng đúng
+           * threadId/threadKey mới — app cũng dispatch đúng hai trường này (@985925). */
+          try {
+            if (full) { full.thread_id = synced.threadId; full.thread_key = synced.threadKey; }
+            if (conv) { conv.threadId = synced.threadId; conv.threadKey = synced.threadKey; }
+          } catch (eW) { /* ignore */ }
+          /* ═══ KHÔNG trả threadId Ở ĐÂY — VÀ PHẢI CHẠY LẠI VÒNG DÒ GID ═══
+           * `firstNonNull` coi mọi giá trị khác rỗng là **gid** ⇒ trả threadId ở đây sẽ bị
+           * dùng làm gid ⇒ gửi sai người. Nhưng nếu chỉ `return null` thì VÔ DỤNG:
+           * các nhánh gid ở TRÊN đã đóng với `threadId = ''` (chúng kiểm `if (… && threadId)`)
+           * ⇒ chúng đã return null xong rồi, không có cơ hội chạy lại.
+           * ⇒ Phải gọi lại chính vòng dò gid với `threadId` MỚI, rồi trả kết quả đó.
+           * `resolveGlobalIdForConv` là hàm hiện tại; nó KHÔNG đệ quy vô hạn vì lần 2 đã có
+           * `threadId` (điều kiện `if (!threadId)` ở trên không còn đúng).
+           * Chỉ ĐỌC ⇒ không thể sinh tin trùng. */
+          /* Chữ ký thật: `resolveGlobalId(full, threadId, cacheKey, convFromPsid, forceFind, ctx)`.
+           * `cacheKey` là khoá cache của hội thoại — dùng `full.id || conv.id` như chỗ gọi khác.
+           * `forceFind = false`: cho phép dùng cache (nếu vừa sync xong mà cache đã có thì tốt). */
+          const _ck = String((full && (full.id || full.convId)) || conv.id || '');
+          /* `resolveGlobalId` trả **string** hoặc **null** (xem các `return String(...)` / `return null`).
+           * Không bọc object ⇒ đọc thẳng. */
+          const rg = await resolveGlobalId(full, synced.threadId, _ck, conv, false, ctx);
+          if (rg && /^\d+$/.test(String(rg))) {
+            try { gidStats.threadIdSyncSaved++; } catch (eG2) { /* ignore */ }
+            return String(rg);
+          }
+          return null;
+        } catch (eS) { return null; }
+      })());
+    }
 
     // Nhánh 1: WebSocket PENDING_MESSAGES + wakingUpLoadThread + wsPoll 60ms (bắt ngay global_id ở <60ms khi loadThread về,
     // giữ PENDING_MESSAGES[pKey] tối đa 30s khớp findGlobalId @823397 trong _app để loadThread cuộn đủ 15 trang!)
@@ -10764,6 +10876,11 @@
            * một lần bù (`cứu K`). `cứu > 0` = Pancake nói "chưa thấy" nhưng FB có tin ⇒
            * nếu không có đường này thì đã bù ⇒ khách nhận 2 tin. */
           + ' · thiếu updated_at ' + (gidStats.updMissing || 0) + ' ca (mốc phải lùi 1 ngày)'
+          /* [v1.93.15] `sync thread_id N` = số ca được `sync_missing_thread_id` trả `thread_id`
+           * thật (mở lại nguồn gid ①②③); `cứu M` = trong đó CÓ ra gid. Đây là thước đo trực
+           * tiếp của nhóm "hội thoại không có thread_id" mà 4 nguồn gid cùng bó tay. */
+          + ' · sync thread_id ' + (gidStats.threadIdSynced || 0)
+          + ' cứu ' + (gidStats.threadIdSyncSaved || 0)
           + ' · đọc thẳng FB: tin ' + gidStats.fbDirectMessages
           + ' · gid ' + gidStats.fbDirectSavedGid
           + ' · cứu ' + sendDiag.fbDirectPresent

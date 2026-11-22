@@ -2103,3 +2103,89 @@ không bao giờ **cắt mất** thread cần tìm. Ngược lại tiến về t
 
 **Test khoá:** 3 kịch bản `(K)` — không còn `conversationUpdatedTime: isNaN(updMs) ? Date.now()`,
 có `Date.now() - 864e5`, có `updMissing`. `npm test`: **387**.
+
+---
+
+## 33. `sync_missing_thread_id` — đường cứu khi hội thoại THIẾU `thread_id` (có bằng chứng HAR)
+
+### 33.1 Vì sao thiếu `thread_id` là chí tử
+
+`Ee.getGlobalIdFromInbox()` có 4 nguồn, và **3 nguồn đầu đều đòi `threadId`**:
+
+| Nguồn | Điều kiện chạy | Thiếu `threadId` |
+|---|---|---|
+| ① `Jt` = `PagesManagerInboxAdminAssignerRootQuery` | `O.get(Jt) && this.threadId` | **không chạy** |
+| ② `Zt` = `PagesManagerInboxQueryUtilCommItemHeaderMercuryQuery` | `O.get(Zt) && t.cquick_token && this.threadKey` | **không chạy** |
+| ③ `findThread` (`rt`/`st`) | `O.get(rt,st) && (this.threadId \|\| this.customerName)` | chạy nhưng chỉ còn `customerName` ⇒ dễ `INCORRECT THREAD` |
+| ④ `getUserInboxByName` (`ge`) | `customerName && bn(pageId)` | phải bật cờ khớp-theo-TÊN |
+
+⇒ Hội thoại **không có `thread_id`** thì ① và ② chết hẳn, ③ suy yếu, ④ là giải pháp tạm
+(chỉ khớp **tên**, rất dễ sai người). Đây đúng là nhóm `HTTP không có gid 56` /
+`Ext trả không có gid` / 14 ca *"Không tìm được global_id để gửi"*.
+
+### 33.2 App thật có sẵn đường sửa — và HAR chứng minh nó chạy thật
+
+```js
+// _app-…v6.js @985925
+let eF = …(e /*pageId*/, t /*convId*/, n) => {
+  let { auth:{ accessToken: o } } = a();
+  let n = await (0,T.Koh)("https://pages.fm/api/v1/pages/" + e
+                          + "/conversations/" + t + "/sync_missing_thread_id?access_token=" + o);
+  let a = null;
+  if (n.success && n.thread_id) {
+    a = n.thread_id;
+    r(setThreadId({ pageId:e, conversationId:t, threadId:a, threadKey:n.thread_key }));
+    p.Z.set(t, null);            // ← XOÁ cache gid của hội thoại (threadKey vừa đổi)
+  }
+  return a };
+window.__syncMissingThreadId__ = eF;
+```
+
+**BẰNG CHỨNG THẬT — HAR `guisot.har`, 2 lần, HTTP 200:**
+```
+GET https://pancake.vn/api/v1/pages/898735919982398/conversations/
+          898735919982398_28877217668608600/sync_missing_thread_id?
+200 → {"success":true,"thread_id":"1474059909116660","thread_key":"t_1597054761634327"}
+```
+Trả **đúng 2 thứ** mà ①②③ cần: `thread_id` + `thread_key`.
+
+### 33.3 ĐÃ THÊM
+
+`syncMissingThreadId(pageId, convId)`:
+- `GET {apiBase()}/v1/pages/{pageId}/conversations/{convId}/sync_missing_thread_id?access_token=…`;
+- `access_token` = `getToken()` (cùng giá trị `cookie_session` script dùng cho mọi API khác);
+- **1 lần/hội thoại/phiên** (`syncThreadIdTried` Set) — endpoint gọi xong là hội thoại đã có
+  `thread_id` nên gọi lại vô nghĩa;
+- trả `{threadId, threadKey}` hoặc `null`; **không throw**.
+
+Nhánh trong vòng dò gid — đặt **ngay sau** `const raceTasks = []` (trước khi các nhánh gid đóng):
+```js
+if (!threadId) {
+  raceTasks.push((async () => {
+    const synced = await syncMissingThreadId(pageId, full?.id || conv.id);
+    if (!synced) return null;
+    full.thread_id = synced.threadId; full.thread_key = synced.threadKey;
+    conv.threadId  = synced.threadId; conv.threadKey  = synced.threadKey;
+    const rg = await resolveGlobalId(full, synced.threadId, _ck, conv, false, ctx);
+    return (rg && /^\d+$/.test(String(rg))) ? String(rg) : null;
+  })());
+}
+```
+
+**3 điều dễ làm sai — đã tránh:**
+
+1. **KHÔNG trả `threadId`**: `firstNonNull` coi mọi giá trị khác rỗng là **gid** ⇒ sẽ gửi sai người.
+2. **KHÔNG chỉ `return null`**: các nhánh gid phía trên đã đóng với `threadId = ''`
+   (chúng kiểm `if (… && threadId)`) ⇒ trả null không kích hoạt lại được gì. Phải **gọi lại**
+   `resolveGlobalId` với `threadId` mới.
+3. **Không đệ quy vô hạn**: `resolveGlobalId` không tự gọi lại chính nó (đã kiểm grep: 3 chỗ gọi,
+   đều từ ngoài); lần 2 điều kiện `if (!threadId)` không còn đúng ⇒ nhánh này không lặp.
+
+Chữ ký thật: `resolveGlobalId(full, threadId, cacheKey, convFromPsid, forceFind, ctx)` → trả
+**string** hoặc **null** (không phải object).
+
+**Chẩn đoán mới:** `· sync thread_id N cứu M`
+- `N` = số ca được trả `thread_id` thật (mở lại nguồn ①②③);
+- `M` = trong đó **có ra gid**. `M` là số ca đường này **cứu được thật**.
+
+**Chỉ ĐỌC** (GET) ⇒ không thể sinh tin trùng.
