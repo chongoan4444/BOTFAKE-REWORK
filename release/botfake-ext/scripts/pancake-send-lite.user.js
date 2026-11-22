@@ -2723,6 +2723,9 @@
     /* [v1.93.15] Số ca `sync_missing_thread_id` CỨU ĐƯỢC thật (có gid sau khi chạy lại vòng dò).
      * Đây là thước đo trực tiếp của nhóm `HTTP không có gid 56`. */
     threadIdSyncSaved: 0,
+    /* [v1.93.15] Số ca BỎ lệnh gửi vì KHÔNG có `thread_id` — đúng hợp đồng app
+     * (`errorMessage:"noThreadIdFound"`). Ca này CHẮC CHẮN chưa gửi. */
+    noThreadIdFound: 0,
   };
   function resetGidStats() {
     Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
@@ -3951,6 +3954,12 @@
     if (/kiểm soát thread|đang kiểm soát/i.test(m)) return true;                             // (#10) 2018300
     if (/1545012|Đã xảy ra lỗi tạm thời/i.test(m)) return true;                              // transientError:1
     if (/(#100)|Không tìm thấy người dùng/i.test(m)) return true;                            // người dùng không tồn tại
+    /* [v1.93.15] `noThreadIdFound` — ĐÚNG hợp đồng app: app KHÔNG hề gọi Extension khi thiếu
+     * `thread_id` (`executeByExtOnce`: `if (k || (k = await eF(...)), !k && !isIGD) return
+     * { success:!1, errorMessage:"noThreadIdFound" }`). Vì script tự bỏ lệnh TRƯỚC khi gửi,
+     * đây là bằng chứng DƯƠNG rằng chưa có lệnh nào tới ext ⇒ `sent:false` là CHẮC CHẮN,
+     * không phải suy đoán ⇒ cùng nhóm "dứt khoát chưa gửi", không cần cổng 10 s. */
+    if (/noThreadIdFound/i.test(m)) return true;
     return false;
   }
 
@@ -4156,6 +4165,13 @@
   async function ensureThreadId(full, conv, pageId) {
     try {
       let threadId = (full && (full.thread_id || full.threadId)) || '';
+      /* App gọi `eF(page_id, convId)` VÔ ĐIỀU KIỆN ở mỗi lần gửi:
+       *   executeByExtOnce(e){ let k = w.thread_id; if(k || (k = await eF(w.page_id, w.id)), …) }
+       * Nhưng `syncMissingThreadId` của chính app CHỈ làm gì đó khi `n.success && n.thread_id`
+       * ⇒ gọi lại với hội thoại ĐÃ có thread_id là **1 request thừa**.
+       * Script chọn: có rồi thì KHÔNG gọi (khác app ở đây là CÓ CHỦ Ý — tiết kiệm 1 request/ca
+       * ở lô 10 000; app gọi vì app chạy 1 ca/lần người dùng). Ghi rõ để không ai "sửa" thành
+       * gọi vô điều kiện. */
       if (threadId) return { threadId: String(threadId), source: 'conv' };
       const cid = (full && (full.id || full.convId)) || (conv && conv.id) || '';
       /* Ưu tiên hàm của app nếu trang có (nó tự dispatch setThreadId + xoá cache gid sai),
@@ -6233,7 +6249,23 @@
       if (_ens.source === 'sync') { try { gidStats.threadIdSynced++; } catch (e0) { /* ignore */ } }
     }
     const threadId = ctx.threadId;
-    if (!threadId) return { ok: false, error: 'Không tìm thấy thread_id' };
+    if (!threadId) {
+      /* ═══ [v1.93.15] KHỚP HỢP ĐỒNG APP: app KHÔNG gửi khi thiếu thread_id ═══
+       * Nguồn `_app-…v6.js`:
+       *   async executeByExtOnce(e){ … const w = this.payload.conversation, k = w.thread_id;
+       *     if (k || (k = await eF(w.page_id, w.id)),
+       *         !k && !("instagram_official" === x && this.payload?.isIGD))
+       *       return { success:!1, errorMessage:"noThreadIdFound" }; …
+       *   async executeByExtInChunks(){ … let s = t.thread_id; if (s || (s = await eF(t.page_id, t.id)),
+       *         !s && …) return { success:!1, errorMessage:"noThreadIdFound" }; … }
+       * ⇒ App BỎ HẲN lệnh gửi, không gọi Extension với `threadId: undefined`.
+       * Script cũ vẫn gọi (payload có `threadId: null`) ⇒ extension tự chế biến ⇒ tốn 1 lệnh
+       * + dễ ra `INCORRECT THREAD` (§35.2: `isThreadCorrect` trả false khi `!this.threadId`).
+       * Nay: trả đúng mã của app. Ca này CHẮC CHẮN chưa gửi (không lệnh nào tới ext)
+       * ⇒ nhánh gọi coi là `sent:false` AN TOÀN, không thể sinh tin trùng. */
+      try { gidStats.noThreadIdFound++; } catch (eNT) { /* ignore */ }
+      return { ok: false, sent: false, error: 'noThreadIdFound', noThreadIdFound: true };
+    }
 
     if (!ctx.gidResolved) {
       ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);

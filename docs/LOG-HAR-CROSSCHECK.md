@@ -2327,3 +2327,54 @@ Nay `ensureThreadId` thử hàm app **trước**, không có thì gọi `syncMis
 - **≥ 3** chỗ gọi `ensureThreadId(full, conv, pageId)` (đủ 3 đường: Socket / Ext / Redux).
 
 `npm test`: **393**.
+
+---
+
+## 36. Hợp đồng `noThreadIdFound` của app — script đang GỬI dù thiếu `thread_id`
+
+### 36.1 App BỎ HẲN lệnh gửi khi thiếu `thread_id`
+
+```js
+// _app-…v6.js — executeByExtOnce
+async executeByExtOnce(e){ … const w = this.payload.conversation, k = w.thread_id;
+  if (k || (k = await eF(w.page_id, w.id)),                                  // ← SYNC nếu thiếu
+      !k && !("instagram_official" === x && this.payload?.isIGD))
+    return { success:!1, errorMessage:"noThreadIdFound" };                   // ← BỎ HẲN
+  if (!await u.Z.checkConnection({silent:!0})) return { success:!1, errorMessage:"extensionDisconnected" };
+  …
+  let [S,C] = await this.concurrentlyGetGLobalId(x, w, k);                   // k = threadId vừa sync
+  if (!C && !S) return { success:!1, error:"no_global_id_found" }; }
+
+// executeByExtInChunks — y hệt
+let s = t.thread_id; if (s || (s = await eF(t.page_id, t.id)), !s && …) return { success:!1, errorMessage:"noThreadIdFound" };
+```
+
+**3 điều script đã/đang làm khác app:**
+
+| | App | Script (trước) | Nay |
+|---|---|---|---|
+| Thiếu `thread_id` khi gửi | **bỏ**, trả `noThreadIdFound` | **vẫn gọi** Extension với `threadId: null` | ✔ bỏ, trả `noThreadIdFound` |
+| Nguồn `thread_id` | `eF(page_id, convId)` của app | chỉ thử `window.__syncMissingThreadId__` | ✔ `ensureThreadId` (hàm app → endpoint script) |
+| Có `thread_id` rồi | **vẫn** gọi `eF` (vô điều kiện) | không gọi | giữ không gọi (**cố ý**: 1 request thừa/ca ở lô 10 000; app chạy 1 ca/lần người dùng) |
+
+### 36.2 Vì sao "vẫn gọi" là sai chứ không phải "vô hại"
+
+Gọi Extension với `threadId: null` tốn **1 lệnh** trong hàng đợi **tuần tự** của extension (§25.3)
+⇒ đẩy chậm mọi lệnh khác của lô. Và nếu extension vẫn dò ra thread thì `Ee.init()` **reject
+`INCORRECT THREAD`** vì `isThreadCorrect` trả `false` khi `!this.threadId` (§35.2) ⇒
+script nhận **một lỗi trông như "sai thread"** thay vì sự thật **"chưa có thread_id"**.
+
+### 36.3 ĐÃ SỬA
+
+```js
+if (!threadId) {
+  gidStats.noThreadIdFound++;
+  return { ok: false, sent: false, error: 'noThreadIdFound', noThreadIdFound: true };
+}
+```
+Và thêm `noThreadIdFound` vào `isDefinitiveNotSent` ⇒ thuộc nhóm **"dứt khoát chưa gửi"**:
+`sent:false` ở đây là **bằng chứng dương** (script tự bỏ lệnh **trước khi** gửi, không lệnh nào
+tới ext) ⇒ không cần cổng chờ 10 s, được đi kênh kế ngay.
+
+**Test khoá (2 kịch bản `(N)`):** có `noThreadIdFound: true`; và `isDefinitiveNotSent` phủ nó.
+`npm test`: **395**.

@@ -1918,6 +1918,19 @@ check('[api] có ghi content_ids khi gửi ảnh thành công (2xx)',
     (stripComments(SRC).match(/ensureThreadId\(full, conv, pageId\)/g) || []).length >= 3, true);
 }
 
+/* ═══ (N) [v1.93.15] THIẾU `thread_id` ⇒ BỎ LỆNH, đúng hợp đồng app ═══
+ * `_app-…v6.js`:
+ *   executeByExtOnce(e){ … const w = this.payload.conversation, k = w.thread_id;
+ *     if (k || (k = await eF(w.page_id, w.id)),
+ *         !k && !("instagram_official" === x && this.payload?.isIGD))
+ *       return { success:!1, errorMessage:"noThreadIdFound" }; … }
+ * App BỎ HẲN, không gọi Extension với `threadId: undefined`. Script cũ VẪN gọi ⇒ tốn 1 lệnh
+ * và dễ ra `INCORRECT THREAD` (vì `isThreadCorrect` trả false khi `!this.threadId`). */
+check('[ext] thiếu thread_id ⇒ trả đúng mã của app (`noThreadIdFound`)',
+  /noThreadIdFound: true/.test(stripComments(SRC)), true);
+check('[ext] `noThreadIdFound` thuộc nhóm DỨT KHOÁT CHƯA GỬI (không chờ cổng 10 s)',
+  /function isDefinitiveNotSent[\s\S]{0,900}?noThreadIdFound/i.test(stripComments(SRC)), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
