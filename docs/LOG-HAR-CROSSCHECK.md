@@ -2252,3 +2252,26 @@ HAR (`batmesss.har`, 2 mẫu): app gửi **13** `pages[...]=0` trong cùng 1 req
 **Không sửa:** snippet chỉ được dùng để đối chiếu **`convId` + `pageId` cụ thể**, nên 1 page là
 đủ và trả ít dữ liệu hơn (nhanh hơn). Gửi 13 page sẽ nhận cả hội thoại của page khác ⇒
 `absenceVerdict` phải lọc nhiều hơn, không có lợi ích.
+
+### 34.7 `contents/touch` gửi `content_ids: []` — ĐÃ SỬA
+
+HAR (`batmesss.har`):
+```
+POST /v1/pages/{p}/contents/touch?   {"content_ids":["f22adca4-cbdf-4957-b6b0-aae141840bb2"]}
+→ {"success":true}
+```
+Script cũ gửi **mảng rỗng** ⇒ request chạy nhưng không "touch" nội dung nào ⇒ vô nghĩa.
+
+**ĐÃ SỬA:**
+- `buildInboxSend` trả thêm `contentIds` = `normalizePhotoItems(photo).map(x => x.id).filter(Boolean)`
+  — chính id Pancake cấp cho ảnh, **đã có sẵn** trong `photo.items` (không tạo gì mới).
+- `rememberTouchIds(pageId, ids)` gom theo page, **chỉ khi HTTP 2xx** (4xx/5xx ⇒ ảnh không lên
+  ⇒ touch cũng vô nghĩa). Trần 500 id/page để không phình bộ nhớ ở lô 10 000.
+- `postSendSideEffects({perPage:true})` đọc `touchIdsByPage[pageId]`; **không có id thì KHÔNG gọi**
+  (thay vì gửi request rỗng).
+
+**Test khoá (3 kịch bản `(L)`):** không còn `content_ids: []` (kiểm trên `stripComments` — chính
+chú thích có nhắc chuỗi đó nên phải bỏ comment trước), có `touchIdsByPage`, có
+`rememberTouchIds(pageId, req.contentIds)`.
+
+`npm test`: **390**.

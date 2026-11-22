@@ -3394,6 +3394,10 @@
     if (opts.forceCtx7) ctx7 = true;
 
     const items = normalizePhotoItems(photo);
+    /* [v1.93.15] `content_ids` THẬT của lần gửi này — dùng lại cho `contents/touch` cuối lô
+     * (HAR: body `{"content_ids":["f22adca4-…"]}`, KHÔNG phải mảng rỗng).
+     * Chỉ là id Pancake cấp cho ảnh (đã có sẵn trong `photo.items`), không tạo gì mới. */
+    const contentIdsForTouch = items.map((x) => x.id).filter(Boolean);
     if (items.length > 1) {
       const fbIds = (Array.isArray(photo.fbIds) && photo.fbIds.length >= items.length)
         ? photo.fbIds.slice(0, items.length)
@@ -3416,7 +3420,7 @@
       // code app: 24 ca thiếu cờ = chat ngoài cửa sổ. Gửi cờ khi không đủ điều kiện là bịa
       // thêm dữ liệu server không mong đợi ⇒ trả lại hành vi gốc của app.
       if (ctx7) jsonBody.is_record_ctx_7_days = true;
-      return { url: url, isJson: true, jsonBody: jsonBody, ctx7: ctx7 };
+      return { url: url, isJson: true, jsonBody: jsonBody, ctx7: ctx7, contentIds: contentIdsForTouch };
     }
 
     const fd = new FormData();
@@ -3435,7 +3439,7 @@
       if (p0.h) fd.append('height', String(p0.h));
     }
     fd.append('send_by_platform', 'web'); // request thật của app luôn có (cả text lẫn ảnh)
-    return { url: url, fd: fd, isJson: false, ctx7: ctx7 };
+    return { url: url, fd: fd, isJson: false, ctx7: ctx7, contentIds: contentIdsForTouch };
   }
 
   // ⚡ CHẾ ĐỘ NHANH: bắn request API qua cổng điều tiết apiSendLane (64 luồng HTTP song song),
@@ -3600,6 +3604,16 @@
             const statusKey = String(Number(response.status) || 0);
             sendDiag.apiStatusCounts[statusKey] = (sendDiag.apiStatusCounts[statusKey] || 0) + 1;
             if (Number(response.status) === 429) sendDiag.api429++;
+            /* [v1.93.15] Gom `content_ids` của ảnh vừa gửi ĐƯỢC (2xx) để `contents/touch`
+             * cuối lô có id THẬT (HAR: `{"content_ids":["f22adca4-…"]}`) thay vì mảng rỗng.
+             * Chỉ 2xx mới ghi: 4xx/5xx ⇒ ảnh không lên ⇒ touch cũng vô nghĩa. */
+            try {
+              const st = Number(response.status) || 0;
+              if (st >= 200 && st < 300 && req && Array.isArray(req.contentIds) && req.contentIds.length) {
+                rememberTouchIds(pageId, req.contentIds);
+                try { if (conv) conv.__sentContentIds = req.contentIds.slice(); } catch (eC) { /* ignore */ }
+              }
+            } catch (eRT) { /* ignore */ }
           }
           return response;
         } finally {
@@ -6926,6 +6940,26 @@
   // ---- SAU KHI GỬI THÀNH CÔNG — 3 request app LUÔN gọi (HAR tinnhan1.har + file "post"):
   // fill_admin_name (ghép tên nhân viên vào chat — per conversation, điều tiết qua sideEffectLane),
   // check_inbox + contents/touch (per page, chốt 1 lần cuối lô). Bắn nền KHÔNG chờ!
+  /* ═══ [v1.93.15] SỔ `content_ids` THEO PAGE để `contents/touch` có dữ liệu THẬT ═══
+   * HAR (`batmesss.har`): `POST /v1/pages/{p}/contents/touch? body {"content_ids":["f22adca4-…"]}`.
+   * Script cũ gửi `content_ids: []` ⇒ request rỗng, không touch nội dung nào.
+   * Nội dung được touch là ẢNH đã gửi (id do Pancake cấp = `content_ids` mà `buildInboxSend`
+   * dùng trong body gửi). Sổ này gom lại trong lúc gửi, `perPage` đọc ra lúc chốt lô.
+   * Giới hạn 500 id/page để không phình bộ nhớ ở lô 10 000. */
+  const touchIdsByPage = Object.create(null);
+  function rememberTouchIds(pageId, ids) {
+    try {
+      if (!pageId || !Array.isArray(ids) || !ids.length) return;
+      const k = String(pageId);
+      let arr = touchIdsByPage[k];
+      if (!arr) { arr = touchIdsByPage[k] = []; }
+      for (const id of ids) {
+        const v = String(id || '');
+        if (v && arr.indexOf(v) < 0) { arr.push(v); if (arr.length >= 500) break; }
+      }
+    } catch (eR) { /* ignore */ }
+  }
+
   function postSendSideEffects(conv, opts) {
     const o = opts || {};
     try {
@@ -6945,12 +6979,32 @@
         fetch(apiBase() + '/v1/pages/' + pageId + '/check_inbox?', {
           method: 'POST', headers: { Accept: 'application/json' }, credentials: 'include',
         }).catch(() => null);
-        fetch(apiBase() + '/v1/pages/' + pageId + '/contents/touch?', {
-          method: 'POST',
-          headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ content_ids: [] }),
-        }).catch(() => null);
+        /* ═══ [v1.93.15] `contents/touch` PHẢI CÓ `content_ids` THẬT ═══
+         * HAR (`batmesss.har`): `POST /v1/pages/{p}/contents/touch?`
+         *   body: {"content_ids":["f22adca4-cbdf-4957-b6b0-aae141840bb2"]}  → {"success":true}
+         * Script cũ gửi `{"content_ids":[]}` — mảng RỖNG ⇒ không "touch" nội dung nào
+         * ⇒ request vô nghĩa (đúng là không hỏng gì, nhưng cũng không làm được việc của nó).
+         * Nay: lấy id THẬT của ảnh (chính `content_ids` mà `buildInboxSend` đã dùng để gửi,
+         * xem `messages` body `content_ids: items.map(x => x.id)`), gộp theo page trong lô.
+         * Không có id ⇒ KHÔNG gọi (đừng gửi request rỗng). */
+        const _touchIds = (function () {
+          try {
+            const pr = (o && o.touchContentIds) || null;
+            if (Array.isArray(pr) && pr.length) return pr.filter(Boolean);
+            const fromConv = (conv && (conv.__sentContentIds || conv.sentContentIds)) || null;
+            if (Array.isArray(fromConv) && fromConv.length) return fromConv.filter(Boolean);
+            const fromBook = touchIdsByPage[String(pageId)] || null;
+            return Array.isArray(fromBook) ? fromBook.slice() : [];
+          } catch (eT) { return []; }
+        })();
+        if (_touchIds.length) {
+          fetch(apiBase() + '/v1/pages/' + pageId + '/contents/touch?', {
+            method: 'POST',
+            headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ content_ids: _touchIds }),
+          }).catch(() => null);
+        }
       }
     } catch (e) { /* việc phụ — không được làm hỏng lô gửi */ }
   }

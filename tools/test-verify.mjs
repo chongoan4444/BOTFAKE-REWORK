@@ -1886,6 +1886,18 @@ check('[ext] thiếu `updated_at` thì LÙI 1 NGÀY (864e5) thay vì dùng "bây
 check('[ext] có đếm số ca thiếu `updated_at` (updMissing)',
   /updMissing: 0/.test(SRC), true);
 
+/* ═══ (L) [v1.93.15] `contents/touch` KHÔNG ĐƯỢC GỬI `content_ids: []` ═══
+ * HAR `batmesss.har`: `POST /v1/pages/{p}/contents/touch?`
+ *   body {"content_ids":["f22adca4-cbdf-4957-b6b0-aae141840bb2"]} → {"success":true}
+ * Mảng rỗng = request vô nghĩa (không touch nội dung nào). */
+/* Phải bỏ comment trước khi kiểm — chính chú thích có nhắc `content_ids: []`. */
+check('[api] contents/touch không còn gửi content_ids rỗng',
+  /contents\/touch\?[\s\S]{0,400}?content_ids: \[\]/.test(stripComments(SRC)), false);
+check('[api] contents/touch lấy id từ sổ theo page (touchIdsByPage)',
+  /const fromBook = touchIdsByPage\[/.test(SRC), true);
+check('[api] có ghi content_ids khi gửi ảnh thành công (2xx)',
+  /rememberTouchIds\(pageId, req\.contentIds\)/.test(SRC), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
