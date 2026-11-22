@@ -1024,3 +1024,72 @@ Script không kèm `maxThreadCount` (đúng — ext dùng trần 250), nhưng ch
 | `SEND_COMMENT` | Script đã đọc đúng `messageId` (sửa ở 1.93.11). `SEND_COMMENT_FAILURE` 2 hình dạng (`message` hoặc rỗng) — script đọc cả hai ✔ |
 | `LISTEN_INBOX` / `LISTEN_WS` | Là lệnh **bật/tắt listener**, extension tự chạy `Oc`/`$a`. Script không điều khiển — đúng (ACK lấy qua lịch sử, không qua listener) |
 | `timeRangeMin: 0` | `if(this.timeRangeMin!=null && d<this.timeRangeMin) break` ⇒ 0 = lấy mọi mốc ✔ |
+
+---
+
+## 19. Kiểm toàn bộ tên lệnh gửi cho extension + đường nạp doc_id
+
+### 19.1 Bảng tên lệnh — 6/6 KHỚP sau khi sửa
+
+Đối chiếu tự động: trích mọi `type: '…'` của script, so với **83 `case"…"`** của
+`0.5.62_0/assets/background.js`.
+
+| Tên script gửi | Có case? |
+|---|---|
+| `REPLY_INBOX_PHOTO` | ✔ |
+| `SEND_COMMENT` | ✔ |
+| `GET_GLOBAL_ID_FOR_CONV` | ✔ |
+| `BATCH_GET_GLOBAL_ID` | ✔ |
+| `MAKE_MESSENGER_LINK` | ✔ |
+| `UPLOAD_INBOX_PHOTO` | ✔ |
+| `PRELOAD_DOC_IDS` | ✔ (**vừa sửa** — trước gửi tên bịa `PRELOAD_DOC_IDS_CANDIDATE`) |
+
+`BOTFAKE_BG_SEND` / `BOTFAKE_BG_FETCH` / `BOTFAKE_BG_STOP` / `BOTFAKE_JOB` **không phải** lệnh
+extension: chúng đi qua `chrome.runtime.sendMessage` (hàm `extCall` @568) tới
+`extension/bridge.js` của extension BOTFAKE — tách hoàn toàn khỏi `__ExtensionAdapter__`. ✔
+
+### 19.2 `__ExtensionAdapter__` do extension **Pancake 0.5.62** cung cấp, KHÔNG phải extension trong repo
+
+`extension/background.js` của repo (447 dòng) là extension BOTFAKE: overlay + gửi API trong SW,
+`CONCURRENCY=24`, `jobs`/`bgCtl`. **Không có switch adapter, 0 case.**
+
+`release/botfake-ext/manifest.json` chỉ có content script
+`[scripts/pancake-send-lite.user.js, extension/bridge.js, extension/overlay.js]` — không inject
+`window.__ExtensionAdapter__`.
+
+⇒ Mọi `adapter.send(...)` **chỉ chạy được khi máy user có extension Pancake 0.5.62**; nếu không có
+thì `adapter` là `undefined` và script rơi về `finishExt(null)` / `docIdReady()` đọc localStorage.
+Điều này giải thích vì sao sửa hợp đồng lệnh **chỉ có tác dụng trên máy đã cài 0.5.62**.
+
+### 19.3 Vì sao đường nạp doc_id qua Ext vẫn có thể 0/0 dù đã sửa tên
+
+`tryPreloadDocIdsViaExt()` bị chặn bởi **công tắc riêng**:
+```js
+if (!window.__botfakeTryPreloadDocIds__) return Promise.resolve(false);
+```
+Không ai trong repo set cờ này ⇒ hàm **luôn trả `false` ngay dòng đầu**.
+Cộng với `!docIdReady()` ở `requestBatchGlobalIds` (@9113) thì batch bị bỏ trước khi gửi lệnh.
+⇒ 2 sửa ở §18 là **điều kiện cần, chưa đủ**: còn phải bật cờ (hoặc đổi mặc định) mới đo được.
+
+### 19.4 Đã đối chiếu, KHÔNG sửa — `GET_FB_MSG` và tiêu chí khớp tin
+
+`case"GET_FB_MSG"` → `findInternalMessage(sendParams, replyMessage)`; hàm này lọc và khớp **3 điều kiện**:
+```js
+y = parseInt(parseInt(I.timestamp_precise)/1e3) == t.insertedAt          // mốc giây
+b = c ? c.trim() == I.message.text.trim() : true                          // nội dung
+v = isFromPage ? String(I.message_sender.id)==String(t.from.id)
+                : String(I.message_sender.id)==String(globalId)           // người gửi
+```
+Script dùng cùng logic (`isMessageDeliveredInHistory` + `confirmViaSnippet`) ⇒ **không lệch chuẩn**.
+`GET_FB_MSG` là kênh phụ, script không cần gọi.
+
+### 19.5 `jc = n => ![1545041].includes(n?.error)` — `1545041` là bộ lọc retry, KHÔNG phải nhãn "khách chặn"
+
+```js
+const Q = jc(H);              // Q = true khi error KHÁC 1545041
+… case"restartInbox": … .then(()=>Q && Ze(t)) …      // chỉ restart khi lỗi KHÁC 1545041
+… case"cannotRetry":   Q && Ze(t); v({fbErrorCode:H.error})
+```
+`1545041` ∉ `[1357004,1545012,1545006,3252001,1390008]` ⇒ `getErrorHandler` trả **`cannotRetry`**.
+Extension **không có nhãn "khách chặn"** — chỉ có mã lỗi. Việc script coi `1545041` là
+"FB từ chối nhận tin" là **diễn giải của script**, không phải hằng số của extension.
