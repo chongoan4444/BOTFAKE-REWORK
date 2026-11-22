@@ -9454,10 +9454,40 @@
    * không trả `_SUCCESS` vì nó không `await` `O.preloadDocIds`). Tách khỏi `viaExtOk`
    * để không báo "đã nạp" khi thực tế mới chỉ "đã chờ". */
   const docIdStats = { seenHtml: 0, htmlWithMap: 0, saved: 0, viaExtOk: 0, viaExtWaited: 0, viaExtEmpty: 0 };
+  /* ═══ [v1.93.15] CHỜ THÍCH ỨNG THAY VÌ CHỜ CỨNG 25 000 ms ═══
+   * ĐO ĐƯỢC: 31 log có **16** dòng `batch rỗng — THIẾU doc_id … (chưa chạy được lần nào)`
+   * và **0** lần `batch nạp N/M` với N>0; chỉ **1** dòng `đã gửi PRELOAD_DOC_IDS`.
+   * Tức mỗi lần warm-up trả giá 25 s rồi `BATCH_GET_GLOBAL_ID` vẫn thất bại.
+   *
+   * VÌ SAO CHỜ 25 s LÀ SAI (đọc mã, không phải suy đoán):
+   *  ① `case"PRELOAD_DOC_IDS"` KHÔNG gửi `_SUCCESS`/`_FAILURE` (chỉ `break`) ⇒ adapter
+   *     `send()` **không bao giờ** giải promise ⇒ chỉ có hết hạn. Chờ 25 s hay 25 phút
+   *     cũng vậy — `res` LUÔN là `{success:false, data:null}`. Không chờ được kết quả.
+   *  ② Lệnh KHÔNG bị chặn: listener ext chỉ `await` tuần tự cho `o = Mm.has(type)`,
+   *     và `Mm` gồm **`SEND_COMMENT` + `REPLY_INBOX_PHOTO`** — `PRELOAD_DOC_IDS` chạy ngay.
+   *     Nên "chờ cho nó xong" không giúp gì cho độ đúng; nó chỉ giữ slot.
+   *  ③ `O.preloadDocIds` tự thoát ngay khi đã có doc_id (`if(a.length===0) return`) ⇒ lần
+   *     thứ 2 trở đi trong cùng trang là **gần như 0 ms** dù ta chờ 25 s.
+   * ⇒ Trả giá tối đa cho một promise chắc chắn không bao giờ resolve, trong khi thứ ta cần
+   *   (doc_id có hay chưa) chỉ `BATCH_GET_GLOBAL_ID` trả lời được.
+   *
+   * NAY: chờ THÍCH ỨNG — 3 000 ms cho page chưa từng nạp, 800 ms khi đã nạp trong phiên
+   * (trường hợp ext đã có doc_id, gần như tức thời), trần `DOCID_PRELOAD_MAX_WAIT_MS`
+   * để không ai nâng lên vô hạn. Ghi lại thời gian chờ THẬT vào `docIdStats.savedMs`
+   * để chứng minh bằng số thay vì cảm nhận. Đường này CHỈ ĐỌC. */
+  const DOCID_PRELOAD_FIRST_WAIT_MS = 3000;
+  const DOCID_PRELOAD_REPEAT_WAIT_MS = 800;
+  const DOCID_PRELOAD_MAX_WAIT_MS = 4000;
+  docIdStats.savedMs = 0;
+  docIdStats.preloadFirst = 0;
+  docIdStats.preloadRepeat = 0;
   /* Tên doc_id bóc được từ HTML — CHỈ để đối chiếu/ghi log, không dùng để quyết định gì. */
   const docIdSeenFromHtml = Object.create(null);
   /* Page nào đã được gửi PRELOAD_DOC_IDS (gửi 1 lần/page, không lặp). */
   const docPreloadSent = new Set();
+  /* [v1.93.15] Page nào ĐÃ TỪNG được gửi lệnh nạp trong phiên này ⇒ lần sau chờ ngắn hơn
+   * (ext đã có doc_id trong `chrome.storage.local`, `O.preloadDocIds` thoát gần như tức thời). */
+  const docPreloadEverSent = new Set();
   const DOCID_NAMES = DOCID_KEEP;   // giữ tên cũ cho chỗ dùng bên dưới
 
   /* ═══ [v1.93.13] doc_id KHÔNG đọc được từ trong trang — bỏ hẳn ảo giác này ═══
@@ -9631,13 +9661,22 @@
      * cache 5 h) và coi hết hạn là BÌNH THƯỜNG; nếu `res.success === true` (không xảy ra
      * với case này) thì thoát sớm. Sau đó `BATCH_GET_GLOBAL_ID` mới được phép chạy —
      * và nếu vẫn rỗng thì đọc lại theo nhịp, vẫn CHỈ ĐỌC, không sinh tin. */
+    /* Chờ THÍCH ỨNG: page chưa từng nạp trong phiên ⇒ 3 s; đã nạp rồi (ext gần như trả ngay
+     * vì `O.preloadDocIds` thoát sớm khi đủ doc_id) ⇒ 800 ms. Trần 4 s. */
+    const _first = !docPreloadEverSent.has(key);
+    docPreloadEverSent.add(key);
+    const _docWaitMs = Math.min(DOCID_PRELOAD_MAX_WAIT_MS,
+      _first ? DOCID_PRELOAD_FIRST_WAIT_MS : DOCID_PRELOAD_REPEAT_WAIT_MS);
+    if (_first) { try { docIdStats.preloadFirst++; } catch (e0) { /* ignore */ } }
+    else { try { docIdStats.preloadRepeat++; } catch (e0) { /* ignore */ } }
+    const _waitStart = Date.now();
     return Promise.resolve()
       .then(() => adapter.send({
         type: 'PRELOAD_DOC_IDS',
         pageId: String(pid),
         isBusiness: false,
         country: (function () { try { return localStorage.getItem('country') || 'vn'; } catch (e) { return 'vn'; } })(),
-      }, { timeout: 25000 }))
+      }, { timeout: _docWaitMs }))
       .then((res) => {
         /* `PRELOAD_DOC_IDS` KHÔNG trả `_SUCCESS`/`_FAILURE` (case chỉ `break`), nên
          * `adapter.send` sẽ hết hạn rồi trả `{success:false, data:null}` — đó KHÔNG phải lỗi,
@@ -9651,9 +9690,12 @@
          * Sự thật duy nhất kiểm được là `BATCH_GET_GLOBAL_ID` trả mapping hay không
          * (`batch nạp N/M`). Vì vậy đếm RIÊNG, không gộp vào `viaExtOk`. */
         if (res && res.success) docIdStats.viaExtOk++; else docIdStats.viaExtWaited++;
+        const _waited = Date.now() - _waitStart;
+        try { docIdStats.savedMs += Math.max(0, DOCID_PRELOAD_FIRST_WAIT_MS - _waited); } catch (e0) { /* ignore */ }
         try {
           logLine('🧩 [doc_id] đã gửi PRELOAD_DOC_IDS cho page ' + pid
-            + ' và chờ 25 000 ms (ext KHÔNG await `O.preloadDocIds` nên không có _SUCCESS)'
+            + ' và chờ ' + _waited + ' ms (ext KHÔNG await `O.preloadDocIds` nên KHÔNG BAO GIỜ'
+            + ' có _SUCCESS — chờ chỉ để ext kịp chạy, không phải để đọc kết quả)'
             + ' — kết quả thật xem ở dòng `batch nạp N/M`');
         } catch (e) { /* ignore */ }
         return true;

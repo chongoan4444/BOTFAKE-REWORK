@@ -2551,3 +2551,72 @@ dọn mục cũ khi > 4000 khoá.
 
 **Test khoá (4 kịch bản `(Q)`+`(R)`):** Socket bỏ sớm `noThreadIdFound`; `Map` không phải `Set`;
 có nhánh TTL; hằng số 45 000. `npm test`: **405**.
+
+---
+
+## 40. `batch nạp 0/0` — nguyên nhân THẬT: `PRELOAD_DOC_IDS` nạp SAI BỘ doc_id
+
+### 40.1 Hai bộ doc_id khác nhau (đây là gốc của mọi `Missing doc_id`)
+
+```js
+// ext 0.5.62 — bảng hằng
+rt = "MessengerThreadlistWebGraphQLQuery"          // ← BẮT BUỘC cho BATCH_GET_GLOBAL_ID
+st = "MessengerThreadlistQuery"
+ea = "BizInboxSearchResultFacebookListQuery"       // ← bộ TÌM KIẾM
+ge = "BizInboxCustomerRelaySearchSourceQuery"
+Oe = "BizInboxSearchResultListContainerQuery"
+Jt = "PagesManagerInboxAdminAssignerRootQuery"     // ← bộ nguồn gid trong inbox
+Zt = "PagesManagerInboxQueryUtilCommItemHeaderMercuryQuery"
+Da = "MessengerThreadsWebGraphQLQuery"             // ← bộ LOAD_FACEBOOK_MESSAGES
+Sa = "MessengerThreadsQuery"
+```
+
+| Nơi đòi doc_id | Bộ cần | Ai nạp |
+|---|---|---|
+| `Ct.init()` — `BATCH_GET_GLOBAL_ID` | **`rt`, `st`** (`if(!O.get(rt,st)) reject "Missing doc_id"`) | `ee.preloadDocIds` (**feature `inbox`**) |
+| `Ue.preloadDocIds` — người xử lý của case `PRELOAD_DOC_IDS` | **`ea`, `ge`, `Oe`** | chính case đó |
+| `He.preloadDocIds` — `LOAD_FACEBOOK_MESSAGES` | `Da`, `Sa` | `He.loadFacebookMessages` |
+| `Ee.getGlobalIdFromInbox` — nguồn gid ①② | `Jt`, `Zt` | **`Ee.init()` tự nạp** |
+
+```js
+// case "PRELOAD_DOC_IDS" (ext @400618)
+O.preloadDocIds({pageId:_, isBusiness:g}), q.setItem("country", r.data.country); break
+//   → Ll.preloadDocIds → các feature CHƯA ready → getFeatureHandlerClass("businessInboxComment") = Ue
+//   → Ue.preloadDocIds → loadDocIdsFromView({docNames:[ea,ge,Oe]})     ← KHÔNG có rt/st
+// ee.preloadDocIds (feature "inbox", @166xxx)
+const l = [Jt, Zt, rt, st]; await O.loadDocIdsFromView({html:s, docNames:l, …})   ← CÓ rt/st
+// Ee.getGlobalIdFromInbox  (ext @74503)
+if ((e || !O.isFeatureReady("inbox")) && await ee.preloadDocIds({pageId, isBusiness}), O.get(Jt) && this.threadId) { … }
+```
+
+⇒ `PRELOAD_DOC_IDS` **không bao giờ** nạp `rt/st`. Vì vậy `BATCH_GET_GLOBAL_ID` của script
+reject `Missing doc_id MessengerThreadlistWebGraphQLQuery or MessengerThreadlistQuery` ở
+**100 %** lần chạy — đúng như đo: **16** dòng `batch rỗng — THIẾU doc_id`, **0** lần `batch nạp N/M`
+với N > 0, chỉ **1** dòng `đã gửi PRELOAD_DOC_IDS`.
+
+### 40.2 Vì sao app không bao giờ gặp lỗi này
+
+`grep -c "PRELOAD_DOC_IDS" _app-…v6.js` = **0** — app **không hề gửi lệnh đó**. `doc_id` đến
+như **tác dụng phụ** của `Ee.init()` mà app gọi trong `concurrentlyGetGlobalId` /
+`getGlobalIdFromWeb` ⇒ khi app gọi `BATCH_GET_GLOBAL_ID` (`@897543`) thì `rt/st` đã có sẵn.
+Script gửi batch **trước** khi có bất kỳ `Ee.init()` nào ⇒ luôn trượt. Đây là hệ quả của việc
+script chủ động gọi một lệnh mà app không gọi, **với một người xử lý khác**.
+
+### 40.3 VÌ SAO CHỜ 25 000 ms LÀ VÔ ÍCH (đã sửa)
+
+1. `case"PRELOAD_DOC_IDS"` **không** gửi `_SUCCESS`/`_FAILURE` (chỉ `break`) ⇒ `adapter.send`
+   **không bao giờ** giải promise ⇒ luôn hết hạn. Chờ 25 s hay 25 phút: `res` vẫn
+   `{success:false, data:null}`. Không có thông tin nào để chờ.
+2. Lệnh **không bị chặn**: listener ext chỉ `await` tuần tự với `o = Mm.has(type)`, và `Mm`
+   = **`SEND_COMMENT` + `REPLY_INBOX_PHOTO`**. `PRELOAD_DOC_IDS` chạy ngay.
+3. `O.preloadDocIds` tự thoát ngay khi feature đã ready ⇒ lần 2 trở đi **gần như 0 ms** dù ta chờ 25 s.
+
+**ĐÃ SỬA:** chờ thích ứng `DOCID_PRELOAD_FIRST_WAIT_MS = 3000` (page chưa nạp) /
+`DOCID_PRELOAD_REPEAT_WAIT_MS = 800` (đã nạp trong phiên), trần `DOCID_PRELOAD_MAX_WAIT_MS = 4000`.
+Ghi `docIdStats.savedMs` (thời gian tiết kiệm thật) + `preloadFirst`/`preloadRepeat`, và log in
+**số ms đã chờ thật** thay vì con số 25 000 viết cứng.
+
+> Điều này KHÔNG làm batch thành công (nguyên nhân là 40.1), nhưng bỏ được ~22 s chờ vô ích
+> mỗi lần warm-up. Việc nạp đúng bộ `rt/st` phải do **`Ee.init()`** làm — xem §41.
+
+**Test khoá:** hằng chờ ≤ 4 000 ms; không còn `timeout: 25000` cho `PRELOAD_DOC_IDS`.

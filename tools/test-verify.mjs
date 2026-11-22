@@ -1975,6 +1975,17 @@ check('[sync] lần thử CŨ hơn TTL thì được thử lại (không chặn 
 check('[sync] có ngưỡng thời gian chặn gọi lặp (45s)',
   /SYNC_TID_RETRY_MS = 45000/.test(stripComments(SRC)), true);
 
+/* ═══ (S) [v1.93.15] `PRELOAD_DOC_IDS`: chờ THÍCH ỨNG, không chờ cứng 25 s ═══
+ * Case này KHÔNG gửi `_SUCCESS`/`_FAILURE` (chỉ `break`) ⇒ adapter không bao giờ giải promise.
+ * Chờ 25 s là giữ slot cho một promise chắc chắn hết hạn. Đo được: 16 dòng `batch rỗng — THIẾU
+ * doc_id` và 1 dòng `đã gửi PRELOAD_DOC_IDS` trên 31 log. Trần phải ≤ 4 s. */
+check('[doc_id] không còn chờ cứng 25 000 ms cho PRELOAD_DOC_IDS',
+  /type: 'PRELOAD_DOC_IDS'[\s\S]{0,900}?timeout: 25000/.test(stripComments(SRC)), false);
+check('[doc_id] chờ thích ứng có trần 4 000 ms',
+  /DOCID_PRELOAD_MAX_WAIT_MS = 4000/.test(stripComments(SRC)), true);
+check('[doc_id] log in số ms THẬT đã chờ (không viết cứng)',
+  /_waited = Date\.now\(\) - _waitStart/.test(stripComments(SRC)), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
