@@ -2658,6 +2658,9 @@
      * `fbDirectSavedGid` = số lần lấy được `globalId` từ chính phản hồi đó (nguồn gid THẬT,
      * không phụ thuộc `ENABLE_FIND_THREAD_BY_USERNAME`, không cần 4 nguồn `Ee.init`). */
     fbDirectMessages: 0, fbDirectSavedGid: 0,
+    /* [v1.93.15] Số ca THIẾU `updated_at`. Với các ca này `conversationUpdatedTime` phải lùi 1 ngày
+     * (xem chú thích ở `updMs`), vì nó là `before` của `findThread` chứ không phải mốc lọc. */
+    updMissing: 0,
   };
   function resetGidStats() {
     Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
@@ -4222,7 +4225,42 @@
     const custName = (full && full.from && (full.from.name || full.from.username))
       || (full && (full.customerName || full.name)) || '';
     const rawUpd = String((full && (full.updated_at || full.updatedAt)) || '');
-    const updMs = rawUpd ? Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawUpd) ? rawUpd : rawUpd + 'Z') : Date.now();
+    /* ═══ [v1.93.15] THIẾU `updated_at` THÌ **KHÔNG** DÙNG `Date.now()` ═══
+     * ĐO ĐƯỢC trên app THẬT (`_app-…v6.js`) — MỌI lời gọi đều dùng `Date.parse(updated_at + "Z")`,
+     * KHÔNG có chỗ nào fallback về giờ hiện tại:
+     *   MAKE_MESSENGER_LINK   conversationUpdatedTime: Date.parse("".concat(e.updated_at,"Z")), uiVersion: n.facebookUiVersion || 6
+     *   GET_PROFILE_LINK      conversationUpdatedTime: Date.parse("".concat(f.updated_at,"Z"))
+     *   LOAD_FACEBOOK_MESSAGES conversationUpdatedTime: Date.parse("".concat(t.updated_at,"Z"))
+     *   BLOCK_FACEBOOK_USER   … Date.parse("".concat(r.updated_at,"Z"))
+     *   REACT_MESSAGE         … Date.parse("".concat(u.inserted_at,"Z")), Date.parse("".concat(o.updated_at,"Z"))
+     *   (còn @961519, @891666)
+     *
+     * VÌ SAO `Date.now()` LÀ SAI NGHIÊM TRỌNG — nguồn `0.5.62_0/assets/background.js`:
+     *   `Ee.getGlobalIdFromInbox()` nguồn ③:
+     *      const u = await this.findThread({ customerName, threadId,
+     *                       graphQLInstance:a, timeCursor: this.conversationUpdatedTime + 6e4 });
+     *   `findThread(e)`:
+     *      const { threadId:t, customerName:a, …, timeCursor:s, count:o=0, category:c="main" } = e;
+     *      … graphqlbatch({ timeCursor: s }), query_params:{ limit: Cn(=20), tags:f, before: s, … }
+     *   ⇒ `conversationUpdatedTime + 6e4` là **`before`** của danh sách thread — một con trỏ lùi
+     *     về quá khứ, KHÔNG phải "mốc thời gian để lọc".
+     *   ⇒ Thiếu `updated_at` mà gửi `Date.now()` thì `before` = **bây giờ** ⇒ danh sách chỉ còn
+     *     thread mới hơn "bây giờ" ⇒ **rỗng** ⇒ `findThread` trả `null` ⇒ mất **nguồn gid ③**.
+     *     Đây là nguồn DUY NHẤT còn lại khi `Jt`/`Zt` thất bại (2 nguồn đầu cần `threadId`+`cquick_token`
+     *     và thường xuyên fail) ⇒ ca thiếu `updated_at` **mất luôn khả năng dò gid**.
+     *
+     * NAY: thiếu `updated_at` ⇒ `updMs = NaN` ⇒ payload **KHÔNG kèm** `conversationUpdatedTime`
+     * (các chỗ gửi đã có `isNaN(updMs) ? Date.now() : updMs` — nay đổi thành bỏ hẳn trường).
+     * Ext thấy `undefined` ⇒ `undefined + 6e4 = NaN` ⇒ `before: NaN`… KHÔNG được: phải có giá trị.
+     * ⇒ Dùng mốc **XẤP XỈ NHƯNG HỢP LỆ**: lấy `updated_at` từ bản ghi khác của cùng hội thoại
+     *   nếu có; nếu không có thì dùng `Date.now()` **nhưng đánh dấu** để không phát ngôn sai
+     *   (`gidStats.updMissing++`) — và `before` lùi 1 ngày để KHÔNG cắt mất thread cũ:
+     *   `Date.now() - 864e5`. Lùi về quá khứ là AN TOÀN (chỉ lấy thêm), tiến về tương lai mới mất. */
+    const updParsed = rawUpd ? Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawUpd) ? rawUpd : rawUpd + 'Z') : NaN;
+    if (isNaN(updParsed)) { try { gidStats.updMissing++; } catch (eUM) { /* ignore */ } }
+    /* `- 864e5` chỉ áp cho ca THIẾU mốc: `before` lùi 1 ngày ⇒ danh sách thread RỘNG hơn,
+     * không bao giờ cắt mất thread cần tìm. Ca có mốc thì giữ nguyên `updated_at`. */
+    const updMs = isNaN(updParsed) ? (Date.now() - 864e5) : updParsed;
     const hasExtFinder = typeof window.findGlobalIdForConv === 'function'
       || !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
 
@@ -4435,7 +4473,7 @@
              * Lệnh này CHỈ ĐỌC (tạo link / dò gid), không gửi tin ⇒ không thể sinh tin trùng.
              * `globalId: null` giữ nguyên ⇒ ext dò khi cần. */
             globalId: null,
-            conversationUpdatedTime: isNaN(updMs) ? Date.now() : updMs,
+            conversationUpdatedTime: updMs,   // [v1.93.15] đã xử lý tại nguồn: thiếu mốc ⇒ lùi 1 ngày (xem `updMs`)
             customerName: custName,
             platform: 'facebook',
           /* ═══ [v1.93.13] 5 000 ms LÀ QUÁ NGẮN — `MAKE_MESSENGER_LINK` CŨNG ĐI QUA `Ee.init()` ═══
@@ -4491,7 +4529,7 @@
           threadId: threadId,
           threadKey: (full && (full.thread_key || full.threadKey)) || ('t_' + threadId),
           isBusiness: true,
-          conversationUpdatedTime: isNaN(updMs) ? Date.now() : updMs,
+          conversationUpdatedTime: updMs,   // [v1.93.15] đã xử lý tại nguồn: thiếu mốc ⇒ lùi 1 ngày (xem `updMs`)
           customerName: custName,
           convType: 'INBOX', postId: null, convId: null,
         };
@@ -6115,9 +6153,18 @@
       convId: full.thread_key || full.threadKey || conv.threadKey || (threadId ? 't_' + threadId : null), // thread_key = 't_' + thread_id
       customerName: (full.from && (full.from.username || full.from.name)) || full.customerName || conv.customerName || '',
       isIGD: false,
+      /* [v1.93.15] THIẾU MỐC ⇒ LÙI 1 NGÀY, KHÔNG DÙNG "BÂY GIỜ".
+       * `conversationUpdatedTime` đi vào `Ee.getGlobalIdFromInbox` nguồn ③ dưới dạng
+       * `timeCursor = conversationUpdatedTime + 6e4`, rồi thành `before` của danh sách thread.
+       * "Bây giờ" ⇒ `before` = tương lai ⇒ danh sách RỖNG ⇒ mất nguồn gid ③.
+       * Lùi 1 ngày ⇒ danh sách RỘNG hơn ⇒ không cắt mất thread cần tìm. */
       conversationUpdatedTime: (function () {
-        const t = Date.parse(String(full.updated_at || full.updatedAt || conv.updatedAt || '') + 'Z');
-        return isNaN(t) ? Date.now() : t; // thiếu mốc → dùng giờ — không gửi NaN cho extension
+        const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(String(full.updated_at || full.updatedAt || conv.updatedAt || ''))
+          ? String(full.updated_at || full.updatedAt || conv.updatedAt)
+          : String(full.updated_at || full.updatedAt || conv.updatedAt || '') + 'Z');
+        if (!isNaN(t)) return t;
+        try { gidStats.updMissing++; } catch (eUM2) { /* ignore */ }
+        return Date.now() - 864e5;
       })(),
       photoUrls: photo ? normalizePhotoItems(photo).map((x) => x.url).filter(Boolean) : [],
       isBusiness: false,
@@ -10716,6 +10763,7 @@
           /* [v1.93.14] Đọc lịch sử TRỰC TIẾP TỪ FB: `tin N · gid M` và số lần nó CHẶN được
            * một lần bù (`cứu K`). `cứu > 0` = Pancake nói "chưa thấy" nhưng FB có tin ⇒
            * nếu không có đường này thì đã bù ⇒ khách nhận 2 tin. */
+          + ' · thiếu updated_at ' + (gidStats.updMissing || 0) + ' ca (mốc phải lùi 1 ngày)'
           + ' · đọc thẳng FB: tin ' + gidStats.fbDirectMessages
           + ' · gid ' + gidStats.fbDirectSavedGid
           + ' · cứu ' + sendDiag.fbDirectPresent
@@ -11566,7 +11614,12 @@
         isBusiness: true,
         platform: 'facebook',
         customerName: (fullC && (fullC.name || fullC.customerName)) || conv.name || '',
-        conversationUpdatedTime: (fullC && (fullC.updated_at || fullC.conversationUpdatedTime)) || Date.now(),
+        /* [v1.93.15] xem chú thích ở `updMs`: thiếu mốc thì LÙI 1 NGÀY, không dùng "bây giờ". */
+        conversationUpdatedTime: (function () {
+          const raw = String((fullC && (fullC.updated_at || fullC.conversationUpdatedTime)) || '');
+          const t = raw ? Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(raw) ? raw : raw + 'Z') : NaN;
+          return isNaN(t) ? (Date.now() - 864e5) : t;
+        })(),
         convType: 'INBOX', postId: null, convId: null,
       }, { timeout: 20000 }).then((res) => {
         if (!res || !res.success || !res.data || !Array.isArray(res.data.messages)) return null;

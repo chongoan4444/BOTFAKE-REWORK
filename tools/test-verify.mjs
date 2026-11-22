@@ -1871,6 +1871,21 @@ check('reset đầu lượt phải xoá CẢ HAI chỉ mục của danh sách g�
 check('[ext] MAKE_MESSENGER_LINK KHÔNG gửi cứng uiVersion',
   /type: 'MAKE_MESSENGER_LINK'[\s\S]{0,600}?uiVersion:/.test(stripComments(SRC)), false);
 
+/* ═══ (K) [v1.93.15] THIẾU `updated_at` KHÔNG ĐƯỢC DÙNG `Date.now()` LÀM `conversationUpdatedTime` ═══
+ * `conversationUpdatedTime` KHÔNG phải "mốc để lọc" — nó thành
+ *   `timeCursor = conversationUpdatedTime + 6e4`  (Ee.getGlobalIdFromInbox, nguồn ③)
+ *   → `before: timeCursor` của `MessengerGraphQLThreadlistFetcher` (findThread)
+ * tức là CON TRỎ LÙI của danh sách thread. Dùng "bây giờ" ⇒ `before` ở TƯƠNG LAI ⇒ danh sách
+ * RỖNG ⇒ `findThread` trả null ⇒ mất nguồn gid ③.
+ * App thật luôn `Date.parse(updated_at + "Z")`, KHÔNG có fallback nào về giờ hiện tại.
+ * Test khoá: mọi chỗ gán `conversationUpdatedTime` phải KHÔNG còn `Date.now()` trần. */
+check('[ext] không còn `conversationUpdatedTime: … Date.now() : …` trần',
+  /conversationUpdatedTime:\s*isNaN\(updMs\)\s*\?\s*Date\.now\(\)/.test(SRC), false);
+check('[ext] thiếu `updated_at` thì LÙI 1 NGÀY (864e5) thay vì dùng "bây giờ"',
+  /Date\.now\(\) - 864e5/.test(SRC), true);
+check('[ext] có đếm số ca thiếu `updated_at` (updMissing)',
+  /updMissing: 0/.test(SRC), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));

@@ -2030,3 +2030,76 @@ adapter.send({ type: 'MAKE_MESSENGER_LINK', pageId, convId, threadId,
 
 **Test khoá:** `[ext] MAKE_MESSENGER_LINK KHÔNG gửi cứng uiVersion` — để không ai thêm lại.
 `npm test`: **384 kịch bản** (373 → 383 với 10 test `fbMessagesVerdict` → 384 với test này).
+
+---
+
+## 32. `conversationUpdatedTime` là CON TRỎ LÙI, không phải mốc lọc — `Date.now()` làm MẤT nguồn gid ③
+
+### 32.1 Chuỗi lan truyền (đọc đủ 3 tầng)
+
+```js
+// ① script gửi
+payload.conversationUpdatedTime = rawUpd ? Date.parse(rawUpd + 'Z') : Date.now()   // ← chỗ sai
+
+// ② extension: Ee.getGlobalIdFromInbox(), NGUỒN ③
+if (O.get(rt,st) && (this.threadId || this.customerName)) {
+  const u = await this.findThread({ customerName: this.customerName, threadId: this.threadId,
+                                    graphQLInstance: a,
+                                    timeCursor: this.conversationUpdatedTime + 6e4 }); }
+
+// ③ extension: findThread({ threadId, customerName, graphQLInstance, timeCursor, count=0, category="main" })
+const { threadId:t, customerName:a, graphQLInstance:r, timeCursor:s, originTimeCursor:i=s, count:o=0, … } = e;
+const u = await r.graphqlbatch({ batchName:"MessengerGraphQLThreadlistFetcher",
+  graphqlQueries:[{ doc_id: O.get(rt,st),
+    query_params:{ limit: Cn /* =20 */, tags:f /* ["INBOX"] */, before: s, … } }] });
+```
+
+⇒ `conversationUpdatedTime + 6e4` trở thành **`before`** của danh sách thread. Đó là **con trỏ lùi**
+(vị trí bắt đầu duyệt từ cũ về mới), **không** phải mốc để lọc.
+
+| `conversationUpdatedTime` gửi đi | `before` | Danh sách thread | `findThread` |
+|---|---|---|---|
+| `updated_at` thật (ms) | `updated_at + 60 s` | các thread CŨ hơn mốc đó — **đúng** | tìm thấy |
+| `Date.now()` khi thiếu mốc | **bây giờ** | chỉ thread MỚI hơn "bây giờ" ⇒ **rỗng** | `null` |
+| lùi 1 ngày | `bây giờ − 24 h` | **rộng hơn** cần thiết — vẫn tìm thấy | tìm thấy |
+
+### 32.2 Bằng chứng từ app THẬT (`_app-…v6.js`)
+
+**7/7** chỗ app gửi `conversationUpdatedTime` đều `Date.parse(updated_at + "Z")`, **không** có
+fallback về giờ hiện tại:
+
+| @offset | Lệnh | Biểu thức |
+|---|---|---|
+| 866537 | `LOAD_FACEBOOK_MESSAGES` | `Date.parse("".concat(t.updated_at,"Z"))` |
+| 889965 | `REACT_MESSAGE` | `Date.parse(inserted_at+"Z")`, `Date.parse(updated_at+"Z")` |
+| 891666 | (block user helper) | `Date.parse("".concat(n.updated_at,"Z"))` |
+| 892886 | `BLOCK_FACEBOOK_USER` | `Date.parse("".concat(r.updated_at,"Z"))` |
+| 894440 | `MAKE_MESSENGER_LINK` | `Date.parse(updated_at+"Z")`, `uiVersion: n.facebookUiVersion \|\| 6` |
+| 895529 | `GET_PROFILE_LINK` | `Date.parse("".concat(f.updated_at,"Z"))` |
+| 961519 | (dò gid) | `Date.parse("".concat(t.updated_at,"Z"))` |
+
+App có `updated_at` trong mọi bản ghi hội thoại ⇒ **không cần** fallback. Script thì có nhánh
+thiếu mốc (dữ liệu lấy từ nhiều nguồn khác nhau) ⇒ phải có phương án, nhưng phương án
+`Date.now()` là **phương án sai chiều**.
+
+### 32.3 ĐÃ SỬA (4 chỗ)
+
+| Chỗ | Trước | Nay |
+|---|---|---|
+| `updMs` (@4225) | `: Date.now()` | `isNaN ⇒ Date.now() − 864e5` + đếm `gidStats.updMissing` |
+| `finderPayload.conversationUpdatedTime` | `isNaN(updMs) ? Date.now() : updMs` | `updMs` (đã xử lý tại nguồn) |
+| `MAKE_MESSENGER_LINK.conversationUpdatedTime` | `isNaN(updMs) ? Date.now() : updMs` | `updMs` |
+| `REPLY_INBOX_PHOTO.conversationUpdatedTime` | `isNaN(t) ? Date.now() : t` | `isNaN ⇒ Date.now() − 864e5` + đếm |
+| `fetchFbMessagesDirect` (§29) | `… \|\| Date.now()` | parse + `isNaN ⇒ Date.now() − 864e5` |
+
+Đồng thời sửa cách parse: `Date.parse(raw + 'Z')` **mù** sẽ sai khi chuỗi đã có `Z`/offset
+⇒ nay kiểm `/[zZ+]|\+\d{2}:?\d{2}$/` trước khi thêm `Z` (đúng như `updMs` vẫn làm).
+
+**Lùi 1 ngày là chiều AN TOÀN:** `before` lùi ⇒ danh sách thread **rộng hơn** ⇒ chỉ **lấy thêm**,
+không bao giờ **cắt mất** thread cần tìm. Ngược lại tiến về tương lai ⇒ **mất** thread ⇒ mất gid.
+
+**Chẩn đoán mới:** `· thiếu updated_at N ca (mốc phải lùi 1 ngày)` — nếu N lớn thì nguồn dữ liệu
+đang thiếu `updated_at` và đây chính là nhóm dễ mất nguồn gid ③ nhất.
+
+**Test khoá:** 3 kịch bản `(K)` — không còn `conversationUpdatedTime: isNaN(updMs) ? Date.now()`,
+có `Date.now() - 864e5`, có `updMissing`. `npm test`: **387**.
