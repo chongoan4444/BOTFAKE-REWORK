@@ -2640,3 +2640,37 @@ thứ tự lệnh trong đường warm-up ảnh hưởng nhịp lô):
 Chứng cứ để chọn: `BATCH_GET_GLOBAL_ID` **không bao giờ** trả mapping trong 12 HAR và 31 log
 (**0** lần `batch nạp N/M` với N > 0). Nếu chọn C thì nên **bỏ hẳn lệnh** thay vì gửi lệnh
 chắc chắn thất bại — gửi mà biết chắc hỏng chỉ tốn slot và làm log nhiễu.
+
+### 40.5 ĐÃ CHỌN HƯỚNG A — gieo `rt/st` qua `GET_GLOBAL_ID_FOR_CONV` trước batch
+
+```js
+// Ee.init()  (ext 0.5.62)
+init(){ switch(this.convType){
+  case "INBOX": a = this.getGlobalIdFromInbox(); … } }
+// Ee.getGlobalIdFromInbox  ← `ee.preloadDocIds` chạy ở DÒNG ĐẦU, trước MỌI nhánh thoát
+async getGlobalIdFromInbox(e=!1){ …
+  if ((e || !O.isFeatureReady("inbox")) && await ee.preloadDocIds({pageId:this.pageId, isBusiness:this.isBusiness}),
+      O.get(Jt) && this.threadId ) { … } }
+// ee.preloadDocIds (feature "inbox")
+const l = [Jt, Zt, rt, st]; await O.loadDocIdsFromView({html:s, docNames:l, …})
+```
+
+**Vì sao hướng A đúng:** `ee.preloadDocIds` chạy **trước** mọi `return`/`reject` của
+`getGlobalIdFromInbox`/`init()` ⇒ `rt/st` được nạp **kể cả khi** lệnh sau đó trả
+`INCORRECT THREAD` hoặc không tìm được gid. Tức 1 lệnh gieo/page/phiên là đủ, độc lập kết quả.
+
+**Đã làm** (`seedDocIdsViaConv`):
+- Dùng **chat thật đầu tiên có `threadId`** của page (`noteSeedConv` ghi ở `warmUpSockets`) chứ
+  không dùng payload rỗng ⇒ lệnh gieo **có thể trả gid thật luôn**, không phải lệnh thừa.
+- Thứ tự mới trong `requestBatchGlobalIds`: **seed → `ensureDocIds` → `BATCH_GET_GLOBAL_ID`**
+  (test khoá kiểm thứ tự bằng chỉ số chuỗi, không chỉ kiểm sự tồn tại).
+- **Không có chat nào có `threadId`** ⇒ **KHÔNG gửi batch** (`batchSkippedNoSeed`), vì gửi lúc
+  chắc chắn `Missing doc_id` chỉ tốn slot + làm nhiễu log.
+- Gid lấy được từ lệnh gieo đi vào **đúng một đường ghi** `__botfakeSaveGid__` (`seedGotGid`),
+  không tạo cơ chế lưu mới.
+- Chỉ gieo **1 lần/page/phiên** (`docSeedPages`) — không spam.
+- `PRELOAD_DOC_IDS` **vẫn giữ**: nó nạp `[ea,ge,Oe]`, đúng thứ nguồn dò theo **TÊN** (④) cần;
+  chỉ không còn bị coi là "bảo đảm doc_id cho batch".
+
+Đếm mới: `docIdStats.seedSent / seedGotGid / seedFailed / seedMs / batchSkippedNoSeed`.
+**Test khoá (5 kịch bản `(T)`).** `npm test`: **413**.

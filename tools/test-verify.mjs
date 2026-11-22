@@ -1986,6 +1986,25 @@ check('[doc_id] chờ thích ứng có trần 4 000 ms',
 check('[doc_id] log in số ms THẬT đã chờ (không viết cứng)',
   /_waited = Date\.now\(\) - _waitStart/.test(stripComments(SRC)), true);
 
+/* ═══ (T) [v1.93.15] GIEO doc_id `rt/st` TRƯỚC `BATCH_GET_GLOBAL_ID` ═══
+ * `PRELOAD_DOC_IDS` nạp `[ea,ge,Oe]` (người xử lý `Ue`, feature `businessInboxComment`) ⇒ KHÔNG
+ * có `rt/st` mà `Ct.init()` bắt buộc ⇒ batch reject `Missing doc_id` 100 % lần chạy.
+ * `rt/st` chỉ có từ `ee.preloadDocIds` (feature `inbox`), chạy ở DÒNG ĐẦU của
+ * `Ee.getGlobalIdFromInbox` — tức chỉ cần 1 lệnh `GET_GLOBAL_ID_FOR_CONV` là gieo được.
+ * Thứ tự bắt buộc: seed(GET_GLOBAL_ID_FOR_CONV) → ensureDocIds → BATCH. */
+const _iSeed = SRC.indexOf('seedDocIdsViaConv(pageId, _seedConv, _seedTid)');
+const _iEns = SRC.indexOf('.then(() => ensureDocIds(pageId))', _iSeed);
+const _iBat = SRC.indexOf("type: 'BATCH_GET_GLOBAL_ID'", _iEns > 0 ? _iEns : 0);
+check('[seed] có hàm gieo doc_id qua GET_GLOBAL_ID_FOR_CONV',
+  /function seedDocIdsViaConv\(pageId, conv, threadId\)/.test(stripComments(SRC)), true);
+check('[seed] thứ tự seed → ensureDocIds → batch', _iSeed > 0 && _iEns > _iSeed && _iBat > _iEns, true);
+check('[seed] KHÔNG gửi batch khi chưa có threadId để gieo',
+  /batchSkippedNoSeed\+\+/.test(stripComments(SRC)), true);
+check('[seed] gid lấy được từ seed cũng vào sổ (một đường ghi duy nhất)',
+  /seedGotGid\+\+/.test(stripComments(SRC)), true);
+check('[seed] chỉ 1 lần/page/phiên (không spam lệnh gieo)',
+  /if \(!pid \|\| !threadId \|\| docSeedPages\[pid\]\) return Promise\.resolve\(false\)/.test(stripComments(SRC)), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));

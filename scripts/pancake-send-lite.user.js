@@ -9391,6 +9391,9 @@
   // chạy song song các bắn API — nên khi nào cần bù Socket thì chỉ còn ~1–2s của sendMessage.
   const socketWarmPromises = {}; // pageId → Promise kết nối socket (đang chạy dở)
   const batchGidFetchedPages = {};
+  /* [v1.93.15] pageId → conv ĐẦU TIÊN của page đã có `threadId`, dùng để GIEO doc_id `rt/st`
+   * qua `GET_GLOBAL_ID_FOR_CONV` trước `BATCH_GET_GLOBAL_ID` (xem `seedDocIdsViaConv`). */
+  const batchSeedConv = {};
   /* [v1.93.13] Page nào đã bật khớp-theo-tên cho ext (`ENABLE_FIND_THREAD_BY_USERNAME`).
    * Mỗi page chỉ gửi 1 lần — cờ đó nằm trong SW của ext, gửi lại vô ích. */
   const nameSearchEnabled = new Set();
@@ -9481,6 +9484,12 @@
   docIdStats.savedMs = 0;
   docIdStats.preloadFirst = 0;
   docIdStats.preloadRepeat = 0;
+  /* [v1.93.15] GIEO doc_id qua `GET_GLOBAL_ID_FOR_CONV` (hướng A của §40.4) */
+  docIdStats.seedSent = 0;
+  docIdStats.seedGotGid = 0;
+  docIdStats.seedFailed = 0;
+  docIdStats.seedMs = 0;
+  docIdStats.batchSkippedNoSeed = 0;
   /* Tên doc_id bóc được từ HTML — CHỈ để đối chiếu/ghi log, không dùng để quyết định gì. */
   const docIdSeenFromHtml = Object.create(null);
   /* Page nào đã được gửi PRELOAD_DOC_IDS (gửi 1 lần/page, không lặp). */
@@ -9726,6 +9735,87 @@
     return true;
   }
 
+  /* ═══ [v1.93.15] GIEO DOC_ID `rt/st` ĐÚNG CÁCH (hướng A của §40.4) ═══
+   * §40.1 đã chứng minh `PRELOAD_DOC_IDS` KHÔNG BAO GIỜ nạp `rt/st` — người xử lý của nó là
+   * `Ue` (feature `businessInboxComment`) với `docNames:[ea,ge,Oe]`. `rt/st` chỉ có từ
+   * `ee.preloadDocIds` (feature `inbox`, `docNames:[Jt,Zt,rt,st]`).
+   *
+   * ĐƯỜNG DUY NHẤT chạy `ee.preloadDocIds` mà ta điều khiển được:
+   *   case"GET_GLOBAL_ID_FOR_CONV"  →  new Ee(r.data).init()
+   *   Ee.init(){ switch(convType){ case"INBOX": a = this.getGlobalIdFromInbox(); … } }
+   *   Ee.getGlobalIdFromInbox(){ …
+   *     if ((e || !O.isFeatureReady("inbox")) && await ee.preloadDocIds({pageId, isBusiness}),
+   *     O.get(Jt) && this.threadId ) …
+   * ⇒ `ee.preloadDocIds` chạy ở **DÒNG ĐẦU**, trước mọi nhánh thoát: kể cả khi
+   *   `getGlobalIdFromInbox` sau đó thất bại, hay `Ee.init()` reject `INCORRECT THREAD`,
+   *   doc_id `rt/st` VẪN ĐƯỢC NẠP (tác dụng phụ, không phụ thuộc kết quả).
+   *
+   * VÌ SAO DÙNG CHAT THẬT chứ không phải payload rỗng: `Ee` cần `threadId/threadKey/
+   * customerName/conversationUpdatedTime` để thử 4 nguồn — dùng chat đầu tiên của lô (đã có
+   * `threadId`) thì lệnh này **có thể trả gid thật luôn**, không phải lệnh thừa.
+   * Nếu KHÔNG có chat nào có `threadId` thì bỏ qua: `ee.preloadDocIds` không chạy được
+   * (`getGlobalIdFromInbox` chỉ gọi nó sau khi đã có `le(pageId)` — vẫn chạy, nhưng ta không
+   * có gì để đưa vào `Ee`, và batch vẫn sẽ hỏng; đừng gửi lệnh vô nghĩa).
+   *
+   * CHỈ ĐỌC. Kết quả (nếu có gid) được lưu qua `__botfakeSaveGid__` — cùng đường với mọi
+   * nguồn khác, không tạo cơ chế mới. */
+  const docSeedPages = Object.create(null);
+  function seedDocIdsViaConv(pageId, conv, threadId) {
+    const pid = String(pageId || '');
+    if (!pid || !threadId || docSeedPages[pid]) return Promise.resolve(false);
+    const adapter = window.__ExtensionAdapter__;
+    if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(false);
+    docSeedPages[pid] = 1;
+    const full = (conv && (peekConv(conv) || conv)) || {};
+    const updRaw = String(full.updated_at || full.conversationUpdatedTime || '');
+    const upd = updRaw ? Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(updRaw) ? updRaw : updRaw + 'Z') : NaN;
+    const payload = {
+      pageId: pid,
+      threadId: String(threadId),
+      threadKey: (full.thread_key || full.threadKey) || ('t_' + threadId),
+      isBusiness: true,
+      conversationUpdatedTime: isNaN(upd) ? (Date.now() - 864e5) : upd,
+      customerName: (full.name || full.customerName || (conv && conv.name)) || '',
+      convType: 'INBOX', postId: null, convId: null,
+    };
+    const startedAt = Date.now();
+    return adapter.send({ type: 'GET_GLOBAL_ID_FOR_CONV', ...payload }, { timeout: 20000 })
+      .then((res) => {
+        const gid = res && res.success
+          ? String((res.data && res.data.globalId) || res.globalId || '')
+          : '';
+        docIdStats.seedSent++;
+        docIdStats.seedMs += Date.now() - startedAt;
+        if (/^\d+$/.test(gid)) {
+          try {
+            window.__botfakeSaveGid__(String((conv && conv.id) || (pid + '_' + threadId)),
+              pid, String(threadId), gid);
+            docIdStats.seedGotGid++;
+          } catch (eS) { /* ignore */ }
+        }
+        try {
+          logLine('🧩 [doc_id] đã GIEO doc_id qua GET_GLOBAL_ID_FOR_CONV (page ' + pid
+            + ', ' + (Date.now() - startedAt) + ' ms'
+            + (gid ? ', kèm gid thật' : ', ext không trả gid — nhưng `ee.preloadDocIds` '
+              + 'ĐÃ chạy nên `rt/st` có trong cache 5 h') + ')');
+        } catch (e) { /* ignore */ }
+        return true;
+      })
+      .catch(() => { docIdStats.seedFailed++; return false; });
+  }
+
+  /* Gọi ở chỗ warm-up (nơi đã có danh sách conv của page) để nhớ 1 conv có `threadId`.
+   * Chỉ nhớ LẦN ĐẦU; conv không có `threadId` thì bỏ qua (không dùng được để gieo). */
+  function noteSeedConv(pageId, conv) {
+    const pid = String(pageId || '');
+    if (!pid || !conv || batchSeedConv[pid]) return;
+    try {
+      const f = peekConv(conv) || conv;
+      const tid = f && (f.thread_id || f.threadId);
+      if (tid) batchSeedConv[pid] = f;
+    } catch (e) { /* ignore */ }
+  }
+
   function requestBatchGlobalIds(pid, force) {
     if (!pid || typeof pid === 'object') return Promise.resolve(0);
     const pageId = String(pid || '').trim();
@@ -9740,7 +9830,32 @@
      * Không còn câu "chưa có doc_id" — ta KHÔNG đọc được doc_id của extension nên không
      * được phát ngôn về nó. Chỉ bảo đảm đã gửi lệnh nạp, rồi để chính extension trả lời. */
     try { logLine('🧩 [doc_id] bảo đảm extension đã nạp doc_id trước khi gọi batch…'); } catch (e) { /* ignore */ }
-    const promise = Promise.resolve().then(() => ensureDocIds(pageId)).then(() => adapter.send({
+    /* ═══ [v1.93.15] THỨ TỰ MỚI: GIEO doc_id `rt/st` → rồi mới batch ═══
+     * Cũ: `ensureDocIds` (= `PRELOAD_DOC_IDS`, nạp `[ea,ge,Oe]`) → batch.
+     * §40.1 chứng minh `PRELOAD_DOC_IDS` không nạp `rt/st` ⇒ batch reject `Missing doc_id` ở
+     * 100 % lần chạy (0 lần `batch nạp N/M` trong 12 HAR + 31 log).
+     * Nay: gieo qua `GET_GLOBAL_ID_FOR_CONV` (chạy `ee.preloadDocIds` = `[Jt,Zt,rt,st]`) rồi
+     * batch. Chỉ 1 lệnh gieo/page/phiên; nếu không có chat nào có `threadId` thì KHÔNG gửi
+     * batch (gửi lúc chắc chắn hỏng chỉ tốn slot) và trả 0.
+     * `PRELOAD_DOC_IDS` vẫn giữ — nó nạp `[ea,ge,Oe]` cho nguồn dò theo TÊN (④), thứ mà
+     * `Ee` cũng cần; chỉ không còn là bước "bảo đảm doc_id cho batch". */
+    const _seedConv = (typeof batchSeedConv === 'object' && batchSeedConv/*map*/)
+      ? batchSeedConv[pageId] : null;
+    const _seedTid = _seedConv && (_seedConv.thread_id || _seedConv.threadId);
+    const promise = Promise.resolve()
+      .then(() => (_seedTid ? seedDocIdsViaConv(pageId, _seedConv, _seedTid) : false))
+      .then(() => ensureDocIds(pageId))
+      .then(() => {
+        if (!_seedTid) {
+          docIdStats.batchSkippedNoSeed++;
+          try {
+            logLine('🧩 [doc_id] BỎ BATCH_GET_GLOBAL_ID page ' + pageId
+              + ' — chưa có chat nào có threadId để gieo doc_id `rt/st`'
+              + ' (batch sẽ reject "Missing doc_id" nếu gửi)');
+          } catch (e) { /* ignore */ }
+          return null;
+        }
+        return adapter.send({
       type: 'BATCH_GET_GLOBAL_ID',
       pageId: pageId,
       // Khớp payload app (@897543): app luôn kèm timeRangeMin. Gửi 0 = lấy mọi mốc,
@@ -9760,8 +9875,14 @@
        * ⇒ nâng hạn chờ lên 30 000 ms (đúng hạn adapter cho mọi lệnh thường: `l = 3e4`).
        * Lệnh này CHỈ ĐỌC + trả mapping; chờ lâu hơn không sinh thêm lệnh gửi nào.
        * Không kèm `maxThreadCount` để giữ trần 250 như app. */
-    }, { timeout: 30000 })).then((res) => {
+    }, { timeout: 30000 });
+      })
+      .then((res) => {
       delete batchGidPromises[pageId];
+      if (!res) {
+        /* Không có seed ⇒ không gửi batch. Không cộng `batchFail` (chưa hề gửi lệnh). */
+        return 0;
+      }
       const list = res && res.success && res.data && res.data.threadsWithGlobalId;
       /* ═══ [v1.93.6] ĐỪNG ĐÁNH DẤU "ĐÃ NẠP" KHI CHƯA NẠP ĐƯỢC GÌ ═══
        * ĐO ĐƯỢC trên TOÀN BỘ 28 log (không có ngoại lệ):
@@ -9870,6 +9991,8 @@
         const pid = c.pageId || String(c.id || '').split('_')[0];
         if (!pid || seen[pid]) return;
         seen[pid] = true;
+        /* [v1.93.15] nhớ 1 conv có threadId để GIEO doc_id trước batch (xem seedDocIdsViaConv) */
+        try { noteSeedConv(pid, c); } catch (eNS) { /* ignore */ }
         // 1) Gọi BATCH_GET_GLOBAL_ID (@897543 trong _app) 1 lần/page trong phiên để nạp hàng loạt { threadId, globalId }
         if (adapter && typeof adapter.send === 'function') requestBatchGlobalIds(pid, false);
         if (!h || typeof h.initSocket !== 'function') return;
