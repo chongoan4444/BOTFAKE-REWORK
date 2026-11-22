@@ -3354,26 +3354,35 @@
      *   case"UPLOAD_INBOX_PHOTO":  ae.startCheck(_, D);          // D() gửi, D(s) = switch profile rồi gửi
      *   case"SEND_COMMENT":        ae.startCheck(pageId, _, !0, !0);
      *
-     *   static startCheck(e, t, a = !0, r = !1) {   // e=pageId  t=hàm gửi
-     *     const s = () => ae.startCheck(e, t, a, !0);   // retry KHÔNG kèm cờ r
-     *     r ? new ae(e, a).init().then(()=>{}).catch(()=>{}).finally(t)   // ← BỎ QUA KẾT QUẢ
-     *       : t(s);
+     *   static startCheck(e, t, a = !0, r = !1) {   // e=pageId  t=hàm gửi  a=confirmProfile
+     *     const s = () => { ae.startCheck(e, t, a, !0) };      // lần 2: r = true
+     *     r ? (new ae(e, a).init().then(…).catch(…).finally(t))  // ĐỔI PROFILE → rồi mới gửi
+     *       : t(s);                                             // GỬI NGAY, không đổi profile
      *   }
      *
-     * Hệ quả (đo được bằng code, không suy đoán):
-     *  a) `new ae(pageId, confirmProfile=true).init()` = **đổi profile Facebook sang page**.
-     *     `checkValidProfile()` đọc `business.facebook.com`; nếu `confirmProfile && !currentProfile.id`
-     *     (handler fanpage / HTML đổi cấu trúc / 429 / ≥500) ⇒ `switchNoResponse = true; return`
-     *     ⇒ `switchResult` KHÔNG BAO GIỜ được gán ⇒ `finally(t)` chạy `t(s)` với cờ `r = true`
-     *     ⇒ lần 2 cũng chỉ `init()` rồi `finally(t)` ⇒ **KHÔNG BAO GIỜ GỬI BÌNH LUẬN**,
-     *     mà `t` (là hàm gửi) vẫn được gọi nên nếu `t` là hàm "gửi + báo kết quả" thì có thể
-     *     báo SAI. Đây là lý do phải đọc kết quả thật trước khi tin.
+     * ═══ [v1.93.15] ĐÍNH CHÍNH — bản v1.93.8 viết NGƯỢC nhánh `r` ═══
+     * Bản cũ ghi: "`SEND_COMMENT` truyền `!0,!0` ⇒ lần 1 đi `new ae(...).init().finally(t)`".
+     * Đúng ra: `!0,!0` ⇒ `r = true` ⇒ **lần 1 LÀ đổi profile** (`.finally(t)` gửi SAU khi đổi).
+     * `UPLOAD_INBOX_PHOTO` gọi `ae.startCheck(_, D)` = `(e=pageId, t=D, a=!0, r=!1)` ⇒ **KHÔNG
+     * đổi profile** ở lần 1, chỉ `t(s)`.
+     * ⇒ Câu "`UPLOAD_INBOX_PHOTO` KHÔNG switch profile nên ảnh đi nhánh này" đúng KẾT LUẬN,
+     *   nhưng lý do phải là "vì `r = false`", không phải "vì `D()` rỗng".
      *
-     *  b) `getProfileSetting()` dùng `G(html, '{"require":…RelayPrefetchedStreamCache…')`;
-     *     nếu HTML không còn khối đó ⇒ `t = []` ⇒ `currentProfile = {}` ⇒ rơi đúng vào (a).
-     *
-     *  c) `UPLOAD_INBOX_PHOTO` gọi `D()` (rỗng) ⇒ KHÔNG switch profile; chỉ ảnh bình luận
-     *     đi nhánh này. ⇒ Câu "mất globalId" là **của nhánh upload ảnh**, không phải nhánh gửi.
+     * HỆ QUẢ ĐÚNG (đọc theo `class ae` thật):
+     *  a) `new ae(pageId, confirmProfile).init()` → `checkValidProfile()`:
+     *       - `status >= 500 || status === 429` ⇒ `switchNoResponse = true; return`  (KHÔNG đổi)
+     *       - `confirmProfile && !currentProfile.id`   ⇒ `switchNoResponse = true; return`  (KHÔNG đổi)
+     *       - `currentProfile.id !== pageId`           ⇒ `switchProfile(a, profiles)`    (ĐỔI)
+     *       - bằng nhau                                ⇒ `switchResult = "not_needed"`
+     *     **`.finally(t)` chạy `t` TRONG MỌI TRƯỜNG HỢP**, kể cả khi `init()` reject.
+     *  b) ⇒ Với `UPLOAD_INBOX_PHOTO` (`r=false`): `s()` = `startCheck(e,t,a,true)` ⇒ nếu lần 1
+     *     thất bại và `D(s)` gọi `s()`, lần 2 SẼ đổi profile rồi `t` lại. Nhưng `D` **không gọi
+     *     `w`** ở nhánh thành công và chỉ gọi `w`/`_FAILURE` khi lỗi ⇒ **1 lần upload** trong
+     *     thực tế, trừ khi `le(pageId)` reject *sau* khi đã upload thành công (hiếm).
+     *  c) Với `SEND_COMMENT` (`r=true`): ext **luôn đổi profile trước khi gửi** ⇒ nếu đang ở
+     *     profile khác page, việc đổi làm chậm mỗi bình luận và có thể thất bại theo (a).
+     *     Nhưng `.finally(t)` nghĩa là **`t` vẫn chạy** ⇒ vẫn có lần gửi thật, kết quả do `t`
+     *     quyết định (`SEND_COMMENT_SUCCESS`/`_FAILURE`) — script đọc đúng chỗ đó.
      *
      * Vì vậy KHÔNG được coi "không có res.success" là "không rõ" một cách mù quáng:
      * `res.data` là `undefined` ⇒ extension KHÔNG hề báo gửi xong (nó chỉ switch profile rồi

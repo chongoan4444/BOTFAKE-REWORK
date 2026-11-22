@@ -3035,3 +3035,51 @@ nhưng phải phát biểu là *"ext không đọc trường này ở bất kỳ
 mới dùng, mà nhánh đó không truyền"*. Kết luận hành động không đổi.
 
 **Test khoá:** không thêm `allowPrioritySearchByName`/`allowSearchByName` vào payload script.
+
+---
+
+## 47. `class ae` (`startCheck`) — chú thích của CHÍNH SCRIPT mô tả NGƯỢC nhánh `r`
+
+### 47.1 Nguyên văn ext
+
+```js
+static startCheck(e, t, a = !0, r = !1) {          // e=pageId, t=hàm gửi, a=confirmProfile
+  const s = () => { ae.startCheck(e, t, a, !0) };  // lần 2: r = true
+  r ? (C.log("SWITCH_PROFILE_BUT_NOT_HANDLE_ERROR"),
+       new ae(e, a).init().then(…).catch(…).finally(t))   // ĐỔI PROFILE → rồi mới gửi
+    : (C.log("FIRST_TRY_DOING_TASK_WITHOUT_SWITCH_PROFILE"), t(s));  // GỬI NGAY
+}
+// case"SEND_COMMENT":        ae.startCheck(r.data.pageId, _, !0, !0);   // r = true  ⇒ ĐỔI profile trước
+// case"UPLOAD_INBOX_PHOTO":  ae.startCheck(_, D);                       // r = false ⇒ KHÔNG đổi
+```
+
+### 47.2 Chú thích script (v1.93.8) viết ngược
+
+Bản cũ ghi: *"`SEND_COMMENT` truyền `!0,!0` ⇒ lần 1 đi `new ae(...).init().finally(t)` … `UPLOAD_INBOX_PHOTO`
+gọi `D()` (rỗng) ⇒ KHÔNG switch profile"*. Hai chỗ sai:
+1. Nhánh `r = true` là **ĐỔI PROFILE trước rồi mới gửi** — bản cũ đọc thành "chỉ `init()` rồi
+   im lặng / không bao giờ gửi". `.finally(t)` bảo đảm **`t` luôn chạy** (kể cả `init()` reject).
+2. `UPLOAD_INBOX_PHOTO` không đổi profile **vì `r = false`**, không phải "vì `D()` rỗng".
+
+**Code thì đã đúng** (nhánh `res.data` rỗng trả `sent:'maybe'` ⇒ không gửi thêm, không chốt ✅) —
+chỉ chú thích sai. Nhưng chú thích sai là nguy hiểm: nó là căn cứ để lần sau "sửa" theo hướng
+sai. Đã viết lại theo `class ae` thật.
+
+### 47.3 `checkValidProfile()` — 4 nhánh, chỉ 1 nhánh ĐỔI profile
+
+```js
+async checkValidProfile(){ const {html:e, response:t} = await this.readMainPage();
+  if (t?.status >= 500 || t?.status === 429) { this.switchNoResponse = true; return }  // KHÔNG đổi
+  if (e) { const {currentProfile:a, profiles:r} = await this.getProfileSetting(e);
+    if (this.confirmProfile && !a?.id) { this.switchNoResponse = true; return }        // KHÔNG đổi
+    a?.id !== this.pageId ? (… await this.switchProfile(a, r))                          // ĐỔI
+                         : (this.targetProfileId = a.id, this.switchResult = "not_needed") } }
+```
+⇒ Nếu HTML Facebook đổi cấu trúc (`getProfileSetting` không bóc được khối `RelayPrefetchedStreamCache`)
+thì `currentProfile = {}` ⇒ `confirmProfile && !id` ⇒ **không đổi được profile**, và với
+`SEND_COMMENT` ext vẫn `finally(t)` ⇒ **vẫn gửi** (nhưng ở profile hiện tại ⇒ FB có thể trả
+`SEND_COMMENT_FAILURE`). Đây là lý do thật khiến nhóm bình luận lỗi hàng loạt, và **script không
+sửa được** — nó nằm trong ext.
+
+**Test khoá:** chú thích trong script phải mô tả `r = true ⇒ ĐỔI PROFILE trước khi gửi`
+(khoá cả văn bản, để lần sau không ai chép lại kết luận ngược).

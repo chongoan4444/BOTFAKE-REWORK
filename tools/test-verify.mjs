@@ -2086,6 +2086,19 @@ check('[comment] giữ fbPageId từ linked_fb_page như app', /fbPageId: meta\.
 check('[Ue] script không gửi allowPrioritySearchByName (ext không đọc)',
   /allowPrioritySearchByName/.test(stripComments(SRC)), false);
 
+/* ═══ (AA) [v1.93.15] `startCheck`: chú thích phải mô tả ĐÚNG nhánh `r` ═══
+ * ext: `r ? (new ae(e,a).init().…finally(t)) : t(s)` ⇒ `r = true` là ĐỔI PROFILE TRƯỚC rồi gửi;
+ * `.finally(t)` bảo đảm `t` LUÔN chạy (kể cả `init()` reject).
+ * `SEND_COMMENT` gọi `ae.startCheck(pageId, _, !0, !0)` ⇒ r = true ⇒ ĐỔI profile.
+ * `UPLOAD_INBOX_PHOTO` gọi `ae.startCheck(_, D)` ⇒ r = false ⇒ KHÔNG đổi.
+ * Bản v1.93.8 từng viết NGƯỢC ⇒ khoá lại để không chép lại kết luận sai. */
+check('[startCheck] chú thích nói đúng: r = true ⇒ ĐỔI PROFILE trước khi gửi',
+  /`r = true` ⇒ \*\*lần 1 LÀ đổi profile\*\*/.test(SRC), true);
+check('[startCheck] chú thích nói đúng: UPLOAD_INBOX_PHOTO không đổi profile VÌ r = false',
+  /vì `r = false`/.test(SRC), true);
+check('[startCheck] có ghi `.finally(t)` LUÔN chạy t',
+  /\.finally\(t\)` chạy `t` TRONG MỌI TRƯỜNG HỢP/.test(SRC), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
