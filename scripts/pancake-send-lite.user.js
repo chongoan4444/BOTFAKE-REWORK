@@ -636,6 +636,21 @@
 
   // [v1.93.13] SỔ messageId extension trả về (REPLY_INBOX_PHOTO_SUCCESS có `messageId`).
   // Lượt đọc lại lịch sử đối chiếu với sổ này; chỉ ĐỌC, không gửi thêm.
+  /* ═══ [v1.93.21] SỔ ĐẾM "✅ CÓ BẰNG CHỨNG GÌ" ═══
+   * Lô 5 281 chat: 4 844 dòng `✅ đánh dấu ĐÃ TỚI NƠI qua ext` mà KHÔNG truy được bằng chứng;
+   * người dùng kiểm tay thấy 4 000+ chat chưa nhận tin. Nguyên nhân sâu nhất không phải một
+   * nhánh sai, mà là **dòng sổ không mang bằng chứng** ⇒ không ai (kể cả tôi) kiểm chứng được.
+   * Nay mỗi dòng ✅ ghi `[bằng chứng: …]` và bộ đếm dưới đây cộng theo nhãn đó.
+   * Tiêu chí nghiệm thu: `unknown` phải ≈ 0 ở lô sau. Nếu `unknown` lớn, mọi con số "thành công"
+   * của lô đó KHÔNG được dùng để kết luận gì. */
+  const proofStats = { messageId: 0, history: 0, ack: 0, http200: 0, extSuccess: 0, unknown: 0 };
+  function noteProof(p) {
+    try {
+      const k = String(p || 'unknown');
+      if (proofStats[k] == null) proofStats.unknown++;
+      else proofStats[k]++;
+    } catch (e) { /* ignore */ }
+  }
   const extMsgIdByConv = Object.create(null);
 
   let lastBgConvById = {};
@@ -3720,7 +3735,7 @@
       if (res.ok && data && data.success) {
         sendDiag.apiSuccess++;
         resetPageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
-        markDelivered(conv.id, 'api'); postSendSideEffects(conv); return;
+        markDelivered(conv.id, 'api', 'http200'); postSendSideEffects(conv); return;
       } // đã đến nơi — im lặng
       /* [v1.93.19] ĐỐI SOÁT 130 REQUEST GỬI THẬT (network-log*.har + logtest4.har trên `main`):
        *   · 21 ca thành công → `payload.actions[0]` đủ 13 trường, có `message_id`
@@ -3759,7 +3774,7 @@
               sendDiag.ctx7RetryOk = (sendDiag.ctx7RetryOk || 0) + 1;
               resetPageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
               logLine('🔁 ' + nm + ' — (#10) do THIẾU CỜ ctx-7-days → gửi lại kèm cờ THÀNH CÔNG.');
-              markDelivered(conv.id, 'api'); postSendSideEffects(conv); return;
+              markDelivered(conv.id, 'api', 'http200'); postSendSideEffects(conv); return;
             }
             const msg2 = (d2 && (d2.message || d2.error)) || ('HTTP ' + res2.status);
             if (d2 && d2.success === false) msg = msg2; // cờ đã có mà vẫn (#10) → chặn thật của chat này
@@ -3783,7 +3798,7 @@
             if (resTr.ok && dTr && dTr.success) {
               sendDiag.apiSuccess++;
               sendDiag.transientRetryOk = (sendDiag.transientRetryOk || 0) + 1;
-              markDelivered(conv.id, 'api'); postSendSideEffects(conv);
+              markDelivered(conv.id, 'api', 'http200'); postSendSideEffects(conv);
               logLine('🔁 ' + nm + ' — lỗi TẠM THỜI (1545012) → gửi lại NGAY, THÀNH CÔNG.');
               return;
             }
@@ -5704,7 +5719,7 @@
           sendDiag.sockLateOk = (sendDiag.sockLateOk || 0) + 1;
           const nm0 = conv.name || conv.id;
           reopenUncertain(conv.id);
-          markDelivered(conv.id, 'socket');
+          markDelivered(conv.id, 'socket', 'ack');
           if (ctx && ctx.isSocketRetryPass) sockRetryBudgetNote(sockRetryBudgetState, 'saved', 0);
           try { postSendSideEffects(conv); } catch (ePS) { /* ignore */ }
           logFailGrouped(nm0, 'ACK về MUỘN sau hạn chờ giữ slot (' + Math.round(latencyMs) + 'ms) — tin ĐÃ tới nơi, tính ✅ Socket'
@@ -6139,7 +6154,7 @@
             reopenUncertain(conv.id); // ⚡ [FIX-4b] hạ ⚠ nếu watchdog đã chốt trước khi ACK về
             // [v1.92.26] lần thử lại mà cứu được ⇒ giả thuyết "burst-reject" còn sống ⇒ mở ngân sách
             if (ctx && ctx.isSocketRetryPass) sockRetryBudgetNote(sockRetryBudgetState, 'saved', 0);
-            markDelivered(conv.id, 'socket');
+            markDelivered(conv.id, 'socket', 'ack');
             postSendSideEffects(conv);
             return;
           }
@@ -8510,7 +8525,7 @@
         if (myRun !== runSeq) return;
         if (deliveredIds[conv.id] || finalFailedIds[conv.id]) return;
         const lateMs = Date.now() - startedAt;
-        try { markDelivered(conv.id, 'ext'); } catch (e) { /* ignore */ }
+        try { markDelivered(conv.id, 'ext', 'extSuccess'); } catch (e) { /* ignore */ }
         try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
         try {
           logFailGrouped((conv.name || conv.id),
@@ -8832,7 +8847,7 @@
      * `absent` cho qua quá dễ** khi chính page đang có 0 ACK — lô này gửi ảnh cho 5 306/5 281
      * ca nên `photoMovedVerdict` không bao giờ trả 'yes', và `absenceVerdict` rơi xuống
      * 'absent' chỉ vì `updated_at` cũ hơn mốc gửi. Trong khi đó bằng chứng NGƯỢC lại có thật:
-     * tin tới được qua Ext sau đó. Xem `socketZeroAckRescueAllowed()`.
+     * tin tới được qua Ext sau đó. Xem `pageSocketAckState()` (chỉ ĐO, không chặn gì).
      */
     const preferSocket = sockReady && hasRealGid && (hint === 'socket' || hasRealGid);
     const first = preferSocket ? 'socket' : 'ext';
@@ -8947,7 +8962,7 @@
           const nm2 = conv.name || conv.id;
           if (r.ok) {
             if (r.fired) return; // bắn-nhả: xác nhận nền tự ghi nhận khi ACK về — không chốt sớm
-            markDelivered(conv.id, r.sendBy || 'ext');
+            markDelivered(conv.id, r.sendBy || 'ext', r.sendBy === 'extension' ? (r.extMessageId ? 'messageId' : 'unknown') : 'unknown');
             postSendSideEffects(conv);
             logFailGrouped(nm2, 'gửi THÀNH CÔNG qua '
               + (r.sendBy === 'socket' ? 'Socket' : r.sendBy === 'extension' ? 'Extension' : 'API'), '✅', conv.id);
@@ -10715,7 +10730,7 @@
       if (kind === 'ok') sendDiag.socketAckOk++;
       else if (kind === 'rejected') sendDiag.socketAckRejected++;
       else if (kind === 'noack') sendDiag.socketNoAck++;
-      /* [v1.93.21] ĐẾM ACK THẬT THEO PAGE — đầu vào của `socketZeroAckRescueAllowed()`.
+      /* [v1.93.21] ĐẾM ACK THẬT THEO PAGE — đầu vào của `pageSocketAckState()`.
        * Chỉ 'ok'/'rejected' mới là ACK (no-ACK là bộ đếm giờ của TA nổ, không phải phản hồi FB). */
       if (kind === 'ok' || kind === 'rejected') {
         try { const _p = String(pageId || ''); if (_p) pageAckGot[_p] = (pageAckGot[_p] || 0) + 1; } catch (eAG) { /* ignore */ }
@@ -10963,37 +10978,23 @@
   }
   const verifyStats = { found: 0, held: 0, unknown: 0 }; // theo lượt — in ở dòng TỔNG HỢP (held = giữ ⚠, không bắn lại)
   const sockRescueStats = { tried: 0, zeroAckHold: 0 }; // [v1.92.37] số ca đã chứng minh vắng mặt ⇒ gửi cứu 1 lần
-  /* ═══ [v1.93.21] CỔNG CHẶN "CỨU HÀNG LOẠT QUA EXT" KHI SOCKET CHƯA TỪNG TRẢ ACK ═══
-   * ĐO ĐƯỢC (log 22/11, lô 5 281 chat): `ACK OK/rejected/no-ACK 0/0/4884` — page không trả
-   * MỘT `/ls_resp` nào trong cả lượt; rồi 4 844 ca được `🛟 GỬI CỨU 1 lần qua Extension`.
-   * Khi cả page có 0 ACK thì "hội thoại không đổi" KHÔNG phải bằng chứng "tin chưa đi":
-   *   • `proveAbsentBeforeBu` chỉ dựa vào snippet Pancake + photoMoved; log ghi
-   *     `đọc thẳng FB: tin 610 · gid 0` ⇒ đường xác nhận độc lập không chạy được.
-   *   • Nếu cổng sai thì mỗi ca sinh THÊM một lần gửi (Ext) ⇒ đúng nguồn gửi trùng.
-   * NAY: page đã bắn ≥ SOCK_ZERO_ACK_MIN lần mà vẫn 0 ACK ⇒ chỉ cho cứu tối đa
-   * SOCK_ZERO_ACK_RESCUE_MAX ca (giữ mẫu, không bỏ sót ca lẻ); phần còn lại GIỮ ⚠ và vào
-   * danh sách GỬI TAY để người dùng thấy ngay, thay vì máy tự bắn cứu hàng loạt.
-   * Đây là THU HẸP đường bắn thêm, không mở đường nào. Hai hằng là ngưỡng ĐO TỪ LOG NÀY
-   * (4 844 ca cứu trên 4 844 ca 0 ACK) ⇒ phải đo lại lô sau: cứu mà phần lớn tới nơi thật thì
-   * nâng trần; cứu 0 % thì hạ về 0.
-   */
-  const SOCK_ZERO_ACK_MIN = 30;        // ≥30 lần bắn Socket mà 0 ACK mới đủ mẫu kết luận
-  const SOCK_ZERO_ACK_RESCUE_MAX = 40; // số ca tối đa được bắn cứu khi page đang 0 ACK
-  const pageSockSent = {};             // [v1.93.21] pageId → số lần đã bắn Socket (lượt này)
-  const pageAckGot = {};               // [v1.93.21] pageId → số ACK thật nhận được (ok+rejected)
-  const pageZeroAckRescueUsed = {};    // [v1.93.21] pageId → số ca đã cho cứu trong chế độ 0 ACK
-  function socketZeroAckRescueAllowed(pageId) {
-    try {
-      const pid = String(pageId || '');
-      if (!pid) return { ok: true, zeroAck: false };
-      const got = pageAckGot[pid] || 0;
-      const sent = pageSockSent[pid] || 0;
-      if (got > 0) return { ok: true, zeroAck: false, sent: sent };
-      if (sent < SOCK_ZERO_ACK_MIN) return { ok: true, zeroAck: false, sent: sent };
-      const used = pageZeroAckRescueUsed[pid] || 0;
-      if (used >= SOCK_ZERO_ACK_RESCUE_MAX) return { ok: false, zeroAck: true, sent: sent, used: used };
-      return { ok: true, zeroAck: true, sent: sent, used: used };
-    } catch (e) { return { ok: true, zeroAck: false }; }
+  /* ═══ [v1.93.21] ĐO "PAGE CÓ TRẢ ACK NÀO KHÔNG" — KHÔNG DÙNG ĐỂ CHẶN GÌ ═══
+   * Bản nháp đầu của tôi dùng số này để CHẶN đường cứu Ext ⇒ ĐÃ GỠ, vì đo lại thì sai:
+   *   · `🛟 chứng minh vắng mặt ⇒ gửi cứu 1 lần` của lô 5 281 chỉ **423 ca**, không phải 4 844.
+   *   · 4 844 con số 4 844 là số CA ĐI QUA nhánh ⚠ rồi được lật ✅ bởi một đường khác, không phải
+   *     số lần bắn cứu. Chặn cứu = chặn đúng 423 ca ĐÃ ĐƯỢC CHỨNG MINH là chưa có tin ⇒ chặn
+   *     đúng thứ đang cứu được.
+   * Vì vậy hai bộ đếm dưới đây GIỮ LẠI nhưng chỉ để ĐỌC: chúng trả lời "page này có trả ACK
+   * nào trong lượt không", thứ mà trước bản này không có ở đâu.
+   * Ngưỡng "0 ACK" KHÔNG kết luận được gì về việc tin đã đi hay chưa — xem §10 trong
+   * docs/DOI-SOAT-LO-5281.md. */
+  const pageSockSent = {};             // pageId → số lần đã bắn Socket (lượt này)
+  const pageAckGot = {};               // pageId → số ACK thật nhận được (ok+rejected)
+  function pageSocketAckState(pageId) {
+    const pid = String(pageId || '');
+    const sent = pageSockSent[pid] || 0;
+    const got = pageAckGot[pid] || 0;
+    return { sent: sent, ack: got, zeroAck: sent > 0 && got === 0 };
   }
   /* ═══ [v1.93.1] FB ĐÃ BÁO "KHÔNG NHẬN ĐƯỢC" THÌ KHÔNG BÙ NỮA ═══
    * ĐO ĐƯỢC trên log 21/11 19:44 (lô 4 281 chat, CÓ sổ kiểm chứng 10 717 dòng):
@@ -11509,6 +11510,10 @@
         logLine('🫥 CHẠY NỀN: ' + bgClock.describe());
         logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total
           + ' tin (' + pct + '%)' + chStr
+          + ' | 🧾 Bằng chứng của ' + c.okTotal + ' ca ✅: messageId ' + proofStats.messageId
+            + ' · lịch sử ' + proofStats.history + ' · ACK Socket ' + proofStats.ack
+            + ' · HTTP 200 ' + proofStats.http200 + ' · ext-báo-success ' + proofStats.extSuccess
+            + ' · ⚠ KHÔNG có bằng chứng ' + proofStats.unknown
           + ' | ❌ Lỗi: ' + c.failTotal
           + (c.unsureTotal ? ' | ⚠ Không rõ: ' + c.unsureTotal : '')
           + (extTry1545.tried
@@ -11860,7 +11865,7 @@
   function confirmedOkCount() {
     return summaryCounters.okApi + summaryCounters.okExt + summaryCounters.okSocket;
   }
-  function markDelivered(convId, via) {
+  function markDelivered(convId, via, proof) {
     if (!convId) return;
     clearBgPending(convId);
     /* [v1.93.21] ĐÃ GIAO ĐƯỢC ⇒ KHOÁ NGOÀI HẾT VIỆC.
@@ -11881,9 +11886,25 @@
       if (!last || last.by !== ch || (tNow - last.t) > 2000) {
         hist.push({ t: tNow, by: ch });
         if (hist.length > 20) hist.shift();
-        auditPush('✅', convId, '', 'đánh dấu ĐÃ TỚI NƠI qua ' + ch);
+        /* [v1.93.21] nhãn bằng chứng — xem khối chú thích dài ngay dưới. */
+        const _pf = (typeof proof === 'string' && proof) ? proof : 'unknown';
+        noteProof(_pf);
+        auditPush('✅', convId, '', 'đánh dấu ĐÃ TỚI NƠI qua ' + ch + ' [bằng chứng: ' + _pf + ']');
       }
     } catch (e0) { /* ignore */ }
+    /* ═══ [v1.93.21] MỖI DÒNG ✅ PHẢI NÓI NÓ DỰA TRÊN BẰNG CHỨNG NÀO ═══
+     * VÌ SAO: lô 5 281 chat, sổ có 4 844 dòng `✅ đánh dấu ĐÃ TỚI NƠI qua ext` — trong khi
+     * làn Ext KHÔNG có lấy một dòng chẩn đoán (🛰 Ext = 0 · 🧯 Ext quá hạn = 0 ·
+     * Ext báo success = 0) và người dùng kiểm bằng mắt thấy 4 000+ chat chưa nhận tin.
+     * Nghĩa là: KHÔNG THỂ biết dòng ✅ đó đến từ đâu — bản thân dòng sổ không mang bằng chứng.
+     * Đó là gốc của việc tôi đọc sai 2 lần và của việc người dùng phải gửi lại tay.
+     * NAY: `via` giữ nguyên (ext/socket/api để đếm kênh), thêm NHÃN BẰNG CHỨNG:
+     *   · 'messageId' — ext trả message_id của FB (bằng chứng dương duy nhất của ext)
+     *   · 'history'   — đọc lại lịch sử thấy đúng tin
+     *   · 'ack'       — /ls_resp của Socket báo replaceOptimsiticMessage
+     *   · 'http200'   — API trả 200 kèm id tin
+     *   · 'unknown'   — KHÔNG có bằng chứng (đây là ca phải nhìn thấy trước tiên)
+     * Không đổi phán quyết, không đổi số lệnh gửi — chỉ ghi thêm sự thật vào sổ. */
     const prev = deliveredIds[convId];
     if (prev === ch) { updateBatchSummaryUI(); return; }
     if (prev === 'ext') summaryCounters.okExt = Math.max(0, summaryCounters.okExt - 1);
@@ -12192,7 +12213,7 @@
          * 📡 Socket 0 ACK · 🌐 API chỉ 397 OK · 🧯 Ext quá hạn 0 ⇒ số ✅ đó không có lệnh nào
          * tương ứng. Nay ca này đi đường "không rõ" như các ca chưa xác nhận khác. */
         if (r && r.ok && !r.dupBlocked) {
-          markDelivered(conv.id, ch);
+          markDelivered(conv.id, ch, r.sendBy === 'extension' ? (r.extMessageId ? 'messageId' : 'extSuccess') : (ch === 'socket' ? 'ack' : 'http200'));
           postSendSideEffects(conv);
           markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
           if (conv.__extFallback1545) noteExt1545Outcome('saved'); // [v1.92.49] Ext CỨU ĐƯỢC ca 1545041
@@ -12269,7 +12290,7 @@
           clearBgPending(conv.id);
           buStats.cancelled++;
           sendDiag.buProofCancelled++;
-          markDelivered(conv.id, buVia);
+          markDelivered(conv.id, buVia, 'history');
           logFailGrouped(name, 'hội thoại ĐÃ CÓ tin vừa gửi ⇒ tin đã tới nơi, HỦY bù — KHÔNG gửi lần 2 (chặn lặp)', '✅', conv.id);
           updateBatchSummaryUI();
           return;
@@ -12958,7 +12979,7 @@
           if (snip === 'yes') {
             // Chốt luôn + thoát, không in thêm dòng "tin ĐÃ đến nơi" cho khỏi 2 dòng/ca.
             verifyStats.found++;
-            markDelivered(conv.id, 'socket');
+            markDelivered(conv.id, 'socket', 'history');
             try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
             logFailGrouped(nm, 'kiểm chứng bằng HỘI THOẠI: snippet = tin vừa gửi, do chính page này gửi — tính ✅ Socket', '🔎', conv.id);
             return;
@@ -12966,7 +12987,7 @@
         }
         if (verdict === 'yes') {
           verifyStats.found++;
-          markDelivered(conv.id, 'socket');
+          markDelivered(conv.id, 'socket', 'history');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
           logFailGrouped(nm, 'kiểm chứng: tin ĐÃ đến nơi (Socket chỉ mất ACK) — tính ✅ Socket', '🔎', conv.id);
           return;
@@ -13047,26 +13068,6 @@
           verifyStats.held = (verifyStats.held || 0) + 1;
           return;
         }
-        /* ═══ [v1.93.21] CHỖ SINH RA 4 844 CA "GỬI CỨU QUA EXTENSION" CỦA LÔ 5 281 ═══
-         * Đo được: page có `ACK 0/0/4884` (0 phản hồi) mà cả 4 844 ca đều qua nhánh này ⇒
-         * mỗi ca sinh THÊM một lệnh gửi qua Ext. Khi chính page chưa từng trả ACK thì
-         * "hội thoại không đổi" không đủ tư cách làm bằng chứng "tin chưa đi".
-         * Nay: page đang 0 ACK ⇒ chỉ cho cứu tối đa SOCK_ZERO_ACK_RESCUE_MAX ca; phần còn lại
-         * GIỮ ⚠ + vào danh sách gửi tay (người dùng thấy), KHÔNG tự bắn cứu hàng loạt.
-         * Đây là THU HẸP đường bắn thêm — không thể sinh tin trùng. */
-        const _zeroAckGate = (socksProof === 'absent' && hasExtNow)
-          ? socketZeroAckRescueAllowed(pageId)
-          : { ok: true, zeroAck: false };
-        if (!_zeroAckGate.ok) {
-          sockRescueStats.zeroAckHold++;
-          try { noteManualResend(conv.id); } catch (eMR) { /* ignore */ }
-          logFailGrouped(nm, 'Socket 0 ACK suốt lượt (' + (_zeroAckGate.sent || 0) + ' lần bắn, 0 phản hồi) — '
-            + 'KHÔNG tự bắn cứu qua Extension (đã cho cứu ' + SOCK_ZERO_ACK_RESCUE_MAX + ' ca mẫu) ⇒ GIỮ ⚠, vào danh sách gửi tay', '🛟', conv.id);
-          return;
-        }
-        if (_zeroAckGate.zeroAck && _zeroAckGate.ok) {
-          try { pageZeroAckRescueUsed[String(pageId)] = (pageZeroAckRescueUsed[String(pageId)] || 0) + 1; } catch (eZU) { /* ignore */ }
-        }
         if (socksProof === 'absent' && hasExtNow && myRun === runSeq && !state.stopRequested
             && !deliveredIds[conv.id] && !finalFailedIds[conv.id]) {
           sockVerifyFired[conv.id] = runSeq; // khoá: mỗi chat chỉ được cứu 1 lần / lượt
@@ -13128,7 +13129,7 @@
               })
               .then((sn3) => {
                 if (sn3 === 'yes' && myRun === runSeq && !deliveredIds[conv.id]) {
-                  markDelivered(conv.id, 'socket');
+                  markDelivered(conv.id, 'socket', 'history');
                   try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
                   logFailGrouped(nm, 'sau rescue_mode_inbox: hội thoại ĐÃ có tin ⇒ tính ✅ Socket (không gửi lại)', '🔎', conv.id);
                   return;
@@ -13269,7 +13270,7 @@
         if (!found) found = (await confirmViaSnippet(conv, f, pageId, convId, want, sentAtMs)) === 'yes';
         if (found) {
           extTimeoutStats.found++;
-          markDelivered(conv.id, 'ext');
+          markDelivered(conv.id, 'ext', 'history');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
           logFailGrouped(nm, 'kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi — tính ✅ Ext', '🔎', conv.id);
           return;
@@ -13378,7 +13379,7 @@
           if (!found) found = (await confirmViaSnippet(it.conv, f, pageId, convId, it.want, it.sentAt)) === 'yes';
           if (!found) return;
           flipped++;
-          markDelivered(convId, 'ext');
+          markDelivered(convId, 'ext', 'history');
           try { postSendSideEffects(it.conv); } catch (e2) { /* ignore */ }
           auditPush('🔎', convId, it.conv.name || '', 'hậu kiểm 1545041: THẤY tin trong lịch sử ⇒ lật ✅ (không gửi lại)');
           logFailGrouped(it.conv.name || convId,
@@ -13468,7 +13469,7 @@
           if ((await confirmViaSnippet(conv, f, pageId, convId, want, sentAt)) === 'yes') verdict = 'yes';
         }
         if (verdict === 'yes') {
-          markDelivered(conv.id, 'api');
+          markDelivered(conv.id, 'api', 'http200');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
           logFailGrouped(nm, 'kiểm chứng: tin ĐÃ tới (API chỉ trả lời trễ) — tính ✅ API', '🔎', conv.id);
           return;
@@ -13981,6 +13982,7 @@
     });
     Object.keys(waveDiag).forEach((k) => { waveDiag[k] = 0; });
     Object.keys(socketPickDiag).forEach((k) => { socketPickDiag[k] = 0; });
+    Object.keys(proofStats).forEach((k) => { proofStats[k] = 0; }); // [v1.93.21]
     batchStats.finalLogged = false;
     batchStats.tailHoldLogged = false; // [v1.93.20] trạng thái hoãn chốt phải về 0 mỗi lượt
     batchStats.tailWaitSince = 0;
@@ -14351,7 +14353,7 @@
         // fired = chỉ ĐÃ BẮN request — CHƯA xác nhận server nhận. Đánh dấu "đã đến nơi" cho
         // kết quả fired sẽ chặn nhầm bước bù nền → "báo gửi nhưng không gửi gì" (bug v1.39.0).
         // Chỉ đánh dấu khi kênh XÁC NHẬN thành công thật (kể cả xác nhận nền — fireApiAndWatch).
-        if (!r.fired) { markDelivered(c.id, r.sendBy || 'api'); postSendSideEffects(c); }
+        if (!r.fired) { markDelivered(c.id, r.sendBy || 'api', r.sendBy === 'socket' ? 'ack' : 'extSuccess'); postSendSideEffects(c); }
         if (r.fired) { firedN++; noteBgPending(c, r.sendBy); } // vào sổ watchdog — quá 90s tự chốt, không kẹt
         // [v1.92.31] KHÔNG in từng dòng "đã gửi" nữa — chỉ in mốc tiến độ (xem logProgress).
         // [v1.92.35] `ok` ở đây là "đã phát" (ca fired chưa có ACK) ⇒ KHÔNG dùng để báo thành công.
@@ -14687,7 +14689,7 @@
               if (pv === 'yes') {
                 clearBgPending(item.c.id);
                 releaseOutbound(item.c.id);
-                markDelivered(item.c.id, 'socket');
+                markDelivered(item.c.id, 'socket', 'history');
                 done++; ok++;
                 sendDiag.buProofCancelled++;
                 logFailGrouped((item.c.name || item.c.id),

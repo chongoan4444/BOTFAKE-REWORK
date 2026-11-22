@@ -2485,16 +2485,22 @@ check('[v1.93.21] nhánh bù không chốt ✅ cho ca dupBlocked',
   /if \(r && r\.ok && !r\.dupBlocked\) \{/.test(SRC), true);
 check('[v1.93.21] markDelivered nhả outboundLock (khoá sót biến ca đã giao thành dupBlocked)',
   /try \{ delete outboundLock\[convId\]; \}/.test(SRC), true);
-check('[v1.93.21] có cổng chặn cứu hàng loạt khi Socket 0 ACK',
-  /function socketZeroAckRescueAllowed/.test(SRC), true);
-check('[v1.93.21] cổng 0-ACK có ngưỡng mẫu + trần cứu (hằng số đo được)',
-  /SOCK_ZERO_ACK_MIN = \d+;/.test(SRC) && /SOCK_ZERO_ACK_RESCUE_MAX = \d+;/.test(SRC), true);
-check('[v1.93.21] nhánh GỬI CỨU có đi qua cổng 0-ACK',
-  /_zeroAckGate\.ok/.test(SRC), true);
-check('[v1.93.21] đếm ACK thật theo page (đầu vào của cổng)',
+
+/* ═══ [v1.93.21b] MỖI DÒNG ✅ PHẢI MANG BẰNG CHỨNG ═══
+ * Lô 5 281 chat: 4 844 dòng `✅ … qua ext` không truy được bằng chứng nào; người dùng kiểm tay
+ * thấy 4 000+ chat chưa nhận tin. Nguyên nhân sâu nhất là DÒNG SỔ KHÔNG MANG BẰNG CHỨNG.
+ * Đã GỠ luôn cổng chặn cứu Ext của bản nháp (đo lại: 🛟 gửi cứu chỉ 423 ca, không phải 4 844). */
+check('[v1.93.21b] dòng sổ ✅ có nhãn bằng chứng',
+  /\[bằng chứng: ' \+ _pf \+ '\]/.test(SRC), true);
+check('[v1.93.21b] có sổ đếm bằng chứng + in ở dòng chốt',
+  /const proofStats = \{ messageId: 0, history: 0, ack: 0, http200: 0, extSuccess: 0, unknown: 0 \}/.test(SRC)
+  && /KHÔNG có bằng chứng ' \+ proofStats\.unknown/.test(SRC), true);
+check('[v1.93.21b] KHÔNG còn cổng chặn cứu Ext (bản nháp đã gỡ)',
+  /SOCK_ZERO_ACK_RESCUE_MAX/.test(SRC), false);
+check('[v1.93.21b] không còn lời gọi markDelivered 2 tham số (thiếu nhãn)',
+  (SRC.match(/markDelivered\([^,)]+, '[a-z]+'\)/g) || []).length, 0);
+check('[v1.93.21b] có bộ đếm ACK thật theo page (chỉ để ĐO, không chặn)',
   /pageAckGot\[_p\] = \(pageAckGot\[_p\] \|\| 0\) \+ 1/.test(SRC), true);
-check('[v1.93.21] đếm số lần bắn Socket theo page (mẫu số của cổng)',
-  /pageSockSent\[_pidS\] = \(pageSockSent\[_pidS\] \|\| 0\) \+ 1/.test(SRC), true);
 
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);

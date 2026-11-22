@@ -208,3 +208,95 @@ Hai hằng số trên là **ngưỡng đo từ chính log này** (4 844 ca cứu
 4. Đối chiếu **TỔNG THEO CHAT** (`#đã tới nơi > 0`) với số người dùng kiểm bằng mắt trên Pancake.
    Hai số này là nguồn duy nhất đáng tin cho "đã tới nơi"; dòng ✅ của sổ chỉ đáng tin sau khi
    mục 1–3 sạch.
+
+---
+
+# PHẦN ĐÁNH GIÁ 23/11 — "cách này có thật sự hữu dụng?" (tự phản biện)
+
+## 10. Những gì tôi đã kết luận SAI, và vì sao
+
+| Lần | Kết luận | Sai ở đâu | Bằng chứng lật lại |
+|---|---|---|---|
+| 1 | "99,2 % đã tới nơi, chỉ là báo cáo in sớm" | Dùng chính **sổ kiểm chứng** để chứng minh sổ đúng — vòng tròn lập luận | Người dùng kiểm tay: 4 000+ chat chưa nhận tin |
+| 2 | "4 843 dòng ✅ là do `dupBlockedResult()` trả `ok:true`" | Suy từ đọc code, **không đối chiếu log** | Log: `🛡 Chặn trùng` = **0** ⇒ không ca `dupBlocked` nào |
+| 3 | "cổng `absent` cho qua nên cứu 4 844 ca qua Ext" | Nhầm **số ca đi qua nhánh ⚠** với **số ca được bắn cứu** | Dòng chốt: `🛟 chứng minh vắng mặt ⇒ gửi cứu 1 lần` = **423**, không phải 4 844 |
+
+**Bài học (ghi lại để không tái phạm):** mỗi kết luận phải đối chiếu **một con số in ra trong log
+của chính lượt đó**, không phải suy từ đường code. Tôi đã 3 lần suy từ code trước rồi mới tìm
+số — đúng cái "check tù mù" mà người dùng đã cấm.
+
+## 11. Đánh giá trung thực các bản vá
+
+### 11.1 CÓ hại — cổng chặn cứu Ext (ĐÃ GỠ)
+
+Tôi thêm `SOCK_ZERO_ACK_MIN/RESCUE_MAX`: page 0 ACK thì chỉ cho cứu 40 ca. **Đây là chặn sai chỗ:**
+- `🛟 gửi cứu` chỉ **423 ca** trên 5 281 chat (8 %) ⇒ không phải "cứu hàng loạt".
+- 423 ca đó là những ca **đã được chứng minh vắng mặt** (cổng đọc hội thoại 2 lượt) — đúng thứ
+  đang cứu được. Chặn chúng = bỏ đúng đường cứu duy nhất còn lại.
+- Trong khi đó **4 844 ca còn lại** đi đường khác: cổng phán `absent` ⇒ **KHÔNG cứu**
+  (`🛟` 423 < 4 844) ⇒ chúng nằm ở ⚠ rồi được lật ✅ bởi một nhánh **chưa xác định được**.
+- Hệ quả nếu giữ: thêm 383 ca ⚠ vào danh sách gửi tay mà không cứu được ca nào.
+
+⇒ **Đã gỡ hoàn toàn.** Hai bộ đếm `pageSockSent`/`pageAckGot` giữ lại nhưng chỉ để ĐO
+(`pageSocketAckState()`), không chặn gì.
+
+### 11.2 CÓ hại một phần — `dupBlockedResult()`
+
+Sửa `ok:true` → `ok:false` là **đúng về mặt logic** (ca không bắn thì không được coi là đã gửi),
+nhưng:
+- **Không phải nguyên nhân của lô này**: log ghi `🛡 Chặn trùng = 0` ⇒ chưa từng xảy ra.
+- **Có thể làm chậm**: `sendViaSocket` đường bắn-nhả trả `ok:true` cho ca "đã bắn rồi, đang chờ
+  ACK"; nếu khoá còn mà ca đó chưa ✅ thì nay nhánh bù sẽ **chờ kiểm chứng** thay vì đi tiếp.
+  Đây là **đổi tốc độ**, người dùng ưu tiên tốc độ ⇒ cần đo ở lô sau, và nếu đuôi xác nhận dài
+  ra thì phải hoàn nguyên riêng thay đổi này.
+- `markDelivered()` nhả `outboundLock` là **an toàn** (giữ, vì `acquireOutbound` đã chặn bằng
+  `deliveredIds`).
+
+### 11.3 HỮU DỤNG THẬT — nhãn bằng chứng trên mỗi dòng ✅
+
+Đây là thay đổi duy nhất trả lời đúng câu hỏi "tại sao lại thế này mà không kiểm được":
+mỗi dòng sổ ✅ nay có `[bằng chứng: messageId | history | ack | http200 | extSuccess | unknown]`
+và dòng chốt in tổng theo nhãn. Ca nào `unknown` là ca **không có bằng chứng nào** — đúng loại
+đã sinh 4 844 dòng ✅ khống mà không ai phát hiện.
+
+Không đổi phán quyết, không đổi số lệnh gửi, **không thể sinh tin trùng** (chỉ ghi thêm chữ).
+
+### 11.4 Vẫn ĐÚNG, giữ nguyên
+
+- `hasExt1545 is not defined` (775 ca/1 000 mẫu) — lỗi ReferenceError thật, sửa là đúng.
+- `noteSocketPageLaneOutcome` return sớm ⇒ sổ ACK không đếm (log tự mâu thuẫn
+  `no-ACK 4884` vs `50 ca gần nhất: 0`) — sửa là đúng.
+- Hoãn dòng chốt khi còn chuỗi bù (`SUMMARY_TAIL_MAX_MS = 300 s`) — đúng, vì dòng chốt in lúc
+  17:37:34 rồi ✅ còn lật tới 17:45:13.
+
+## 12. Vì sao bị đẩy hết vào Ext — trả lời bằng số ĐO ĐƯỢC, không suy đoán
+
+**(a) Đường chính: `fastOnly` → `deferredToExt`.**
+`prepareDirectCtx()` ở làn 1 đặt `ctx.deferredToExt = true` khi thiếu `thread_id` **và**
+`ctx.fastOnly`. Log: `🧭 … sync thread_id 8` (chỉ 8 ca) ⇒ gần như mọi ca vào làn Ext.
+
+**(b) Đường phụ đã ĐO ĐƯỢC: Extension tự trả lời SAU hạn chờ của tool.**
+
+| Mốc | Số |
+|---|---|
+| `gửi THÀNH CÔNG qua Extension` (làn Ext đồng bộ) | **0** |
+| `bù THÀNH CÔNG qua Extension` (nhánh bù, khác dòng trên) | 4 843 |
+| `✅ đánh dấu ĐÃ TỚI NƠI qua ext` | 4 844 |
+| Lật ✅ theo thời gian | 17:37:34 → … → **17:45:13** (7,5 phút) |
+| Đường `markDelivered(…, 'ext')` **không in dòng nào** | nhánh `sendExtWithLateWatch`: `extLateStats.ok++` rồi `markDelivered` — `extLateStats` chỉ in **khi làn Ext có mẫu**, và log này không có |
+
+Đây là **nhánh im lặng**: ext trả lời sau `extTimeoutMs()` (≈2,5 s) nhưng vẫn `success` ⇒ script
+coi là đã gửi rồi `markDelivered` **mà không in dòng nào**. Nó giải thích được cả ba điều:
+số ✅ tăng dần 8 phút sau khi phát lệnh; 0 dòng chẩn đoán Ext; và người dùng thấy 4 000+ chat
+không có tin (nếu ext báo success mà FB không tạo tin).
+
+**(c) Kết luận trung thực:** với log này **không thể phân biệt** "tin đã đi" và "ext báo success
+khống" — vì cả hai đều không để lại bằng chứng trong log. Đó chính là thứ §11.3 vá: lô sau mỗi
+dòng ✅ sẽ mang nhãn, và `extSuccess` mà CÓ nhãn đó thì biết ngay nó là loại không có
+`messageId`.
+
+**Việc cần làm tiếp (chưa làm, cần người dùng đồng ý vì đụng đường gửi):**
+1. `sendExtWithLateWatch` phải ghi sổ + in 1 dòng khi `extLateStats.ok++` ⇒ hết nhánh im lặng.
+2. Ext báo `success` **mà không `message_id`** thì **không** được `markDelivered` — chỉ ⚠ +
+   kiểm chứng lịch sử (đã có sẵn đường này ở nhánh `res.success` chính, chỉ nhánh late-watch
+   là chưa áp).
