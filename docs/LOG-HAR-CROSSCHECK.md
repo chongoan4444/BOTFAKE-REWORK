@@ -1659,3 +1659,122 @@ Cứ **11 lệnh** ext đi `GET https://www.facebook.com` … cho **mọi** host
 tuần tự. Ở lô 8 572 chat đây là chi phí ẩn cộng dồn — cộng với hàng đợi tuần tự (§25.3)
 giải thích `Ext p90 0ms → timeout 7000ms`.
 `REPLY_INBOX_PHOTO` **có** `await Z()` đầu case; `GET_GLOBAL_ID_FOR_CONV`/`BATCH_GET_GLOBAL_ID`/`MAKE_MESSENGER_LINK` **không**.
+
+---
+
+## 27. ĐÍNH CHÍNH §26.3 + gốc thật của `batch nạp 0/0`
+
+### 27.1 ĐÍNH CHÍNH — §26.3 viết SAI
+
+§26.3 đã viết: *"`1545041` ⇒ `Q === false` ⇒ không `Ze()` (không gửi lại)"*. **SAI.** Đọc đủ `sendInbox`:
+
+```js
+async sendInbox(e){ … const w = g ? ro(g) : "NO_TIMEOUT";
+  if (w === null) return b({success:!1, retryReason:"execute task timeout"});   // ← hết hạn ⇒ KHÔNG gửi
+  … const H = this.base.parseFbRes(V);
+  if (this.isResponseSuccess(H,c)) b({success:!0, …});
+  else { const Q = jc(H);
+    switch (await this.getErrorHandler(a,H,I)) {
+      case "retryUsingSocket":  return v({success:!1, canRetryUsingSocket:!0,
+                                          retryReason:"blocked_3252001", fbErrorCode:H?.error});
+      case "restartInbox":      this.init(a,!0).then(()=>Q&&Ze(t)).then(()=>this.init(a))
+                                    .then(()=>this.sendInbox({...e,retry:1,retryReason:"restartInbox"}))…  // ← CÓ gửi lại
+      case "reuploadPhotos":    … then(()=>this.sendInbox({...e,files:N,retry:1,…}))                     // ← CÓ gửi lại
+      case "reuploadPhotosByApi": …                                                                      // ← CÓ gửi lại
+      case "cannotRetry":  Q && Ze(t), v(…)                                                              // ← CÓ gửi lại nếu Q
+    } } }
+```
+
+- `Ze(n)` = **reload DNR rules** (`GET {origin}/check_origin` → `Bs()` → `chrome.declarativeNetRequest.updateDynamicRules`),
+  **KHÔNG** phải "gửi lại". §26.3 gọi nó là "gửi lại" là **SAI**.
+- `cannotRetry` **vẫn gọi `sendInbox({...e,retry:1,…})`** khi `Q === true`.
+
+⇒ **`1545041` là mã DUY NHẤT extension bỏ hoàn toàn**: nó ra `cannotRetry` (§26.2) **và**
+`Q = jc(H) = false` ⇒ không gửi lại. Mọi mã khác đều được ext thử lại ít nhất 1 lần.
+Điều này **củng cố** kết luận §26 (3 547 ca ⚠ chung một nguyên nhân) nhưng **cách giải thích cũ sai**.
+
+### 27.2 GỐC THẬT của `batch nạp 0/0` — ext KHÔNG `await` `O.preloadDocIds`
+
+```js
+case "PRELOAD_DOC_IDS": { await Z();
+  const { pageId:_, isBusiness:g } = r.data;
+  O.preloadDocIds({ pageId:_, isBusiness:g }), q.setItem("country", r.data.country);
+  break }                                    // ← KHÔNG `await`, KHÔNG `_SUCCESS`/`_FAILURE`
+```
+`O.preloadDocIds` là hàm async thật (class `Ll`):
+```js
+async preloadDocIds(e, t = this.featureNeedsPreloadDocIds) {
+  let a = t.filter(r => !this.isFeatureReady(r)).map(r => this.getFeatureHandlerClass(r)) …;
+  for (let r of a) await r.preloadDocIds(e) }
+```
+`featureNeedsPreloadDocIds = ["inbox","comment","sendCommerceProduct","switchProfile","businessInboxComment"]`;
+`inbox` ⇒ `ee.preloadDocIds` ⇒ `GET business.facebook.com/latest/inbox/messenger?asset_id=…`
++ tải JS + bóc `[Jt, Zt, rt, st]` (mất **hàng giây**).
+
+⇒ Ext `break` ngay ⇒ adapter `send` **hết hạn** rồi trả `{success:false, data:null}`.
+Bản trước dùng **4 000 ms** rồi coi "hết hạn = đã nạp" và gọi `BATCH_GET_GLOBAL_ID` **ngay**:
+```js
+async init(){ if(!O.get(rt,st)) return Promise.reject(`Missing doc_id ${rt} or ${st}`); … }
+```
+⇒ `BATCH_GET_GLOBAL_ID_FAILURE` ⇒ **`batch nạp 0/0` ở MỌI log** — đúng dấu hiệu "chạy trước khi doc_id có".
+
+**ĐÃ SỬA:**
+- `PRELOAD_DOC_IDS` timeout **4 000 → 25 000 ms** (doc_id cache 5 h, nạp 1 lần/page).
+- Tách bộ đếm `docIdStats.viaExtWaited` — hết hạn **KHÔNG** còn bị tính là "đã nạp".
+- **In** `doc_id gửi N (chờ hết hạn M · gửi lỗi K)` vào dòng chẩn đoán. Trước bản này 3 bộ đếm
+  `docIdStats.*` được thu thập rồi **không in ở đâu** ⇒ không thể biết lệnh nạp có được gửi hay chưa.
+
+### 27.3 `Ct.init()` còn 2 điều kiện script CHƯA từng biết
+
+```js
+class Ct{ constructor({pageId, timeRangeMin, maxThreadCount}){ this.maxThreadCount = maxThreadCount || ul }  // ul=250
+  async init(){ const e = new Date().getTime();
+    if(!O.get(rt,st)) return Promise.reject(`Missing doc_id ${rt} or ${st}`);
+    if(lr[this.pageId]) return Promise.reject("There is a running job");      // ← KHOÁ THEO PAGE
+    lr[this.pageId] = !0;
+    try { … for(;;){ let c = yn;                                 // yn = 50
+        if(this.maxThreadCount && this.maxThreadCount - s < yn) c = this.maxThreadCount - s;
+        const l = await this.getFacebookThreads(a, c);
+        … if(l.length === 0){ i = "There's no thread left"; break }
+        … if(d < this.timeRangeMin){ i = "Reach min time range"; break }
+        a = d - 1 }
+      return Object.entries(r).map(([c,l]) => ({...l, threadId:c}))   // [{threadId, globalId, updatedAt}]
+    } finally { lr[this.pageId] = !1 } }
+  extractGlobalId(e){ if(Ct.isAllActorArePage(e)) return [e.thread_key.other_user_id,
+                        {globalId: e.thread_key.other_user_id, updatedAt: parseInt(e.updated_time_precise), isCustomerUsePageRole: true}];
+    return [e.page_comm_item.id || e.page_comm_item.comm_source_id,
+            {globalId: e.thread_key.other_user_id, updatedAt: parseInt(e.updated_time_precise)}] } }
+```
+- **"There is a running job"**: `BATCH_GET_GLOBAL_ID` gửi **song song** cho cùng page ⇒ chỉ lệnh
+  đầu chạy, các lệnh sau **reject ngay** ⇒ `_FAILURE` ⇒ bị đếm là `batchFail`.
+  Script đã có `batchGidPromises[pageId]` chống gọi trùng ⇒ **không cần sửa**, nhưng nay đã biết
+  vì sao chỉ 1 lệnh/page có tác dụng.
+- **`timeRangeMin: 0`** script gửi là **đúng** (`d < 0` không bao giờ xảy ra ⇒ đi hết trần 250).
+- `maxThreadCount` không gửi ⇒ ext dùng `ul = 250`, mỗi lượt `yn = 50` ⇒ **5 lượt graphql**.
+  Timeout 30 000 ms hiện tại là hợp lý (5 lượt × ~1–2 s + `le(pageId)` init).
+
+### 27.4 `MAKE_MESSENGER_LINK` — `uiVersion` của script có thể SAI
+
+```js
+case"MAKE_MESSENGER_LINK": { await Z(); … R = L => { new k_({pageId, threadId, threadKey, isBusiness, uiVersion:b, globalId:v, …}) } }
+class k_{ async handleFacebook(){ const e = this.uiVersion || await za.get(this.pageId);
+  switch(e){ case 1: case 2: case 5: { const t = e===5 ? "web.facebook.com" : this.isBusiness ? "business.facebook.com" : "facebook.com";
+                return { link: … } }        // ← CHỈ TRẢ link
+             case 3: … case 4: … case 6: … case 7: …   // ← gọi getGlobalId() rồi trả {link, globalId} } } }
+```
+`za.get(pageId)` là **tự phát hiện** version. `uiVersion` script gửi = **cứng `6`** cho **mọi page**.
+Với page là v1/v2/v5 thật, ext **bị ép** vào nhánh 6 ⇒ đi `Ee.init()` (≈4 graphql + 2 fetch HTML),
+đó chính là vì sao 5 000 ms cũ không đủ và vì sao `MAKE_MESSENGER_LINK` hay hết hạn.
+**Không sửa**: script không biết version thật của từng page, và gửi `uiVersion: undefined`
+sẽ khiến ext tự dò `za.get()` — **cần đo** trước. Ghi nhận, không đổi (tránh đổi dựa trên giả định).
+
+### 27.5 Các điểm ĐÃ ĐỐI SOÁT, KHÔNG cần sửa (có căn cứ)
+
+| Điểm | Căn cứ |
+|---|---|
+| `UPLOAD_INBOX_PHOTO` bọc `ae.startCheck(pageId, D)` | `r` mặc định `!1` ⇒ lần đầu chạy **KHÔNG** đổi profile (`FIRST_TRY_DOING_TASK_WITHOUT_SWITCH_PROFILE`); chỉ khi lỗi mới đổi. Timeout 25 000 ms của script là đủ cho lần đầu. |
+| `SEND_COMMENT` cũng bọc `ae.startCheck(pageId,_,!0,!0)` | `r = !0` ⇒ **đổi profile ngay từ lần đầu**, không trả `_SUCCESS` nếu đổi lỗi. Script **chưa tính** thời gian đó ⇒ nên nới timeout. **Chưa sửa**, xem §27.6. |
+| `country` trong `PRELOAD_DOC_IDS` | `q.setItem("country", r.data.country)` — chỉ để ext nhớ nước; script fallback `'vn'`. Không ảnh hưởng doc_id. |
+| `isBusiness` trong `PRELOAD_DOC_IDS` | `ee.makeInboxViewUrl(pageId, isBusiness)` — `isBusiness` **chỉ** đổi host, **và chỉ ở uiVersion 1\|2\|5** (`business.` vs `www.`). Case 3/4/6/7 **bỏ qua tham số này**. `false` của script là hợp lệ. |
+| `REPORT_EXTENSION_STATUS` / `ks()` | `ks` chỉ tồn tại để ext **tự** post danh sách host; script không gửi ⇒ không ảnh hưởng. |
+| `Z()` gọi trong `PRELOAD_DOC_IDS`/`UPLOAD_INBOX_PHOTO`/`REPLY_INBOX_PHOTO`/`SEND_COMMENT` | `sendInbox` **không** gọi `Z()`; `GET_GLOBAL_ID_FOR_CONV`/`BATCH`/`MAKE_MESSENGER_LINK` **không** gọi. Nên `GET_GLOBAL_ID_FOR_CONV` là lệnh **rẻ nhất** — dùng nó thay `MAKE_MESSENGER_LINK` để dò gid là đúng hướng. |

@@ -9116,7 +9116,10 @@
   };
   /* [v1.93.13] bỏ `loadedFromLs` (đường đọc localStorage trang không tồn tại — map nằm ở
    * `chrome.storage.local` của ext). `viaExtOk` nay = "đã GỬI lệnh", không phải "đã nạp". */
-  const docIdStats = { seenHtml: 0, htmlWithMap: 0, saved: 0, viaExtOk: 0, viaExtEmpty: 0 };
+  /* [v1.93.14] `viaExtWaited` = số lần phải CHỜ hết hạn (case `PRELOAD_DOC_IDS` của ext
+   * không trả `_SUCCESS` vì nó không `await` `O.preloadDocIds`). Tách khỏi `viaExtOk`
+   * để không báo "đã nạp" khi thực tế mới chỉ "đã chờ". */
+  const docIdStats = { seenHtml: 0, htmlWithMap: 0, saved: 0, viaExtOk: 0, viaExtWaited: 0, viaExtEmpty: 0 };
   /* Tên doc_id bóc được từ HTML — CHỈ để đối chiếu/ghi log, không dùng để quyết định gì. */
   const docIdSeenFromHtml = Object.create(null);
   /* Page nào đã được gửi PRELOAD_DOC_IDS (gửi 1 lần/page, không lặp). */
@@ -9271,25 +9274,53 @@
     const adapter = extAdapter();
     if (!adapter) return Promise.resolve(false);
     if (!pid) return Promise.resolve(false);
+    /* ═══ [v1.93.14] PHẢI CHỜ, VÌ EXT KHÔNG CHỜ ═══
+     * Nguồn `0.5.62_0/assets/background.js`:
+     *   case "PRELOAD_DOC_IDS": { await Z();
+     *     const { pageId:_, isBusiness:g } = r.data;
+     *     O.preloadDocIds({ pageId:_, isBusiness:g }), q.setItem("country", r.data.country);
+     *     break }                                    ← KHÔNG `await`, KHÔNG `_SUCCESS/_FAILURE`
+     * `O.preloadDocIds` là hàm async thật (class `Ll`):
+     *   async preloadDocIds(e, t = this.featureNeedsPreloadDocIds) { … for (let r of a) await r.preloadDocIds(e) }
+     * với `a` = các feature CHƯA sẵn sàng ⇒ `inbox` ⇒ `ee.preloadDocIds` ⇒ `GET
+     * https://business.facebook.com/latest/inbox/messenger?asset_id=…` + tải JS + bóc
+     * `[Jt, Zt, rt, st]`. Việc đó mất HÀNG GIÂY.
+     * Ext `break` ngay ⇒ KHÔNG có phản hồi ⇒ adapter `send` hết hạn (4 000 ms cũ) rồi trả
+     * `{success:false, data:null}`. Trước bản này script coi "hết hạn" là "đã nạp"
+     * (`docIdStats.viaExtOk++`) rồi gọi `BATCH_GET_GLOBAL_ID` NGAY ⇒ `Ct.init()` thấy
+     * `!O.get(rt, st)` ⇒ reject `Missing doc_id rt or st` ⇒ `batch nạp 0/0` ở MỌI log.
+     *
+     * ĐO ĐƯỢC trên toàn bộ log: `batch nạp 0/0 mapping (lỗi 0)` — 0 mapping, 0 lỗi.
+     * Đúng dấu hiệu "lệnh chạy trước khi doc_id có".
+     *
+     * Nay: `PRELOAD_DOC_IDS` KHÔNG trả lời được ⇒ chờ đủ lâu (doc_id nạp 1 lần/page,
+     * cache 5 h) và coi hết hạn là BÌNH THƯỜNG; nếu `res.success === true` (không xảy ra
+     * với case này) thì thoát sớm. Sau đó `BATCH_GET_GLOBAL_ID` mới được phép chạy —
+     * và nếu vẫn rỗng thì đọc lại theo nhịp, vẫn CHỈ ĐỌC, không sinh tin. */
     return Promise.resolve()
       .then(() => adapter.send({
         type: 'PRELOAD_DOC_IDS',
         pageId: String(pid),
         isBusiness: false,
         country: (function () { try { return localStorage.getItem('country') || 'vn'; } catch (e) { return 'vn'; } })(),
-      }, { timeout: 4000 }))
+      }, { timeout: 25000 }))
       .then((res) => {
         /* `PRELOAD_DOC_IDS` KHÔNG trả `_SUCCESS`/`_FAILURE` (case chỉ `break`), nên
          * `adapter.send` sẽ hết hạn rồi trả `{success:false, data:null}` — đó KHÔNG phải lỗi,
          * side-effect đã xảy ra trong SW. Vì vậy: thử đọc lại qua `BATCH_GET_GLOBAL_ID`
          * (lệnh duy nhất cho biết sự thật) thay vì đoán từ `res`.
          * Ở đây chỉ ghi nhận "đã gửi", không kết luận gì về doc_id. */
-        docIdStats.viaExtOk++;
+        /* [v1.93.14] HẾT HẠN KHÔNG PHẢI "ĐÃ NẠP". Case `PRELOAD_DOC_IDS` của extension
+         * `break` ngay sau khi gọi một hàm async KHÔNG `await` ⇒ không bao giờ có
+         * `_SUCCESS`. Nên `res.success === true` là ca KHÔNG XẢY RA; `res.success === false`
+         * chỉ nói "đã chờ đủ 25 s", không nói doc_id đã có.
+         * Sự thật duy nhất kiểm được là `BATCH_GET_GLOBAL_ID` trả mapping hay không
+         * (`batch nạp N/M`). Vì vậy đếm RIÊNG, không gộp vào `viaExtOk`. */
+        if (res && res.success) docIdStats.viaExtOk++; else docIdStats.viaExtWaited++;
         try {
           logLine('🧩 [doc_id] đã gửi PRELOAD_DOC_IDS cho page ' + pid
-            + ' (ext tự nạp [Jt,Zt,rt,st]; phản hồi adapter: '
-            + (res && res.success ? 'success' : 'không có success — bình thường, lệnh này không trả _SUCCESS')
-            + ')');
+            + ' và chờ 25 000 ms (ext KHÔNG await `O.preloadDocIds` nên không có _SUCCESS)'
+            + ' — kết quả thật xem ở dòng `batch nạp N/M`');
         } catch (e) { /* ignore */ }
         return true;
       })
@@ -10630,6 +10661,12 @@
           + ' · Ext chưa rõ ' + gidStats.extUnknown
           + ' · lần dò chưa ra ' + gidStats.unknown
           + ' · batch nạp ' + gidStats.batchMappings + '/' + gidStats.batchReturned + ' mapping (lỗi ' + gidStats.batchFail + ')'
+          /* [v1.93.14] doc_id: ext KHÔNG trả _SUCCESS cho `PRELOAD_DOC_IDS` (không `await`
+           * `O.preloadDocIds`) ⇒ `viaExtOk` gần như luôn 0, `viaExtWaited` = số lần đã chờ đủ.
+           * Trước bản này 3 bộ đếm này thu thập rồi KHÔNG in ở đâu ⇒ không thể biết lệnh nạp
+           * có được gửi hay không. In ra để đọc được. */
+          + ' · doc_id gửi ' + (docIdStats.viaExtOk + docIdStats.viaExtWaited)
+          + ' (chờ hết hạn ' + docIdStats.viaExtWaited + ' · gửi lỗi ' + docIdStats.viaExtEmpty + ')'
           + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
           + ' (trong đó INCORRECT THREAD ' + (gidStats.extIncorrectThread || 0) + ')'
           + ' · Ext p90 ' + (extLatP90() || 0) + 'ms → timeout ' + extTimeoutMs() + 'ms'
