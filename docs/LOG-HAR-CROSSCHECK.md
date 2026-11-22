@@ -659,3 +659,79 @@ let I = x.find(w => { …
 đã tải). Và `getGlobalIdFromInbox` truyền `customerName: this.customerName` — đúng tham số.
 
 ⇒ Không sửa gì. Ghi lại để lần sau không "sửa" theo kết luận sai này.
+
+## 13. 1 197 ca BỊ CHẶN THẬT bị chốt ⚠ ⇒ vào danh sách GỬI TAY (1.93.12)
+
+### 13.1 Số đo — log 22/11 07:38 (lô 1 694 chat, bản 1.93.11)
+
+```
+✅ 474   ❌ 23   ⚠ 1 197        474 + 1 197 + 23 = 1 694  (khớp)
+ACK OK/rejected/no-ACK  473/1204/0        ← no-ACK = 0
+SOCKET: retry wave 0 · retry lần 0
+🌊 Ext queue/active 0/17 · Ext gửi 48    ← Ext gần như không chạy
+📡 buckets <250/250-999/1-2s/2-5s/≥5s 0/314/1279/84/0
+```
+
+`no-ACK = 0` ⇒ **mọi ca đều có phản hồi** ⇒ toàn bộ 1 197 ca ⚠ là ACK **REJECTED**.
+Người dùng kiểm trực tiếp trong Pancake: **chỉ 474 ca có tin; 1 197 ca còn lại là khách CHẶN THẬT**.
+
+### 13.2 Gốc — hai điều kiện chặn đường xử lý dứt khoát
+
+```js
+// settleSocketResult, nhánh rejected
+if (rejected && ctx.apiRejected551) ctx.socketRetriedOnce = true;          // ← bật cờ, chặn dưới
+if (rejected && (!ctx || !ctx.gidFromPsid) && !ctx.socketRetriedOnce) { …thử lại 1 lần… }  // ← bị chặn
+…
+const isConfirmedUnavailable = !!(ctx && ctx.socketRetriedOnce);           // ← false
+return { ok:false, sent:false, ambiguous:true, recipientUnavailable:false, … };
+```
+
+`ambiguous: true` ⇒ vào cổng `if (r.ambiguous && !r.recipientUnavailable …)` ⇒
+`scheduleBuRetry` ⇒ hết ngân sách ⇒ `{ uncertain: true, sent: 'maybe' }` ⇒
+`trackStatus('uncertain')` ⇒ **⚠ + 🖐 CẦN GỬI TAY**.
+
+Thêm một đường nữa: `resolveGlobalId` bước 4 (`psid-guess`) đặt `ctx.gidFromPsid = true` ⇒
+điều kiện `!ctx.gidFromPsid` **sai** ⇒ nhánh thử lại **không bao giờ chạy** (log: `retry lần 0`).
+
+### 13.3 Vì sao `gidFromPsid` KHÔNG làm phản hồi mất giá trị
+
+`markOptimisticMessageFailed` là phản hồi cho **chính khung `/ls_req`** ta vừa publish
+(`thread_fbid` + `offline_threading_id`). FB chỉ trả lời khi đã định tuyến được thread.
+⇒ dù gid là PSID đoán, **câu trả lời "không nhận tin này" vẫn là dứt khoát**.
+
+Đối chứng: log 21/11 21:05 (4 266 chat) — 630 ACK rejected, người dùng xác nhận **"đều là chết thật"**.
+Log 22/11 07:38 — 1 204 ACK rejected, người dùng xác nhận **"1 197 ca là khách chặn thật"**.
+
+### 13.4 Sửa
+
+```js
+const _psidRejected = !!(raw.kind === 'rejected' && ctx && ctx.gidFromPsid);
+const isConfirmedUnavailable = _psidRejected || !!(ctx && ctx.socketRetriedOnce);
+return { …, ambiguous: !isConfirmedUnavailable, recipientUnavailable: isConfirmedUnavailable, … };
+```
+
+Đường đi sau sửa: `recipientUnavailable: true` ⇒ `finalizeSockBg` dòng ~5617 ⇒
+`trackStatus(conv.id,'fail')` ⇒ **❌ NGAY, `return`, không bù, không vào danh sách gửi tay**.
+
+**KHÔNG thêm một lệnh gửi nào.** `ambiguous:false` + `recipientUnavailable:true` là **đường tắt**
+tới ❌ — bỏ bù, bỏ gửi tay. Chỉ-đọc.
+
+### 13.5 Đối chứng 3/3 (`/tmp/v9.js`)
+
+| ca | 1.93.11 | 1.93.12 | `ambiguous` |
+|---|---|---|---|
+| `rejected` + gid là **PSID đoán** | `recipientUnavailable=false` | **true** | false |
+| `rejected` + gid thật + đã thử lại | true | true | false |
+| `rejected` + gid thật, **chưa** thử lại | false | false | **true** (giữ nguyên) |
+
+### 13.6 Hệ quả đo được trên lô mẫu (nếu giữ nguyên 1 694 chat)
+
+| chỉ số | 1.93.11 | 1.93.12 (dự kiến) |
+|---|---:|---:|
+| ⚠ "không rõ" | 1 197 | **≈ 0** |
+| ❌ lỗi | 23 | **≈ 1 220** |
+| 🖐 CẦN GỬI TAY | 1 197 | **≈ 0** |
+| số lệnh gửi | 1 694 | **1 694 (không đổi)** |
+
+⇒ Người dùng **không còn bị dụ gửi tay** vào 1 197 chat mà máy đã biết là chết.
+Đây là "báo ✅ sai" theo chiều ngược lại — và là lỗi lớn nhất của cả phiên.
