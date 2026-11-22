@@ -2743,6 +2743,10 @@
     /* [v1.93.15] Số ca BỎ lệnh gửi vì KHÔNG có `thread_id` — đúng hợp đồng app
      * (`errorMessage:"noThreadIdFound"`). Ca này CHẮC CHẮN chưa gửi. */
     noThreadIdFound: 0,
+    /* [v1.93.15] Số lần GỬI `REPLY_INBOX_PHOTO` mà KHÔNG có `globalUserId` — đúng như app
+     * (`sendInbox`: `if (platform === "facebook" && !i) getGlobalUserId(...).then(… sendInbox)`).
+     * Trước đây nhóm này bị cổng `gidGateSkipExt` chốt ❌ (168 dòng log) trước khi gửi. */
+    extThreadOnlySent: 0,
   };
   function resetGidStats() {
     Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
@@ -6314,14 +6318,33 @@
     if (!globalUserId && !threadId) {
       return { ok: false, sent: false, error: 'Không có globalId/thread_id — bỏ qua Ext' };
     }
-    // GATE NO-GID: khâu dò đã đủ bằng chứng (HTTP ok-no-gid + Batch xong + Ext finder
-    // phản hồi success không có gid) → không bắn lệnh gửi thread-only, khỏi giữ extSendLane.
+    /* ═══ [v1.93.15] GỠ CỔNG `gidGateSkipExt` — APP VẪN GỬI, và EXT TỰ DÒ GID BÊN TRONG ═══
+     * Nguồn `0.5.62_0/assets/background.js`, `sendInbox(e)`:
+     *   sendInbox(e){ const {…, globalUserId:i, …} = e; … return new Promise(async (b,v) => {
+     *     if (c === "facebook" && !i)
+     *       return this.getGlobalUserId({pageId, threadId, threadKey, isBusiness,
+     *                                     conversationUpdatedTime, customerName})
+     *         .then(M => { Object.assign(e, {globalUserId: M}), this.sendInbox(e).then(b).catch(v) })
+     *         .catch(M => v(M));
+     *     …buildSendParams… }); }
+     * và `getGlobalUserId({…})` = `new Ee({…convType:"INBOX"}).init()` — tức **chạy lại đủ 4
+     * nguồn dò gid NGAY TRONG extension**, rồi gửi lại. Không có `globalUserId` KHÔNG phải
+     * điều kiện để từ chối: nó chỉ là một **lượt dò thêm bên trong chính lệnh đó**.
+     *
+     * ĐO ĐƯỢC (31 log): **168** dòng `❌ … bù Extension không được: Không tìm được global_id
+     * để gửi — bỏ qua Ext thread-only cho nhanh`. Đây là nhóm bị **chính cổng này** chốt ❌
+     * TRƯỚC KHI gửi lệnh — tức ta tự loại một đường mà app vẫn đi, dựa trên giả định
+     * "không có gid ⇒ gửi cũng vô ích". Giả định đó SAI: ext gửi bằng `threadKey`
+     * (`buildSendParams` dựng form từ `threadKey/threadId`), gid chỉ là trường phụ.
+     *
+     * NAY: bỏ cổng ⇒ gửi `REPLY_INBOX_PHOTO` với `globalUserId: null` đúng như app, để ext tự
+     * dò trong lệnh (`getGlobalUserId`) hoặc gửi luôn theo `threadKey`. Vẫn CHỈ 1 lệnh gửi —
+     * lượt dò thêm là của extension, không phải của script, nên không thể sinh tin trùng.
+     * `ctx.gidGateSkipExt` KHÔNG còn chặn ở đây; biến vẫn được giữ cho nơi khác đọc (chỉ để
+     * báo cáo), và nhánh `!globalUserId && !threadId` phía trên vẫn là cổng thật (không có
+     * `thread_id` thì `Ee` cũng không dò được — đó mới là ca chắc chắn hỏng). */
     if (!globalUserId && ctx && ctx.gidGateSkipExt) {
-      return {
-        ok: false, sent: false, gidUnknown: true, noGidGate: true,
-        discoveryState: ctx.gidDiscoveryState || 'ext-responded-no-gid',
-        error: 'Không tìm được global_id để gửi — bỏ qua Ext thread-only cho nhanh',
-      };
+      try { gidStats.extThreadOnlySent++; } catch (eG2) { /* ignore */ }
     }
     const token = getToken();
     let files;
@@ -8737,11 +8760,22 @@
                 'server/Batch/WS/Ext đều không có global_id ⇒ chuyển làn API bằng conversation_id'
                 + ' (HAR: lệnh gửi API không cần global_id)', '🛟', conv.id);
             } else {
-              return {
-                ok: false, sent: false, gidUnknown: true, noGidGate: true,
-                discoveryState: ctx.gidDiscoveryState || 'ext-responded-no-gid',
-                error: 'Không tìm được global_id để gửi (server/Batch/WS/Ext đều không có) — bỏ qua Ext thread-only cho nhanh',
-              };
+              /* ═══ [v1.93.15] KHÔNG CHỐT ❌ CHỈ VÌ THIẾU gid — APP VẪN GỬI ═══
+               * Nhóm này là nhóm LỚN NHẤT bị chốt oan: **2 671** dòng
+               * `❌ … Không tìm được global_id để gửi (server/Batch/WS/Ext đều không có)
+               *  — bỏ qua Ext thread-only cho nhanh` trên 31 log.
+               * ① App KHÔNG có cổng này: `sendInbox` (`background.js`) khi thiếu `globalUserId`
+               *    chỉ **tự dò lại trong chính lệnh** (`getGlobalUserId` = `new Ee({…convType:
+               *    "INBOX"}).init()`) rồi gửi lại — không từ chối.
+               * ② `buildSendParams` của ext dựng form gửi từ **`threadKey`/`threadId`**;
+               *    `globalUserId` chỉ là trường phụ ⇒ gửi thread-only là hợp lệ và ĐÃ được
+               *    chứng minh: 186 tin gửi được qua Extension trong 2 lô 16:07/16:11 (nhóm
+               *    1545041) — xem §v1.92.41.
+               * ③ Chưa có tin nào được bắn cho chat này ⇒ thử Ext trước là an toàn tuyệt đối.
+               * Nay: KHÔNG return nữa — rơi xuống nhánh cứu hộ Ext-bằng-thread_id ngay dưới
+               * (`!ctx.apiNoGidDone`), đúng thứ tự của luồng gửi tay trong `_app`:
+               * extension → socket → api. */
+              try { gidStats.extThreadOnlySent++; } catch (eG3) { /* ignore */ }
             }
           }
           // Chưa hề có tin nào được bắn cho chat này, nên cứu hộ ở đây không thể gây trùng:

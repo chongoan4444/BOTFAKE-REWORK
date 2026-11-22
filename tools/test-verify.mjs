@@ -2005,6 +2005,20 @@ check('[seed] gid lấy được từ seed cũng vào sổ (một đường ghi 
 check('[seed] chỉ 1 lần/page/phiên (không spam lệnh gieo)',
   /if \(!pid \|\| !threadId \|\| docSeedPages\[pid\]\) return Promise\.resolve\(false\)/.test(stripComments(SRC)), true);
 
+/* ═══ (U) [v1.93.15] KHÔNG chốt ❌ chỉ vì thiếu `globalUserId` ═══
+ * `sendInbox` (ext): `if (c === "facebook" && !i) return this.getGlobalUserId({…})
+ *   .then(M => { Object.assign(e,{globalUserId:M}), this.sendInbox(e).then(b).catch(v) })`
+ * ⇒ app KHÔNG từ chối khi thiếu gid: nó tự dò LẠI trong chính lệnh rồi gửi. Và
+ * `buildSendParams` dựng form từ `threadKey/threadId`, gid chỉ là trường phụ.
+ * Đo được: 2 671 dòng `❌ … (server/Batch/WS/Ext đều không có) — bỏ qua Ext thread-only cho
+ * nhanh` + 168 dòng biến thể ở `sendViaExtension` ⇒ nhóm bị CHÍNH SCRIPT chốt oan. */
+check('[ext] không còn return "bỏ qua Ext thread-only cho nhanh" (sendOne)',
+  /bỏ qua Ext thread-only cho nhanh/.test(stripComments(SRC)), false);
+check('[ext] sendViaExtension cũng không từ chối khi thiếu gid (đếm rồi đi tiếp)',
+  /gidGateSkipExt\) \{\s*\n?\s*try \{ gidStats\.extThreadOnlySent\+\+/.test(stripComments(SRC)), true);
+check('[ext] nhánh thiếu gid ở sendOne rơi xuống cứu hộ thread_id, không return',
+  /try \{ gidStats\.extThreadOnlySent\+\+; \} catch \(eG3\)/.test(stripComments(SRC)), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));

@@ -2674,3 +2674,54 @@ const l = [Jt, Zt, rt, st]; await O.loadDocIdsFromView({html:s, docNames:l, …}
 
 Đếm mới: `docIdStats.seedSent / seedGotGid / seedFailed / seedMs / batchSkippedNoSeed`.
 **Test khoá (5 kịch bản `(T)`).** `npm test`: **413**.
+
+---
+
+## 41. Thiếu `globalUserId` KHÔNG phải lý do để chốt ❌ — app vẫn gửi (2 671 + 168 dòng log)
+
+### 41.1 Hợp đồng thật của `sendInbox`
+
+```js
+// 0.5.62 background.js — sendInbox(e)
+sendInbox(e){ const {webOrigin, pageId:a, threadId:r, threadKey:s, globalUserId:i, isBusiness:o,
+                     platform:c, photoUrls:l, conversationUpdatedTime:d, customerName:f, …} = e;
+  return new Promise(async (b, v) => {
+    if (c === "facebook" && !i)
+      return this.getGlobalUserId({pageId:a, threadId:r, threadKey:s, isBusiness:o,
+                                   conversationUpdatedTime:d, customerName:f})
+        .then(M => { Object.assign(e, {globalUserId: M}), this.sendInbox(e).then(b).catch(v) })
+        .catch(M => { console.log("error", M), v(M) });
+    const A = await this.buildSendParams(e);   // ← dựng form từ threadKey/threadId
+    … }); }
+// getGlobalUserId({…}) = new Ee({… convType:"INBOX"}).init()   ← dò lại ĐỦ 4 nguồn, NGAY TRONG lệnh
+```
+
+**Hai điều rút ra:**
+1. Thiếu `globalUserId` ⇒ ext **tự dò lại** (chạy trọn `Ee.init()`) rồi gửi lại — **không từ chối**.
+2. `buildSendParams` dựng form từ **`threadKey`/`threadId`**; `globalUserId` chỉ là trường phụ.
+
+### 41.2 Script đang chốt ❌ nhóm lớn nhất, trước khi gửi
+
+| Chỗ | Dòng log (31 log) | Câu |
+|---|---|---|
+| `sendViaExtension` (cổng `gidGateSkipExt`) | **168** | `… bỏ qua Ext thread-only cho nhanh` |
+| `sendOne` (nhánh `canApiNoGid=false`) | **2 671** | `❌ … (server/Batch/WS/Ext đều không có) — bỏ qua Ext thread-only cho nhanh` |
+
+Cả hai đều `return { ok:false, sent:false }` **trước khi gửi bất kỳ lệnh nào**, dựa trên giả định
+"không có gid ⇒ gửi cũng vô ích". Giả định đó **sai theo §41.1**, và đã bị chính dữ liệu bác bỏ:
+186 tin gửi được qua Extension trong 2 lô 16:07/16:11 đúng ở nhóm tưởng là "khách chết".
+
+### 41.3 ĐÃ SỬA
+
+- `sendViaExtension`: bỏ `return`, chỉ đếm `gidStats.extThreadOnlySent++` rồi gửi với
+  `globalUserId: null` — **đúng như app**.
+- `sendOne`: bỏ `return` ⇒ rơi xuống nhánh cứu hộ có sẵn (`!ctx.apiNoGidDone` → thử Ext bằng
+  `thread_id` trước, rồi API bằng `conversation_id`), đúng thứ tự luồng gửi tay của `_app`:
+  **extension → socket → api**.
+- Cổng thật vẫn giữ: `!globalUserId && !threadId` ⇒ bỏ (không có `thread_id` thì `Ee` cũng
+  không dò được — đó mới là ca **chắc chắn** hỏng, §36/§39).
+
+**An toàn:** cả hai chỗ đều nằm **trước** mọi lệnh gửi của chat đó, nên nới ra **không thể**
+sinh tin trùng; chỉ chuyển một ca "chắc chắn thất bại" thành "có thử qua đúng đường app dùng".
+
+**Test khoá (3 kịch bản `(U)`).** `npm test`: **416**.
