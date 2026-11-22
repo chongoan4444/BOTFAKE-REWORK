@@ -3193,3 +3193,89 @@ thật sự dùng). Có 2 test khoá.
   Nếu ra đúng ~14 s thì cả hai nút cổ chai (bind ảnh và làn Socket) đều đã hết; bước sau muốn
   nhanh hơn phải hạ `SOCKET_MIN_PACE_MS` (4 ms/page) hoặc giảm phí HTTP mỗi ca — **không** nới
   làn nữa.
+
+---
+
+## §49 — ĐUÔI XÁC NHẬN: CỔNG CHỨNG MINH GIỮ 10–14 s MÀ CHƯA CỨU ĐƯỢC CA NÀO (v1.93.17 / W200.127)
+
+### 49.1 Số đo mở đường (lượt 12:43:02, `1.93.15-W200.125`, 456 chat, **không ảnh**)
+
+| chỉ số | giá trị |
+|---|---|
+| ✅ / ❌ / ⚠ | **454 (99,6 %)** · 2 · 0 |
+| PHÁT | 6,8 s = **67,13 lệnh/giây** |
+| **chờ xác nhận (đuôi)** | **20,3 s** |
+| tổng người dùng chờ | **27 s** (thành công 16,75/giây) |
+| `⏱ GIỮ SLOT` | chờ 6 · chuẩn bị 0 · **còn lại 45 ms** · tổng 45 (n = 456) |
+
+`còn lại` = 45 ms trong khi lượt **có ảnh** 12:34 đo 2 142 ms ⇒ **§48 đúng**: hết bind ảnh là
+hết nghẽn pha phát. Nhưng tổng vẫn 27 s, tức **75 % thời gian không nằm ở pha phát**. Chỉ **2 ca**
+giữ đuôi: `#551` → cổng 10,3 s và 5,5 s; cả hai kết thúc ❌.
+
+### 49.2 Cổng đó có bắt được lần lặp nào không — quét 31 log
+
+| dấu trong log | ý nghĩa | số ca |
+|---|---|---|
+| `chặn lặp` / `HỦY bù` (cổng trả `yes`) | cổng **cứu** khỏi gửi trùng | **0** |
+| `chứng minh VẮNG MẶT ⇒ bù an toàn` | cổng chờ đủ rồi vẫn phải bù | **442** |
+| `chưa chứng minh được` | chờ đủ, không kết luận được, vẫn bù | 11 |
+
+442 ca đó kết thúc **✅ ≈ 50 (11 %)** / **❌ ≈ 390 (89 %)**. Nói cách khác: trong toàn bộ log còn
+lưu, **cổng chưa một lần** ngăn được tin lặp, nhưng mỗi ca #551 bị nó giữ 10–14 s.
+
+**Không phải cổng vô dụng** — nó là lưới an toàn cho ca **no-ACK Socket** (không có phán quyết
+nào, buộc phải suy luận). Chỉ ca **lỗi DỨT KHOÁT** (`isDefinitiveNotSent`: `#551` / ngoài 24h /
+`#10` thread-control / `#100` / `noThreadIdFound`) mới có **bằng chứng** là chưa có byte nào tới
+Facebook ⇒ không có gì để chờ.
+
+### 49.3 ⚠️ MẶT TRÁI BẮT BUỘC PHẢI GIỮ — KHÔNG ĐƯỢC CHỐT ❌ KHI `#551`
+
+Đã từng kết luận "chốt ❌ khi #551" ở v1.93.13 và **đo lại thấy sai**. Quét 23 log có `#551`:
+
+| log | #551 | cứu được ✅ |
+|---|---|---|
+| 17/11 16:27:14 | 37 | **35** |
+| 17/11 14:03:00 | 4 | **4** |
+| 20/11 09:46:09 | 8 | 6 |
+| 21/11 19:46:52 | 18 | 4 |
+| **tổng** | **229** | **47 (20,5 %)** |
+
+Các log đó cứu bằng **Extension** (`bù THÀNH CÔNG qua Extension`, hàng trăm dòng) — đường mà
+v1.93.13 đã cắt. Kết luận đúng: `#551` là câu trả lời của **kênh API**, không phải bản án cho
+khách. **Chỉ bỏ ĐOẠN CHỜ, tuyệt đối không bỏ lần bù.**
+
+### 49.4 Bản vá (v1.93.17)
+
+```js
+const buProofSkip   = !!(opts && opts.definitiveNotSent);   // bằng chứng dứt khoát
+const buGated       = !!(opts && opts.ambiguous) && !buProofSkip;
+const buGatedSwitch = !!(opts && opts.ambiguous) && buProofSkip;
+if (!buGated && !buGatedSwitch) { actuallySendBu(); return; }   // đường cũ, 0 chờ
+if (buGatedSwitch) { noteBgPending(conv, 'bu-direct'); actuallySendBu(); return; }
+```
+
+Ba điểm **phải** giữ, mỗi điểm có test khoá (mutation-verified):
+
+1. **Chỉ tắt cổng khi `definitiveNotSent`**, không tắt theo `opts.ambiguous` trần — ca suy luận
+   vẫn chờ đủ `BU_PROOF_WAIT_MS = 14 000` (giữ nguyên, **không** hạ toàn cục).
+2. **Vẫn `noteBgPending`** trước khi bù ngay. Nhánh `!buGated` cũ `return` mà **không** vào sổ
+   chờ nền ⇒ lượt có thể chốt TỔNG HỢP + nhả nút Chạy trong lúc chuỗi bù còn xếp hàng làn
+   (mất tin mà báo ✅). Sổ chờ nền có watchdog 180 s nên vẫn an toàn.
+3. **Truyền cờ ở CẢ HAI chỗ gọi #551**: `sendViaApi` (~3 821) và `fireApiAndWatch` (~709).
+   Thiếu một chỗ là bản vá chỉ chạy nửa đường. Test đếm *chỗ truyền cờ để điều khiển*, không
+   đếm `definitiveNotSent: true` trong object kết quả — nếu đếm cả nó thì mutation bỏ cờ vẫn xanh.
+
+Không đổi: `BU_ABSENT_CAP 600` · `BU_ENGINE_DEAD_STREAK 12` · `BU_PROOF_WAIT_MS 14 000` ·
+`triedCh` (mỗi kênh 1 lần) · `acquireOutbound` (khoá ngoài theo chat).
+
+### 49.5 Tiêu chí nghiệm thu lần chạy sau
+
+```
+🛡 Cổng chống lặp: … · ⚡ bù NGAY (lỗi dứt khoát) N ca
+```
+
+* `N > 0` ⇒ bản vá có hiệu lực; `N = 0` ở lô có `#551` ⇒ cờ không được truyền (kiểm 2 chỗ gọi).
+* Đuôi phải **rút từ 20,3 s xuống ≈ thời gian bù thật** (~5 s cho 2 ca). Kỳ vọng lô 456 chat
+  không ảnh: **27 s → ≈ 12 s**.
+* `chặn lặp` phải **vẫn 0** (nếu khác 0 sau bản vá ⇒ tin lặp thật, hoàn nguyên ngay).
+* Số ✅ không được **giảm** so với 454/456. Giảm ⇒ đã cắt nhầm lần bù.

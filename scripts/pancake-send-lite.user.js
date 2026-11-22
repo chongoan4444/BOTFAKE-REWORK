@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.16-w200.126
+// @version      1.93.17-w200.127
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.16-W200.126'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.17-W200.127'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -706,8 +706,9 @@
                 logLine('⚠ ' + nm + ' — bù: ' + clip((r && r.error) || 'không rõ', 90) + ' — KHÔNG gửi thêm (chống trùng)');
               } else if (r && !r.ok) {
                 logLine('⚠ ' + nm + ' — bù: ' + clip((r && r.error) || 'không rõ', 90));
+                /* [v1.93.17] cùng lý do như ở sendViaApi: lỗi DỨT KHOÁT ⇒ bù ngay, khỏi cổng 10 s. */
                 scheduleBuRetry(conv, tx, lastBgPhoto, nm, 'API từ chối (' + clip(msg.error || '', 90) + ')', ['api'],
-                  { ambiguous: true, via: 'api', sentAt: Date.now() });
+                  { ambiguous: true, definitiveNotSent: isDefinitiveNotSent(msg.error), via: 'api', sentAt: Date.now() });
               }
             })
             .catch((e) => { logLine('❌ ' + nm + ' — bù lỗi: ' + (e && e.message || e)); })
@@ -3813,11 +3814,13 @@
          * ⇒ #551 là câu trả lời của KÊNH API (endpoint messaging/send/), KHÔNG phải bản án cho
          *   khách: Extension đi qua tab Facebook thật vẫn gửi được. Chốt ❌ ở đây là MẤT TIN.
          * Giữ nguyên: vẫn bù kênh khác như cũ. Ghi lại để lần sau không "tối ưu" lại lần nữa. */
-        if (isDefinitiveNotSent(msg)) noteFbRejected(conv.id, 'API từ chối: ' + clip(msg, 70));
+        const _definite = isDefinitiveNotSent(msg);
+        if (_definite) noteFbRejected(conv.id, 'API từ chối: ' + clip(msg, 70));
         logLine('⚠ ' + nm + ' — API từ chối (' + clip(msg, 90) + ')'
           + (win ? ' — ngoài cửa sổ 24h' : ''));
+        /* [v1.93.17] `definitiveNotSent` ⇒ API đã DỨT KHOÁT chưa nhận ⇒ bù ngay, khỏi cổng 10 s. */
         scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + clip(msg, 90) + ')', ['api'],
-          { ambiguous: true, via: 'api', sentAt: Date.now() });
+          { ambiguous: true, definitiveNotSent: _definite, via: 'api', sentAt: Date.now() });
       } else {
         sendDiag.apiUnknown++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'API không rõ: ' + clip(msg, 60));
@@ -10445,6 +10448,7 @@
      * ⇒ chặn được 1 lần bù ⇒ chặn được 1 tin trùng. Đây là thước đo trực tiếp của §28/§25.2. */
     fbDirectPresent: 0,
     buProofGated: 0, buProofCancelled: 0,
+    buProofSkippedDefinite: 0,   // [v1.93.17] số ca lỗi DỨT KHOÁT được bù NGAY (không qua cổng 10 s)
     // [v1.92.44] số ca bị khoá chống trùng chặn lại (KHÔNG phải lệnh gửi thật)
     dupBlocked: 0,
     /* [v1.92.45] ĐUÔI CHỜ XÁC NHẬN — đo đúng cái người dùng phàn nàn: "gửi 100 con mà chờ
@@ -11289,8 +11293,9 @@
                * đã chặn được (log 21/11: 577 ca bù, 573 trong đó là ca FB đã báo không nhận). */
               + (fbRejectStats.blockedBu ? ' · 🚫 FB báo không nhận ⇒ KHÔNG bù ' + fbRejectStats.blockedBu + ' ca (chốt ❌, vào gửi tay)' : '')
             : '')
-          + ((sendDiag.buProofGated || sendDiag.buProofPresent || sendDiag.buProofCancelled)
+          + ((sendDiag.buProofGated || sendDiag.buProofPresent || sendDiag.buProofCancelled || sendDiag.buProofSkippedDefinite)
             ? ' | 🛡 Cổng chống lặp: chặn bù mù ' + sendDiag.buProofGated + ' ca · tin ĐÃ tới (hủy bù) ' + sendDiag.buProofCancelled
+              + (sendDiag.buProofSkippedDefinite ? ' · ⚡ bù NGAY (lỗi dứt khoát) ' + sendDiag.buProofSkippedDefinite + ' ca' : '')
               + ' · chứng minh vắng mặt ' + sendDiag.buProofAbsent + ' · không chứng minh được ' + sendDiag.buProofUnknown
               + ' · dùng lại kết quả ' + sendDiag.buProofCached
             : '')
@@ -11736,9 +11741,27 @@
   // hỗ trợ API/Extension. 'maybe'/đã đến nơi → DỪNG tuyệt đối (chống trùng).
   function scheduleBuRetry(conv, text, photo, name, why, tried, opts) {
     if (!conv) return;
+    if (opts && opts.definitiveNotSent) sendDiag.buProofSkippedDefinite = (sendDiag.buProofSkippedDefinite || 0) + 1;
     // [v1.92.30] `opts.ambiguous` = phán quyết lỗi là SUY LUẬN (không phải bằng chứng) ⇒ phải
     // chứng minh vắng mặt trước khi bắn lần 2. `opts.sentAt` = mốc bắt đầu lần gửi đầu.
-    const buGated = !!(opts && opts.ambiguous);
+    /* ═══ [v1.93.17] LỖI DỨT KHOÁT (#551/#10/#100/ngoài 24h) ⇒ BÙ NGAY, BỎ CỔNG CHỜ 10 s ═══
+     * ĐO TRÊN 31 LOG — cổng chứng minh vắng mặt KHÔNG bắt được ca lặp nào, chỉ giữ thời gian:
+     *   · `chặn lặp` (cổng trả 'yes'): **0 lần / 31 log**
+     *   · `chứng minh VẮNG MẶT` rồi bù: 442 ca, kết thúc ✅ ~50 (11 %), còn lại ❌/⚠
+     *   · Lượt 12:43 hôm nay: 2 ca #551 → cổng giữ **10,3 s** và **5,5 s**, cả hai kết thúc ❌.
+     *     `PHÁT 6,8 s` nhưng người dùng chờ **27 s** ⇒ 75 % thời gian nằm ở cổng, không ở làn.
+     * VÌ SAO BỎ CỔNG Ở ĐÂY KHÔNG GÂY GỬI LẶP — 3 lớp, không lớp nào bị bỏ:
+     *   1) `definitiveNotSent` chỉ đúng khi lỗi là DỨT KHOÁT (`isDefinitiveNotSent`: #551 /
+     *      ngoài 24h / #10 / #100) ⇒ API đã trả lời "KHÔNG nhận", chưa có byte nào tới FB.
+     *      Đây là BẰNG CHỨNG, không phải suy đoán — khác hẳn ca no-ACK (vẫn giữ đủ 14 s).
+     *   2) `acquireOutbound` vẫn giữ khoá ngoài cho chat đó suốt chuỗi bù ⇒ 2 chuỗi bù của cùng
+     *      một chat không thể chồng nhau.
+     *   3) `triedCh` / `buRetryDone` vẫn chặn thử một kênh hai lần.
+     * NGƯỢC LẠI — KHÔNG ĐƯỢC BỎ LẦN BÙ: 31 log cho **47/229 ca #551 được cứu thật** (log
+     * 17/11 16:27: 35/37 ca #551 → ✅ qua Extension); log 13:31 cùng ngày 4/4. #551 là câu trả
+     * lời của KÊNH API, không phải bản án cho khách ⇒ chỉ bỏ ĐOẠN CHỜ, không bỏ lần bù. */
+    const buProofSkip = !!(opts && opts.definitiveNotSent);
+    const buGated = !!(opts && opts.ambiguous) && !buProofSkip;
     // [v1.92.38] `opts.fromUncertain` = cứu ca ⚠ ĐÃ CÓ BẰNG CHỨNG vắng mặt (socket no-ACK).
     // Chat vẫn nằm trong sổ ⚠ để lượt không bị mở lại (xem chú thích ở scheduleSocketVerify),
     // nên phải cho đi qua cửa chặn "đã chốt ⚠ thì không bù" — nhưng CHỈ khi có cờ này.
@@ -11926,7 +11949,19 @@
       /* [v1.92.30] CỔNG CHỨNG MINH VẮNG MẶT — chỉ cho phán quyết SUY LUẬN.
        * Phán quyết là BẰNG CHỨNG (socket chết trước publish, lỗi trước khi bắn) đi thẳng:
        * 0 request, 0 chờ ⇒ giữ nguyên tốc độ cũ. */
-      if (!buGated) { actuallySendBu(); return; }
+      /* [v1.93.17] Ca `definitiveNotSent` đi thẳng nhưng VẪN PHẢI VÀO SỔ CHỜ NỀN.
+       * `buGatedSwitch` = cổng bị tắt bởi bằng chứng dứt khoát (không phải "không cần cổng").
+       * Trước đây nhánh `!buGated` chạy `actuallySendBu()` rồi `return` mà KHÔNG `noteBgPending`
+       * — nếu bản vá #551 dùng lại nhánh này thì lượt có thể chốt TỔNG HỢP và nhả nút Chạy
+       * trong lúc chuỗi bù còn đang xếp hàng làn ⇒ mất tin mà báo ✅. Sổ chờ nền có watchdog
+       * 180 s và tự chốt ⚠ nếu không có xác nhận ⇒ an toàn, đúng ý "không bỏ lần bù". */
+      const buGatedSwitch = !!(opts && opts.ambiguous) && buProofSkip;
+      if (!buGated && !buGatedSwitch) { actuallySendBu(); return; }
+      if (buGatedSwitch) {
+        noteBgPending(conv, 'bu-direct');
+        actuallySendBu();
+        return;
+      }
       noteBgPending(conv, 'bu-proof');
       const afterProof = (v) => {
         if (myRun !== runSeq) { clearBgPending(conv.id); return; }
@@ -13566,7 +13601,7 @@
     // [v1.92.30] cổng chống lặp: reset sổ mỗi lượt (cache chứng minh cũng xoá để không dùng
     // kết quả của lượt trước).
     sendDiag.buProofGated = 0; sendDiag.buProofPresent = 0; sendDiag.buProofAbsent = 0;
-    sendDiag.buProofUnknown = 0; sendDiag.buProofCached = 0; sendDiag.buProofCancelled = 0;
+    sendDiag.buProofUnknown = 0; sendDiag.buProofCached = 0; sendDiag.buProofCancelled = 0; sendDiag.buProofSkippedDefinite = 0;
     try { buProofCache.clear(); } catch (eBp) { /* ignore */ }
     verifyStats.found = 0; verifyStats.held = 0; verifyStats.unknown = 0;
     try {

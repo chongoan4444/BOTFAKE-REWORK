@@ -2226,6 +2226,50 @@ const _preSrc = stripComments(SRC);
     /dùng lại được /.test(_preSrc) && /preBindHit/.test(_preSrc), true);
 }
 
+/* ═══ (AC) [v1.93.17] LỖI DỨT KHOÁT ⇒ BÙ NGAY, KHÔNG QUA CỔNG 10 s ═══
+ * Cơ sở ĐO (31 log): cổng chứng minh vắng mặt chặn lặp được **0 ca**, nhưng giữ 10,3–14 s cho
+ * MỖI ca #551 (lượt 12:43: PHÁT 6,8 s · tổng 27 s · cả 2 ca kết thúc ❌). Đổi lại, 31 log cho
+ * thấy **47/229 ca #551 được cứu thật** (17/11 16:27: 35/37 → ✅ qua Extension) ⇒ chỉ được bỏ
+ * ĐOẠN CHỜ, tuyệt đối không bỏ lần bù. Bốn bất biến dưới đây khoá đúng hai mặt đó. */
+{
+  const _preSrcFor551 = stripComments(SRC);
+  const fn = stripComments(extractFn('scheduleBuRetry'));
+  // (1) cổng bị tắt CHỈ khi có bằng chứng dứt khoát — không phải tắt cả opts.ambiguous
+  check('[551] có cờ definitiveNotSent để bỏ cổng', /opts\.definitiveNotSent/.test(fn), true);
+  check('[551] buGated vẫn dựa trên opts.ambiguous (không bỏ cổng cho ca suy luận)',
+    /opts\.ambiguous/.test(fn), true);
+  check('[551] buGated = ambiguous && !buProofSkip', /&&\s*!buProofSkip/.test(fn), true);
+  /* (2)(3) NHÁNH BÙ-NGAY phải nằm trong ĐÚNG 250 ký tự sau `if (buGatedSwitch) {` và phải:
+   *   • có `noteBgPending(conv` — thiếu là lượt chốt TỔNG HỢP khi chuỗi bù còn xếp hàng;
+   *   • có `actuallySendBu()` — thiếu là ca #551 không được bù (mất 47/229 ca đã đo là cứu được);
+   *   • KHÔNG có `chotFailKhongBu` — đó đúng là lỗi v1.93.13 (chốt ❌ khi #551).
+   * Đọc theo cửa sổ ký tự, KHÔNG theo thứ tự khai báo (bài học §7). */
+  /* Neo vào ĐÚNG `if (buGatedSwitch) {` — neo vào tên biến thì cửa sổ bắt luôn câu khai báo
+   * phía trên và test xanh oan (đã tự bắt được ở mutation M3/M5). */
+  /* THÂN KHỐI, không phải "cửa sổ N ký tự": cửa sổ 250 ký tự nuốt luôn
+   * `noteBgPending(conv, 'bu-proof')` của NHÁNH KẾ BÊN ⇒ xoá dòng của nhánh bù-ngay mà test
+   * vẫn xanh (đã tự bắt được ở mutation M3). `[^}]*` cắt đúng ở `}` đóng khối. */
+  const win = (fn.match(/if \(buGatedSwitch\)\s*\{([^}]*)\}/) || ['', ''])[1];
+  check('[551] tìm thấy nhánh buGatedSwitch', win.length > 20, true);
+  check('[551] ca bỏ cổng VẪN noteBgPending (thiếu ⇒ lượt chốt sớm, mất tin mà báo ✅)',
+    /noteBgPending\(conv/.test(win), true);
+  check('[551] ca bỏ cổng gọi actuallySendBu (không chốt ❌)', /actuallySendBu\(\)/.test(win), true);
+  check('[551] KHÔNG chốt ❌/bỏ bù ở ca #551 (lỗi đã mắc ở v1.93.13)', /chotFailKhongBu/.test(win), false);
+  // (4) số đo phải in ra để lần sau đối soát được
+  check('[551] có sendDiag.buProofSkippedDefinite đếm ca bù ngay', /buProofSkippedDefinite/.test(fn), true);
+  check('[551] dòng TỔNG HỢP in "bù NGAY (lỗi dứt khoát)"', /bù NGAY \(lỗi dứt khoát\)/.test(_preSrcFor551), true);
+  // (5) cả HAI chỗ gọi #551 phải truyền cờ — thiếu 1 chỗ là bản vá chỉ chạy nửa đường
+  /* Chỉ đếm chỗ truyền cờ ĐỂ ĐIỀU KHIỂN (`isDefinitiveNotSent(` hoặc biến `_definite`),
+   * KHÔNG đếm `definitiveNotSent: true` trong object kết quả gửi — nếu đếm cả nó thì bản
+   * mutation bỏ cờ ở `fireApiAndWatch` vẫn xanh (đúng lỗi test yếu đã tự bắt được). */
+  const nArg = (_preSrcFor551.match(/definitiveNotSent:\s*(?:isDefinitiveNotSent\(|_definite)/g) || []).length;
+  check('[551] có ≥2 chỗ truyền definitiveNotSent (sendViaApi + fireApiAndWatch)', nArg >= 2, true);
+  check('[551] cờ lấy từ isDefinitiveNotSent (không phải chuỗi tự chế)',
+    /definitiveNotSent:\s*isDefinitiveNotSent\(/.test(_preSrcFor551), true);
+  // (6) hằng thời gian của cổng phải GIỮ cho ca no-ACK Socket (không được hạ toàn cục)
+  check('[551] BU_PROOF_WAIT_MS vẫn 14 000 cho ca suy luận', /const BU_PROOF_WAIT_MS = 14000;/.test(_preSrcFor551), true);
+}
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
