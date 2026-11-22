@@ -702,7 +702,7 @@
                 // "không rõ" (socket mất ACK / Ext quá hạn) ⇒ vừa gọi scheduleBuRetry (bù qua
                 // kênh khác) trong khi tin CÓ THỂ đã đi ⇒ nguy cơ gửi 2 lần. Nay "không rõ" chốt
                 // ⚠ + ghi uncertainIds (để mọi đường bù khác cũng bị chặn), KHÔNG gửi thêm.
-                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'bù không rõ: ' + clip((r && r.error) || '', 60));
                 logLine('⚠ ' + nm + ' — bù: ' + clip((r && r.error) || 'không rõ', 90) + ' — KHÔNG gửi thêm (chống trùng)');
               } else if (r && !r.ok) {
                 logLine('⚠ ' + nm + ' — bù: ' + clip((r && r.error) || 'không rõ', 90));
@@ -3614,7 +3614,7 @@
           { ambiguous: true, via: 'api', sentAt: Date.now() });
       } else {
         sendDiag.apiUnknown++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'API không rõ: ' + clip(msg, 60));
         logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — kiểm chứng lịch sử trước khi bù');
         scheduleUncertainVerify(conv, text, photo, Date.now(), msg);
       }
@@ -5585,7 +5585,7 @@
                   return;
                 }
                 // Đã đo xong: Extension cũng không cứu được ⇒ ⚠ "chưa gửi" để người dùng gửi tay
-                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'Socket FB từ chối + ngân sách dò Ext ĐÓNG ⇒ chưa thử Ext');
                 /* [v1.92.66] IN SỐ THẬT — xem khối chú thích dài ở `extFallback1545Allowed()`.
                  * Câu cũ ("đã đo 200 ca") là chuỗi cố định, lặp 3 611 lần ở lô 19:48 trong khi
                  * `tried` = 0. Nay số in ra là số ĐO ĐƯỢC của chính lô này. */
@@ -10051,7 +10051,7 @@
       if (now - Math.max(e.at || 0, bgLaneBusyAt) >= BG_SETTLE_DEADLINE_MS) {
         delete pendingBg[id];
         try { sockFiredPending.delete(id); } catch (e0) { /* ignore */ }
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(id, 'uncertain');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(id, 'uncertain', 'quá ' + Math.round(BG_SETTLE_DEADLINE_MS / 1000) + 's chưa có xác nhận nền');
         forced++;
       }
     });
@@ -10595,7 +10595,9 @@
     updateBatchSummaryUI();
   }
 
-  window.__botfakeTrackStatus__ = function (convId, kind) {
+  /* [v1.93.13] `reason` (tuỳ chọn, tham số 3) chỉ dùng để GHI SỔ ca ⚠ — xem khối chú thích
+   * trong nhánh `uncertain`. Không đổi phán quyết, không thêm lệnh gửi. */
+  window.__botfakeTrackStatus__ = function (convId, kind, reason) {
     if (!convId || deliveredIds[convId]) return;
     clearBgPending(convId);
     if (kind === 'fail') {
@@ -10607,6 +10609,20 @@
       if (!finalFailedIds[convId]) { finalFailedIds[convId] = true; summaryCounters.fail++; }
     } else if (kind === 'uncertain') {
       if (!uncertainIds[convId] && !finalFailedIds[convId]) { uncertainIds[convId] = true; summaryCounters.unsure++; }
+      /* ═══ [v1.93.13] GHI SỔ CHO CA ⚠ — TRƯỚC ĐÂY KHÔNG CÓ DÒNG NÀO ═══
+       * ĐO ĐƯỢC (log 22/11 09:54, lô 8 572 chat, bản W200.124):
+       *   • TỔNG HỢP ghi `⚠ Không rõ: 3 547` và `🖐 CẦN GỬI TAY: 3 547 chat`
+       *   • Sổ kiểm chứng chỉ có 5 025 chat; `8 572 − 5 025 = 3 547` — KHỚP CHÍNH XÁC
+       *   • Trong sổ: ✅ 5 006 · ❌ 47 · ⏳ 33 · 🔎 19 · 🛟 1 ⇒ **0 dòng ⚠**
+       *   • 2 000 dòng đầu của 🖐 CẦN GỬI TAY: giao với sổ = **0/2 000**
+       * ⇒ Nhánh này chỉ tăng bộ đếm + đưa vào danh sách gửi tay, **không ghi dòng sổ nào**.
+       *   Mọi ca được gọi từ đường nào (ACK rejected, quá hạn ACK, …) đều biến mất khỏi sổ.
+       *
+       * Hệ quả thật: đây đúng là câu hỏi treo từ lô 08:32 (570 ca ⚠) — KHÔNG truy được
+       * nguồn vì ca ⚠ không có dòng sổ. Nay ghi sổ, kèm LÝ DO nếu chỗ gọi đưa vào.
+       * Chỉ ghi nhận — không thêm lệnh gửi, không đổi phán quyết. */
+      auditPush('⚠', convId, '', 'chốt KHÔNG RÕ (vào danh sách gửi tay)'
+        + (reason ? ' · ' + String(reason) : ''));
       noteManualResend(convId); // ⚠ = máy không chắc đã gửi ⇒ vào danh sách gửi tay
     } else if (kind === 'skip') {
       if (!skippedLateIds[convId]) { skippedLateIds[convId] = true; summaryCounters.skipLate++; }

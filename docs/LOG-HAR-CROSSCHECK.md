@@ -1167,3 +1167,69 @@ O.preloadDocIds(e, t = this.featureNeedsPreloadDocIds)      // ["inbox","comment
    sau, ext vẫn có thể chưa nạp xong ⇒ batch rỗng lần 1. `isAllDocIdLoaded` + `ot()` 20 s làm
    khả năng này thấp nhưng **chưa đo được**.
 4. Lỗi gốc *"ca khách chặn thật bị chốt ⚠"* **vẫn chưa sửa** — §20 chỉ sửa đường gid.
+
+---
+
+## 21. LOG 22/11 09:54 — W200.124 (8 572 chat) — XÁC NHẬN SỬA doc_id ĐÃ CHẠY
+
+### 21.1 Bằng chứng sửa §18–§20 có tác dụng
+
+```
+[09:51:58] 🧩 [doc_id] đã gửi PRELOAD_DOC_IDS cho page 769625892902516
+             (ext tự nạp [Jt,Zt,rt,st]; phản hồi adapter: không có success — bình thường…)
+[09:51:58] 🧭 BATCH_GET_GLOBAL_ID 769625892902516: threadsWithGlobalId=250 · nạp mới=25
+…
+🧭 Chẩn đoán globalId: … batch nạp 25/250 mapping (lỗi 0) …
+```
+
+| Chỉ số | 30 log cũ (1.93.12↓) | log này (W200.124) |
+|---|---|---|
+| `BATCH_GET_GLOBAL_ID` | **0 lần chạy** | **250 mapping** trả về |
+| `batch nạp` | `0/0` ở **17/17** log | `25/250` |
+| câu `THIẾU doc_id ⇒ Missing` | 16 dòng | **0 dòng** |
+
+⇒ Sửa tên lệnh + timeout 30 s + bỏ cờ chặn **đã chạy đúng**. Đây là lần đầu đường gid
+hàng loạt hoạt động sau nhiều bản.
+
+### 21.2 Lỗi gốc "ca khách chặn bị chốt ⚠" — ĐÃ ĐI ĐÚNG ĐƯỜNG
+
+6 ca chặn thật (`Đậu Huyền`, `Trần Hương`, `Lệ Hoàng`, `Loan Nguyen`, `Châu Nguyễn`, `Mai Mủm Mỉm`):
+```
+⏳ API từ chối ((#551) không có mặt) — đang bù
+🔎 chứng minh VẮNG MẶT (hội thoại không đổi sau lúc gửi) ⇒ bù an toàn
+❌ bù Socket không được: Socket: FB từ chối nhận tin (khách hiện không có mặt / đã khóa nick)
+```
+Kết thúc **❌**, **KHÔNG** vào 🖐 CẦN GỬI TAY. `⚠ Không rõ` không còn ca `#551` nào.
+→ Riêng nhóm `#551` (19 ca = 100 % ca `#551` của lô) **đã đúng yêu cầu**.
+
+### 21.3 NHƯNG: 3 547 ca ⚠ **KHÔNG có một dòng nào trong sổ kiểm chứng**
+
+| | số |
+|---|---|
+| khai báo | 8 572 |
+| chat có ≥1 dòng trong sổ | **5 025** |
+| `8 572 − 5 025` | **3 547** = đúng `⚠ Không rõ` |
+| trong sổ: ✅ / ❌ / ⏳ / 🔎 / 🛟 | 5 006 / 47 / 33 / 19 / 1 |
+| dòng `⚠` trong sổ | **0** |
+| 2 000 dòng đầu 🖐 giao với sổ | **0 / 2 000** |
+
+⇒ Nhánh `kind === 'uncertain'` trong `__botfakeTrackStatus__` **chỉ tăng bộ đếm và gọi
+`noteManualResend`, không hề ghi sổ**. Mọi ca chốt ⚠ — dù từ ACK rejected, quá hạn ACK hay
+bù không rõ — **biến mất khỏi sổ**.
+
+**Đây chính là lý do câu hỏi treo từ lô 08:32 (570 ca ⚠) không thể trả lời** — không phải
+thiếu log, mà log **không có dòng để tra**.
+
+### 21.4 SỬA: ghi sổ ca ⚠ + lý do
+
+`window.__botfakeTrackStatus__(convId, kind, reason)` — thêm tham số 3 (tuỳ chọn), chỉ để ghi sổ.
+`auditPush('⚠', convId, '', 'chốt KHÔNG RÕ … · ' + reason)`.
+Lý do đã nối ở 4 chỗ: API không rõ · quá 180 s chưa xác nhận nền · bù không rõ ·
+Socket FB từ chối + ngân sách dò Ext ĐÓNG.
+
+**Không đổi phán quyết, không thêm lệnh gửi.** Lô sau sẽ thấy `⚠` trong sổ.
+
+### 21.5 Phát hiện phụ — dòng "qua cổng" của wave bị mất
+
+Tổng `qua cổng` của 17 wave ghi trong log = **5 890 / 8 572** ⇒ thiếu 2 682. Không phải script
+tính sai: khi xuất, một số dòng wave bị gộp/bỏ (log gọn 89 dòng). **Không kết luận gì từ chỉ số này.**
