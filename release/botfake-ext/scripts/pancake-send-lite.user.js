@@ -819,15 +819,28 @@
    * CHỈ ĐỌC (GET, không tạo tin). Trả `{ threadId, threadKey }` hoặc `null`.
    * Giới hạn: 1 lần/hội thoại/phiên (endpoint gọi xong là hội thoại đã có thread_id nên
    * gọi lại vô nghĩa), và chỉ gọi khi hội thoại THẬT SỰ thiếu `thread_id`. */
-  const syncThreadIdTried = new Set();
+  /* [v1.93.15] App KHÔNG cache "đã thử": `eF(page_id, convId)` được gọi lại MỖI lần gửi khi
+   * hội thoại vẫn thiếu `thread_id` (`executeBySocketFB` @975143, `executeByExtOnce` @964502,
+   * `executeByExtInChunks` @962696). HAR `guisot.har` cho thấy đúng 1 lần cho conv đó — vì app
+   * gọi 1 lần rồi dùng kết quả cho cả lần gửi, KHÔNG phải vì nó nhớ "đã thử".
+   * Script cũ cache VĨNH VIỄN theo phiên (`Set` không TTL) ⇒ chỉ cần 1 lần lỗi mạng/timeout là
+   * hội thoại đó MẤT `thread_id` cho tới khi tải lại trang, dù lần sau endpoint trả bình thường.
+   * Nay: giữ chặn gọi trùng trong CÙNG một đợt (45 s) để không spam, nhưng cho phép thử lại sau. */
+  const SYNC_TID_RETRY_MS = 45000;
+  const syncThreadIdTried = new Map(); // key -> thời điểm thử (ms)
   function syncMissingThreadId(pageId, convId) {
     return Promise.resolve().then(() => {
       const pid = String(pageId || '');
       const cid = String(convId || '');
       if (!pid || !cid) return null;
       const key = pid + '|' + cid;
-      if (syncThreadIdTried.has(key)) return null;
-      syncThreadIdTried.add(key);
+      const triedAt = syncThreadIdTried.get(key);
+      if (triedAt && Date.now() - triedAt < SYNC_TID_RETRY_MS) return null;
+      syncThreadIdTried.set(key, Date.now());
+      if (syncThreadIdTried.size > 4000) {
+        const cut = Date.now() - SYNC_TID_RETRY_MS;
+        syncThreadIdTried.forEach((v, k) => { if (v < cut) syncThreadIdTried.delete(k); });
+      }
       const url = apiBase() + '/v1/pages/' + encodeURIComponent(pid)
         + '/conversations/' + encodeURIComponent(cid)
         + '/sync_missing_thread_id?access_token=' + encodeURIComponent(getToken());
@@ -5522,6 +5535,22 @@
       if (_ens.source === 'sync') { try { gidStats.threadIdSynced++; } catch (e0) { /* ignore */ } }
     }
     const threadId = ctx.threadId;
+    /* ═══ [v1.93.15] APP BỎ SỚM KHI THIẾU `thread_id` — CẢ ĐƯỜNG SOCKET ═══
+     * `_app-…v6.js` @975143:
+     *   async executeBySocketFB(){ … let w = x.thread_id;
+     *     if (w || (w = await eF(x.page_id, x.id)), !w) return {success:!1, errorMessage:"noThreadIdFound"};
+     *     … let e = await this.concurrentlyGetGLobalId("facebook", x, w), N = e?.[1];
+     *     if (!N) return {success:!1, errorMessage:"getGlobalIdFailed"}; … }
+     * Thứ tự hợp đồng: ① `thread_id` (sync nếu thiếu) → ② gid → ③ gửi. Thiếu ① thì DỪNG.
+     * `resolveGlobalId` vẫn "chạy được" với threadId rỗng (nó rơi xuống nguồn ③/④ theo tên),
+     * nên script cũ đi tiếp rồi bắn publish ⇒ FB trả `1545006`/`#551` (đã đo 11 lần trong HAR)
+     * hoặc treo tới hạn ACK — tốn đúng 1 lượt chờ cho một ca CHẮC CHẮN không gửi được.
+     * Nay trả đúng mã của app TRƯỚC khi dò gid. Ca này chắc chắn chưa gửi ⇒ `sent:false`. */
+    if (!threadId) {
+      try { gidStats.noThreadIdFound++; } catch (eNT2) { /* ignore */ }
+      recycleUnusedFbId(pageId, ctx);
+      return { ok: false, sent: false, error: 'noThreadIdFound', noThreadIdFound: true };
+    }
     if (!ctx.gidResolved) {
       ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
       ctx.gidResolved = true;

@@ -2503,3 +2503,51 @@ của script là **đúng**. Nhánh `!t` **không** gửi `CHECK_EXTENSION` (ch�
 
 Bằng chứng đo: **0/31 log** có dòng "Extension Pancake chưa kết nối" ⇒ nhánh này không chạy thực tế.
 Ghi nhận, **không sửa** (thêm `CHECK_EXTENSION` là thêm lệnh, không có ca nào cần).
+
+---
+
+## 39. Socket cũng phải BỎ khi thiếu `thread_id` + `syncThreadIdTried` không được cache vĩnh viễn
+
+### 39.1 Thứ tự hợp đồng của app — áp cho CẢ 3 đường gửi
+
+```js
+// executeBySocketFB  @975143
+async executeBySocketFB(){ … let w = x.thread_id;
+  if (w || (w = await eF(x.page_id, x.id)), !w) return {success:!1, errorMessage:"noThreadIdFound"};
+  … let e = await this.concurrentlyGetGLobalId("facebook", x, w), N = e?.[1];
+  if (!N) return {success:!1, errorMessage:"getGlobalIdFailed"}; … }
+// executeByExtOnce   @964502  — y hệt, chỉ khác sau đó là upload + sendInbox
+// executeByExtInChunks @962696 — y hệt
+```
+**① `thread_id` (sync nếu thiếu) → ② `globalId` → ③ gửi.** Thiếu ① thì **dừng**, không dò gid.
+
+Trước lượt này script đã đúng ở **đường Ext** (§36) nhưng **đường Socket thì không**:
+`resolveGlobalId` vẫn "chạy được" với `threadId: ''` (rơi xuống nguồn ③/④ dò theo tên), nên script
+đi tiếp rồi bắn publish ⇒ FB trả `1545006`/`#551` (**11 lần** trong 12 HAR) hoặc treo tới hạn ACK —
+tốn đúng 1 lượt chờ cho ca **chắc chắn** không gửi được.
+
+**ĐÃ SỬA** (`sendViaSocket`, ngay sau `ensureThreadId`, TRƯỚC `resolveGlobalId`):
+```js
+if (!threadId) {
+  gidStats.noThreadIdFound++;
+  recycleUnusedFbId(pageId, ctx);
+  return { ok: false, sent: false, error: 'noThreadIdFound', noThreadIdFound: true };
+}
+```
+
+### 39.2 `syncThreadIdTried`: `Set` vĩnh viễn ⇒ mất `thread_id` cả phiên
+
+App **không** nhớ "đã thử": `eF(page_id, convId)` được gọi lại **mỗi lần gửi** khi hội thoại vẫn
+thiếu `thread_id`. HAR `guisot.har` chỉ có **1** lần cho conv `…_28877217668608600` (13:54:30.596,
+ngay TRƯỚC `POST /conversations/…` lúc 30.677 — tức app sync **trong lúc gửi**) — vì app dùng kết
+quả cho cả lần gửi đó, **không phải** vì nó nhớ.
+
+Script cũ: `const syncThreadIdTried = new Set()` + `has → return null`, **không TTL** ⇒ chỉ cần
+**một** lần lỗi mạng/timeout/429 là hội thoại đó **mất `thread_id` tới khi tải lại trang**, và mọi
+lần gửi sau rơi vào `noThreadIdFound`. Đây là kiểu hỏng "im lặng + vĩnh viễn" tệ nhất.
+
+**ĐÃ SỬA:** `Map` + `SYNC_TID_RETRY_MS = 45000` (chặn gọi trùng trong một đợt, cho thử lại sau),
+dọn mục cũ khi > 4000 khoá.
+
+**Test khoá (4 kịch bản `(Q)`+`(R)`):** Socket bỏ sớm `noThreadIdFound`; `Map` không phải `Set`;
+có nhánh TTL; hằng số 45 000. `npm test`: **405**.

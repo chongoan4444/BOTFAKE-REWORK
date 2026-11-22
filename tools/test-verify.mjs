@@ -1957,6 +1957,24 @@ check('[ws] không tự gửi LISTEN_WS (đó là WS comment, không phải inbo
 check('[ws] warm-up socket đi qua helper của app (initSocket)',
   /h\.initSocket\(pid\)/.test(stripComments(SRC)), true);
 
+/* ═══ (Q) [v1.93.15] Socket cũng phải BỎ khi thiếu `thread_id` ═══
+ * `_app-…v6.js` @975143 `executeBySocketFB`: `let w=x.thread_id; if(w||(w=await eF(x.page_id,
+ * x.id)), !w) return {success:!1, errorMessage:"noThreadIdFound"}; … if(!N) return
+ * {success:!1, errorMessage:"getGlobalIdFailed"}` ⇒ thứ tự ① thread_id → ② gid → ③ gửi.
+ * Script cũ đi tiếp với threadId rỗng ⇒ FB trả 1545006/#551 hoặc treo tới hạn ACK. */
+check('[socket] bỏ sớm khi thiếu thread_id (noThreadIdFound)',
+  /async function sendViaSocket[\s\S]{0,7000}?if \(!threadId\) \{[\s\S]{0,260}?noThreadIdFound: true/.test(stripComments(SRC)), true);
+
+/* ═══ (R) [v1.93.15] `syncThreadIdTried` phải có TTL, không cache vĩnh viễn ═══
+ * App gọi lại `eF()` MỖI lần gửi khi vẫn thiếu thread_id — không nhớ "đã thử". Set vĩnh viễn
+ * ⇒ 1 lần lỗi mạng là mất thread_id cả phiên. */
+check('[sync] syncThreadIdTried dùng Map (không phải Set vĩnh viễn)',
+  /const syncThreadIdTried = new Map\(\)/.test(stripComments(SRC)), true);
+check('[sync] lần thử CŨ hơn TTL thì được thử lại (không chặn vĩnh viễn)',
+  /syncThreadIdTried\.get\(key\)[\s\S]{0,120}?Date\.now\(\) - triedAt < SYNC_TID_RETRY_MS\) return null/.test(stripComments(SRC)), true);
+check('[sync] có ngưỡng thời gian chặn gọi lặp (45s)',
+  /SYNC_TID_RETRY_MS = 45000/.test(stripComments(SRC)), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
