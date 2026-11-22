@@ -4444,8 +4444,24 @@
               { timeout: extWaitMs }
             ));
           callExtFinderOnce().then(async (res) => {
-            let val = (res && res.success && res.data && res.data.globalId
-              && String(res.data.globalId) !== badGid) ? String(res.data.globalId) : '';
+            /* [v1.93.13] ĐỌC ĐÚNG `globalId` TOP-LEVEL CỦA GET_GLOBAL_ID_FOR_CONV_SUCCESS.
+             * Nguồn `0.5.62_0/assets/background.js`:
+             *   case"GET_GLOBAL_ID_FOR_CONV":
+             *     g.init().then(y=>{ y ? e.port.postMessage({type:"GET_GLOBAL_ID_FOR_CONV_SUCCESS",
+             *                       success:!0, globalId:y, taskId:_}) : I() })
+             * ⇒ `globalId` nằm ở **cấp ngoài**, KHÔNG lồng trong `data`.
+             * Adapter của app bọc: `t({success:!0, data:n})` với `n` = nguyên message
+             * ⇒ đường đúng là `res.data.globalId`. Script đã đọc đúng.
+             * Đường ADAPTER RIÊNG `__botfake` (nếu có) lại bọc phẳng `{success, globalId}`
+             * ⇒ phải chấp nhận CẢ HAI. Trước bản này chỉ đọc `res.data.globalId` nên adapter
+             * phẳng trả gid THẬT mà script vẫn coi là "không có gid". */
+            const _gidOf = (r0) => {
+              if (!r0 || !r0.success) return '';
+              const raw0 = (r0.data && r0.data.globalId) ? r0.data.globalId : r0.globalId;
+              const v0 = (raw0 == null) ? '' : String(raw0);
+              return (v0 && v0 !== badGid && v0 !== 'null' && v0 !== 'undefined') ? v0 : '';
+            };
+            let val = _gidOf(res);
             if (val) { finishExt(val, 'ext'); return; }
             const hitMid0 = peekFastGlobalId(full, full, badGid);
             if (hitMid0) { finishExt(hitMid0, 'cache'); return; }
@@ -4458,8 +4474,7 @@
               const hitMid1 = peekFastGlobalId(full, full, badGid);
               if (hitMid1) { finishExt(hitMid1, 'cache'); return; }
               const res2 = await callExtFinderOnce().catch(() => null);
-              val = (res2 && res2.success && res2.data && res2.data.globalId
-                && String(res2.data.globalId) !== badGid) ? String(res2.data.globalId) : '';
+              val = _gidOf(res2);
               if (val) { finishExt(val, 'ext'); return; }
               const d2 = res2 && res2.data;
               const errStr2 = (d2 && typeof d2 === 'object') ? String(d2.errorMessage || d2.error || d2.reason || '') : '';

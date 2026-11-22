@@ -914,3 +914,57 @@ Trong `case"REPLY_INBOX_PHOTO"` của extension:
 | Đường verify Ext có so nội dung tin | **Có** — `isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAtMs)` + `confirmViaSnippet`. Không phải "thấy tin bất kỳ là ✅". |
 | `late-watch` chốt ✅ muộn | Chỉ chạy khi `late.success` — tức đã có `REPLY_INBOX_PHOTO_SUCCESS` = FB trả `message_id`. Không phải `res.success` trần. Chỉ **5 lần** / 30 log. |
 | `payload.type` | Adapter REQUIRE `type` (throw nếu thiếu). Script có gửi. ✔ |
+
+---
+
+## 17. Đối chiếu nốt 3 lệnh còn lại (1.93.13)
+
+### 17.1 ĐÃ SỬA — `GET_GLOBAL_ID_FOR_CONV_SUCCESS`: `globalId` nằm ở TOP-LEVEL
+
+```js
+// 0.5.62_0/assets/background.js
+case"GET_GLOBAL_ID_FOR_CONV":{const{taskId:_}=r.data, g=new Ee(r.data),
+  I=()=>e.port.postMessage({type:"GET_GLOBAL_ID_FOR_CONV_FAILURE",taskId:_});
+  g.init().then(y=>{ y ? e.port.postMessage({type:"GET_GLOBAL_ID_FOR_CONV_SUCCESS",
+                    success:!0, globalId:y, taskId:_}) : I() }).catch(()=>{I()}); }
+```
+`globalId` ở **cấp ngoài**, KHÔNG lồng trong `data`.
+
+Adapter của app bọc `t({success:!0, data:n})` với `n` = nguyên message ⇒ `res.data.globalId` ✔ (script đã đúng).
+Nhưng adapter RIÊNG (`__botfake`, nếu có) bọc phẳng `{success, globalId}` ⇒ script cũ **bỏ sót**.
+
+Đã sửa: `_gidOf()` đọc **cả hai** đường, và loại `badGid` / chuỗi `"null"` / `"undefined"`.
+Áp cho cả lần dò 1 và lần dò 2 (`4447` và `4461`).
+
+### 17.2 ĐÃ KIỂM — `MAKE_MESSENGER_LINK` với `uiVersion: 6` là ĐÚNG
+
+```js
+class k_{ … handleFacebook(){ const e=this.uiVersion||await za.get(this.pageId);
+  switch(e){ case 3: case 4: case 6: case 7: return this.getGlobalId().then(t=>({
+      link:`https://business.facebook.com/latest/inbox/all?asset_id=…&selected_item_id=${t}`,
+      globalId:t })); } }
+  getGlobalId(){ return this.globalId ? Promise.resolve(this.globalId)
+      : new Ee({pageId,threadId,threadKey,isBusiness,conversationUpdatedTime,customerName,…}).init() } }
+```
+⇒ `uiVersion` 3/4/6/7 mới **thực sự dò gid**; 1/2/5 chỉ trả link không có gid.
+Script gửi `uiVersion: 6`, `globalId: null` ⇒ path đúng. **Không sửa.**
+(Đây cũng là lý do ghi chú cũ "không bỏ `uiVersion: 6`" là đúng.)
+
+### 17.3 ĐÃ KIỂM — `UPLOAD_INBOX_PHOTO` là fallback đúng, `convId`/`uploadId` không bắt buộc
+
+```js
+case"UPLOAD_INBOX_PHOTO":{ … const{pageId:_,convId:g,taskId:I,uploadId:y,photoUrl:b,name:v,platform:A}=r.data;
+  S.upload(b,_,v,A,i).then(R=>e.port.postMessage({type:"UPLOAD_INBOX_PHOTO_SUCCESS",
+    from:"EXTENSION",taskId:I,uploadId:y,fbId:R.fbid,previewUri:R.previewUri})) … }
+```
+- `convId`/`uploadId` **chỉ được echo lại** trong message trả về, không dùng để upload.
+- Upload đi `upload-business.facebook.com/ajax/mercury/upload.php` — **khác** `/v1/contents` của script.
+- Script chỉ gọi khi `/v1/contents` thất bại (fallback) ⇒ đúng thiết kế, **0 lần** trong 30 log.
+- `uploadId` thiếu chỉ làm trường đó `undefined` ở response — script chỉ đọc `res.data.fbId`. ✔
+
+### 17.4 ĐÃ KIỂM — `taskId` echo lại trong MỌI response
+
+Cả 3 lệnh trên đều `postMessage({… taskId …})`. Việc đó **cần** khi app tự gửi (adapter ghép theo
+`pendingMessages[taskId]`), nhưng `adapter.send` đã tự thêm `taskId` (`{...e, taskId:n}`) nên
+script **không được** tự gửi `taskId` — gửi sẽ ghi đè bộ đếm và làm lệch ghép kết quả.
+Script hiện **không gửi** ở cả 3 lệnh. ✔
