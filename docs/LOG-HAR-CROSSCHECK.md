@@ -1434,3 +1434,69 @@ Thêm vào dòng chẩn đoán: `Ext trả không có gid N (trong đó INCORREC
 `LOAD_FACEBOOK_MESSAGES` (tiềm năng gộp "gid + kiểm chứng" 1 lệnh) · `GET_IMG_FROM_SHARED_ATTACHMENT`
 · `GET_IG_CONTACT_ID` · `GET_POST_ID_FROM_LINK` · 11 listener · 2 comment · 30 case "Khác".
 Chưa case nào có bằng chứng script cần dùng.
+
+---
+
+## 24. `MAKE_MESSENGER_LINK` — 5 000 ms quá ngắn + đọc thiếu top-level
+
+### 24.1 Lệnh này KHÔNG chỉ "tạo link" — nó DÒ GID
+
+```js
+case"MAKE_MESSENGER_LINK": … new k_({…, uiVersion:b, globalId:v, …}).init() …
+k_.handleFacebook(){ const e = this.uiVersion || await za.get(this.pageId);
+  switch(e){ case 1: case 2: case 5: return { link: … }        // KHÔNG có gid
+             case 3: case 4: case 6: case 7:
+               return this.getGlobalId().then(t => ({ link: `…selected_item_id=${t}`, globalId: t })) } }
+k_.getGlobalId(){ return this.globalId ? Promise.resolve(this.globalId)
+                                       : new Ee({…, convType:"INBOX", …}).init() }
+```
+Script gửi `uiVersion: 6` + `globalId: null` ⇒ **luôn** vào `Ee.init()`.
+`Ee.init()` → `getGlobalIdFromInbox()` gồm tối đa:
+1. `await le(this.pageId)` — nạp base page
+2. `await ee.preloadDocIds({…})` — fetch HTML + bóc doc_id
+3. `a.graphql(Jt, …)` — nguồn 1
+4. `a.graphql(Zt, …)` + gọi đệ quy `r()` — nguồn 2
+5. `this.findThread({…})` → `graphqlbatch(rt/st)` — nguồn 3
+6. `this.getUserInboxByName(a)` → fetch HTML + `loadDocIdsFromView` — nguồn 4
+
+⇒ **4 request graphql + 2 lần fetch HTML**, mỗi bước có nhịp/retry riêng.
+
+### 24.2 ĐÃ SỬA: `timeout: 5000` → `14000`
+
+5 000 ms chỉ đủ khi `this.globalId` đã có sẵn (nhánh `Promise.resolve`). Ca phải **dò thật** —
+đúng nhóm khó cần nhất — gần như chắc chắn hết hạn ⇒ adapter trả `{success:false, data:null}`
+⇒ script kết luận "không ra gid" **trong khi ext vẫn đang chạy**.
+
+Trần theo hợp đồng adapter: `REPLY_INBOX_PHOTO ∉ u`
+(`u = Set(["CONFIG_ROUTING_APP","CACHE_PAGES_ROUTING_APP"])`) ⇒ trần chung `l = 3e4`.
+Chọn **14 000 ms**: đủ 2–3 lượt graphql (đo `HTTP fetch p50 1461 ms`) mà vẫn dưới trần chung.
+Lệnh **chỉ đọc** (trả link + gid) ⇒ chờ lâu hơn **không thể** sinh tin trùng.
+
+### 24.3 ĐÃ SỬA: đọc `globalId` top-level
+
+Ext trả `{type, taskId, link, globalId}`; adapter app bọc `{success, data:n}` ⇒ `mlRes.data.globalId`
+(đường cũ, đúng). Adapter riêng `__botfake` bọc phẳng `{success, globalId}` ⇒ phải đọc thêm
+`mlRes.globalId`, và `link` cũng vậy. Thêm lọc chuỗi `"null"`.
+
+### 24.4 Đã kiểm — KHÔNG cần sửa
+
+| Lệnh | Lý do |
+|---|---|
+| `Z()` (chạy trước mọi case) | Bộ đếm `requestCount`; >10 thì reset + `Fs()` nạp lại base. Không đổi kết quả |
+| `ae.startCheck(pageId, fn, a=!0, r=!1)` | ĐỔI PROFILE FB rồi mới chạy `fn` (`FIRST_TRY_DOING_TASK_WITHOUT_SWITCH_PROFILE` → thử ngay, lỗi mới đổi). Script đi thẳng `REPLY_INBOX_PHOTO` ⇒ đúng, không cần tự đổi profile |
+| `GET_IMG_FROM_SHARED_ATTACHMENT` | Trả `url` ảnh trong tin chia sẻ. Script tự upload qua `/v1/contents` |
+| `GET_IG_CONTACT_ID` | Chỉ cho IG (`findContactId(customerName)`). Script gửi Facebook |
+| `GET_POST_ID_FROM_LINK` | Comment/post. Script không dùng |
+| `VALIDATE_SEND_IGD_INBOX` | Kiểm tra quyền gửi IGD. Script không gửi IGD |
+| `REPLY_INBOX_PRODUCT` `REACT_MESSAGE` `SEND_STICKER_COMMENT` `SEND_PRIVATE_REPLY` `REPLY_INBOX_FILE_ZALO_OA` | Kênh khác (sản phẩm/reaction/sticker/riêng/Zalo) — script chỉ gửi text + ảnh |
+
+### 24.5 Cập nhật bảng phủ
+
+| | trước §22 | sau §23–§24 |
+|---|---|---|
+| case thật của adapter | 68 | 68 |
+| đã đối soát | 7 | **13** |
+| còn lại | 61 | **55** |
+
+13 case đã phủ: 7 case script gửi + `ENABLE_FIND_THREAD_BY_USERNAME` + `WAKE_UP` +
+`CHECK_EXTENSION` + `REPORT_EXTENSION_STATUS` + `PREINITIALIZE_PAGES` + `GET_FB_MSG`.

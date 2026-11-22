@@ -4374,17 +4374,50 @@
             conversationUpdatedTime: isNaN(updMs) ? Date.now() : updMs,
             customerName: custName,
             platform: 'facebook',
-          }, { timeout: 5000 })).then((mlRes) => {
+          /* ═══ [v1.93.13] 5 000 ms LÀ QUÁ NGẮN — `MAKE_MESSENGER_LINK` CŨNG ĐI QUA `Ee.init()` ═══
+           * Nguồn `0.5.62_0/assets/background.js`:
+           *   case"MAKE_MESSENGER_LINK": … new k_({…, uiVersion:b, globalId:v, …}).init()
+           *   k_.handleFacebook(): case 3,4,6,7 ⇒ return this.getGlobalId().then(…)   // KHÔNG phải chỉ tạo link
+           *   k_.getGlobalId(): this.globalId ? resolve : new Ee({convType:"INBOX", …}).init()
+           *   Ee.init() → getGlobalIdFromInbox():
+           *       const t = await le(this.pageId)                       // ① nạp base page
+           *       … && await ee.preloadDocIds({pageId, isBusiness})     // ② fetch HTML + bóc doc_id
+           *       a.graphql(Jt, …)                                      // ③ nguồn 1
+           *       a.graphql(Zt, …) + r() đệ quy                        // ④ nguồn 2 (+đệ quy)
+           *       this.findThread({…}) → graphqlbatch(rt/st)            // ⑤ nguồn 3
+           *       this.getUserInboxByName(a) → fetch HTML + loadDocIds  // ⑥ nguồn 4
+           *   ⇒ tối đa 4 request graphql + 2 lần fetch HTML, MỖI lần đều có retry/nhịp riêng.
+           * 5 000 ms chỉ đủ cho trường hợp `this.globalId` đã có sẵn. Khi phải DÒ THẬT
+           * (đúng nhóm ca khó ta cần nhất) thì gần như chắc chắn hết hạn ⇒ adapter trả
+           * `{success:false, data:null}` ⇒ script coi là "không ra gid" dù ext vẫn đang chạy.
+           *
+           * Trần đúng phải theo hợp đồng adapter: `REPLY_INBOX_PHOTO` ∉ `u`
+           * (`u = Set(["CONFIG_ROUTING_APP","CACHE_PAGES_ROUTING_APP"])`) ⇒ trần chung `l = 3e4`.
+           * Lấy **14 000 ms**: đủ cho 2–3 lượt graphql (đo p90 dò lịch sử ~1,4 s/request ở
+           * `HTTP fetch p50 1461ms`) mà vẫn ngắn hơn trần chung, để không giữ lane Ext quá lâu.
+           * Đây là lệnh CHỈ ĐỌC (trả link + gid), không gửi tin ⇒ chờ lâu hơn KHÔNG thể sinh trùng. */
+          }, { timeout: 14000 })).then((mlRes) => {
             if (mlRes && mlRes.success && mlRes.data) {
-              let mlGid = mlRes.data.globalId || '';
-              if (!mlGid && mlRes.data.link) {
+              /* [v1.93.13] ĐỌC CẢ TOP-LEVEL — cùng lỗi hình dạng như `GET_GLOBAL_ID_FOR_CONV`.
+               * Ext trả: `{type:"MAKE_MESSENGER_LINK_SUCCESS", taskId, link, globalId}`
+               * (k_.handleFacebook: `…, e.port.postMessage({…, link:V, globalId:z})`).
+               * Adapter app bọc `{success, data: n}` ⇒ `mlRes.data.globalId` (đường cũ, đúng).
+               * Adapter RIÊNG (`__botfake`) bọc phẳng `{success, globalId}` ⇒ đọc thêm `mlRes.globalId`.
+               * Và `globalId` có thể là `null`/rỗng khi `uiVersion` rơi nhánh 1|2|5 ⇒ lúc đó mới
+               * phải bóc `selected_item_id` từ `link` (link nhánh đó KHÔNG có selected_item_id,
+               * nên vế sau chỉ có tác dụng với link nhánh 3|4|6|7). */
+              let mlGid = (mlRes.data && mlRes.data.globalId) || mlRes.globalId || '';
+              const mlLink = (mlRes.data && mlRes.data.link) || mlRes.link || '';
+              if (!mlGid && mlLink) {
                 try {
-                  const qStr = String(mlRes.data.link).split('?')[1] || String(mlRes.data.link);
+                  const qStr = String(mlLink).split('?')[1] || String(mlLink);
                   const sel = new URLSearchParams(qStr).get('selected_item_id');
                   if (sel && /^\d+$/.test(sel)) mlGid = sel;
                 } catch (e3) { /* ignore */ }
               }
-              if (mlGid && String(mlGid) !== badGid) { finishExt(mlGid, 'ext'); return; }
+              if (mlGid && String(mlGid) !== badGid && String(mlGid) !== 'null') {
+                finishExt(String(mlGid), 'ext'); return;
+              }
             }
             finishExt(null, 'ext');
           }).catch(() => finishExt(null, 'ext'));
