@@ -2052,6 +2052,20 @@ check('[mlink] gửi customerName (nguồn ③④)', /customerName: custName/.te
 check('[mlink] gửi conversationUpdatedTime (timeCursor nguồn ③)', /conversationUpdatedTime: updMs/.test(_mlSeg), true);
 check('[mlink] gửi isBusiness (chọn host nhánh 1|2|5)', /isBusiness: true/.test(_mlSeg), true);
 
+/* ═══ (X) [v1.93.15] `rescue_mode_inbox` phải xác thực như ext (Bearer jwt từ cookie) ═══
+ * ext: `Ne(token, path)` → `{url, headers: {Authorization: "Bearer " + <cookie jwt>}}`;
+ * `Ce` gửi `headers + Content-Type: application/json`. Script cũ chỉ thêm `?access_token=`.
+ * LUỒNG LISTEN CỦA EXT ĐÃ CHẾT (`Oc.listen`: `if (shouldStop || !ctx.loggedIn) return`, và
+ * `ctx.loggedIn =` xuất hiện 0 lần) ⇒ `rescue_mode_inbox` là đường DUY NHẤT còn dùng được. */
+check('[rescue] dùng Bearer jwt như ext (không chỉ access_token)',
+  /authHeader: 'jwt'/.test(stripComments(SRC)), true);
+check('[rescue] có nhánh LÙI về access_token khi Bearer thất bại',
+  /lùi về đường cũ \(access_token\)/.test(SRC), true);
+check('[bgFetch] KHÔNG thêm access_token khi đã có authHeader',
+  /!_authHdr && !\/\[\?&\]access_token=\/\.test\(swUrl\)/.test(stripComments(SRC)), true);
+check('[bgFetch] gửi authMode jwt xuống SW (nơi có chrome.cookies)',
+  /authMode: _authHdr === 'jwt' \? 'jwt' : null/.test(stripComments(SRC)), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));

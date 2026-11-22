@@ -2893,3 +2893,61 @@ adapter.send({ type:'MAKE_MESSENGER_LINK', pageId, convId: key, threadId,
 đây là biến cấp hàm chứ không phải biến trong khối (đúng cái bẫy đã ghi ở Errors mục ③).
 
 **Test khoá (5 kịch bản `(W)`).** `npm test`: **424**.
+
+---
+
+## 44. `class Oc` (LISTEN_INBOX) — luồng CHẾT, nên `rescue_mode_inbox` là đường duy nhất; và script gọi nó SAI cách xác thực
+
+### 44.1 Luồng listen chết: `loggedIn` không bao giờ được gán
+
+```js
+// ext 0.5.62 — class Oc
+listen(e){ if (this.shouldStop || !this.ctx.loggedIn) return;      // ← THOÁT NGAY, luôn luôn
+  … this.graphqlbatch(Dc, Tc, {limit:10, before:null, tags:["INBOX"], …}) … }
+```
+`grep -c "loggedIn"` toàn bundle = **1** (đúng dòng điều kiện đó); `ctx.loggedIn =` = **0**.
+Constructor chỉ đặt `this.ctx = {clientID: …}`. ⇒ `listen()` **luôn** return ở dòng đầu ⇒
+`handle_list_threads` / `load_list_messages` / `handle_list_messages` / `trigger_to_pancake`
+**không bao giờ chạy**.
+
+Nghĩa là: đường "extension tự kéo tin từ FB về Pancake" **không tồn tại trong thực tế**, dù mã có
+đủ. Đây là xác nhận cho §25.1 bằng đếm chính xác (trước đó chỉ ghi nhận).
+
+### 44.2 Hệ quả: script phải tự gọi `rescue_mode_inbox` — và đang gọi SAI xác thực
+
+```js
+// ext — cách một call Pancake được dựng
+class Yi{ headers(e={}){ return {...e, Authorization: `Bearer ${<phiên>}`} }
+          url(e){ return `${this.apiBase}${e}` } }
+vc  = async(n,e) => (await chrome.cookies.getAll({url:n, name:"jwt"}))
+                     .find(s => s.hostOnly && s.value)?.value          // ← token = COOKIE `jwt`
+Ne  = (n,e) => { if (!(n instanceof Yi)) throw new Error("missing_pancake_session");
+                 return {url:n.url(e), headers:n.headers()} }
+Ce  = async(n,e,t={},a={}) => la(n, {method:"POST",
+        headers:{...a.headers, "Content-Type":"application/json"}, body:e, params:t}, …)
+trigger_to_pancake(e){ const {url:t, headers:a} = Ne(this.accessToken, `/v1/pages/${this.page_id}/rescue_mode_inbox`);
+  return await Ce(t, {message_ids:e}, {}, {headers:a}) }
+```
+
+**Hai điểm sai của script cũ:**
+1. Xác thực bằng `?access_token=` (qua `bgFetchJson`) trong khi ext dùng
+   **`Authorization: Bearer <jwt đọc từ cookie>`** ⇒ dễ 401/403 ⇒ `rescue` im lặng thất bại
+   (hàm `.catch(() => false)`), và ca ⚠/❌ vẫn bị chốt oan.
+2. Body: `{message_ids: [...]}` — **đã đúng** hình dạng (`Ce(t, {message_ids:e}, …)`), không sửa.
+
+### 44.3 ĐÃ SỬA
+
+- `bgFetchJson` nhận thêm `authHeader` / `headers` / `authMode` ⇒ khi `authHeader: 'jwt'` thì
+  **KHÔNG** thêm `access_token` vào query (đúng hình dạng request của ext) và gửi
+  `headers: {__botfakeAuth: 'jwt'}` + `authMode: 'jwt'` để phía SW (nơi CÓ `chrome.cookies`)
+  tự gắn Bearer.
+- `rescueInboxMessages`: thử **Bearer trước**; chỉ khi thất bại mới lùi về `access_token` như cũ.
+  Vẫn **CHỈ ĐỌC** — không gửi tin, không thể sinh trùng.
+
+**Giới hạn phải nói rõ:** phía SW nhận `authMode: 'jwt'` cần hỗ trợ (đọc cookie `jwt`, gắn
+Bearer). Nếu bản SW đang chạy chưa có nhánh đó, request đầu sẽ lỗi và script **lùi về đường cũ**
+⇒ hành vi không tệ hơn trước, nhưng cũng **chưa** chắc cứu được. Cần log `rescue` để xác nhận
+đường nào thắng — hiện `verifyStats.rescued` chỉ đếm 1 lần/phiên.
+
+**Test khoá:** `rescueInboxMessages` có `authHeader: 'jwt'`; `bgFetchJson` không thêm
+`access_token` khi có `authHeader`; có nhánh lùi `access_token`.

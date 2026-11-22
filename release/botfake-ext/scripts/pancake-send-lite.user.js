@@ -774,11 +774,30 @@
       /* `message_ids` phải là id THẬT của tin trên FB. Script chỉ biết id tin của Pancake
        * (`message_id` sau khi gửi) nên KHÔNG tự bịa id. Chỉ nhận id do nơi gọi đưa vào
        * (vd. `res.data.messageId` của REPLY_INBOX_PHOTO_SUCCESS có thể là id FB). */
-      const tok = getToken() || '';
       const body = { message_ids: ids };
       const url0 = apiBase() + '/v1/pages/' + pageId + '/rescue_mode_inbox';
-      return bgFetchJson(url0, 2, { method: 'POST', bodyObj: body, timeoutMs: 12000 })
-        .then((r) => !!(r && (r.ok || r.success)))
+      /* ═══ [v1.93.15] HAI ĐIỂM SAI ĐÃ SỬA ═══
+       * ① ext KHÔNG gửi `{message_ids: [...]}` — `Ce` nhận `body` là **giá trị nguyên**:
+       *      Ce = async(n, e, t={}, a={}) => la(n, { method:"POST", headers:{…}, body:e, params:t }, …)
+       *      trigger_to_pancake(e){ … return await Ce(t, { message_ids: e }, {}, { headers: a }) }
+       *    ⇒ body là JSON `{"message_ids": e}` — nhưng ở tầng `la` nó còn được bọc/xử lý;
+       *    với `BOTFAKE_BG_FETCH` script thì `bodyObj` được serialize thành JSON ⇒ TƯƠNG ĐƯƠNG.
+       *    Giữ `bodyObj: {message_ids}` (không đổi) — đã đúng hình dạng.
+       * ② XÁC THỰC: ext đi bằng `Authorization: Bearer <jwt từ cookie "jwt">`, KHÔNG bằng
+       *    `?access_token=`. Script cũ (qua `bgFetchJson`) chỉ thêm `access_token` ⇒ dễ 401/403.
+       *    Nay: thử Bearer trước; nếu không gửi được (SW không đọc được cookie) thì lùi về
+       *    `access_token` như cũ — vẫn CHỈ ĐỌC, không gửi tin. */
+      return bgFetchJson(url0, 2, {
+        method: 'POST', bodyObj: body, timeoutMs: 12000,
+        authHeader: 'jwt', headers: null,
+      })
+        .then((r) => {
+          if (r && (r.ok || r.success)) return true;
+          /* lùi về đường cũ (access_token) — không tăng số lần gọi khi đường đầu đã thành công */
+          return bgFetchJson(url0, 1, { method: 'POST', bodyObj: body, timeoutMs: 12000 })
+            .then((r2) => !!(r2 && (r2.ok || r2.success)))
+            .catch(() => false);
+        })
         .catch(() => false);
     } catch (e) { return Promise.resolve(false); }
   }
@@ -1605,13 +1624,37 @@
 
   function bgFetchJson(url, tries, reqOpts) {
     let swUrl = String(url || '');
-    if (swUrl && !/[?&]access_token=/.test(swUrl)) {
+    const _authHdr = reqOpts && reqOpts.authHeader;
+    /* Đọc cookie `jwt` (hostOnly) — ĐÚNG như `vc` của ext:
+     *   vc = async(n,e) => (await chrome.cookies.getAll({url:n, name:"jwt"})).find(s=>s.hostOnly&&s.value)?.value
+     * Trang web KHÔNG đọc được cookie httpOnly ⇒ phải đi qua extension. Ở đây ta KHÔNG có API
+     * riêng để hỏi ext lấy cookie, nên dùng chính request của ext: `BOTFAKE_BG_FETCH` được SW
+     * xử lý (cùng SW đã gửi `Ac`/`Yi`); ta chỉ cần đặt cờ `authHeader: 'jwt'` và để SW gắn
+     * Bearer. Nếu SW không hỗ trợ thì request trả lỗi và ta lùi về `access_token`.
+     * ⇒ `_jwtHeaders` là CỜ, không phải token: giá trị gửi đi là `{ __botfakeAuth: 'jwt' }`
+     * để phía SW nhận biết mà tự lấy cookie của chính nó (nó có `chrome.cookies`). */
+    const _jwtHeaders = _authHdr === 'jwt' ? { __botfakeAuth: 'jwt' } : null;
+    /* ═══ [v1.93.15] `Authorization: Bearer <jwt>` — ĐÚNG CÁCH EXT XÁC THỰC PANCAKE ═══
+     * ext 0.5.62:
+     *   class Yi{ constructor(e,t){ …, this.apiBase=t } url(e){ return `${this.apiBase}${e}` }
+     *             headers(e={}){ return {...e, Authorization:`Bearer ${cn(...)}`} } }
+     *   vc = async(n,e) => (await chrome.cookies.getAll({url:n, name:"jwt"})).find(s=>s.hostOnly&&s.value)?.value
+     *   Ne = (n,e) => { if (!(n instanceof Yi)) throw new Error("missing_pancake_session");
+     *                   return { url:n.url(e), headers:n.headers() } }
+     *   Ce = async(n, e, t={}, a={}) => la(n, {method:"POST",
+     *          headers:{...a.headers, "Content-Type":"application/json"}, body:e, params:t}, …)
+     * ⇒ mọi call Pancake của ext đi bằng **Bearer jwt từ cookie**, KHÔNG bằng `?access_token=`.
+     * `rescue_mode_inbox` là một trong số đó. Khi truyền `authHeader` thì KHÔNG thêm
+     * `access_token` vào query nữa (đúng hình dạng request của ext). */
+    if (swUrl && !_authHdr && !/[?&]access_token=/.test(swUrl)) {
       const tok = getToken() || 'cookie_session';
       swUrl += (swUrl.indexOf('?') > -1 ? '&' : '?') + 'access_token=' + encodeURIComponent(tok);
     }
     return extCall({
       type: 'BOTFAKE_BG_FETCH',
       url: swUrl,
+      headers: (reqOpts && (reqOpts.headers || _jwtHeaders)) || null,
+      authMode: _authHdr === 'jwt' ? 'jwt' : null,
       tries: tries || 3,
       method: (reqOpts && reqOpts.method) || 'GET',
       bodyObj: (reqOpts && reqOpts.bodyObj) || null,
