@@ -740,6 +740,49 @@
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
+  /* ═══ [v1.93.13] `/rescue_mode_inbox` — ÉP PANCAKE KÉO LẠI TIN TỪ FACEBOOK ═══
+   * Nguồn `0.5.62_0/assets/background.js` (`class Oc` = LISTEN_INBOX):
+   *   async trigger_to_pancake(e){
+   *     const { url:t, headers:a } = Ne(this.accessToken, `/v1/pages/${this.page_id}/rescue_mode_inbox`);
+   *     return await Ce(t, { message_ids: e }, {}, { headers: a } ); }
+   *   handle_list_messages(e,t){ const a = t.nodes.map(s => s.message_id);
+   *     const r = await this.trigger_to_pancake(a);
+   *     if(r.success && r.continue && t.page_info?.has_previous_page) …load_list_messages(…, before) }
+   *
+   * Nghĩa: ext đọc danh sách `message_id` trên **facebook.com** (graphql `MessengerGraphQLThreadFetcher`),
+   * rồi gọi endpoint Pancake này để Pancake KÉO LẠI các tin đó từ FB về hội thoại.
+   * ⇒ Đây là cách DUY NHẤT trong extension khiến server Pancake **cập nhật ngay** những tin
+   * FB ĐÃ NHẬN mà Pancake chưa hiển thị.
+   *
+   * VÌ SAO SCRIPT CẦN — đo được (log 22/11 09:54, lô 8 572):
+   *   • ACK rejected 3 552 ⇒ 3 547 ca ⚠ "kiểm chứng: đọc 4 lần chưa thấy tin — GIỮ ⚠"
+   *   • `HTTP không có gid 56` · `can_inbox=false 0/56` — tức yêu cầu gửi ĐÃ tới Pancake
+   *   • nhưng `/conversations/{id}/messages` trả KHÔNG có tin đó ⇒ script kết luận "chưa đi"
+   *   Trong khi đó FB trả ACK rejected: FB nói KHÔNG nhận ⇒ hai nguồn nói khác nhau.
+   *   Có những ca FB ĐÃ nhận (tin nằm trên Messenger) mà Pancake chưa kéo về ⇒ script đọc
+   *   lịch sử 4 lần đều rỗng ⇒ chốt ⚠ oan (hoặc ❌ oan) ⇒ mất tin / gửi tay sai.
+   *   `/rescue_mode_inbox` giải đúng ca đó.
+   *
+   * AN TOÀN: hàm này KHÔNG gửi tin, KHÔNG tạo tin. Nó chỉ bảo Pancake ĐỌC LẠI từ FB và
+   * đồng bộ vào hội thoại ⇒ không thể sinh tin trùng. Gọi nhiều lần vô hại.
+   * Chỉ gọi khi các lần đọc lịch sử đều KHÔNG thấy tin (không gọi tràn lan). */
+  function rescueInboxMessages(pageId, messageIds) {
+    try {
+      const ids = (Array.isArray(messageIds) ? messageIds : [])
+        .map((x) => String(x == null ? '' : x)).filter((x) => /^\d+$/.test(x));
+      if (!ids.length) return Promise.resolve(false);
+      /* `message_ids` phải là id THẬT của tin trên FB. Script chỉ biết id tin của Pancake
+       * (`message_id` sau khi gửi) nên KHÔNG tự bịa id. Chỉ nhận id do nơi gọi đưa vào
+       * (vd. `res.data.messageId` của REPLY_INBOX_PHOTO_SUCCESS có thể là id FB). */
+      const tok = getToken() || '';
+      const body = { message_ids: ids };
+      const url0 = apiBase() + '/v1/pages/' + pageId + '/rescue_mode_inbox';
+      return bgFetchJson(url0, 2, { method: 'POST', bodyObj: body, timeoutMs: 12000 })
+        .then((r) => !!(r && (r.ok || r.success)))
+        .catch(() => false);
+    } catch (e) { return Promise.resolve(false); }
+  }
+
   function apiBase() {
     // getHostname() trong _app: dev.pages.fm → https://dev.pancake.vn/api; còn lại → origin + /api
     if (location.hostname === 'dev.pages.fm') return 'https://dev.pancake.vn/api';
@@ -11638,6 +11681,48 @@
          * Đặt SAU các cổng quyết định, để không vô hiệu hoá cổng 🚫 của 1.93.1.
          * Đường này CHỈ ĐỌC ⇒ bỏ nó không thể sinh tin trùng, không thể chốt ✅ oan. */
         if (socksProof === 'absent') {
+          /* ═══ [v1.93.13] TRƯỚC KHI BỎ CUỘC: ÉP PANCAKE KÉO LẠI TIN TỪ FB ═══
+           * Đây đúng là ca "hội thoại KHÔNG có tin" ⇒ nếu FB ĐÃ nhận mà Pancake chưa đồng bộ
+           * thì `proveAbsentBeforeBu` sẽ nói 'absent' SAI. Extension có sẵn đường sửa:
+           * `Oc.trigger_to_pancake()` → `POST /v1/pages/{pageId}/rescue_mode_inbox {message_ids}`.
+           * (xem chú thích đầy đủ ở `rescueInboxMessages`)
+           *
+           * GIỚI HẠN THẬT: hàm đó cần `message_id` CỦA FB. Script chỉ có id tin Pancake.
+           * Vì vậy ở đây chỉ gọi khi TA CÓ id nghi vấn; không có thì thôi (không bịa id,
+           * không gọi tràn lan). Dù vậy hàm này KHÔNG gửi tin ⇒ gọi vô hại.
+           * Sau khi gọi, đọc lại lịch sử 1 lần nữa: nếu thấy tin ⇒ ✅ thật (không gửi lại). */
+          /* Nguồn id THẬT duy nhất script có: `extMsgIdByConv[conv.id]` — sổ ghi `messageId`
+           * từ `REPLY_INBOX_PHOTO_SUCCESS` (extension trả `messageId = payload.actions[0].message_id`,
+           * xem `parseSuccessResponse`). Đó LÀ id tin trên FB ⇒ dùng được cho `message_ids`.
+           * Ca chưa từng đi qua Extension thì không có id ⇒ không gọi (không bịa id). */
+          const _rec = extMsgIdByConv[conv.id];
+          const _rid = _rec && _rec.messageId && /^\d+$/.test(String(_rec.messageId))
+            ? [String(_rec.messageId)] : null;
+          if (_rid && _rid.length && !verifyStats.rescued) {
+            verifyStats.rescued = 1;
+            return Promise.resolve()
+              .then(() => rescueInboxMessages(pageId, _rid))
+              .then((okRescue) => {
+                if (!okRescue) return null;
+                return new Promise((res) => {
+                  bgClock.wait(1500).then(() => {
+                    confirmViaSnippet(conv, f, pageId, convId, want, sentAt)
+                      .then((sn2) => res(sn2)).catch(() => res(null));
+                  });
+                });
+              })
+              .then((sn3) => {
+                if (sn3 === 'yes' && myRun === runSeq && !deliveredIds[conv.id]) {
+                  markDelivered(conv.id, 'socket');
+                  try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
+                  logFailGrouped(nm, 'sau rescue_mode_inbox: hội thoại ĐÃ có tin ⇒ tính ✅ Socket (không gửi lại)', '🔎', conv.id);
+                  return;
+                }
+                verifyStats.held = (verifyStats.held || 0) + 1;
+              })
+              .catch(() => { verifyStats.held = (verifyStats.held || 0) + 1; })
+              .then(() => { try { updateBatchSummaryUI(); } catch (e) { /* ignore */ } });
+          }
           verifyStats.held = (verifyStats.held || 0) + 1;
           return;
         }

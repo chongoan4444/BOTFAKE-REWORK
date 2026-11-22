@@ -1500,3 +1500,93 @@ Ext trả `{type, taskId, link, globalId}`; adapter app bọc `{success, data:n}
 
 13 case đã phủ: 7 case script gửi + `ENABLE_FIND_THREAD_BY_USERNAME` + `WAKE_UP` +
 `CHECK_EXTENSION` + `REPORT_EXTENSION_STATUS` + `PREINITIALIZE_PAGES` + `GET_FB_MSG`.
+
+---
+
+## 25. `class Oc` (LISTEN_INBOX) — listener CHẾT + `/rescue_mode_inbox` chưa dùng
+
+### 25.1 `this.ctx.loggedIn` KHÔNG BAO GIỜ ĐƯỢC GÁN — listener chết ngay dòng đầu
+
+```js
+class Oc{ constructor(e,t){ this.accessToken=e; this.page_id=t;
+                               this.ctx={clientID: (Math.random()*2147483648|0).toString(16)} }
+  start(){ this.currentlyRunning || this.startup() }
+  async startup(e){ const a = await k("https://www.facebook.com/"+this.page_id+"/inbox/");
+    … t.ctx.userID / t.ctx.dtsg / t.ctx.ttstamp / t.ctx.server_revision / t.ctx.client_revision /
+      t.ctx.sync_sequence_id / t.ctx.sequence_id …
+    t.reset(); t.listen(); }                       // ← KHÔNG gán ctx.loggedIn
+  listen(e){ if(this.shouldStop || !this.ctx.loggedIn) return;   // ← luôn TRUE ⇒ thoát
+    …graphqlbatch(Dc="MessengerGraphQLThreadlistFetcher", Tc="1890618264322526", {limit:10,…})… } }
+```
+
+**Đo trên toàn bộ file (412 772 byte):**
+- `loggedIn` xuất hiện **1 lần duy nhất** — chính dòng `!this.ctx.loggedIn` trên.
+- `loggedIn =` / `loggedIn=` ⇒ **0 lần**.
+
+⇒ `this.ctx.loggedIn` là `undefined` ⇒ `!undefined === true` ⇒ `listen()` **return ngay lần gọi đầu**.
+Listener INBOX của extension 0.5.62 **chưa bao giờ chạy**: không `graphqlbatch`, không
+`handle_list_threads`, không `load_list_messages`, không `trigger_to_pancake`.
+
+**Đây là lỗi của extension, không phải của script.** Script không thể sửa. Ghi nhận vì:
+- mọi kỳ vọng "extension sẽ tự đẩy tin vào Pancake" trong các bản trước là **SAI CƠ SỞ**;
+- nó giải thích vì sao chỉ có đường Socket + đọc lịch sử mới phát hiện được tin đã tới.
+
+### 25.2 `/rescue_mode_inbox` — đúng đường cần, script chưa từng gọi
+
+```js
+async trigger_to_pancake(e){ const {url:t, headers:a} =
+    Ne(this.accessToken, `/v1/pages/${this.page_id}/rescue_mode_inbox`);
+  return await Ce(t, { message_ids: e }, {}, { headers:a }) }
+```
+Endpoint này bảo **Pancake kéo lại** các `message_id` (id tin trên FB) từ Facebook về hội thoại.
+Do §25.1, extension **không bao giờ** gọi nó.
+
+**ĐO ĐƯỢC vì sao script cần** (log 22/11 09:54):
+- `ACK rejected 3 552` ⇒ `3 547 ca ⚠` với lý do `kiểm chứng: đọc 4 lần chưa thấy tin — GIỮ ⚠`
+- đồng thời `HTTP không có gid 56` · `can_inbox=false 0/56` ⇒ yêu cầu gửi **đã tới Pancake**
+- Nghĩa: yêu cầu gửi đi được, FB trả "không nhận", Pancake không hiển thị tin ⇒ script không
+  phân biệt được "FB không nhận" với "FB ĐÃ nhận nhưng Pancake chưa kéo về".
+
+**ĐÃ THÊM** `rescueInboxMessages(pageId, messageIds)`:
+- chỉ dùng id THẬT: lấy `extMsgIdByConv[conv.id].messageId` — sổ ghi từ
+  `REPLY_INBOX_PHOTO_SUCCESS` (`parseSuccessResponse → messageId = payload.actions[0].message_id`).
+  **Không bịa id**; ca không có id thì không gọi.
+- gọi **1 lần/ca**, chỉ ở chỗ đã `socksProof === 'absent'` (đọc 4 lần không thấy) và sắp bỏ cuộc;
+- sau khi gọi, `confirmViaSnippet` lại 1 lần: thấy tin ⇒ `markDelivered` ✅ (không gửi thêm).
+- **KHÔNG gửi tin, KHÔNG tạo tin** — chỉ bảo Pancake đọc lại từ FB ⇒ không thể sinh tin trùng.
+
+**Hạn chế phải nói rõ:** đường này chỉ chạy cho ca **đã từng đi qua Extension và có `messageId`**.
+Ca Socket thuần (phần lớn 3 547 ca ⚠) **không có id FB** ⇒ script vẫn không cứu được bằng đường này.
+Muốn cứu nhóm đó phải có id FB từ Socket — hiện **chưa có**.
+
+### 25.3 Phần chạy TRƯỚC `switch` — mọi lệnh bị xếp hàng tuần tự
+
+```js
+chrome.runtime.onConnect.addListener(function(n){ … let t = Promise.resolve();
+  n.onMessage.addListener(async function(a){ …
+    const s = r.data.type, i = Ns(tab.url), o = Mm.has(s),
+          c = t.then(() => o ? Ac(n.sender, r.data.accessToken, r.data.cookieSession===!0) : null);
+    t = c.catch(() => null);                       // ← MỌI lệnh xếp hàng SAU lệnh trước
+    const l = await c;
+    if(o){ if(!l && Gm.has(s)) return; r.data.accessToken = l }
+    switch(s){ … } }) })
+```
+- `Mm = {LISTEN_WS, LISTEN_INBOX, LISTEN_IG_COMMENT, CRAWL_ARTICLE_ZALO_OA, SEND_COMMENT,
+  REPLY_INBOX_PHOTO, LOAD_ECOMMERCE_PRODUCT, UPLOAD_MEDIA_TO_PANCAKE}`
+- `Gm = {LISTEN_WS, LISTEN_INBOX, LISTEN_IG_COMMENT, CRAWL_ARTICLE_ZALO_OA}`
+
+⇒ `REPLY_INBOX_PHOTO` ∈ `Mm` nhưng **∉** `Gm` ⇒ lấy token thất bại vẫn chạy (`accessToken = null`).
+⇒ `GET_GLOBAL_ID_FOR_CONV` / `BATCH_GET_GLOBAL_ID` / `PRELOAD_DOC_IDS` / `MAKE_MESSENGER_LINK` /
+`UPLOAD_INBOX_PHOTO` **∉ `Mm`** ⇒ KHÔNG qua `Ac` ⇒ đi ngay.
+⇒ NHƯNG mọi lệnh đều bị **serialize** bởi `t = c`. Ở lô 8 572 chat, script bắn 192 lệnh song song
+thì extension xử lý **tuần tự** ⇒ phần lớn thời gian chờ là xếp hàng, không phải xử lý.
+Đây là lý do `Ext p90 0ms → timeout 7000ms` và đỉnh `Ext dò 4 (đỉnh 14)`.
+
+**Không sửa** — script không điều khiển được hàng đợi nội bộ extension. Ghi nhận để đọc đúng
+số đo: `Ext: Extension không phản hồi` phần lớn là **chờ hàng**, không phải ext chết.
+
+### 25.4 Cập nhật bảng phủ
+
+14 case đã đối soát: 7 case script gửi + `ENABLE_FIND_THREAD_BY_USERNAME` + `WAKE_UP` +
+`CHECK_EXTENSION` + `REPORT_EXTENSION_STATUS` + `PREINITIALIZE_PAGES` + `GET_FB_MSG` +
+`LISTEN_INBOX` (kèm `class Oc` + `/rescue_mode_inbox`).
