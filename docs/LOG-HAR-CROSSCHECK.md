@@ -735,3 +735,69 @@ tới ❌ — bỏ bù, bỏ gửi tay. Chỉ-đọc.
 
 ⇒ Người dùng **không còn bị dụ gửi tay** vào 1 197 chat mà máy đã biết là chết.
 Đây là "báo ✅ sai" theo chiều ngược lại — và là lỗi lớn nhất của cả phiên.
+
+---
+
+## 14. GỠ 1.93.12 — nhánh sửa đó CHẾT (1.93.13)
+
+### 14.1 Điều kiện đã thêm không bao giờ đúng ở lô lớn
+
+1.93.12 thêm:
+
+```js
+const _psidRejected = !!(raw && raw.kind === 'rejected' && ctx && ctx.gidFromPsid);
+const isConfirmedUnavailable = _psidRejected || !!(ctx && ctx.socketRetriedOnce);
+```
+
+`ctx.gidFromPsid = true` chỉ được gán ở **đúng 2 chỗ**, cả hai đều là bước 4 `psid-guess`:
+
+```
+4114:  const isLargeBatch = !!(batchStats && batchStats.total > 50);
+4119:    if (isLargeBatch) { ctx.gidUnknown = true; … return null; }   ← chặn 4127
+4551:    if (isLargeBatch) { return null; }                            ← chặn 4559
+4127:      ctx.gidFromPsid = true;
+4559:        ctx.gidFromPsid = true;
+```
+
+⇒ Mọi lô **> 50 chat** không bao giờ có `gidFromPsid === true` ⇒ `_psidRejected` luôn `false`.
+
+### 14.2 Đối chứng bằng log 1.93.12 (22/11 08:32, lô 1 672 chat)
+
+```
+script 1.93.12-W200.123
+✅ 1 059 · ❌ 43 · ⚠ 570 · 🖐 gửi tay 570
+khách không nhận được (đã đo): 0
+chốt NGAY vì FB từ chối dứt khoát: 0 ca
+retry lần 0
+Chẩn đoán globalId: cache 1628 · HTTP 0 · WS 0 · Ext 0 · cứu thiếu globalId 43
+```
+
+`chốt NGAY = 0` và `khách không nhận được = 0` ⇒ đúng nhánh 1.93.12 **chưa từng chạy**.
+`cache 1628 / cứu thiếu globalId 43` ⇒ gid đến từ cache và làn API, **không** từ PSID đoán.
+
+### 14.3 Kết luận
+
+Gỡ về đúng logic 1.93.11. Giữ lại khối chú thích để lần sau không sửa lại y hệt.
+
+**Điều KHÔNG chứng minh được:** nguồn sinh 570 ca ⚠ của lô 08:32. `570 ⚠` khớp đúng
+`570 ACK rejected`, nhưng log xuất **0 dòng sổ kiểm chứng** và `retry lần 0` ⇒ nhánh
+`rejected` trong `settleSocketResult` không chạy lần nào. Chưa chỉ ra được dòng code nào
+đã đặt ⚠. Cần log xuất **ngay sau khi lượt chốt, trước khi F5** để tra từng chat.
+
+### 14.4 Đối chiếu extension 0.5.62 — phần đã đúng / còn thiếu
+
+Nguồn: `0.5.62_0/assets/background.js-EHsGnyIc.js` (412 999 byte).
+
+**ĐÚNG (khớp source):**
+- `getSendAPIUrl` → `https://business.facebook.com/messaging/send/` — đường DUY NHẤT ext dùng
+- `buildSendParams`: `offline_threading_id`, `source:"source:page_unified_inbox"`, `FormData`
+- `getErrorHandler` 5 mã: `1357004 · 1545012 · 1545006 · 3252001 · 1390008`
+- `REPLY_INBOX_PHOTO_FAILURE` chỉ có 1 trường `error` (+ 4 hình dạng của `s`)
+- `canRetryUsingSocket`: extension có trả nhưng **không chỗ nào trong extension đọc lại** ⇒ script bỏ qua là đúng
+
+**CÒN THIẾU (chứng minh được từ source, chưa sửa):**
+- `REPLY_INBOX_PHOTO_SUCCESS` mang `messageId` (lấy từ `payload.actions[0].message_id`) và
+  `timestamp`. Script đọc `res.data.timestamp || res.data.convId` ⇒ **vứt `messageId`** —
+  đây là bằng chứng dương tính duy nhất FB trả về.
+- Nhánh `restartInbox` của ext **chắc chắn chưa gửi**: mọi nhánh đó đều `v(...)` (reject),
+  không nhánh nào `b(...)` (resolve). Script đang xếp nhóm này vào "không rõ" (⚠ + gửi tay).

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.12-w200.123
+// @version      1.93.13-w200.124
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.12-W200.123'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.13-W200.124'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5379,41 +5379,26 @@
         // burst-reject tạm thời hoặc mapping gid vừa đổi (ca thực địa
         // chạy lại đã gửi được). Chưa bắn lại thì giữ lỗi Socket thường,
         // tuyệt đối không gắn nhãn recipientUnavailable.
-        /* ═══ [v1.93.12] LỖI THẬT: 1 197 ca BỊ CHẶN THẬT nhưng chốt ⚠ ⇒ vào danh sách GỬI TAY ═══
-         * ĐO trên log 22/11 07:38 (lô 1 694 chat, bản 1.93.11):
-         *   ✅ 474 · ❌ 23 · ⚠ 1 197      · ACK OK/rejected/no-ACK = 473/1204/**0**
-         * `no-ACK = 0` ⇒ MỌI ca đều có phản hồi. Vậy toàn bộ 1 197 ca ⚠ là ACK **REJECTED**.
-         * Người dùng kiểm trực tiếp trong Pancake: **chỉ 474 ca có tin, 1 197 ca kia là khách CHẶN THẬT**.
-         * ⇒ 1 197 ca bị chốt thành "không rõ" và đẩy vào 🖐 CẦN GỬI TAY dù FB đã nói dứt khoát.
-         *
-         * GỐC — hai điều kiện chặn đường thử lại (dòng dưới), và vì sao chúng luôn chặn sai:
-         *   ① `!ctx.gidFromPsid` — log: `cứu thiếu globalId 16` ⇒ gid là **PSID đoán**
-         *      (resolveGlobalId bước 4 `psid-guess`) ⇒ `gidFromPsid = true` ⇒ nhánh thử lại
-         *      **không bao giờ chạy** (log: `retry lần 0`).
-         *      NHƯNG FB ĐÃ TRẢ LỜI CHO KHUNG ĐÓ: `markOptimisticMessageFailed` là phản hồi của
-         *      chính `thread_fbid` + `offline_threading_id` ta vừa publish — FB chỉ trả lời khi
-         *      đã định tuyến được thread. Nên `gidFromPsid` KHÔNG làm phản hồi mất giá trị.
-         *   ② `ctx.apiRejected551` — bật `socketRetriedOnce` ⇒ nhánh dưới cũng không chạy.
-         *
-         * SỬA: `rejected` + `gidFromPsid` ⇒ vẫn là FB TỪ CHỐI DỨT KHOÁT ⇒
-         *   `recipientUnavailable: true` **và** `ambiguous: false`.
-         * Trước bản này `ambiguous: true` ĐÈ lên `recipientUnavailable` ở cổng
-         * `if (r.ambiguous && !r.recipientUnavailable …)` (dòng ~8247) — cổng đó đúng, nhưng
-         * `recipientUnavailable` lại bị tính sai thành false.
-         *
-         * KHÔNG thêm một lệnh gửi nào: `ambiguous:false` + `recipientUnavailable:true` là
-         * đường ĐI TẮT tới ❌ (bỏ bù, bỏ gửi tay) — chỉ-đọc, không thể sinh tin trùng. */
-        const _psidRejected = !!(raw && raw.kind === 'rejected' && ctx && ctx.gidFromPsid);
-        const isConfirmedUnavailable = _psidRejected || !!(ctx && ctx.socketRetriedOnce);
+        /* [v1.93.13] GỠ BẢN SỬA SAI CỦA 1.93.12.
+         * 1.93.12 thêm `_psidRejected = (rejected && ctx.gidFromPsid)` để chốt ❌ ngay.
+         * ĐIỀU KIỆN ĐÓ KHÔNG BAO GIỜ ĐÚNG Ở LÔ >50 CHAT ⇒ nhánh chết:
+         *   dòng 4114  `const isLargeBatch = !!(batchStats && batchStats.total > 50);`
+         *   dòng 4119-4123 và 4551-4552  `if (isLargeBatch) return null;`
+         * chặn CẢ HAI chỗ duy nhất gán `ctx.gidFromPsid = true` (dòng 4127 và 4559,
+         * đều là bước 4 `psid-guess`, chỉ dành cho lô ≤50 chat).
+         * Đối chứng log 1.93.12 (lô 1 672 chat, 08:32): `cache 1628 · cứu thiếu globalId 43`,
+         * `khách không nhận được (đã đo) 0 · chốt NGAY vì FB từ chối dứt khoát 0 ca`
+         * ⇒ phần sửa đó chưa từng chạy. GỠ VỀ ĐÚNG NHƯ 1.93.11.
+         * BÀI HỌC: trước khi thêm điều kiện, phải chứng minh điều kiện đó CÓ THỂ đúng
+         * bằng số đo trong log, không suy từ chú thích. */
+        const isConfirmedUnavailable = !!(ctx && ctx.socketRetriedOnce);
         return {
           ok: false,
           sent: false,
           // [v1.92.30] KHUNG `markOptimisticMessageFailed` KHÔNG nói nó thuộc tin nào ⇒ đây là
           // phán đoán, không phải bằng chứng "chưa gửi". Cổng chứng minh vắng mặt sẽ quyết định
           // trước khi bắn lần 2 (xem proveAbsentBeforeBu) — đây là nguồn lặp của bản cũ.
-          // [v1.93.12] ĐÃ có kết luận dứt khoát (FB từ chối) ⇒ KHÔNG được đánh "không rõ":
-          // `ambiguous:true` sẽ đẩy ca này qua cổng chứng minh vắng mặt rồi hết ngân sách ⇒ ⚠ + gửi tay.
-          ambiguous: !isConfirmedUnavailable,
+          ambiguous: true,
           recipientUnavailable: isConfirmedUnavailable,
           error: isConfirmedUnavailable
             ? 'Socket: FB từ chối nhận tin (khách hiện không có mặt / đã khóa nick)'
