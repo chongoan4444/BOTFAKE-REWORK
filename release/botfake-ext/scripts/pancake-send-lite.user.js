@@ -2653,6 +2653,11 @@
     /* [v1.93.13] ext TÌM ĐƯỢC thread nhưng `isThreadCorrect()` sai ⇒ `Ee.init()` reject
      * "INCORRECT THREAD". Tách khỏi `extUnknown` (im lặng) để đọc đúng sức khoẻ làn Ext. */
     extIncorrectThread: 0,
+    /* [v1.93.14] ĐỌC LỊCH SỬ TRỰC TIẾP TỪ FB qua `LOAD_FACEBOOK_MESSAGES`:
+     * `fbDirectMessages` = số lần lệnh trả được danh sách tin;
+     * `fbDirectSavedGid` = số lần lấy được `globalId` từ chính phản hồi đó (nguồn gid THẬT,
+     * không phụ thuộc `ENABLE_FIND_THREAD_BY_USERNAME`, không cần 4 nguồn `Ee.init`). */
+    fbDirectMessages: 0, fbDirectSavedGid: 0,
   };
   function resetGidStats() {
     Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
@@ -9677,6 +9682,9 @@
     // (buProofPresent = số lần lặp chặn được), bao nhiêu ca chứng minh được vắng mặt, không rõ,
     // và bao nhiêu ca dùng lại kết quả đã dò (không tốn thêm request).
     buProofPresent: 0, buProofAbsent: 0, buProofUnknown: 0, buProofCached: 0,
+    /* [v1.93.14] `fbDirectPresent` = số lần Pancake nói "chưa thấy" NHƯNG đọc thẳng FB thấy tin
+     * ⇒ chặn được 1 lần bù ⇒ chặn được 1 tin trùng. Đây là thước đo trực tiếp của §28/§25.2. */
+    fbDirectPresent: 0,
     buProofGated: 0, buProofCancelled: 0,
     // [v1.92.44] số ca bị khoá chống trùng chặn lại (KHÔNG phải lệnh gửi thật)
     dupBlocked: 0,
@@ -10689,6 +10697,12 @@
            * `O.preloadDocIds`) ⇒ `viaExtOk` gần như luôn 0, `viaExtWaited` = số lần đã chờ đủ.
            * Trước bản này 3 bộ đếm này thu thập rồi KHÔNG in ở đâu ⇒ không thể biết lệnh nạp
            * có được gửi hay không. In ra để đọc được. */
+          /* [v1.93.14] Đọc lịch sử TRỰC TIẾP TỪ FB: `tin N · gid M` và số lần nó CHẶN được
+           * một lần bù (`cứu K`). `cứu > 0` = Pancake nói "chưa thấy" nhưng FB có tin ⇒
+           * nếu không có đường này thì đã bù ⇒ khách nhận 2 tin. */
+          + ' · đọc thẳng FB: tin ' + gidStats.fbDirectMessages
+          + ' · gid ' + gidStats.fbDirectSavedGid
+          + ' · cứu ' + sendDiag.fbDirectPresent
           + ' · doc_id gửi ' + (docIdStats.viaExtOk + docIdStats.viaExtWaited)
           + ' (chờ hết hạn ' + docIdStats.viaExtWaited + ' · gửi lỗi ' + docIdStats.viaExtEmpty + ')'
           + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
@@ -11426,6 +11440,148 @@
     return 'absent';
   }
 
+  /* ═══ [v1.93.14] ĐỌC LỊCH SỬ **TRỰC TIẾP TỪ FACEBOOK** (không qua Pancake) ═══
+   * VÌ SAO CẦN — đo được: mọi cổng "chứng minh vắng mặt" hiện tại đều hỏi Pancake
+   *   `/v1/conversations/customer/{psid}` (snippet). Đường đó phụ thuộc Pancake ĐÃ ĐỒNG BỘ
+   *   tin từ FB về; khi FB đã nhận mà Pancake chưa kéo về thì snippet nói "vắng mặt" SAI.
+   *   Đó đúng là nhóm 3 547 ca ⚠ (ACK rejected 3 552 − FB-báo-không-nhận 5).
+   * Extension có sẵn đường đọc thẳng FB — `class He` / case `LOAD_FACEBOOK_MESSAGES`:
+   *   case"LOAD_FACEBOOK_MESSAGES": { … new He(r.data).init()
+   *     .then(({messages, globalId}) => postMessage({type:"LOAD_FACEBOOK_MESSAGES_SUCCESS",
+   *                                    taskId, messages, globalId})) … }
+   *   async loadFacebookMessages(){ O.isFeatureReady("loadMessages") || await He.preloadDocIds(...);
+   *     const a = await this.getGlobalId();              // ← TỰ LẤY gid nếu không truyền
+   *     return { messages: (await t.graphqlbatch({batchName:"MessengerGraphQLThreadFetcher",
+   *                graphqlQueries: this.getGraphqlQueries(a, this.before)}))[0]
+   *                .data.message_thread.messages.nodes, globalId: a } }
+   *   getGraphqlQueries(e,t){ const a = O.get(Da,Sa); if(!a) throw `Missing doc_id …`;
+   *     return [{doc_id:a, query_params:{id:e, load_messages:!0, message_limit:40, before:t}}] }
+   *
+   * ⇒ Lợi ích kép:
+   *   ① `messages` là tin THẬT trên FB, không phụ thuộc đồng bộ Pancake ⇒ phán 'absent' đúng hơn;
+   *   ② `globalId` là gid THẬT của hội thoại — đúng thứ 56 ca "HTTP không có gid" đang thiếu,
+   *      và nó đến từ `Ee.init()` (4 nguồn Jt/Zt/rt-st/ge) mà KHÔNG cần `ENABLE_FIND_THREAD_BY_USERNAME`.
+   *
+   * CHỈ ĐỌC. Không gửi tin, không tạo tin. `message_limit: 40` đủ cho cửa sổ ±vài phút.
+   * Hạn chế: cần `[Da,Sa]` doc_id — nếu ext chưa nạp thì reject `Missing doc_id` ⇒ trả ['unknown'].
+   * Không đoán, không bịa. */
+  /* ═══ [v1.93.14] PHÂN XỬ TIN CỦA `He` (FB trực tiếp) — TRƯỜNG KHÁC HẲN PANCAKE ═══
+   * Node do `MessengerGraphQLThreadFetcher` trả (đọc từ `He.findInternalMessage` của ext):
+   *   { timestamp_precise: "<ms>",          // ms, phải chia 1e3 rồi parseInt để ra GIÂY
+   *     message_sender: { id },             // id NGƯỜI GỬI (page id nếu page gửi)
+   *     message: { text },                  // nội dung
+   *     blob_attachments: [{ preview: { uri } }] }
+   * Khác Pancake: KHÔNG có `inserted_at` ISO, KHÔNG có `from.id`, KHÔNG có `type`, KHÔNG `attachments`.
+   * Phép khớp của chính ext (đó là chuẩn, không phải suy đoán):
+   *   parseInt(parseInt(m.timestamp_precise)/1e3) == insertedAt     // giây
+   *   text.trim() == message.trim()
+   *   ${m.message_sender.id} == ${from.id}   (hoặc == globalId khi gửi bằng vai page)
+   * Script KHÔNG có `insertedAt` của FB, nên dùng CỬA SỔ THỜI GIAN thay vì khớp giây tuyệt đối,
+   * và chỉ nhận tin DO PAGE gửi (`message_sender.id === pageId`).
+   * Thiếu trường nào ⇒ 'unknown'. KHÔNG suy diễn 'absent' từ việc không khớp. */
+  function fbMessagesVerdict(msgs, pageId, want, photo, sentAtMs) {
+    if (!Array.isArray(msgs) || !msgs.length) return 'unknown';
+    const at = Number(sentAtMs) || 0;
+    /* Lệch đồng hồ: `timestamp_precise` là đồng hồ FB, `sentAtMs` là đồng hồ máy. Script đã đo
+     * `serverSkewMs`; dùng nếu có, nếu không thì nới cửa sổ về phía QUÁ KHỨ (không nới tương lai). */
+    const skew = (typeof serverSkewMs === 'number') ? serverSkewMs : 0;
+    const minT = at + skew - 5000;
+    const maxT = at + skew + 120000;   // đồng bộ trễ tối đa; quá mốc này không phải tin của ta
+    const norm = String(want || '').trim();
+    for (let i = 0; i < msgs.length; i++) {
+      const m = msgs[i];
+      if (!m) continue;
+      const tRaw = parseInt(parseInt(m.timestamp_precise) / 1e3);   // ms → giây (đúng như ext)
+      if (!tRaw || isNaN(tRaw)) continue;
+      const tMs = tRaw * 1000;
+      if (tMs < minT || tMs > maxT) continue;
+      const sender = m.message_sender && m.message_sender.id;
+      if (!sender || String(sender) !== String(pageId)) continue;   // chỉ tin DO PAGE gửi
+      if (norm) {
+        const txt = (m.message && m.message.text) ? String(m.message.text).trim() : '';
+        if (txt && (txt === norm || (norm.length >= 20 && txt.indexOf(norm) > -1))) return 'yes';
+        /* chuẩn hoá giống `normalizeMsgText` của Pancake để bắt được khác biệt unicode */
+        const t2 = normalizeMsgText(m.message && m.message.text);
+        if (t2 && (t2 === normalizeMsgText(norm))) return 'yes';
+      } else if (photo) {
+        const ba = m.blob_attachments;
+        if (Array.isArray(ba) && ba.length > 0) {
+          const uri = ba[0] && ba[0].preview && ba[0].preview.uri;
+          if (uri) {
+            const got = photoNameOf(uri);
+            const exp = photo ? photoNameOf(photo.url || photo) : '';
+            if (got && exp && got === exp) return 'yes';
+          }
+          return 'yes';   // có tệp đính kèm, do page gửi, đúng cửa sổ ⇒ đủ
+        }
+      }
+    }
+    return 'unknown';
+  }
+  function photoNameOf(u) {
+    try {
+      const parts = String(u).split('?')[0].split('/');
+      return parts[parts.length - 1] || '';
+    } catch (e) { return ''; }
+  }
+
+  const fbMsgCache = new Map();
+  function fetchFbMessagesDirect(conv, fallback) {
+    return Promise.resolve().then(() => {
+      const ad = (window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function')
+        ? window.__ExtensionAdapter__ : null;
+      if (!ad) return null;
+      const fullC = (fallback && fallback.page_id) ? fallback : (peekConv(conv) || conv);
+      const pageId = (fullC && (fullC.page_id || fullC.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
+      const threadId = (fullC && (fullC.thread_id || fullC.threadId)) || conv.threadId || '';
+      if (!pageId || !threadId || !/^\d+$/.test(String(threadId))) return null;
+      const ck = String(pageId) + '|' + String(threadId);
+      const hit = fbMsgCache.get(ck);
+      if (hit && Date.now() - hit.at < 8000) return hit.promise;
+      const entry = { at: Date.now(), promise: null };
+      /* `platform: 'facebook'` ⇒ case của ext KHÔNG xoá `customerName` và KHÔNG đổi pageId
+       * (`r.data.platform != "instagram_official" && (r.data.customerName = void 0)` — chỉ xoá tên,
+       *  không ảnh hưởng). `before: undefined` ⇒ lấy 40 tin MỚI NHẤT. */
+      entry.promise = ad.send({
+        type: 'LOAD_FACEBOOK_MESSAGES',
+        pageId: String(pageId),
+        threadId: String(threadId),
+        threadKey: (fullC && (fullC.thread_key || fullC.threadKey)) || ('t_' + threadId),
+        isBusiness: true,
+        platform: 'facebook',
+        customerName: (fullC && (fullC.name || fullC.customerName)) || conv.name || '',
+        conversationUpdatedTime: (fullC && (fullC.updated_at || fullC.conversationUpdatedTime)) || Date.now(),
+        convType: 'INBOX', postId: null, convId: null,
+      }, { timeout: 20000 }).then((res) => {
+        if (!res || !res.success || !res.data || !Array.isArray(res.data.messages)) return null;
+        try { gidStats.fbDirectMessages++; } catch (e) { /* ignore */ }
+        /* ═══ [v1.93.14] `globalId` TỪ CHÍNH PHẢN HỒI NÀY = NGUỒN GID THẬT, MIỄN PHÍ ═══
+         * `He.getGlobalId()` trả gid của hội thoại (`this.globalId` nếu app truyền vào, nếu không
+         * thì `new Ee({…convType:"INBOX"}).init()` — đúng 4 nguồn Jt/Zt/rt-st/ge của ext).
+         * Ta ĐÃ trả giá cho lệnh này rồi ⇒ lưu luôn vào sổ gid, khỏi dò lại bằng
+         * `GET_GLOBAL_ID_FOR_CONV` (đắt hơn) hay `MAKE_MESSENGER_LINK` (đắt nhất).
+         * CHỈ ĐỌC: `window.__botfakeSaveGid__` ghi cache, không gửi tin, không đổi số lệnh gửi. */
+        const gid = res.data.globalId;
+        if (gid && /^\d+$/.test(String(gid))) {
+          try {
+            const mapKey = String(pageId) + '_' + String(threadId);
+            if (!persistentGidMap[mapKey] && typeof window.__botfakeSaveGid__ === 'function') {
+              window.__botfakeSaveGid__(mapKey, String(pageId), String(threadId), String(gid));
+              gidStats.fbDirectSavedGid++;
+            }
+          } catch (eG) { /* ignore */ }
+        }
+        return res.data;   // { messages:[…], globalId }
+      }).catch(() => null);
+      fbMsgCache.set(ck, entry);
+      if (fbMsgCache.size > 3000) {
+        const now = Date.now();
+        fbMsgCache.forEach((v, k) => { if (now - v.at > 60000) fbMsgCache.delete(k); });
+      }
+      return entry.promise;
+    });
+  }
+
   async function probeBuVerdict(conv, pageId, convId, want, sentAtMs, late, hasPhoto) {
     try {
       const psid = psidOf(conv, peekConv(conv) || conv);
@@ -11440,6 +11596,17 @@
       if (v === 'yes') return v;
       // [v1.92.44] ca có ảnh: chữ ngắn/không khớp được vẫn kết luận được nếu hội thoại vừa động
       if (hasPhoto && photoMovedVerdict(convs, convId, pageId, psid, sentAtMs) === 'yes') return 'yes';
+      /* ═══ [v1.93.14] PANCAKE NÓI "CHƯA THẤY" ⇒ HỎI THẲNG FACEBOOK ═══
+       * Snippet của Pancake chỉ đúng khi Pancake ĐÃ ĐỒNG BỘ tin từ FB. Trước khi kết luận
+       * 'absent' (cho phép bù ⇒ nguy cơ khách nhận 2 tin), đọc thẳng FB 1 lần.
+       * Thấy tin ⇒ 'yes' (HỦY bù — đây chính là ca chặn được tin trùng).
+       * Không thấy / không đọc được ⇒ giữ nguyên phán quyết cũ của snippet.
+       * CHỈ ĐỌC, không gửi. */
+      const fbd = await fetchFbMessagesDirect(conv, peekConv(conv) || conv);
+      if (fbd && Array.isArray(fbd.messages) && fbd.messages.length) {
+        const fbV = fbMessagesVerdict(fbd.messages, pageId, want, hasPhoto ? 'photo' : null, sentAtMs);
+        if (fbV === 'yes') { sendDiag.buProofPresent++; sendDiag.fbDirectPresent++; return 'yes'; }
+      }
       return v;
     } catch (e) { return 'unknown'; }
   }

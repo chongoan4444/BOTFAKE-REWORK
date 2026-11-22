@@ -1848,3 +1848,93 @@ Nhánh bù (`sendViaBu`) tách riêng **trước** nhánh `extClaimedSuccess` c�
 
 Cả 3 đều **không phải "khách chặn"** và đều **không có tin được tạo**. Nhóm 3 mới là nhóm
 "chắc chắn chưa đi" — script đã xử lý đúng từ 1.93.10 (`retryReason` được đọc).
+
+---
+
+## 29. `LOAD_FACEBOOK_MESSAGES` — đọc lịch sử TRỰC TIẾP TỪ FB (đường còn thiếu)
+
+### 29.1 Vì sao đây là mảnh ghép đúng của 3 547 ca ⚠
+
+Mọi cổng "chứng minh vắng mặt" của script đều hỏi **Pancake**:
+```js
+GET {apiBase()}/v1/conversations/customer/{psid}?pages[{pageId}]=0      // snippet
+```
+Đường đó chỉ đúng khi **Pancake đã đồng bộ tin từ FB về**. Khi FB đã nhận mà Pancake chưa kéo
+về thì snippet nói `absent` **SAI** ⇒ (nếu còn kênh) bù ⇒ khách nhận 2 tin; (nếu hết kênh) giữ ⚠
+oan. Đó đúng là nhóm `ACK rejected 3 552 − FB-báo-không-nhận 5 = 3 547`.
+
+### 29.2 Hợp đồng thật của `class He` / case `LOAD_FACEBOOK_MESSAGES`
+
+```js
+case"LOAD_FACEBOOK_MESSAGES": {                       // @400xxx
+  r.data.platformExtraInfo?.linked_fb_page && (r.data.pageId = r.data.platformExtraInfo.linked_fb_page),
+  r.data.platform != "instagram_official" && (r.data.customerName = void 0),
+  await Z();
+  const { taskId } = r.data;
+  new He(r.data).init()
+    .then(({ messages, globalId }) => e.port.postMessage({ type:"LOAD_FACEBOOK_MESSAGES_SUCCESS",
+                                                            taskId, messages, globalId }))
+    .catch(() => e.port.postMessage({ type:"LOAD_FACEBOOK_MESSAGES_FAILURE", taskId }));
+  break }
+
+class He { constructor({pageId, threadId, threadKey, isBusiness, before, platform,
+                        customerName, conversationUpdatedTime, globalUserId}) { … }
+  init(){ switch(this.platform){ case "facebook": case "": case null: return this.loadFacebookMessages();
+                                 case "instagram_official": return this.loadIgMessages() } }
+  async loadFacebookMessages(){
+    O.isFeatureReady("loadMessages") || await He.preloadDocIds({pageId, isBusiness});
+    const e = await le(this.pageId), t = new J({pageId, base:e.base});
+    const a = await this.getGlobalId();                        // ← TỰ LẤY gid
+    return { messages: (await t.graphqlbatch({ batchName:"MessengerGraphQLThreadFetcher",
+               graphqlQueries: this.getGraphqlQueries(a, this.before) }))[0]
+               .data.message_thread.messages.nodes,
+             globalId: a } }
+  async getGlobalId(){ if(this.globalId) return this.globalId;
+    let e = to(this, ["pageId","threadId","threadKey","isBusiness","conversationUpdatedTime"]);
+    return Object.assign(e,{postId:null,convId:null,convType:"INBOX"}), new Ee(e).init() }
+  getGraphqlQueries(e,t){ const a = O.get(Da,Sa); if(!a) throw `Missing doc_id ${Da} or ${Sa}`;
+    return [{doc_id:a, query_params:{id:e, load_messages:!0, message_limit:40, before:t}}] } }
+```
+
+**Cấu trúc node trả về** (đọc từ `He.findInternalMessage` — dùng chính phép so sánh của ext):
+```js
+{ timestamp_precise: "<ms>",                 // parseInt(m.timestamp_precise/1e3) == giây
+  message_sender: { id },                    // id người gửi (page id khi page gửi)
+  message: { text },                         // nội dung
+  blob_attachments: [{ preview: { uri } }] }
+```
+Khác hẳn Pancake: **không** `inserted_at` ISO, **không** `from.id`, **không** `type`, **không** `attachments`.
+
+### 29.3 ĐÃ THÊM
+
+`fetchFbMessagesDirect(conv)` — gửi `LOAD_FACEBOOK_MESSAGES` với `platform:'facebook'`,
+`convType:'INBOX'`, `timeout: 20000`, cache 8 s theo `pageId|threadId` (chống gửi trùng trong 1 cửa sổ).
+
+`fbMessagesVerdict(msgs, pageId, want, photo, sentAtMs)` — phân xử theo **đúng trường của `He`**:
+- `timestamp_precise` chia `1e3` rồi `parseInt` (đúng phép của ext), cửa sổ `[at+skew−5 s, at+skew+120 s]`;
+- chỉ nhận tin **do page gửi** (`message_sender.id === pageId`);
+- khớp chặt: `text.trim()` bằng, hoặc `normalizeMsgText` bằng; "chứa" chỉ khi chuỗi ≥ 20 ký tự;
+- ca ảnh: `blob_attachments[].preview.uri` so tên tệp;
+- thiếu trường ⇒ `'unknown'` — **không** suy ra `'absent'` từ "không khớp".
+
+Nối vào `probeBuVerdict`: Pancake nói chưa thấy ⇒ hỏi thẳng FB **1 lần**; thấy tin ⇒ `'yes'`
+⇒ **HỦY bù** (đây chính là ca chặn được tin trùng). Không thấy ⇒ giữ nguyên phán quyết của snippet.
+
+**Lợi ích kép:** phản hồi còn có `globalId` (chính là kết quả `Ee.init()` — 4 nguồn `Jt/Zt/rt-st/ge`).
+Script **đã trả giá cho lệnh này rồi** ⇒ lưu luôn vào sổ gid qua `window.__botfakeSaveGid__`,
+khỏi dò lại bằng `GET_GLOBAL_ID_FOR_CONV` (đắt hơn) hay `MAKE_MESSENGER_LINK` (đắt nhất).
+Đây là câu trả lời cho `HTTP không có gid 56` — không cần `ENABLE_FIND_THREAD_BY_USERNAME`
+(chỉ khớp theo TÊN) khi đã có đường này.
+
+### 29.4 Chẩn đoán mới (IN RA, không thu thập suông)
+
+`· đọc thẳng FB: tin N · gid M · cứu K`
+- `cứu K > 0` ⇒ Pancake nói "chưa thấy" nhưng FB **có** tin ⇒ không có đường này thì đã bù ⇒
+  khách nhận **2 tin**. Đây là thước đo trực tiếp của §28/§25.2.
+- `gid M > 0` ⇒ số gid lấy được **miễn phí** từ đường đọc này.
+
+**Ràng buộc phải nhớ:** `He.getGraphqlQueries` cần `[Da, Sa]` — **KHÔNG** cùng bộ với
+`[Jt,Zt,rt,st]` của `BATCH_GET_GLOBAL_ID`. Nên `PRELOAD_DOC_IDS` (§27) nạp `inbox` **không**
+bảo đảm `loadMessages` sẵn sàng; ext tự gọi `He.preloadDocIds` khi chưa ready
+(`O.isFeatureReady("loadMessages")` = `has(Da) || has(Sa)`). Nếu thiếu ⇒ reject `Missing doc_id`
+⇒ trả `null` ⇒ **không ảnh hưởng phán quyết cũ**.
