@@ -1233,3 +1233,121 @@ Socket FB từ chối + ngân sách dò Ext ĐÓNG.
 
 Tổng `qua cổng` của 17 wave ghi trong log = **5 890 / 8 572** ⇒ thiếu 2 682. Không phải script
 tính sai: khi xuất, một số dòng wave bị gộp/bỏ (log gọn 89 dòng). **Không kết luận gì từ chỉ số này.**
+
+---
+
+## 22. BẢN ĐỒ ĐỐI SOÁT EXTENSION 0.5.62 — CÒN GÌ CHƯA LÀM
+
+### 22.1 Số liệu thật (sửa lại con số cũ)
+
+Trước đây ghi "extension có 83 case". **Đếm lại chính xác:**
+
+| | |
+|---|---|
+| `case"…"` trong toàn file | **86** |
+| — trong đó KHÔNG thuộc switch adapter (2 case `GET`/`POST` của hàm `fetch`, 3 `INBOX/COMMENT/RATING`, 11 lịch hẹn) | **18** |
+| **case THẬT của switch adapter** (offset 391 879 → 412 772) | **68** |
+| script đang gửi | **7** |
+| **chưa đối soát** | **61** |
+
+### 22.2 Đã đối soát xong (7)
+
+`REPLY_INBOX_PHOTO` · `UPLOAD_INBOX_PHOTO` · `SEND_COMMENT` · `MAKE_MESSENGER_LINK` ·
+`BATCH_GET_GLOBAL_ID` · `GET_GLOBAL_ID_FOR_CONV` · `PRELOAD_DOC_IDS`
+
+### 22.3 61 case chưa đối soát, theo nhóm
+
+| Nhóm | Case | Có ảnh hưởng script? |
+|---|---|---|
+| **Gửi tin** | `SEND_PRIVATE_REPLY` `REPLY_INBOX_PRODUCT` `REACT_MESSAGE` `SEND_STICKER_COMMENT` `VALIDATE_SEND_IGD_INBOX` `REPLY_INBOX_FILE_ZALO_OA` | **KHÔNG** — script chỉ gửi text/ảnh |
+| **Kiểm chứng lịch sử** | `LOAD_FACEBOOK_MESSAGES` `GET_FB_MSG` `GET_IMG_FROM_SHARED_ATTACHMENT` | **CÓ — ưu tiên** |
+| **Link/thread** | `ENABLE_FIND_THREAD_BY_USERNAME` `GET_IG_CONTACT_ID` `GET_POST_ID_FROM_LINK` | CÓ (đường dò gid) |
+| **Listener** | 11 case `LISTEN_*`/`STOP_*`/`PLZ_DONT_STOP_*` | KHÔNG (script không điều khiển listener) |
+| **Trạng thái ext** | `CHECK_EXTENSION` `CHECK_EXTENSION_VERSION` `REPORT_EXTENSION_STATUS` `WAKE_UP` | CÓ (chẩn đoán "Ext không phản hồi") |
+| **Comment** | `EDIT_COMMENT` `REMOVE_COMMENT` | KHÔNG |
+| **Khác** | 30 case (sticker, profile, appointment, LINE, Zalo, crawl, ecommerce, routing, block…) | KHÔNG |
+
+### 22.4 `LOAD_FACEBOOK_MESSAGES` — điểm chưa đối soát quan trọng nhất
+
+```js
+case"LOAD_FACEBOOK_MESSAGES": … new He(r.data).init()
+  .then(({messages:I, globalId:y}) => { e.port.postMessage({type:"LOAD_FACEBOOK_MESSAGES_SUCCESS", …}) })
+
+class He{ init(){ switch(this.platform){ case"facebook": … return this.loadFacebookMessages(); … } }
+  async loadFacebookMessages(){
+    O.isFeatureReady("loadMessages") || await He.preloadDocIds({pageId, isBusiness});   // ← nạp [Da,Sa]
+    const e = await le(this.pageId), t = new J({pageId, base:e.base}), a = await this.getGlobalId();
+    return { messages: (await t.graphqlbatch({batchName:"MessengerGraphQLThreadFetcher",
+      graphqlQueries: this.getGraphqlQueries(a, this.before)}))[0].data.message_thread.messages.nodes,
+             globalId: a };
+  }
+  async getGlobalId(){ if(this.globalId) return this.globalId;
+    return new Ee({...}).init(); }        // ← TỰ dò gid nếu thiếu
+}
+```
+
+**Điểm đáng giá:** lệnh này trả **cả `messages` LẪN `globalId`** trong MỘT lần gọi, và
+`getGlobalId()` tự dò nếu thiếu. Đây là đường "lấy gid + kiểm chứng lịch sử" gộp.
+Khác `GET_FB_MSG` (phải truyền `sendParams` + `replyMessage`, khớp 3 điều kiện).
+
+**Chưa khai thác** — chưa đo được lợi/hại. KHÔNG sửa cho tới khi có số.
+
+### 22.5 Nhánh tự-dò gid BÊN TRONG `sendInbox` + trần 35 s
+
+```js
+sendInbox(e){ … return new Promise(async (b,v) => {
+    if (c === "facebook" && !i)                        // i = globalUserId
+      return this.getGlobalUserId({pageId, threadId, threadKey, isBusiness,
+                                   conversationUpdatedTime, customerName})
+        .then(M => { Object.assign(e, {globalUserId:M}); this.sendInbox(e).then(b).catch(v); })
+    const A = await this.buildSendParams(e); …
+    const w = g ? ro(g) : "NO_TIMEOUT";
+    if (w === null) return b({success:!1, retryReason:"execute task timeout"});   // ← CHƯA GỬI
+```
+với `ao = 35e3`, `Wc(task, e = ao - 5e3)` (mốc hết hạn 30 s), `ro()` trả số ms **còn lại**.
+
+⇒ **`execute task timeout` = CHƯA GỬI**, đúng như đã ghi. NHƯNG: nhánh tự-dò có thể
+tiêu hết 30 s ⇒ gửi sau đó bị `execute task timeout`. Script đã tự dò gid TRƯỚC khi gọi
+`REPLY_INBOX_PHOTO` nên nhánh này chỉ chạy khi script gửi `globalUserId` rỗng.
+**Chưa đo** bao nhiêu ca rơi vào đây.
+
+### 22.6 LỖI THẬT MỚI — `onRejected` chỉ được truyền ở 1/6 chỗ gọi
+
+Đây là gốc của **3 547 ca ⚠** (khớp chính xác số học log 22/11):
+
+```
+SOCKET ACK OK/rejected/no-ACK : 4715 / 3552 / 0
+⚠ Không rõ                    : 3547
+FB báo không nhận (đã đo)     : 5
+3 552 − 5 = 3 547             ← KHỚP CHÍNH XÁC
+```
+
+⇒ Toàn bộ 3 547 ca ⚠ là **ACK rejected ở lần bắn ĐẦU**, không phải mất ACK, không phải quá hạn.
+
+Gốc: `socketPublishSend(…, opts)` chỉ gọi `onRejected` khi được truyền:
+```js
+const onRejected = (opts && typeof opts.onRejected === 'function') ? opts.onRejected : null;
+…
+if (!lateMode && onRejected) { try { onRejected(); } catch (eRJ) { /* ignore */ } }
+```
+Nhưng 6 chỗ gọi `socketPublishSend` trong `sendViaSocket` thì chỉ **1** (đường bắn-nhả
+lần đầu @5769) truyền `onRejected`. Ba chỗ còn lại truyền `opts` mà thiếu `onRejected`:
+- @5380 `raw = …` (bắn lại lần 2)
+- @5398 / @5416 gửi ảnh bù (`retryPhotoOnly*`)
+- @5840 `rawSync` (đường ĐỒNG BỘ — lần bắn đầu của lượt nhỏ)
+
+Hệ quả kép:
+1. Cổng 🚫 @11445 (`socksProof==='absent' && isFbRejected`) không kích hoạt ⇒ ca ACK rejected
+   chạy tiếp vào đọc lịch sử rồi chốt ⚠ **vào danh sách gửi tay** dù FB đã nói rõ khách không nhận.
+2. Cổng @5326 (`isFbRejected && !apiRejected551` → chốt ❌, KHÔNG thử lần 2) không bao giờ chạy
+   cho ca lần-1 ⇒ vẫn thử lần 2 vô ích.
+
+**ĐÃ SỬA:** truyền `onRejected` ở cả 6 chỗ (xác nhận bằng grep: 6/6).
+Chỉ BỎ lần thử lại chắc chắn hỏng + chốt ❌ thay ⚠ — **không thêm lệnh gửi nào**.
+
+### 22.7 Còn nợ (chưa chứng minh)
+
+1. Bản sửa §22.6 **chưa chạy lần nào** — cần log mới để thấy `⚠` giảm và `❌` tăng tương ứng.
+2. `LOAD_FACEBOOK_MESSAGES` chưa đo — tiềm năng nhưng chưa có số.
+3. 30 case "Khác" chưa đối soát (sticker/profile/appointment/LINE/Zalo/crawl/ecommerce).
+   Script không dùng ⇒ rủi ro thấp, **không phủ định** là có ẩn ý.

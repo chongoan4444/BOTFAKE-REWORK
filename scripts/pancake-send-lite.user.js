@@ -5260,7 +5260,8 @@
           ctx.nonReusableFbId = null;
           ctx.nonReusableFbIds = null;
           sendDiag.photoRetry++;
-          const retryPhotoOnly = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp.fbIds && freshPhotoUp.fbIds.length) ? freshPhotoUp.fbIds : [freshPhotoUp.fbId]));
+          const retryPhotoOnly = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp.fbIds && freshPhotoUp.fbIds.length) ? freshPhotoUp.fbIds : [freshPhotoUp.fbId]),
+            null, { onRejected: () => noteFbRejected(conv.id, 'Socket ACK rejected (gửi ảnh bù) = FB từ chối nhận tin') });
           if (retryPhotoOnly && retryPhotoOnly.kind === 'ok') {
             recordSocketGidSuccess();
             return { ok: true, id: gid, sendBy: 'socket', sent: true };
@@ -5360,7 +5361,25 @@
         }
         // Bắn lại đúng 1 lần qua hàng đợi ưu tiên đan xen công bằng (runPrioritySocket) để giải phóng
         // ngay lập tức, không dồn ứ hàng nghìn ca retry ở đuôi lượt mà vẫn không chặn các chat Lần 1!
-        raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+        /* ═══ [v1.93.13] ACK rejected Ở LẦN GỬI ĐẦU CŨNG PHẢI GHI `fbRejectedIds` ═══
+         * LỖI THẬT ĐO ĐƯỢC (log 22/11 09:54, lô 8 572 chat):
+         *   SOCKET ACK OK/rejected/no-ACK : 4715 / 3552 / 0
+         *   ⚠ Không rõ: 3 547 · FB báo không nhận (đã đo): 5
+         *   ⇒ 3 552 − 5 = 3 547 — KHỚP CHÍNH XÁC. Toàn bộ 3 547 ca ⚠ là ca
+         *     **ACK rejected ở lần bắn ĐẦU**, không phải ca mất ACK, không phải ca quá hạn.
+         * Gốc: `socketPublishSend(…, opts)` chỉ gọi `onRejected` khi được truyền vào
+         * (`if (!lateMode && onRejected)`), nhưng trong 6 chỗ gọi hàm này chỉ **1 chỗ**
+         * (đường bù, @5759) truyền `onRejected`. Lần bắn ĐẦU (@5363 và đường đồng bộ
+         * @5818) KHÔNG truyền ⇒ FB từ chối mà `fbRejectedIds` không có gì ⇒
+         *   • cổng 🚫 @11445 (`socksProof==='absent' && isFbRejected`) không kích hoạt
+         *     ⇒ 3 547 ca chạy tiếp vào kiểm chứng/đọc lại rồi chốt ⚠ (vào danh sách gửi tay)
+         *   • cổng @5326 (`isFbRejected && !apiRejected551`, chốt ❌ ngay, không thử lần 2) không
+         *     bao giờ chạy cho ca lần-1 ⇒ vẫn thử lần 2 vô ích.
+         * Nay truyền `onRejected` ⇒ FB đã trả lời DỨT KHOÁT "không nhận" thì ghi sổ.
+         * KHÔNG thêm lệnh gửi nào — chỉ BỎ lần thử lại chắc chắn hỏng và chốt ❌ thay ⚠. */
+        raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, attFbIds),
+          null/* firedCb giữ nguyên (xem @5749) */,
+          { onRejected: () => noteFbRejected(conv.id, 'Socket ACK rejected (bắn lại lần 2) = FB từ chối nhận tin') });
         if (raw && raw.kind === 'ok') sendDiag.sockRetryRecovered++;
         else if (raw && raw.kind === 'rejected') sendDiag.sockRetryRejected++;
         else sendDiag.sockRetryOther++;
@@ -5376,7 +5395,8 @@
             ctx.nonReusableFbId = null;
             ctx.nonReusableFbIds = null;
             sendDiag.photoRetry++;
-            const retryPhotoOnly2 = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp2.fbIds && freshPhotoUp2.fbIds.length) ? freshPhotoUp2.fbIds : [freshPhotoUp2.fbId]));
+            const retryPhotoOnly2 = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp2.fbIds && freshPhotoUp2.fbIds.length) ? freshPhotoUp2.fbIds : [freshPhotoUp2.fbId]),
+            null, { onRejected: () => noteFbRejected(conv.id, 'Socket ACK rejected (gửi ảnh bù lần 2) = FB từ chối nhận tin') });
             if (retryPhotoOnly2 && retryPhotoOnly2.kind === 'ok') {
               recordSocketGidSuccess();
               return { ok: true, id: gid, sendBy: 'socket', sent: true };
@@ -5815,7 +5835,10 @@
       let settled;
       try {
         const laneRunner = ctx.prioritySocket ? runPrioritySocket : pageLane;
-        const rawSync = await laneRunner(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
+        /* [v1.93.13] Đường ĐỒNG BỘ — cùng lỗi như trên: ACK rejected ở lần bắn đầu không
+         * được ghi `fbRejectedIds`. Truyền `onRejected` để cổng 🚫/❌ nhìn thấy. */
+        const rawSync = await laneRunner(() => socketPublishSend(helper, pageId, gid, text, attFbIds),
+          null, { onRejected: () => noteFbRejected(conv.id, 'Socket ACK rejected (đồng bộ) = FB từ chối nhận tin') });
         settled = await settleSocketResult(rawSync);
         if (settled && settled.noAck) scheduleSocketVerify(conv, text, photo, settled.publishedAt || (Date.now() - 15000));
       } finally { ctx.ownsOutbound = false; }
