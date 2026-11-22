@@ -611,6 +611,44 @@ check('đóng ngân sách ghi lại % để in vào log',
   check('API timeout ⇒ KHÔNG dứt khoát', F.isDefinitiveNotSent('HTTP 504'), false);
   check('chuỗi rỗng ⇒ KHÔNG dứt khoát', F.isDefinitiveNotSent(''), false);
 
+  /* ═════════ [v1.93.19] BỐN BẢN VÁ — MỖI CÁI CÓ BẰNG CHỨNG DỮ LIỆU THẬT ═════════
+   * Nguồn số liệu: 130 request `business.facebook.com/messaging/send/` trong
+   * network-log.har · network-log2.har · logtest4.har (trên `main`):
+   *   21 ca THÀNH CÔNG → payload.actions[0] đủ 13 trường, có message_id `mid.$…`
+   *  109 ca LỖI      → `error` ở cấp cao nhất, `payload: null`
+   *    0/130         → có `error_payload` (nhánh đó KHÔNG tồn tại thực tế)
+   *  Thời gian: 1545041 p50 990ms · 1545012 p50 ~0,3s · thành công p50 920ms. */
+  const SRC19 = stripComments(SRC);
+
+  // ① chuỗi lỗi phải nói đúng khi success:false không kèm mã
+  check('[19①] lỗi rỗng success:false ⇒ msg nói rõ, không chỉ "HTTP 200"',
+    /success:false \(không kèm mã lỗi\)/.test(SRC19), true);
+
+  // ② chốt dứt khoát lấy CẢ certainFail (hai hàm phán quyết song song)
+  check('[19②] _definite = isDefinitiveNotSent(msg) || certainFail',
+    /const _definite = isDefinitiveNotSent\(msg\) \|\| certainFail;/.test(SRC19), true);
+
+  // ②b sentAt neo vào lúc BẮT ĐẦU gửi, không phải lúc nhận lỗi
+  check('[19②b] sentAt của ca API dùng apiStartedAt (không phải Date.now() lúc nhận lỗi)',
+    /sentAt: apiStartedAt \|\| Date\.now\(\)/.test(SRC19), true);
+
+  // ③ messageId = bằng chứng dương
+  check('[19③] có messageId ⇒ chốt ✅ ngay (bằng chứng dương, 21/21 ca thật)',
+    /if \(_extMsgId && !ownLock\) \{[\s\S]{0,340}?ok: true, sent: true, fired: true, sendBy: 'extension'/.test(SRC19), true);
+  check('[19③] ca error_payload (KHÔNG messageId) vẫn ghi "FB đã từ chối"',
+    /noteFbRejected\(conv\.id, 'Ext báo success nhưng không có messageId = error_payload/.test(SRC19), true);
+  check('[19③] ca có messageId KHÔNG bị đẩy vào sổ ⚠ (tránh ✅→⚠ oan)',
+    /if \(_extMsgId && !ownLock\) \{[\s\S]{0,700}?return \{\s*ok: true, sent: true, fired: true, sendBy: 'extension'/.test(SRC19)
+    && /KHÔNG đăng ký đọc lại lịch sử cho ca này/.test(SRC), true);
+
+  // ④ 🛟 không được nói "KHÔNG có ca nào" khi lô có ca ⚠ khác
+  check('[19④] 🛟 phân loại lý do FB từ chối, không gộp hết vào 1545041',
+    /const fbRejectKinds = Object\.create\(null\)/.test(SRC19)
+    && /noThreadIdFound/.test(SRC19.slice(SRC19.indexOf('fbRejectKinds'), SRC19.indexOf('fbRejectKinds') + 900)), true);
+  check('[19④] dòng TỔNG HỢP nói rõ các ca dứt khoát KHÁC',
+    /KHÔNG có ca 1545041' \+ fbRejectKindsText\(\)/.test(SRC19)
+    && /không có ca FB từ chối nào khác/.test(SRC19), true);
+
   // --- thử lại được (không thể trùng) ---
   check('1545012 ⇒ thử lại được', F.isTransientServerError('Đã xảy ra lỗi tạm thời, vui lòng thử lại.'), true);
   check('mã 1545012 trần ⇒ thử lại được', F.isTransientServerError('error 1545012'), true);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.18-w200.128
+// @version      1.93.19-w200.129
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.18-W200.128'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.19-W200.129'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3722,7 +3722,15 @@
         resetPageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
         markDelivered(conv.id, 'api'); postSendSideEffects(conv); return;
       } // đã đến nơi — im lặng
-      let msg = (data && (data.message || data.error)) || ('HTTP ' + res.status);
+      /* [v1.93.19] ĐỐI SOÁT 130 REQUEST GỬI THẬT (network-log*.har + logtest4.har trên `main`):
+       *   · 21 ca thành công → `payload.actions[0]` đủ 13 trường, có `message_id`
+       *   · 109 ca lỗi     → `error` ở CẤP CAO NHẤT, `payload: null`
+       *   · 0/130 ca có `error_payload` ⇒ nhánh đó không tồn tại trong thực tế
+       * Khi `success:false` mà KHÔNG kèm `message`/`error`, chuỗi cũ ra `"HTTP 200"` — vô nghĩa,
+       * che mất mã lỗi thật và làm mọi hàm phán quyết đọc sai. Nay mang đủ ngữ cảnh. */
+      const _errCode = (data && (data.error || data.errorCode || data.fbErrorCode)) || '';
+      let msg = (data && (data.message || data.error)) || ('HTTP ' + res.status
+        + (_errCode ? '' : (data && data.success === false ? ' · success:false (không kèm mã lỗi)' : '')));
       if (res.status === 401 || res.status === 403) capturedToken = null;
       const nm = conv.name || conv.id;
       const certainFail = isCertainHttpNotSent(res.status, data, parsed);
@@ -3814,13 +3822,24 @@
          * ⇒ #551 là câu trả lời của KÊNH API (endpoint messaging/send/), KHÔNG phải bản án cho
          *   khách: Extension đi qua tab Facebook thật vẫn gửi được. Chốt ❌ ở đây là MẤT TIN.
          * Giữ nguyên: vẫn bù kênh khác như cũ. Ghi lại để lần sau không "tối ưu" lại lần nữa. */
-        const _definite = isDefinitiveNotSent(msg);
+        /* [v1.93.19] `certainFail` (isCertainHttpNotSent) và `isDefinitiveNotSent` là HAI hàm
+         * song song, cùng khẳng định "server đã trả lời và tin CHƯA đi". Nhưng chỉ hàm thứ hai
+         * được quyền bỏ cổng 14 s ⇒ mọi ca `success:false` không kèm mã lỗi (chuỗi rỗng) bị đẩy
+         * vào cổng đắt dù code ĐÃ biết chắc. Nay lấy cả hai.
+         * KHÔNG nới điều kiện gửi: `definitiveNotSent` chỉ bỏ ĐOẠN CHỜ, không bỏ lần bù
+         * (3 lớp chống lặp ở scheduleBuRetry còn nguyên). */
+        const _definite = isDefinitiveNotSent(msg) || certainFail;
         if (_definite) noteFbRejected(conv.id, 'API từ chối: ' + clip(msg, 70));
         logLine('⚠ ' + nm + ' — API từ chối (' + clip(msg, 90) + ')'
           + (win ? ' — ngoài cửa sổ 24h' : ''));
         /* [v1.93.17] `definitiveNotSent` ⇒ API đã DỨT KHOÁT chưa nhận ⇒ bù ngay, khỏi cổng 10 s. */
         scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + clip(msg, 90) + ')', ['api'],
-          { ambiguous: true, definitiveNotSent: _definite, via: 'api', sentAt: Date.now() });
+          /* [v1.93.19] `sentAt` neo vào `apiStartedAt` (lúc THẬT SỰ bắt đầu gửi), không phải
+           * `Date.now()` lúc nhận lỗi. Bằng chứng: FB trả lời p50 ~1 s nhưng 4 ca 1545012 tới
+           * 297–358 ms còn ca 1545041 tới 990 ms; khi API chậm (log 14:13: 18 s), cổng
+           * `target = at + 14000` bị đẩy lùi đúng bằng độ trễ ⇒ cộng dồn 18+14 s vô ích.
+           * `apiStartedAt` đã có sẵn trong scope này (dòng 3656). */
+          { ambiguous: true, definitiveNotSent: _definite, via: 'api', sentAt: apiStartedAt || Date.now() });
       } else {
         sendDiag.apiUnknown++;
         if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'API không rõ: ' + clip(msg, 60));
@@ -6766,6 +6785,33 @@
         /* Vẫn đọc lại lịch sử cho CẢ HAI ca: `error_payload` là suy luận từ hợp đồng extension,
          * chưa phải bằng chứng đo được trên hội thoại. Chỉ ĐỌC ⇒ vô hại, và nếu lịch sử CÓ tin
          * thì lật ✅ (không gửi lại). */
+        /* ═══ [v1.93.19] `messageId` LÀ BẰNG CHỨNG DƯƠNG — ĐỐI SOÁT SOURCE + HAR THẬT ═══
+         * Nguồn ①: `0.5.62_0/assets/background.js` (trên `main`, đọc bằng git show):
+         *   parseSuccessResponse: facebook => error_payload ? {}
+         *                                            : { messageId: actions[0].message_id, … }
+         *   sendInboxSuccess: postMessage REPLY_INBOX_PHOTO_SUCCESS { …, messageId, timestamp }
+         * Nguồn ②: 130 request gửi thật trên `main` (network-log*.har + logtest4.har):
+         *   · 21/21 ca THÀNH CÔNG có `payload.actions[0].message_id` = `mid.$c…`
+         *   · 109/109 ca LỖI có `payload: null` (nên nhánh `error_payload` KHÔNG BAO GIỜ chạy)
+         * ⇒ `success:true` + `messageId` = tin đã được Facebook TẠO. Đây không phải suy đoán
+         *   từ hợp đồng như §28 cũ, mà là quan sát trên response thật.
+         *
+         * GIỮ NGUYÊN 1.93.2: `res.success` MỘT MÌNH vẫn không phải bằng chứng (đo được 554 ca
+         * ✅ giả). Chỉ thêm luật: **có `messageId`** thì mới chốt ✅.
+         *
+         * KHÔNG đăng ký đọc lại lịch sử cho ca này: Pancake thường CHƯA đồng bộ tin vừa gửi
+         * ⇒ cổng sẽ trả "không thấy" ⇒ hạ một ca đã chắc chắn gửi xuống ⚠ (đúng loại ✅→⚠ oan).
+         * KHÔNG đổi số lệnh gửi: ca này không bị bắn lại lần nào. */
+        if (_extMsgId && !ownLock) {
+          extSendCtl.lastOutcomeOk = true;
+          extTimeoutStats.confirmedByMsgId = (extTimeoutStats.confirmedByMsgId || 0) + 1;
+          return {
+            ok: true, sent: true, fired: true, sendBy: 'extension',
+            extMessageId: String(_extMsgId),
+            id: String(_extMsgId),
+            sentAt: _extTs || Date.now(),
+          };
+        }
         if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt, 1, false, 0, true);
         return {
           ok: false, sent: 'maybe', sendBy: 'extension', extClaimedSuccess: true,
@@ -10865,9 +10911,33 @@
    * cổng chứng minh vắng mặt, không đổi số lần gửi của bất kỳ ca nào khác. Ca bị chặn bù
    * vẫn được chốt ❌ + vào danh sách gửi tay y như ca ❌ bình thường (không im lặng mất tin). */
   const fbRejectedIds = new Map(); // convId → { at, why } FB đã trả lời dứt khoát "chưa nhận được"
+  /* [v1.93.19] PHÂN LOẠI lý do FB báo không nhận — TỔNG HỢP không được nói sai.
+   * Log 14:36 in `🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca nào (không có lỗi 1545041)`
+   * trong khi lô đó có **57 ca ⚠** và 1 ca `Ty Do — noThreadIdFound`. Câu đó đọc lên tưởng
+   * "không có gì bất thường". Đường dò `1545041` chỉ canh ĐÚNG một mã; các ca dứt khoát khác
+   * không được nhắc tới. Nay đếm theo loại và in rõ. */
+  const fbRejectKinds = Object.create(null);
+  function fbRejectKindsText() {
+    const ks = Object.keys(fbRejectKinds).filter((k) => k !== '1545041' && fbRejectKinds[k]);
+    if (!ks.length) return ' (không có ca FB từ chối nào khác)';
+    const name = { noThreadId: 'noThreadIdFound', successFalseRong: 'success:false không kèm mã',
+      '551': '#551', '10': '#10 ngoài 24h', '100': '#100', khac: 'lý do khác' };
+    return ' — nhưng CÓ ' + ks.map((k) => fbRejectKinds[k] + ' ca ' + (name[k] || k)).join(' · ');
+  }
+
   function noteFbRejected(convId, why) {
     if (!convId) return;
     try { fbRejectedIds.set(String(convId), { at: Date.now(), why: String(why || '') }); } catch (e) { /* ignore */ }
+    try {
+      const w = String(why || '');
+      const k = /1545041|không có mặt/i.test(w) ? '1545041'
+        : /noThreadIdFound/i.test(w) ? 'noThreadId'
+        : /success:false/i.test(w) ? 'successFalseRong'
+        : /#551/.test(w) ? '551'
+        : /#10|ngoài khoảng thời gian/i.test(w) ? '10'
+        : /#100/.test(w) ? '100' : 'khac';
+      fbRejectKinds[k] = (fbRejectKinds[k] || 0) + 1;
+    } catch (eK) { /* ignore */ }
   }
   function isFbRejected(convId) {
     try { return !!(convId && fbRejectedIds.has(String(convId))); } catch (e) { return false; }
@@ -11283,7 +11353,7 @@
                     ? extTry1545.streak + ' ca liên tiếp bị từ chối'
                     : 'đủ ' + extTry1545.PROBE + ' ca đã định bắn') + ', cứu 0 ⇒ phần còn lại vào danh sách gửi tay)'
                 : '')
-            : ' | 🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca nào (không có lỗi 1545041)')
+            : (' | 🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca 1545041' + fbRejectKindsText()))
           /* [v1.92.45] ĐO TRẦN THẬT CỦA LÀN EXT — để lần sau không tối ưu sai chỗ.
            * HAR làn Ext (90 lệnh / 6,74 s) cho thấy trần ~13,4 lệnh/s và đỉnh in-flight chỉ 42
            * trong khi làn đặt 48–96 ⇒ nâng sàn/trần làn KHÔNG làm lô nhanh hơn. In số đo thật

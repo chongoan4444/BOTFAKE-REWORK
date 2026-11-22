@@ -207,3 +207,77 @@ Khớp **chính xác** `class Ct.getFacebookThreads` trong source. Không có `4
 2. `messageId` có dạng `mid.$…` ⇒ **dùng được** để đối chiếu trực tiếp trong
    `LOAD_FACEBOOK_MESSAGES` (cần kiểm `class He` trả `message_id` cho từng tin).
 3. 2 file `Trace-*.json.gz` (9,3 MB) chưa mở — là Chrome trace, ít khả năng có response HTTP.
+
+---
+
+## 11. Bốn bản vá rút ra từ dữ liệu (v1.93.19 / W200.129)
+
+Mỗi bản vá dưới đây **có số liệu đứng sau**, không suy đoán.
+
+### ① Chuỗi lỗi rỗng che mất mã lỗi
+
+`msg = (data.message || data.error) || ('HTTP ' + res.status)` → khi `success:false` không kèm
+`message`/`error`, chuỗi ra **`"HTTP 200"`** — vô nghĩa, và làm mọi hàm phán quyết đọc sai.
+Log 14:13 có 3 ca như vậy, mỗi ca bị đẩy vào cổng 14 s.
+
+**Vá:** mang đủ ngữ cảnh → `HTTP 200 · success:false (không kèm mã lỗi)`.
+
+### ② Hai hàm phán quyết song song, chỉ một được quyền bỏ cổng
+
+`isCertainHttpNotSent()` trả **true** (vì `data.success === false`) nhưng
+`isDefinitiveNotSent("HTTP 200")` trả **false** ⇒ vẫn vào cổng 14 s dù code đã biết chắc.
+
+**Vá:** `_definite = isDefinitiveNotSent(msg) || certainFail`.
+
+**②b `sentAt` neo sai mốc.** Cũ: `Date.now()` **lúc nhận lỗi**. Khi API chậm (log 14:13: 18 s),
+`target = at + 14000` bị đẩy lùi đúng bằng độ trễ ⇒ cộng dồn 18 + 14 s vô ích.
+
+**Vá:** dùng `apiStartedAt` (đã có sẵn trong scope, dòng 3656).
+
+### ③ `messageId` là bằng chứng dương
+
+Từ **130 request gửi thật**:
+
+| | số ca | có `message_id`? |
+|---|---|---|
+| thành công (`payload.actions`) | 21 | **21/21** — dạng `mid.$c…` |
+| lỗi (`error` cấp cao, `payload:null`) | 109 | không áp dụng |
+| `error_payload` | **0** | nhánh không tồn tại thực tế |
+
+`parseSuccessResponse` chỉ trả `{messageId}` khi FB trả `actions[0].message_id` **và** không có
+`error_payload` ⇒ `success:true` + `messageId` = tin đã được tạo.
+
+**Vá:** chốt ✅ ngay, không đẩy vào sổ ⚠ chờ kiểm chứng (Pancake chưa đồng bộ tin vừa gửi ⇒
+đọc lại sẽ hạ ca đã chắc chắn xuống ⚠).
+
+**Giữ nguyên 1.93.2:** `res.success` một mình vẫn **không** phải bằng chứng (554 ca ✅ giả).
+Chỉ thêm luật: **có `messageId`** mới chốt.
+
+### ④ `🛟 … KHÔNG có ca nào` báo sai nghĩa
+
+Log 14:36 in câu đó trong khi lô có **57 ca ⚠** và 1 ca `Ty Do — noThreadIdFound`.
+Đường dò `1545041` chỉ canh **một** mã.
+
+**Vá:** `fbRejectKinds` phân loại + in rõ
+`— nhưng CÓ 1 ca noThreadIdFound · 7 ca success:false không kèm mã`.
+
+### Kiểm
+
+`npm test` **545 ca** (+8). Mutation **7/7 bị bắt**:
+
+| mã | đột biến |
+|---|---|
+| M1 | bỏ ngữ cảnh `success:false` |
+| M2 | bỏ `\|\| certainFail` |
+| M3 | `sentAt` về `Date.now()` |
+| M4 | bỏ chốt ✅ khi có `messageId` |
+| M5 | chốt ✅ **cả** ca không `messageId` (đúng lỗi 554 ca ✅ giả) |
+| M6 | `🛟` về câu báo sai cũ |
+| M7 | xoá biến `fbRejectKinds` |
+
+### Hiệu quả kỳ vọng trên đúng ca đã đo
+
+| log | trước | sau |
+|---|---|---|
+| 14:13 (68 chat, 3 ca lỗi rỗng) | 35 s | **~19 s** (−46 %) |
+| 14:36 (563 chat, 57 ca ⚠) | ⚠ 57 rồi chờ 407 ms–31 s | chốt ✅ ngay trong làn, ⚠ chỉ còn ca không có `messageId` |
