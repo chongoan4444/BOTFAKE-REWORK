@@ -634,6 +634,10 @@
     };
   }
 
+  // [v1.93.13] SỔ messageId extension trả về (REPLY_INBOX_PHOTO_SUCCESS có `messageId`).
+  // Lượt đọc lại lịch sử đối chiếu với sổ này; chỉ ĐỌC, không gửi thêm.
+  const extMsgIdByConv = Object.create(null);
+
   let lastBgConvById = {};
   let lastBgPhoto = null;
   let lastBgText = '';
@@ -3593,6 +3597,16 @@
          * hiện không có mặt", vẫn được bù Socket rồi Ext, rồi đánh ✅. Chỉ ghi sổ khi lỗi là
          * DỨT KHOÁT (`isDefinitiveNotSent` — hàm có sẵn: #551 / ngoài 24h / #10 kiểm soát thread
          * / #100 không tồn tại). Lỗi tạm thời KHÔNG ghi ⇒ vẫn bù bình thường như cũ. */
+        /* [v1.93.13] ĐÃ THỬ chốt ❌ ngay khi API trả #551 — ĐO LẠI THÌ SAI, GIỮ NGUYÊN ĐƯỜNG CŨ.
+         * 414 dòng `⚠ … API từ chối ((#551) Người này hiện không có mặt.)` trên 30 log nghe như
+         * "FB nói dứt khoát", nhưng đó là log TRUNG GIAN, không phải trạng thái cuối.
+         * Đối chứng sổ kiểm chứng: 380 tên ca từng bị #551, trong đó **29 ca ĐƯỢC CỨU THẬT**
+         * (7,6 %) — vd log 17/11 16:27, conv `769625892902516_28615693248109700` (Hà Hồ):
+         *   16:15:41 ⚠ API từ chối ((#551) Người này hiện không có mặt.)
+         *   16:20:30 ✅ bù THÀNH CÔNG qua Extension     ← sổ ghi "kênh ext"
+         * ⇒ #551 là câu trả lời của KÊNH API (endpoint messaging/send/), KHÔNG phải bản án cho
+         *   khách: Extension đi qua tab Facebook thật vẫn gửi được. Chốt ❌ ở đây là MẤT TIN.
+         * Giữ nguyên: vẫn bù kênh khác như cũ. Ghi lại để lần sau không "tối ưu" lại lần nữa. */
         if (isDefinitiveNotSent(msg)) noteFbRejected(conv.id, 'API từ chối: ' + clip(msg, 70));
         logLine('⚠ ' + nm + ' — API từ chối (' + clip(msg, 90) + ')'
           + (win ? ' — ngoài cửa sổ 24h' : ''));
@@ -6036,10 +6050,28 @@
          * gọi 1 lần rồi. Gọi 2 lần ⇒ `fastStreak` tăng gấp đôi ⇒ làn Ext tự nới 2× nhanh hơn thiết
          * kế — đúng loại lỗi "Ext nhanh mà cứu 0" mà 1.92.45 vừa vá. */
         extTimeoutStats.claimedUnverified++;
+        /* ═══ [v1.93.13] ĐỌC `messageId` CỦA REPLY_INBOX_PHOTO_SUCCESS (trước đây VỨT) ═══
+         * Nguồn `0.5.62_0/assets/background.js`:
+         *   parseSuccessResponse → { messageId: e.payload.actions[0].message_id,
+         *                            globalUserId, timestamp: e.payload.actions[0].timestamp }
+         *   sendInboxSuccess     → postMessage({type:"REPLY_INBOX_PHOTO_SUCCESS", taskId,
+         *                            pageId, convId, messageId, globalUserId, timestamp, …})
+         * Script cũ đọc `res.data.timestamp || res.data.convId` ⇒ BỎ QUA `messageId`, mà đây là
+         * bằng chứng dương tính DUY NHẤT của FB. Nay vẫn giữ ⚠ (đúng: success chỉ là extension
+         * không báo lỗi) nhưng lưu `messageId` vào sổ để lượt đọc lịch sử đối chiếu được.
+         * Không đổi số lệnh gửi. */
+        const _extMsgId = (res.data && res.data.messageId) || '';
+        const _extTs = (res.data && res.data.timestamp) || 0;
+        if (_extMsgId) {
+          try {
+            extMsgIdByConv[conv.id] = { messageId: String(_extMsgId), at: _extTs || Date.now() };
+          } catch (eMI) { /* ignore */ }
+        }
         if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt, 1, false, 0, true);
         return {
           ok: false, sent: 'maybe', sendBy: 'extension', extClaimedSuccess: true,
-          id: (res.data && (res.data.timestamp || res.data.convId)) || '',
+          extMessageId: _extMsgId ? String(_extMsgId) : '',
+          id: _extMsgId || (res.data && (res.data.timestamp || res.data.convId)) || '',
           error: 'Extension báo success — CHƯA xác nhận tin đã tới (đang đọc lại lịch sử, không gửi lại)',
         };
       }

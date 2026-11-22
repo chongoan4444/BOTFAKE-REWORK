@@ -801,3 +801,60 @@ Nguồn: `0.5.62_0/assets/background.js-EHsGnyIc.js` (412 999 byte).
   đây là bằng chứng dương tính duy nhất FB trả về.
 - Nhánh `restartInbox` của ext **chắc chắn chưa gửi**: mọi nhánh đó đều `v(...)` (reject),
   không nhánh nào `b(...)` (resolve). Script đang xếp nhóm này vào "không rõ" (⚠ + gửi tay).
+
+---
+
+## 15. Rà lại toàn bộ `sendInbox` của extension 0.5.62 (1.93.13)
+
+### 15.1 ĐÃ THỬ và ĐÃ GỠ: chốt ❌ ngay khi API trả `#551`
+
+414 dòng `⚠ … API từ chối ((#551) Người này hiện không có mặt.)` trên 30 log — nguồn ⚠ lớn nhất.
+Đã thử chốt ❌ ngay. **SAI — đã gỡ.** Đối chứng sổ kiểm chứng:
+
+```
+380 tên ca từng bị #551  →  29 ca ĐƯỢC CỨU THẬT (7,6 %)
+vd log 17/11 16:27, conv 769625892902516_28615693248109700 (Hà Hồ):
+  16:15:41  ⚠  API từ chối ((#551) Người này hiện không có mặt.)
+  16:20:30  ✅  bù THÀNH CÔNG qua Extension      ← sổ ghi "kênh ext"
+```
+
+⇒ `#551` là câu trả lời của **kênh API**, không phải bản án cho khách. Extension đi qua tab
+Facebook thật vẫn gửi được. Chốt ❌ ở đây = **mất tin**.
+
+Bài học: dòng `⚠` giữa lô KHÔNG phải trạng thái cuối. Muốn kết luận phải tra **sổ kiểm chứng**
+theo `conv id`, không đếm dòng log.
+
+### 15.2 ĐÃ SỬA: `messageId` của `REPLY_INBOX_PHOTO_SUCCESS` bị vứt
+
+```
+parseSuccessResponse → { messageId: payload.actions[0].message_id, globalUserId,
+                         timestamp: payload.actions[0].timestamp }
+sendInboxSuccess     → postMessage({type:"REPLY_INBOX_PHOTO_SUCCESS", taskId, pageId,
+                         convId, messageId, globalUserId, timestamp, …})
+```
+
+Script cũ: `id: (res.data && (res.data.timestamp || res.data.convId))` ⇒ bỏ `messageId`.
+Nay lưu `messageId` vào `extMsgIdByConv` và trả `extMessageId` để lượt đọc lịch sử đối chiếu.
+**Không đổi quyết định** (vẫn ⚠ vì `success` chỉ là "extension không báo lỗi"), **không thêm lệnh gửi**.
+
+### 15.3 ĐỌC LẠI và SỬA LỜI: `restartInbox` KHÔNG phải "chắc chắn chưa gửi"
+
+Trước đó tôi nói `restartInbox` "mọi nhánh đều reject" — **SAI, đọc thiếu**. Code thật:
+
+```js
+case"restartInbox": this.init(a,!0).then(…).then(()=>this.sendInbox({...e,retry:1}))
+                     .then(b).catch(v);    // ← CÓ .then(b) ⇒ CÓ THỂ THÀNH CÔNG
+```
+
+Đúng là `#551 → "cannotRetry"` (nhánh `jc(H)` = `![1545041].includes(H.error)` = false cho 1545041).
+Nhánh `restartInbox` chỉ xảy ra ở lỗi KHÁC ⇒ **không phải bằng chứng khách chết**. Giữ nguyên đường cũ.
+
+### 15.4 ĐÃ KIỂM, GIỮ NGUYÊN (có lý do)
+
+| Điểm | Extension 0.5.62 | Script | Kết luận |
+|---|---|---|---|
+| `isResponseSuccess` | `actions&&actions[0].message_id \|\| error_payload` | coi `success:true` là chưa chứng minh | **Không bắt chước** — ext có thể resolve khi `error_payload` truthy, hoặc throw khi actions rỗng |
+| `getGlobalUserId` khi thiếu gid | ext tự dò rồi mới gửi | script gate `noGidGate` | Giữ gate: `getGlobalUserId` cần `doc_id` (3 tầng chặn đã ghi §12) và không kiểm soát được chống trùng |
+| `ao = 35e3`, `Wc = ao-5e3` | ext có 30 s/lệnh | script bỏ chờ 2,5 s | Không đổi — đã sửa câu chữ ở 1.93.8, quyết định đúng |
+| `canRetryUsingSocket` | ext TRẢ nhưng **không chỗ nào đọc lại** | script bỏ qua | Đúng |
+| `checkCanReuploadPhotos` | cần đủ 3 trường | script giữ 1545012 là "tạm thời" | Đúng (thiếu 2 trường ⇒ không đủ bằng chứng) |
