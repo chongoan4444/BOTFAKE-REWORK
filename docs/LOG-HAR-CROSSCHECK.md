@@ -2985,15 +2985,53 @@ bt = class bt { constructor(e={}){ … this.currentPageName = e.currentPageName,
   ngoài constructor) = **0**. ⇒ trường chết. App gửi `pages.currentPageName` (tên page **đang
   chọn**, không phải page đích) — script gửi `meta.name` của page đích. **Cả hai đều vô hại**
   vì ext không đọc; script giữ bản đúng nghĩa hơn.
-- `allowSearchByName`: chỉ dùng ở **nhánh `convType:"COMMENT"`** —
-  `new Ue({…, allowPrioritySearchByName:this.allowSearchByName})`. Nhưng case `SEND_COMMENT` gọi
-  `new Te(r.data).send()` và **không** truyền trường này (app cũng không) ⇒ ở đường
-  `SEND_COMMENT` nó **luôn `undefined`**. Đường dò bình luận theo tên chỉ dùng được khi ai đó
-  gọi `Ee` với `convType:"COMMENT"` **và** truyền `allowSearchByName` — script không làm vậy ⇒
-  **không cần thêm**.
+- `allowSearchByName`: **ĐÍNH CHÍNH (xem §46.1) — lập luận ở bản đầu là SAI.** Tôi đã viết
+  "chỉ dùng ở nhánh COMMENT ⇒ SEND_COMMENT không truyền nên vô nghĩa". Đúng là
+  `Ee` nhánh COMMENT truyền `allowPrioritySearchByName:this.allowSearchByName` vào `Ue`, nhưng
+  **`Ue` KHÔNG BAO GIỜ ĐỌC trường đó** (`grep` trong cả class `Ue`: 2 vị trí, cả hai là phép
+  gán trong constructor; số lần đọc = **0**). ⇒ Kết luận cuối KHÔNG ĐỔI (không cần thêm vào
+  `SEND_COMMENT`), nhưng **lý do** phải là "ext không đọc", không phải "nhánh này không dùng".
 
 Ghi lại vì đây là bẫy ngược với §37/§43: ở đó thiếu trường là **mất chức năng thật**; ở đây
 thêm trường chỉ làm payload phình ra mà ext không đọc.
 
 **Test khoá:** payload `SEND_COMMENT` **không** thêm `allowSearchByName`/`originalCommentId`
 (tránh "sửa cho đủ" sau này).
+
+---
+
+## 46. `Ue` (businessInboxComment) — chốt §40.1 bằng chính mã của nó; trường chết thứ 3
+
+### 46.1 `Ue.preloadDocIds` nạp `[ea, ge, Oe]` — xác nhận `PRELOAD_DOC_IDS` KHÔNG nạp `rt/st`
+
+```js
+static async preloadDocIds({html:e, pageId:t}){
+  let a = [];
+  O.has(ea) || a.push(ea);      // BizInboxSearchResultFacebookListQuery
+  O.has(ge) || a.push(ge);      // BizInboxCustomerRelaySearchSourceQuery
+  O.has(Oe) || a.push(Oe);      // BizInboxSearchResultListContainerQuery
+  if (a.length === 0) return;   // ← không có `rt`/`st` ở BẤT KỲ nhánh nào
+  … await O.loadDocIdsFromView({html:r, docNames:a}) }
+```
+`Ct.init()` (BATCH_GET_GLOBAL_ID) đòi `O.get(rt, st)` — **không có trong danh sách này**.
+Đây là xác nhận trực tiếp cho §40.1 (trước đó suy ra từ chuỗi `Ll.preloadDocIds → Ue`), nay đọc
+được **đúng hàm** nên không còn là suy luận chuỗi.
+
+### 46.2 Trường chết thứ 3: `allowPrioritySearchByName`
+
+```js
+class Ue{ constructor({pageId, convId, postId, pageAccessToken, convName, allowPrioritySearchByName:i}){
+  … this.allowPrioritySearchByName = i, … } }
+```
+`grep "allowPrioritySearchByName"` trong toàn class `Ue` = **2 vị trí, cả hai là phép gán**
+(khai báo tham số + gán `this.`) ⇒ số lần **đọc** = **0**.
+`searchCommentByUserName()` (đường dò bình luận theo tên) **luôn chạy**, không rẽ nhánh theo cờ này.
+
+⇒ Đường dò bình luận theo tên của ext **vẫn chạy** (nó chỉ `return null` khi `!this.convName`),
+nên nó KHÔNG phải tính năng "phải bật bằng cờ". Cờ này là tàn dư.
+
+**Đính chính §45.2:** lý do "không cần thêm `allowSearchByName` vào `SEND_COMMENT`" vẫn đúng,
+nhưng phải phát biểu là *"ext không đọc trường này ở bất kỳ đâu"*, không phải *"chỉ nhánh COMMENT
+mới dùng, mà nhánh đó không truyền"*. Kết luận hành động không đổi.
+
+**Test khoá:** không thêm `allowPrioritySearchByName`/`allowSearchByName` vào payload script.

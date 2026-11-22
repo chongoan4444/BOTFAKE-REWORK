@@ -2079,6 +2079,13 @@ check('[comment] không thêm allowSearchByName (chỉ dùng cho convType COMMEN
 check('[comment] không thêm originalCommentId (ext không khai báo)', /originalCommentId/.test(_scSeg), false);
 check('[comment] giữ fbPageId từ linked_fb_page như app', /fbPageId: meta\.fbPageId/.test(_scSeg), true);
 
+/* ═══ (Z) [v1.93.15] `Ue`: trường chết `allowPrioritySearchByName` — không thêm vào payload ═══
+ * `class Ue` gán `this.allowPrioritySearchByName = i` nhưng KHÔNG BAO GIỜ ĐỌC (grep = 2 vị trí,
+ * cả hai là phép gán). `searchCommentByUserName()` luôn chạy, không rẽ nhánh theo cờ.
+ * ⇒ Đừng thêm vào bất kỳ payload nào với hy vọng "bật" tính năng dò theo tên. */
+check('[Ue] script không gửi allowPrioritySearchByName (ext không đọc)',
+  /allowPrioritySearchByName/.test(stripComments(SRC)), false);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
