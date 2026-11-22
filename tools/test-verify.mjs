@@ -2066,6 +2066,19 @@ check('[bgFetch] KHÔNG thêm access_token khi đã có authHeader',
 check('[bgFetch] gửi authMode jwt xuống SW (nơi có chrome.cookies)',
   /authMode: _authHdr === 'jwt' \? 'jwt' : null/.test(stripComments(SRC)), true);
 
+/* ═══ (Y) [v1.93.15] `SEND_COMMENT`: đừng thêm trường ext không đọc ═══
+ * ext `bt` khai báo `currentPageName` và `allowSearchByName` nhưng: `currentPageName` chỉ được
+ * GÁN (0 lần đọc trong class) và `allowSearchByName` chỉ dùng ở nhánh `convType:"COMMENT"`
+ * (mà `case"SEND_COMMENT"` không truyền). App cũng không gửi cả hai ⇒ giữ nguyên. */
+const _scSeg = (function () {
+  const C = stripComments(SRC);
+  const i = C.indexOf("type: 'SEND_COMMENT'");
+  return i < 0 ? '' : C.slice(i, i + 800);
+})();
+check('[comment] không thêm allowSearchByName (chỉ dùng cho convType COMMENT)', /allowSearchByName/.test(_scSeg), false);
+check('[comment] không thêm originalCommentId (ext không khai báo)', /originalCommentId/.test(_scSeg), false);
+check('[comment] giữ fbPageId từ linked_fb_page như app', /fbPageId: meta\.fbPageId/.test(_scSeg), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));

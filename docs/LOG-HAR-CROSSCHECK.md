@@ -2951,3 +2951,49 @@ Bearer). Nếu bản SW đang chạy chưa có nhánh đó, request đầu sẽ 
 
 **Test khoá:** `rescueInboxMessages` có `authHeader: 'jwt'`; `bgFetchJson` không thêm
 `access_token` khi có `authHeader`; có nhánh lùi `access_token`.
+
+---
+
+## 45. `SEND_COMMENT` (`class Te` = `bt`) — payload khớp; hai trường ext khai báo là MÃ CHẾT
+
+### 45.1 App gửi gì (mốc so sánh)
+
+```js
+// _app-…v6.js — executeByExtOnce (comment)
+let {message:o, post:i, content:s, platform:l, linkedFbPage:d} = this.payload;
+let p = last(i.id.split("_"));                                  // postId
+let r = l === "facebook" ? last(o.parent_id.split("_")) : o.id; // commentId
+let h = { type:"SEND_COMMENT", pageId:o.page_id, fbPageId:d, postId:p, commentId:r,
+          stickerId:s.sticker && s.sticker.id, message:s.text, mentions:s.mentions,
+          platform:l, currentPageName:this.payload.currentPageName,
+          conversationId:this.payload?.conversation?.id, accessToken:this.payload.accessToken };
+s.photos.length > 0 && (h.photoUrl = s.photos[0].url);
+```
+
+Script gửi **đúng bộ đó** (`fbPageId` lấy từ `pageMeta()` = `platform_extra_info.linked_fb_page`
+— cùng nguồn `linkedFbPage` của app; `postId`/`commentId` cắt bằng `split('_').pop()` như
+`last(...split("_"))`). ✔ Không sửa.
+
+### 45.2 Hai trường ext KHAI BÁO nhưng KHÔNG BAO GIỜ ĐỌC (đừng "bổ sung cho đủ")
+
+```js
+bt = class bt { constructor(e={}){ … this.currentPageName = e.currentPageName,
+                                     this.allowSearchByName = e.allowSearchByName, … }
+```
+- `currentPageName`: `grep "currentPageName"` trong toàn class `bt` = **2** lần — **cả hai** là
+  phép gán (`this.currentPageName = e.currentPageName`). Số lần **đọc** (`this.currentPageName`
+  ngoài constructor) = **0**. ⇒ trường chết. App gửi `pages.currentPageName` (tên page **đang
+  chọn**, không phải page đích) — script gửi `meta.name` của page đích. **Cả hai đều vô hại**
+  vì ext không đọc; script giữ bản đúng nghĩa hơn.
+- `allowSearchByName`: chỉ dùng ở **nhánh `convType:"COMMENT"`** —
+  `new Ue({…, allowPrioritySearchByName:this.allowSearchByName})`. Nhưng case `SEND_COMMENT` gọi
+  `new Te(r.data).send()` và **không** truyền trường này (app cũng không) ⇒ ở đường
+  `SEND_COMMENT` nó **luôn `undefined`**. Đường dò bình luận theo tên chỉ dùng được khi ai đó
+  gọi `Ee` với `convType:"COMMENT"` **và** truyền `allowSearchByName` — script không làm vậy ⇒
+  **không cần thêm**.
+
+Ghi lại vì đây là bẫy ngược với §37/§43: ở đó thiếu trường là **mất chức năng thật**; ở đây
+thêm trường chỉ làm payload phình ra mà ext không đọc.
+
+**Test khoá:** payload `SEND_COMMENT` **không** thêm `allowSearchByName`/`originalCommentId`
+(tránh "sửa cho đủ" sau này).
