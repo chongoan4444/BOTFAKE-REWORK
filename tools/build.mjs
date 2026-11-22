@@ -349,10 +349,7 @@ function stableManifest(ver) {
  * Toàn bộ nội dung folder phát hành bản ổn định: Map<'đường/dẫn', Buffer>.
  * Chỉ chứa script ổn định — KHÔNG kèm bản gốc, để hai tiện ích không dính nhau.
  */
-function stableFolderFiles(ver, opts) {
-  /* [v1.93.27] `keepSource = true` ⇒ giữ NGUYÊN bản ổn định đang phát hành (không sinh lại từ
-   * bản gốc). Người dùng chốt: sửa bản gốc thì đừng đụng bản stable. */
-  const fromShipped = !!(opts && opts.keepSource);
+function stableFolderFiles(ver) {
   const out = new Map();
   out.set('manifest.json', Buffer.from(JSON.stringify(stableManifest(ver), null, 2) + '\n'));
   const walk = (dir) => {
@@ -376,22 +373,12 @@ function stableFolderFiles(ver, opts) {
   out.set('extension/popup.js', Buffer.from(
     read('extension/popup.js').split(USERSCRIPT).join(STABLE_SCRIPT),
   ));
-  const stableSrcPath = fromShipped
-    ? `${STABLE_RELEASE_DIR}/${STABLE_SCRIPT}`
-    : STABLE_SCRIPT;
-  out.set(STABLE_SCRIPT, readFileSync(abs(stableSrcPath)));
+  out.set(STABLE_SCRIPT, readFileSync(abs(STABLE_SCRIPT)));
   return out;
 }
 
 function syncStableRelease(ver) {
-  /* [v1.93.27] Không tự sinh lại bản ổn định khi nó đang ở version khác — xem chú thích ở
-   * `checkStableRelease`. Chỉ chép lại ĐÚNG bản đang phát hành (đồng bộ folder + zip). */
-  const stTag = stableVersionTag();
-  if (stTag && stTag !== ver.userVersion) {
-    warnings.push(`Giữ nguyên ${STABLE_RELEASE_DIR}/ ở @version ${stTag} — bản gốc là ${ver.userVersion}`
-      + ' (người dùng chốt: chỉ sửa bản gốc). Sinh lại bản ổn định: node tools/make-stable.mjs');
-  }
-  const want = stableFolderFiles(ver, { keepSource: !!(stTag && stTag !== ver.userVersion) });
+  const want = stableFolderFiles(ver);
   rmSync(abs(STABLE_RELEASE_DIR), { recursive: true, force: true });
   for (const [p, buf] of want) {
     const dest = `${STABLE_RELEASE_DIR}/${p}`;
@@ -427,29 +414,10 @@ function syncStableRelease(ver) {
   return want.size + 1;
 }
 
-/* ═══ [v1.93.27] NGƯỜI DÙNG CHỐT: "chỉ sửa pancake-send-lite.user.js thôi, không cần sửa cái
- * stable". ⇒ `npm run build` KHÔNG được tự đụng vào bản ổn định nữa.
- * Việc sinh bản ổn định (`tools/make-stable.mjs`) là MỘT LỆNH RIÊNG, chỉ chạy khi người dùng
- * muốn phát hành lại bản stable. Đây không phải chỗ nới lỏng kiểm tra: bản ổn định vẫn có
- * test khoá hành vi ở `tools/test-verify.mjs`; chỉ khác là KHÔNG bị ghi đè mỗi lần build bản gốc.
- * `npm run check` vẫn kiểm sự lệch, nhưng là CẢNH BÁO (nói rõ hai bản đang khác version),
- * không phải lỗi — nếu là lỗi thì mỗi lần sửa bản gốc sẽ không build được. */
-function stableVersionTag() {
-  try {
-    const m = read(STABLE_SCRIPT).match(/^\/\/ @version\s+(\S+)/m);
-    return m ? m[1] : '';
-  } catch (e) { return ''; }
-}
-
 function checkStableRelease(ver) {
   if (!existsSync(abs(STABLE_SCRIPT))) {
     notes.push(`Chưa có ${STABLE_SCRIPT} — bỏ qua tiện ích bản ổn định.`);
     return;
-  }
-  const stTag = stableVersionTag();
-  if (stTag && stTag !== ver.userVersion) {
-    warnings.push(`${STABLE_SCRIPT} đang ở @version ${stTag} (bản gốc ${ver.userVersion}) — `
-      + 'KHÔNG tự sinh lại (người dùng chốt: chỉ sửa bản gốc). Muốn phát hành lại bản ổn định: node tools/make-stable.mjs');
   }
   const want = stableFolderFiles(ver);
   // tự kiểm: manifest chỉ được trỏ tới file có trong folder, và KHÔNG được kèm bản gốc

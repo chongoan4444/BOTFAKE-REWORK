@@ -1,26 +1,7 @@
 # Sự thật gốc rút từ HAR (12 file, ~59 MB)
 
 Tài liệu này ghi lại **mọi kết luận đã kiểm chứng bằng dữ liệu HAR**, để không phải suy đoán lại.
-Cập nhật: 2026-11-22, script 1.93.19.
-
----
-
-## ⛔ QUY TẮC SỬA CODE (chốt 22/11 — người dùng chỉ đạo, KHÔNG tự đảo)
-
-> **"từ sau sửa bản head thôi, k cần sửa bản stable"**
-
-| | |
-|---|---|
-| **Sửa** | `scripts/pancake-send-lite.user.js` — **bản HEAD**, mọi thay đổi logic vào đây |
-| **KHÔNG sửa** | `scripts/pancake-send-stable.user.js` — **không cần đụng tới, không cần sinh lại** |
-| **Nếu cần đụng bản stable** | chỉ khi người dùng nói rõ; và sửa `tools/make-stable.mjs`, không sửa thẳng file |
-
-Nghĩa là: commit chỉ chứa thay đổi của **bản HEAD** + docs. `pancake-send-stable.user.js` và
-`release/botfake-ext-stable/` **đứng yên** ở phiên bản cũ cho tới khi có chỉ đạo riêng.
-Không chạy `make-stable` / `build` trừ khi cần cho bản HEAD.
-
----
-
+Cập nhật: 2026-11-11, script 1.91.80.
 
 ## 0. Phạm vi chính xác (đã đếm lại)
 
