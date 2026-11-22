@@ -1810,6 +1810,58 @@ check('noteManualResend chống trùng bằng Set, không quét mảng',
 check('reset đầu lượt phải xoá CẢ HAI chỉ mục của danh sách gửi tay',
   /manualResendIds\.clear\(\); manualResendById\.clear\(\);/.test(stripComments(SRC)), true);
 
+/* ═══ (I) [v1.93.14] `fbMessagesVerdict` — PHÂN XỬ TIN ĐỌC TRỰC TIẾP TỪ FACEBOOK ═══
+ * Nguồn trường: `He.findInternalMessage` của extension 0.5.62 — đó là CHUẨN, không phải suy đoán:
+ *   parseInt(parseInt(m.timestamp_precise)/1e3) == insertedAt · text.trim() == message.trim()
+ *   · `${m.message_sender.id}` == `${from.id}` (hoặc == globalId khi gửi bằng vai page)
+ * Trường KHÁC HẲN Pancake (không inserted_at/from.id/type/attachments) ⇒ dễ viết sai.
+ * Bộ test này khoá 3 điều nguy hiểm: (1) tin của KHÁCH không được tính là đã gửi,
+ * (2) đơn vị `timestamp_precise` là MILE-GIÂY (sai đơn vị ⇒ lệch 1000 lần), (3) không khớp
+ * KHÔNG được biến thành 'absent'. */
+{
+  const pickFn = (name) => {
+    const i = SRC.indexOf('function ' + name + '(');
+    if (i < 0) throw new Error('không thấy hàm ' + name);
+    let d = 0, j = i;
+    for (; j < SRC.length; j++) {
+      if (SRC[j] === '{') d++;
+      else if (SRC[j] === '}') { d--; if (d === 0) { j++; break; } }
+    }
+    return SRC.slice(i, j);
+  };
+  const code = 'const serverSkewMs=0;\n' + pickFn('normalizeMsgText') + '\n'
+    + pickFn('photoNameOf') + '\n' + pickFn('fbMessagesVerdict')
+    + '\n; return { fbMessagesVerdict };';
+  const { fbMessagesVerdict } = new Function(code)();
+  const pageId = '123';
+  const at = Date.parse('2026-11-11T10:00:00Z');
+  const mk = (text, sender, msOff, atts) => ({
+    timestamp_precise: String(at + msOff), message_sender: { id: sender },
+    message: { text }, ...(atts ? { blob_attachments: atts } : {}),
+  });
+  const LONG = 'Xin chào quý khách đây là tin nhắn';
+
+  check('[fb-direct] tin DO PAGE gửi, đúng nội dung, trong cửa sổ ⇒ yes',
+    fbMessagesVerdict([mk(LONG, '123', 2000)], '123', LONG, null, at), 'yes');
+  check('[fb-direct] tin do KHÁCH gửi, TRÙNG nội dung ⇒ KHÔNG tính (unknown)',
+    fbMessagesVerdict([mk(LONG, '999', 2000)], '123', LONG, null, at), 'unknown');
+  check('[fb-direct] ngoài cửa sổ thời gian ⇒ unknown',
+    fbMessagesVerdict([mk(LONG, '123', -600000)], '123', LONG, null, at), 'unknown');
+  check('[fb-direct] sai nội dung ⇒ unknown',
+    fbMessagesVerdict([mk('Nội dung khác hoàn toàn', '123', 2000)], '123', LONG, null, at), 'unknown');
+  check('[fb-direct] `timestamp_precise` phải hiểu là MILE-GIÂY (30 s vẫn trong cửa sổ)',
+    fbMessagesVerdict([mk(LONG, '123', 30000)], '123', LONG, null, at), 'yes');
+  check('[fb-direct] node thiếu `timestamp_precise` ⇒ unknown, không crash',
+    fbMessagesVerdict([{ message_sender: { id: '123' } }], '123', 'abc', null, at), 'unknown');
+  check('[fb-direct] mảng rỗng ⇒ unknown', fbMessagesVerdict([], '123', 'abc', null, at), 'unknown');
+  check('[fb-direct] null ⇒ unknown', fbMessagesVerdict(null, '123', 'abc', null, at), 'unknown');
+  check('[fb-direct] ảnh: khớp tên tệp trong blob_attachments[].preview.uri ⇒ yes',
+    fbMessagesVerdict([mk('', '123', 2000, [{ preview: { uri: 'https://cdn.fb.com/x/abc123_n.jpg?x=1' } }])],
+      '123', '', { url: 'https://z/abc123_n.jpg' }, at), 'yes');
+  check('[fb-direct] khớp kiểu "chứa" chỉ nhận khi chuỗi gửi ≥ 20 ký tự',
+    fbMessagesVerdict([mk('Dạ vâng ạ', '123', 2000)], '123', 'Dạ', null, at), 'unknown');
+}
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
