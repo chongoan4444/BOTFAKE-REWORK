@@ -2319,37 +2319,72 @@ const _preSrc = stripComments(SRC);
     /chốt KHÔNG RÕ \(vào danh sách gửi tay\)/.test(fnT), true);
 }
 
-/* ═══ (AE) [v1.93.18] BẢN ỔN ĐỊNH — LOG CUỐI CHỈ CÒN 1 DÒNG ═══
- * Yêu cầu của người dùng (chốt nguyên văn): "bản stable log chỉ cần hiện số thành công/số thất
- * bại + tốc độ, không cần chi tiết dài dòng"; chọn 1 dòng duy nhất; giữ dòng tiến trình (🟢).
- * Đây là bản GIAO CHO NGƯỜI DÙNG nên khoá bằng test, không để lần sửa sau làm dài lại.
- * LUÔN chạy trên stripComments (bài học §47). */
+/* ═══ (AE) [v1.93.19] BẢN ỔN ĐỊNH = BẢN GỐC, CHỈ CẮT LOG ═══
+ * Người dùng chốt: "tôi muốn bản stable giống bản gốc về mọi thứ kể cả trên giao diện, nghĩa
+ * là bạn copy bản gốc ra, rồi sửa cắt mỗi cái log thôi".
+ * ⇒ Test khoá CẢ HAI CHIỀU: (a) log phải gọn đúng yêu cầu; (b) mọi thứ khác phải Y HỆT.
+ * Chiều (b) quan trọng hơn — bản trước đã lệch 7 thứ ngoài log (PANEL_ID, APP_VERSION, kênh
+ * extension, mật độ phím Tab, @name…) mà test cũ không bắt vì nó chỉ kiểm log. */
 {
   const st = stripComments(SRC_STABLE);
-  // (1) Dòng tổng kết gọn: đúng 1 khối, có đủ 4 số người dùng cần
-  check('[stable] có dòng 📊 XONG', /logLine\('📊 XONG: ✅ ' \+ c\.okTotal \+ '\/' \+ c\.total/.test(st), true);
+  const lite = stripComments(SRC);
+  // ── (a) LOG GỌN ─────────────────────────────────────────────────────────
+  check('[stable] có dòng 📊 XONG (1 dòng tổng kết)', /logLine\('📊 XONG: ✅ ' \+ c\.okTotal/.test(st), true);
   check('[stable] dòng XONG có % thành công', /' tin \(' \+ pct \+ '%\)'/.test(st), true);
   check('[stable] dòng XONG có ❌ lỗi', /' · ❌ ' \+ c\.failTotal/.test(st), true);
   check('[stable] dòng XONG có ⚠ không rõ', /' · ⚠ ' \+ c\.unsureTotal/.test(st), true);
   check('[stable] dòng XONG có tốc độ tin/giây', /' tin\/giây'/.test(st), true);
-  // (2) Dòng cũ dài phải nằm sau `else` ⇒ bản ổn định KHÔNG in nó
   const iElse = st.indexOf("else logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI:");
-  check('[stable] dòng TỔNG HỢP cũ bị chặn bởi nhánh else', iElse > 0, true);
+  check('[stable] dòng TỔNG HỢP cũ nằm sau else (bị tắt)', iElse > 0, true);
   check('[stable] nhánh gọn đứng TRƯỚC nhánh cũ',
-    iElse > 0 && st.indexOf("if (IS_STABLE_BUILD) logLine('📊 XONG") < iElse, true);
-  // (3) Mọi dòng chẩn đoán dài phải đi qua logDiag (bị tắt), không dùng logLine
+    iElse > 0 && st.indexOf("if (!DIAG_LOGS) logLine('📊 XONG") < iElse, true);
   for (const tag of ['⚡ TỐC ĐỘ', '🌊 WAVE', '📡 SOCKET', '🌐 API NỀN', '🧭 Chẩn đoán', '🫥 CHẠY NỀN']) {
-    check(`[stable] "${tag}" đi qua logDiag (bị tắt), không logLine`,
-      st.indexOf(`logLine('${tag}`) , -1);
-    check(`[stable] "${tag}" có lời gọi logDiag`, st.indexOf(`logDiag('${tag}`) > 0, true);
+    check(`[stable] "${tag}" đi qua logDiag, không logLine`, st.indexOf(`logLine('${tag}`), -1);
   }
-  // (4) Dòng tiến trình giữa lượt PHẢI còn (người dùng chọn "giữ nguyên")
-  check('[stable] giữ dòng tiến trình 🟢 Đang gửi', /logProgress|'Đang gửi /.test(st) || /🟢/.test(SRC_STABLE), true);
-  // (5) Hai bản dùng CÙNG nguồn số — không được tự tính lại
-  check('[stable] dùng chung getBatchSummaryCounts', /getBatchSummaryCounts\(\)/.test(st), true);
-  check('[lite] bản gốc KHÔNG bị ảnh hưởng: vẫn in TỔNG HỢP cũ', /logLine\('📊 TỔNG HỢP CHỐT LƯỢT GỬI/.test(stripComments(SRC)), true);
-  check('[lite] bản gốc KHÔNG có nhánh IS_STABLE_BUILD cho dòng tổng kết',
-    /if \(IS_STABLE_BUILD\) logLine\('📊 XONG/.test(stripComments(SRC)), false);
+  check('[stable] dòng tiến trình 🟢 bị tắt', /if \(false\) logLine\('🟢 Đang gửi /.test(st), true);
+  check('[stable] DIAG_LOGS = false', /const DIAG_LOGS = false;/.test(st), true);
+
+  // ── (b) MỌI THỨ KHÁC PHẢI Y HỆT BẢN GỐC ────────────────────────────────
+  // Đây là các thứ bản stable CŨ đã đổi và người dùng yêu cầu bỏ.
+  check('[stable] PANEL_ID giống bản gốc (ssb-root)', /const PANEL_ID = 'ssb-root'/.test(st), true);
+  check('[stable] KHÔNG còn PANEL_ID riêng', /ssb-root-stable/.test(SRC_STABLE), false);
+  check('[stable] APP_VERSION giống bản gốc', /const APP_VERSION = '1\.93\.\d+-W\d+\.\d+';/.test(st), true);
+  check('[stable] KHÔNG còn hậu tố -STABLE trên panel', /-STABLE'/.test(SRC_STABLE), false);
+  check('[stable] KHÔNG còn cờ chống trùng riêng', /__BOTFAKE_STABLE_ACTIVE__/.test(SRC_STABLE), false);
+  check('[stable] KHÔNG còn IS_STABLE_BUILD', /IS_STABLE_BUILD/.test(SRC_STABLE), false);
+  /* `__botfakeS` là TIỀN TỐ của `__botfakeSaveGid__` / `__botfakeSetSockPageFloor__` (hàm thật
+   * của bản gốc) ⇒ phải neo theo ĐÚNG dạng dùng làm kênh: `ev.data.__botfakeS` hoặc
+   * `__botfakeS: 1` trong postMessage. Kiểm bằng tiền tố trần đã cho false-positive. */
+  check('[stable] KHÔNG còn kênh extension riêng (ev.data.__botfakeS)',
+    /__botfakeS(?![a-zA-Z_])/.test(stripComments(SRC_STABLE).replace(/__botfakeSaveGid__|__botfakeSetSockPageFloor__|__botfakeSetRec__/g, '')), false);
+  check('[stable] KHÔNG còn id overlay riêng', /data-botfake-ext-stable/.test(SRC_STABLE), false);
+  check('[stable] công tắc phím Tab giống bản gốc (mặc định BẬT)',
+    /tabSend: \(\(\) => \{ try \{ return localStorage\.getItem\('ssb_tab_send_on'\) !== '0'; \}/.test(st), true);
+  // Header userscript giữ nguyên (Tampermonkey nhận diện bằng @name/@namespace)
+  check('[stable] @name giữ nguyên bản gốc',
+    (SRC_STABLE.match(/^\/\/ @name .*$/m) || [''])[0] === (SRC.match(/^\/\/ @name .*$/m) || ['x'])[0], true);
+  check('[stable] @namespace giữ nguyên bản gốc',
+    (SRC_STABLE.match(/^\/\/ @namespace .*$/m) || [''])[0] === (SRC.match(/^\/\/ @namespace .*$/m) || ['x'])[0], true);
+  check('[stable] @version giữ nguyên bản gốc',
+    (SRC_STABLE.match(/^\/\/ @version .*$/m) || [''])[0] === (SRC.match(/^\/\/ @version .*$/m) || ['x'])[0], true);
+
+  // ── (c) TIỆN ÍCH BẢN ỔN ĐỊNH CHỈ KHÁC ĐÚNG ĐƯỜNG DẪN SCRIPT ─────────────
+  const rb = path.join(ROOT, 'release/botfake-ext');
+  const rs = path.join(ROOT, 'release/botfake-ext-stable');
+  for (const f of ['extension/bridge.js', 'extension/overlay.js', 'extension/background.js']) {
+    const a = path.join(rb, f), b = path.join(rs, f);
+    if (!existsSync(a) || !existsSync(b)) continue;
+    check(`[stable-ext] ${f} GIỐNG HỆT bản gốc`,
+      readFileSync(a, 'utf8') === readFileSync(b, 'utf8'), true);
+  }
+  if (existsSync(path.join(rb, 'manifest.json')) && existsSync(path.join(rs, 'manifest.json'))) {
+    const ma = readFileSync(path.join(rb, 'manifest.json'), 'utf8');
+    const ms = readFileSync(path.join(rs, 'manifest.json'), 'utf8');
+    // Khác đúng 1 dòng: đường dẫn userscript
+    check('[stable-ext] manifest chỉ khác đường dẫn userscript',
+      ma.split('\n').filter((l) => l !== ' ' * 0 && !ms.includes(l)).length <= 2, true);
+    check('[stable-ext] manifest KHÔNG đổi tên tiện ích', /"name": "BOTFAKE LITE"/.test(ms), true);
+  }
 }
 
 /* ═══ (AF) [v1.93.18] ĐƯỜNG PHÁT HÀNH `.crx` ĐÃ BỊ XOÁ — KHÔNG ĐƯỢC QUAY LẠI ═══

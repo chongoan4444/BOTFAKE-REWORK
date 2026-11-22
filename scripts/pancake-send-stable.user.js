@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)
-// @namespace    salescript-stable
-// @version      1.93.18-stable
-// @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.
+// @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
+// @namespace    salescript
+// @version      1.93.19-w200.129
+// @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
 // @match        https://pages.fm/*
@@ -56,23 +56,13 @@
     } catch (e) { return true; }
   }
 
-  /* [STABLE] CHỐNG GỬI TRÙNG KHI CÀI CẢ HAI BẢN:
-   * Bản gốc thoát nếu `__BOTFAKE_TAB_CLIPBOARD_ACTIVE__` đã có. Bản ổn định:
-   *   - nếu BẢN GỐC đang chạy trước → tự tắt;
-   *   - nếu CHÍNH NÓ chạy trước → chiếm luôn cờ của bản gốc để bản gốc cũng tự tắt.
-   * Nhờ vậy trong một tab LUÔN chỉ có đúng một bộ gửi, không bao giờ hai bộ cùng bắn. */
-  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ || window.__BOTFAKE_STABLE_ACTIVE__ || !botfakeClaimSlot('stable')) {
-    try { console.warn('[BOTFAKE STABLE] Đã có bản khác chạy trong tab này — bản ổn định tự tắt để tránh gửi trùng.'); } catch (e0) { /* ignore */ }
-    return;
-  }
-  window.__BOTFAKE_STABLE_ACTIVE__ = true;
+  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ || !botfakeClaimSlot('lite')) return;
   window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ = true;
-  const IS_STABLE_BUILD = true;
 
   /* ============================ HẰNG SỐ ============================ */
 
-  const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc
-  const APP_VERSION = '1.93.18-STABLE'; // [STABLE] hiện ở tiêu đề panel
+  const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
+  const APP_VERSION = '1.93.19-W200.129'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -121,8 +111,7 @@
     confirmingSend: false,  // đang mở hộp xác nhận gửi / đọc clipboard — chặn bấm đúp Tab/Chạy
     // Công tắc phím Tab: mặc định BẬT (giữ đúng hành vi từ trước tới nay). Tắt bằng nút "TAB:"
     // trên tiêu đề panel — nhớ qua localStorage nên F5 vẫn giữ lựa chọn.
-    // [STABLE] mặc định TẮT (bản gốc mặc định BẬT) — xem ghi chú ngay trên trong tools/make-stable.mjs
-    tabSend: (() => { try { return localStorage.getItem('ssb_tab_send_on') === '1'; } catch (e) { return false; } })(),
+    tabSend: (() => { try { return localStorage.getItem('ssb_tab_send_on') !== '0'; } catch (e) { return true; } })(),
     sendListFrozen: false,  // snapshot người nhận; bỏ checkbox UI trong suốt lượt chạy
     msgSource: 'ui',        // 'ui' (gửi bằng câu trên giao diện) | 'clipboard' (gửi bằng dữ liệu đang copy trên clipboard)
     lastCopiedText: '',     // bản sao lưu text vừa copy trên trang (dự phòng khi trình duyệt chặn clipboard API)
@@ -576,9 +565,6 @@
     extCall(payload, 3000); // báo tiến độ — không cần chờ lâu
   }
 
-  // [STABLE] Kênh nói chuyện với tiện ích: kênh RIÊNG (__botfakeS + data-botfake-ext-stable),
-  // xem tools/build.mjs. Cài cả hai tiện ích thì mỗi bên chỉ trả lời lệnh của chính nó
-  // ⇒ không thể cùng gửi một tin.
   function extCall(payload, waitMs) {
     return new Promise((resolve) => {
       try {
@@ -591,12 +577,12 @@
       } catch (e0) { /* MAIN world: không có chrome */ }
       const id = 'bf' + Date.now() + Math.random().toString(36).slice(2, 8);
       const on = (ev) => {
-        if (ev.source !== window || !ev.data || ev.data.__botfakeS !== 1 || ev.data.dir !== 'from_sw' || ev.data.id !== id) return;
+        if (ev.source !== window || !ev.data || ev.data.__botfake !== 1 || ev.data.dir !== 'from_sw' || ev.data.id !== id) return;
         window.removeEventListener('message', on);
         resolve({ res: ev.data.res, err: ev.data.err || null });
       };
       window.addEventListener('message', on);
-      window.postMessage({ __botfakeS: 1, dir: 'to_sw', id: id, payload: payload }, '*');
+      window.postMessage({ __botfake: 1, dir: 'to_sw', id: id, payload: payload }, '*');
       setTimeout(() => {
         window.removeEventListener('message', on);
         resolve({ res: null, err: 'timeout' });
@@ -612,7 +598,7 @@
       }
     } catch (e1) { /* MAIN world */ }
     const on = (ev) => {
-      if (ev.source !== window || !ev.data || ev.data.__botfakeS !== 1 || ev.data.dir !== 'push') return;
+      if (ev.source !== window || !ev.data || ev.data.__botfake !== 1 || ev.data.dir !== 'push') return;
       fn(ev.data.msg, null, function () {});
     };
     window.addEventListener('message', on);
@@ -622,7 +608,7 @@
     try {
       if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) return true;
     } catch (e) { /* ignore */ }
-    return document.documentElement.getAttribute('data-botfake-ext-stable') === '1';
+    return document.documentElement.getAttribute('data-botfake-ext') === '1';
   }
 
   function serializeBgPhoto(photo, qrPhotoByPage, apiFbIdsByPage, fbIdByPage) {
@@ -11283,7 +11269,7 @@
         batchStats.lastLoggedCounts = { ok: c.okTotal, unsure: c.unsureTotal, fail: c.failTotal };
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
         logDiag('🫥 CHẠY NỀN: ' + bgClock.describe());
-        if (IS_STABLE_BUILD) logLine('📊 XONG: ✅ ' + c.okTotal + '/' + c.total + ' tin (' + pct + '%)'
+        if (!DIAG_LOGS) logLine('📊 XONG: ✅ ' + c.okTotal + '/' + c.total + ' tin (' + pct + '%)'
           + ' · ❌ ' + c.failTotal + ' · ⚠ ' + c.unsureTotal
           + ' · ⏱ ' + elapsedSec + 's · ' + (elapsedSec > 0 ? (c.settled / elapsedSec).toFixed(1) : '0') + ' tin/giây');
         else logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total
@@ -15145,7 +15131,7 @@
         </div>
         <div class="body" id="ssb-body">
           <div class="row" style="align-items:center;gap:6px">
-            <button class="b b-green" id="ssb-send" style="flex:1" title="Bấm nút này để chạy (có bảng xác nhận trước khi gửi). Muốn dùng phím Tab thì bật công tắc TAB trên tiêu đề.">▶ Chạy</button>
+            <button class="b b-green" id="ssb-send" style="flex:1" title="Bấm nút này hoặc nhấn phím Tab để chạy (có bảng xác nhận trước khi gửi)">▶ Chạy (Tab)</button>
             <button class="b b-red" id="ssb-stop" disabled style="flex:1">⏹ Dừng</button>
           </div>
           <div class="prog"><i id="ssb-bar"></i></div>
@@ -15940,7 +15926,7 @@
         if (previewEl) {
           previewEl.textContent = txt
             ? ('Đang có trên Clipboard: “' + clip(txt, 120) + '” — bấm ▶ Chạy (hoặc phím Tab) để xác nhận & gửi.')
-            : 'Khi bấm ▶ Chạy (hoặc phím Tab nếu đã bật công tắc TAB), script sẽ tự lấy nội dung đang copy trên Clipboard và hiện hộp xác nhận trước khi gửi.';
+            : 'Khi bấm ▶ Chạy hoặc nhấn phím Tab, script sẽ tự lấy nội dung đang copy trên Clipboard và hiện hộp xác nhận trước khi gửi.';
         }
         logLine('📋 Đã chuyển sang chế độ: GỬI BẰNG DỮ LIỆU TRÊN CLIPBOARD');
       } else {
@@ -16533,9 +16519,9 @@
     const step = t > 500 ? 10 : 25;
     if (pct < logProgressMark.pct + step || pct >= 100) return;
     logProgressMark.pct = pct - (pct % step);
-    logLine('🟢 Đang gửi ' + d + '/' + t + ' (' + pct + '%) · ✅ ' + (ok || 0)
+    if (false) logLine('🟢 Đang gửi ' + d + '/' + t + ' (' + pct + '%) · ✅ ' + (ok || 0)
       + (inflight ? ' · ⏳ chờ xác nhận ' + inflight : '')
-      + (fail ? ' · ❌ ' + fail : '') + (unsure ? ' · ⚠ ' + unsure : ''));
+      + (fail ? ' · ❌ ' + fail : '') + (unsure ? ' · ⚠ ' + unsure : '')); // [STABLE] dòng 🟢 bị tắt
   }
 
   /* [v1.92.32] HAI SỔ SONG SONG:
@@ -16548,9 +16534,10 @@
   const LOG_ALL_MAX = 60000;
   function logAllReset() { logAll.length = 0; }
 
-  // [STABLE] Chỉ in dòng tổng kết + tiến trình. Các dòng chẩn đoán dài (SOCKET/API/WAVE/globalId)
-  // đi qua logDiag() và bị tắt ở bản này để log cuối gọn, người dùng thường không cần đọc.
-  const DIAG_LOGS = !IS_STABLE_BUILD; // bản ổn định: false ⇒ tắt hết dòng chẩn đoán dài
+  // [STABLE] Log cuối chỉ in 1 dòng tổng kết. Các dòng chẩn đoán dài (SOCKET/API/WAVE/
+  // globalId/CHẠY NỀN/Đuôi chờ) đi qua logDiag() và bị tắt ở bản này.
+  // Cơ chế gửi, làn, ngưỡng, giao diện: GIỐNG HỆT bản gốc — không sửa gì.
+  const DIAG_LOGS = false; // bản ổn định: tắt hết dòng chẩn đoán dài
   function logDiag(s) { if (!DIAG_LOGS) return; try { logLine(s); } catch (e) { /* ignore */ } }
   function logLine(s) {
     const t = new Date();

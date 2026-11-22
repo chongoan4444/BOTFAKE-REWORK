@@ -327,11 +327,17 @@ function syncReleaseFolder() {
 
 /** Manifest của tiện ích ổn định: lấy manifest.json rồi đổi phần nhận diện + script được nạp. */
 function stableManifest(ver) {
+  /* [v1.93.19] GIỐNG BẢN GỐC TỪNG TRƯỜNG, trừ 3 thứ BẮT BUỘC phải khác để Chrome chấp nhận
+   * và để hai folder không giẫm nhau:
+   *   ① `js` đường dẫn → trỏ `-stable.user.js` (bắt buộc, nếu không sẽ nạp nhầm bản gốc)
+   *   ② `key` — bỏ (bản này không ký .crx; xem §3 docs/CAI-DAT.md)
+   *   ③ `update_url` — bản gốc không còn trường này nữa nên cũng không xuất hiện; giữ dòng
+   *      xoá để nếu sau này ai thêm lại thì bản ổn định không tự cập nhật nhầm kênh.
+   * ĐÃ BỎ: đổi `name`/`description` — người dùng chốt bản ổn định phải GIỐNG bản gốc cả trên
+   * giao diện (tên tiện ích hiện trong chrome://extensions). */
   const m = JSON.parse(read(MANIFEST));
-  m.name = 'BOTFAKE STABLE';
-  m.description = 'Bản ổn định: gửi hàng loạt trong tab Pancake. Không nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.';
   m.version = ver.base;
-  delete m.update_url; // không tự cập nhật theo kênh phát hành của bản gốc
+  delete m.update_url;
   delete m.key;
   for (const cs of m.content_scripts || []) {
     cs.js = cs.js.map((f) => (f === USERSCRIPT ? STABLE_SCRIPT : f));
@@ -354,21 +360,18 @@ function stableFolderFiles(ver) {
     }
   };
   walk('extension');
-  // Bridge/popup phải nói chuyện trên kênh RIÊNG của bản ổn định, không đụng kênh bản gốc:
-  // kênh riêng ⇒ cài cả hai tiện ích cũng không thể cùng trả lời một lệnh gửi.
-  out.set('extension/bridge.js', Buffer.from(
-    read('extension/bridge.js')
-      .split('__botfake').join('__botfakeS')
-      .split('data-botfake-ext').join('data-botfake-ext-stable'),
-  ));
+  /* ═══ [v1.93.19] TIỆN ÍCH BẢN ỔN ĐỊNH = TIỆN ÍCH BẢN GỐC, CHỈ ĐỔI SCRIPT ═══
+   * Người dùng chốt: "bản stable giống bản gốc về mọi thứ kể cả trên giao diện".
+   * Trước đây khối này đổi 3 thứ trong extension:
+   *   ✗ kênh `__botfake` → `__botfakeS` (bridge.js)   ⇒ lệch hành vi, giao diện
+   *   ✗ id overlay `botfake-ext-overlay` → `…-stable` ⇒ hai thanh tiến độ khác nhau
+   *   ✗ `__BOTFAKE_OVERLAY__` → `…_STABLE__`          ⇒ lớp phủ khác nhau
+   * Nay BỎ HẾT: chỉ thay đúng đường dẫn script trong popup (bắt buộc — popup phải tiêm
+   * đúng file). Cơ chế chống 2 bản cùng gửi KHÔNG nằm ở extension mà ở userscript:
+   * `botfakeClaimSlot()` + `data-botfake-active` — bản nào nạp trước chiếm chỗ, bản sau tự
+   * tắt. Cơ chế này có sẵn trong bản gốc nên không cần kênh riêng. */
   out.set('extension/popup.js', Buffer.from(
     read('extension/popup.js').split(USERSCRIPT).join(STABLE_SCRIPT),
-  ));
-  // Overlay: id riêng để cài cả hai tiện ích thì hai thanh tiến độ không ghi đè lên nhau.
-  out.set('extension/overlay.js', Buffer.from(
-    read('extension/overlay.js')
-      .split("'botfake-ext-overlay'").join("'botfake-ext-overlay-stable'")
-      .split('__BOTFAKE_OVERLAY__').join('__BOTFAKE_OVERLAY_STABLE__'),
   ));
   out.set(STABLE_SCRIPT, readFileSync(abs(STABLE_SCRIPT)));
   return out;
@@ -382,8 +385,11 @@ function syncStableRelease(ver) {
     mkdirSync(path.dirname(abs(dest)), { recursive: true });
     writeFileSync(abs(dest), buf);
   }
+  /* [v1.93.19] README phải nói ĐÚNG sự thật mới: bản ổn định chỉ khác bản gốc ở phần LOG.
+   * Bản trước còn ghi "tên riêng BOTFAKE STABLE" và "công tắc TAB mặc định TẮT" — cả hai
+   * đã bỏ, để nguyên là tài liệu nói dối người dùng. */
   writeFileSync(abs(`${STABLE_RELEASE_DIR}/README-LOAD-UNPACKED.txt`), [
-    'BOTFAKE STABLE — tiện ích hoàn chỉnh, chạy ĐỘC LẬP với bản gốc',
+    'BOTFAKE — bản ổn định (tiện ích hoàn chỉnh)',
     '',
     'Cài đặt:',
     '  1. Tải cả folder này về máy (giữ nguyên cấu trúc bên trong).',
@@ -391,12 +397,15 @@ function syncStableRelease(ver) {
     '  3. "Load unpacked" → chọn ĐÚNG folder chứa manifest.json này.',
     '',
     'Bên trong:',
-    '  manifest.json   MV3, tên riêng "BOTFAKE STABLE"',
+    '  manifest.json   khai báo MV3 (giống hệt bản gốc, chỉ khác đường dẫn script)',
     '  extension/      service worker, content script, popup, icon',
     `  scripts/        ${STABLE_SCRIPT.split('/').pop()} (toàn bộ logic gửi)`,
     '',
-    'Khác bản gốc: KHÔNG nhớ/lọc chat gửi lỗi · công tắc phím TAB (mặc định TẮT)',
-    '               · log cuối chỉ còn dòng tổng kết.',
+    'KHÁC BẢN GỐC DUY NHẤT Ở PHẦN LOG:',
+    '  · cuối lượt chỉ in 1 dòng: ✅ n/tổng (%) · ❌ · ⚠ · ⏱ · tin/giây',
+    '  · không in các dòng chẩn đoán dài (WAVE/SOCKET/API/globalId/CHẠY NỀN)',
+    '  · không in dòng tiến trình 🟢 giữa lượt (bảng TỔNG HỢP vẫn cập nhật)',
+    'Cơ chế gửi, làn, ngưỡng, giao diện panel, công tắc phím TAB: GIỐNG HỆT bản gốc.',
     '',
     'Lưu ý: folder này sinh tự động từ mã nguồn ở gốc repo — không sửa trực tiếp.',
     'Sửa ở nguồn rồi chạy: npm run build',

@@ -5507,46 +5507,61 @@ không sinh vòng lặp ghi).
 `getBoundingClientRect` trong DOM thật (**chưa chạy được** ở phiên này: sandbox thiếu
 `node_modules`/Chromium).
 
-### §48.7 [v1.93.18] BẢN ỔN ĐỊNH — LOG CUỐI CHỈ CÒN MỘT DÒNG
+### §48.7 [v1.93.19] BẢN ỔN ĐỊNH = BẢN GỐC, CHỈ CẮT LOG
+
+**Yêu cầu người dùng (chốt nguyên văn):** *"tôi muốn bản stable giống bản gốc về mọi thứ kể
+cả trên giao diện, nghĩa là bạn copy bản gốc ra, rồi sửa cắt mỗi cái log thôi"*.
 
 Bản ổn định (`scripts/pancake-send-stable.user.js`) **sinh tự động** bằng
-`node tools/make-stable.mjs` — không bao giờ sửa tay (sửa tay là lệch bản gốc ngay lần sau).
-Muốn đổi logic gửi thì sửa bản gốc rồi chạy lại lệnh sinh.
+`node tools/make-stable.mjs` — không bao giờ sửa tay. Read-only diff với bản gốc sau khi
+lọc comment: **đúng 9 dòng**, tất cả đều là log.
 
-**Yêu cầu người dùng (chốt nguyên văn):** *"bản stable log chỉ cần hiện số thành công/số thất
-bại + tốc độ, không cần chi tiết dài dòng"* — chọn **1 dòng duy nhất**, **cắt hết** số liệu kỹ
-thuật, **giữ** dòng tiến trình giữa lượt.
+#### Chỉ còn 3 phép thay đổi
 
-Trước bản này, cuối mỗi lượt bản ổn định vẫn in 2 dòng rất dài: khối `📊 TỔNG HỢP` (93 dòng
-code) + `⚡ TỐC ĐỘ` (32 dòng code), mỗi dòng in ra 400–1 200 ký tự với 🛟/🖐/🛡/⏳/🧭/📡.
+| # | thay đổi | phạm vi |
+|---|---|---|
+| ① | thêm `DIAG_LOGS = false` + hàm `logDiag()` (no-op) | log |
+| ② | 6 dòng chẩn đoán dài chuyển `logLine` → `logDiag` (bị tắt) | log |
+| ③ | dòng tổng kết: `if (!DIAG_LOGS) logLine('📊 XONG: …')` chèn trước lời gọi cũ | log |
+| ④ | dòng tiến trình `🟢 Đang gửi …` thêm `if (false)` | log |
 
-Nay cuối lượt chỉ còn:
+Bị tắt: `⚡ TỐC ĐỘ` · `🌊 WAVE` · `📡 SOCKET` · `🔔 CỬA SỔ NGHE ACK` · `🌐 API NỀN` ·
+`🧭 Chẩn đoán globalId` · `🫥 CHẠY NỀN` · `🟢 Đang gửi`.
+
+Cuối lượt chỉ còn:
 
 ```
 📊 XONG: ✅ 460/1753 tin (26.2%) · ❌ 2 · ⚠ 1291 · ⏱ 10s · 175.3 tin/giây
 ```
 
-Bị tắt ở bản ổn định (đi qua `logDiag`, `DIAG_LOGS = !IS_STABLE_BUILD`):
+#### ĐÃ BỎ HẲN (những thứ bản 1.93.18 đổi và làm lệch bản gốc)
 
-| dòng | nội dung |
+| thứ từng bị đổi | nay |
 |---|---|
-| `⚡ TỐC ĐỘ` | PHÁT…/giây, đuôi xác nhận, đã chốt, mẫu số, bỏ qua |
-| `🌊 WAVE` | wave, cap, giữ slot, giữ cổng, pre-bind, chờ việc xong |
-| `📡 SOCKET` | ACK OK/rejected/no-ACK, buckets, retry |
-| `🔔 CỬA SỔ NGHE ACK` | giữ slot/nghe/hết hạn/p90/p95 |
-| `🌐 API NỀN` | queued/started/fetch, HTTP, queue wait |
-| `🧭 Chẩn đoán globalId` | cache/HTTP/WS/Ext, batch, lane |
-| `🫥 CHẠY NỀN` | setTimeout/Worker, tab ẩn, bị bóp |
+| `@name` / `@namespace` / `@version` / `@description` | **giữ y bản gốc** (Tampermonkey nhận diện bằng `@name` — đổi là cài chồng, không phải cập nhật) |
+| `PANEL_ID = 'ssb-root-stable'` | **giữ `ssb-root`** |
+| `APP_VERSION = '…-STABLE'` | **giữ y bản gốc** |
+| `IS_STABLE_BUILD` + `__BOTFAKE_STABLE_ACTIVE__` | **bỏ** — `botfakeClaimSlot()` dùng chung `data-botfake-active`, bản nào nạp trước chiếm chỗ, bản sau tự tắt |
+| kênh extension riêng `__botfakeS` | **bỏ** — dùng chung `__botfake` |
+| id overlay `botfake-ext-overlay-stable` + `__BOTFAKE_OVERLAY_STABLE__` | **bỏ** — giống hệt bản gốc |
+| `name`/`description` trong manifest tiện ích | **giữ `BOTFAKE LITE`** |
+| công tắc phím Tab mặc định TẮT | **giữ mặc định BẬT** như bản gốc |
+| 2 câu tooltip | **giữ y bản gốc** |
 
-**Cách làm — nhánh `if`, không cắt biểu thức.** Chèn
-`if (IS_STABLE_BUILD) logLine('📊 XONG…'); else logLine('📊 TỔNG HỢP…')` ngay trước lời gọi cũ.
-Đã thử cách cắt giữa biểu thức 93 dòng bằng thay-chuỗi-nguyên-văn: neo không khớp ⇒ sinh thất
-bại, và lần sửa sau chắc chắn làm hỏng. Nhánh `if` chỉ **thêm** một điều kiện đọc hằng số nên
-`node --check` luôn xanh, biểu thức cũ còn nguyên cho bản gốc.
+⇒ `release/botfake-ext-stable/manifest.json` chỉ khác bản gốc **1 dòng** (đường dẫn script);
+`bridge.js` · `overlay.js` · `background.js` **byte-for-byte giống hệt**.
 
-**Không đổi số:** cả hai bản đọc cùng `getBatchSummaryCounts()` và cùng `elapsedSec` ⇒ cùng một
-kết quả, chỉ khác cách trình bày. Không thêm/không bớt lệnh gửi nào.
+#### Cách làm: nhánh `if`, KHÔNG cắt biểu thức
 
-**Khoá bằng test** (`tools/test-verify.mjs`, nhóm `[stable]`, mutation-verified 3 ca):
-dòng `📊 XONG` phải có đủ ✅/%/❌/⚠/tốc độ; dòng cũ phải nằm sau `else`; 6 dòng chẩn đoán phải
-đi qua `logDiag` và **không** được có `logLine`; bản gốc **không** được lẫn nhánh `IS_STABLE_BUILD`.
+Đã thử cắt khối `📊 TỔNG HỢP` 93 dòng bằng thay-chuỗi-nguyên-văn: neo không khớp ⇒ sinh thất
+bại. Nhánh `if` chỉ **thêm** một điều kiện đọc hằng số nên biểu thức cũ còn nguyên và
+`node --check` luôn xanh. Số liệu không đổi: cùng `getBatchSummaryCounts()` + `elapsedSec`.
+
+#### Khoá bằng test — CẢ HAI CHIỀU
+
+`tools/test-verify.mjs` nhóm `[stable]` + `[stable-ext]`, **mutation-verified 6 ca**:
+dựng lại `PANEL_ID` riêng · dựng lại cờ chống trùng · Tab mặc định TẮT · kênh `__botfakeS` ·
+bật lại `🟢` · sửa `bridge.js`. Mỗi ca đều đỏ đúng chỗ.
+
+Chiều "phải GIỐNG" quan trọng hơn chiều "log phải gọn": bản 1.93.18 đã lệch 7 thứ ngoài log mà
+test cũ **không bắt được** vì nó chỉ kiểm log.
