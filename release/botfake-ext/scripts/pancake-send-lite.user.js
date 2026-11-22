@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.18-w200.128
+// @version      1.93.18-w200.129
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.18-W200.128'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.18-W200.129'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5119,6 +5119,33 @@
     let sawJustSynced = false;
     while (Date.now() < deadline && !state.stopRequested) {
       const s = helper && helper.SOCKETS && helper.SOCKETS[pageId];
+      /* ═══ [v1.93.19-p2] SOCKET CHƯA TỒN TẠI ≠ SOCKET CHẾT ═══
+       * Bản 1.93.18: `if (!isSocketAlive(s)) return s;` — hàm này ĐƯỢC VIẾT để CHỜ, nhưng
+       * thoát ngay ở vòng lặp ĐẦU TIÊN khi `SOCKETS[pageId]` chưa có (helper.initSocket chưa
+       * kịp tạo, hoặc chính `warmUpSockets` chưa chạy tới page đó).
+       * ĐO ĐƯỢC (log 21:19, 6 676 chat, bản 1.93.18):
+       *   • `⏳ Socket CHƯA sync (0/1 page) sau 17ms` ⇒ vòng chờ kết thúc ở 17 ms, tức nó
+       *     KHÔNG chờ lần nào;
+       *   • `WAVE ... chọn kênh: Ext-trước(socket chưa sync) 625` ⇒ mọi wave đầu lên kế hoạch
+       *     ['ext','socket'] ⇒ Ext trả lời trước ⇒ **625 chat đi Ext trước**, `peak Ext
+       *     queue/active 369/128` ⇒ dồn tải vào làn 128 ghế ⇒ `Ext p90 phản hồi 6,2 s`
+       *     (dòng 🛰) và 14 ca vượt hạn chờ của tool;
+       *   • cùng lô, Socket chỉ nhận 4 770 lệnh nhưng ACK TB 1 936 ms.
+       * NAY: chỉ coi là CHẾT khi `SOCKETS[pageId]` ĐÃ CÓ đối tượng nhưng instance không chạy
+       * (`sock.instance` tồn tại + isRunning() false). Chưa có đối tượng ⇒ CHỜ tiếp tới hạn
+       * (đúng 2 500 ms mà mọi nơi khác đang dùng — không thêm con số mới). Tối đa hoá cơ hội
+       * cả lô đi làn Socket; nếu tới hạn vẫn chưa có thì trả về như cũ (Ext vẫn là đường dự
+       * phòng ⇒ KHÔNG mất tin, chỉ chậm hơn). */
+      /* Chưa có đối tượng ⇒ CHỜ, nhưng CHỈ khi có bằng chứng là socket ĐANG được tạo
+       * (`socketWarmPromises` / `socketReconnectPromises` đang chạy). Không có gì đang chạy
+       * thì giữ nguyên hành vi cũ (trả về ngay) — để một page không có socket KHÔNG bắt mỗi
+       * chat phải đứng chờ 2,5 s. */
+      if (!s) {
+        const inFlight = !!(socketWarmPromises[pageId] || socketReconnectPromises[pageId]);
+        if (!inFlight) return s;
+        await sleepUntil(Math.min(deadline, Date.now() + 25), 'sock-sync');
+        continue;
+      }
       if (!isSocketAlive(s)) return s;
       if (isSocketSynced(s)) {
         if (sawJustSynced) await sleepUntil(Date.now() + 180, 'sock-sync'); // [v1.92.9]
@@ -6136,6 +6163,20 @@
             // lần, cứu 0 (ACK rejected 1 722 = 861 x 2) — tức 27% lưu lượng socket là vô ích.
             // Đã đo đủ thì chốt ❌ ngay, ghi rõ lý do, KHÔNG bắn thêm lệnh chắc chắn hỏng.
             const rejectPctBg = socketRejectPctRecent(); // [v1.92.28] cửa sổ 200 ACK gần nhất (-1 = chưa đủ mẫu)
+            /* [v1.93.19-p1] HASEXT1545 — KHAI Ở DEPTH 1, TRƯỚC MỌI NHÁNH DÙNG NÓ.
+             * ĐO ĐƯỢC (sổ kiểm chứng lô 21:19, bản 1.93.18, 6 676 chat):
+             *   • 1 732 dòng ⚠ lý do `lỗi khi phân xử ACK Socket: hasExt1545 is not defined`
+             *   • 1 732 chat đó có **0 dòng ✅ và 0 dòng 🔎** ⇒ không có bằng chứng nào là đã gửi
+             *   • số dòng 🛟 của cả lô = **0** ⇒ nhánh chuyển Ext cho ca FB từ chối CHƯA TỪNG chạy
+             * Gốc: bản 1.93.18 khai `const hasExt1545` BÊN TRONG khối
+             * `if (!sockRetryBudgetAllows(...))` (chỉ chạy khi ngân sách thử lại Socket ĐÃ ĐÓNG),
+             * nhưng dùng lại ở hai nhánh NGOÀI khối đó (ngân sách còn MỞ — trạng thái bình thường
+             * của mọi lô). Khối `if (res && res.deferredToSocketRetry …)` đứng ở depth 1, nên
+             * `const` trong khối con KHÔNG nhìn thấy được ⇒ ReferenceError, bị `.catch` của
+             * `settleAndFinalize` bắt và chốt ⚠.
+             * Nay khai đúng một lần ở depth 1 ⇒ CẢ 3 nhánh dùng chung. Không thêm lệnh gửi nào:
+             * đây là mở lại đường đã có sẵn (và là đường duy nhất đã đo cứu được ~99 %). */
+            const hasExt1545 = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
             if (!sockRetryBudgetAllows(sockRetryBudgetState)) {
               sockRetryBudgetNote(sockRetryBudgetState, 'skipped', rejectPctBg);
               sendDiag.sockRetryBudgetSkipped++;
@@ -6143,7 +6184,6 @@
                * kết luận "chat này không gửi được". FB vừa TỪ CHỐI ĐỨT KHOÁT ⇒ chưa có tin nào
                * được gửi ⇒ thử Extension là AN TOÀN (không thể trùng). Log 16:11: 3 311 ca bị
                * chốt ❌ ở đúng nhánh này trong khi làn Ext trống hoàn toàn. */
-              const hasExt1545 = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
               if (hasExt1545 && extFallback1545Allowed()) {
                 /* [v1.92.66] Dùng `noteExt1545Attempt()` (đếm + đóng phanh cứng khi đủ mẫu).
                  * Bản cũ chỉ `tried++` rồi KHÔNG kiểm ngưỡng ở đây ⇒ nếu `.then` của chuỗi bù
@@ -10375,10 +10415,29 @@
     if (!pending.length) return { waited: 0, ready: pages.length, pages: pages.length };
     const t0 = Date.now();
     try { logLine('🔌 Chờ Socket báo sync (thức ngay khi xong, không có hạn chờ cứng)…'); } catch (e0) { /* ignore */ }
+    /* ═══ [v1.93.19-p2] PHẢI TỰ TẠO SOCKET, KHÔNG CHỈ NGỒI CHỜ PROMISE CÓ SẴN ═══
+     * Log 21:19 (bản 1.93.18): `⏳ Socket CHƯA sync (0/1 page) sau 17ms` — trong khi
+     * `warmUpSockets()` ngay trên đã tạo `socketWarmPromises[pid]`. Hai lý do, cùng cho ra
+     * đúng 1 kết quả (0 page sync, chờ 17 ms):
+     *   • `warmUpSockets` chạy TRƯỚC khi `window.__MqttHelper__` có ⇒ nó `return` sớm, KHÔNG
+     *     tạo promise nào; lúc đó hàm này chỉ còn `waitForSocketSynced(h, pid)` — mà bản cũ
+     *     thoát ngay ở vòng đầu vì `SOCKETS[pid]` chưa tồn tại (xem p2 ở hàm đó);
+     *   • hoặc promise đã resolve (self-delete) trước khi tới đây ⇒ `waits` rỗng nghĩa.
+     * NAY: thiếu promise thì TỰ gọi `h.initSocket(pid)` (đúng thứ `warmUpSockets` vẫn làm,
+     * idempotent — guard `isRunning()` bên trong helper) rồi chờ sync y như nhau. Không đổi
+     * làn, không đổi ngưỡng, không thêm hạn chờ mới. */
     const waits = pending.map((pid) => {
       const warm = socketWarmPromises[pid];
       if (warm && typeof warm.then === 'function') return Promise.resolve(warm).catch(() => null);
-      return waitForSocketSynced(h, pid).catch(() => null);
+      if (typeof h.initSocket === 'function') {
+        try {
+          socketWarmPromises[pid] = Promise.resolve().then(() => h.initSocket(pid))
+            .then(async (r) => { await waitForSocketSynced(h, pid, 2500); delete socketWarmPromises[pid]; return r; })
+            .catch(() => { delete socketWarmPromises[pid]; return null; });
+          return Promise.resolve(socketWarmPromises[pid]).catch(() => null);
+        } catch (eW) { /* rơi xuống đường tự chờ */ }
+      }
+      return waitForSocketSynced(h, pid, 2500).catch(() => null);
     });
     // LƯỚI CHỐNG TREO (không phải hạn chờ tối ưu): nếu initSocket không bao giờ trả về thì
     // vẫn phải chạy lô, không đứng chờ vô hạn. Đường bình thường luôn thức bằng SỰ KIỆN.

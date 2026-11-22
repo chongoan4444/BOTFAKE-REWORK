@@ -859,6 +859,59 @@ check('câu "đã đo 200 ca thì Extension cũng bị chặn" đã bị xoá kh
 check('nhánh ngân sách đóng phải in SỐ THẬT của lô (tried/saved), không in hằng số',
   /ngân sách dò Ext ĐANG ĐÓNG \(đã định bắn '/.test(stripComments(SRC)), true);
 
+/* ═══ [v1.93.19-p1] `hasExt1545` PHẢI NẰM Ở DEPTH 1 CỦA KHỐI `deferredToSocketRetry` ═══
+ * Sổ lô 21:19 (bản 1.93.18, 6 676 chat): 1 732 dòng ⚠ = `lỗi khi phân xử ACK Socket:
+ * hasExt1545 is not defined`; cả lô có **0 dòng 🛟** ⇒ đường chuyển Ext không chạy lần nào.
+ * Nguyên nhân: `const hasExt1545` khai trong khối `if (!sockRetryBudgetAllows(...))` (depth 2)
+ * nhưng dùng ở hai nhánh ngoài khối (depth 1). Test dưới đây khoá đúng độ sâu khai báo —
+ * đây là lỗi mà `node --check` KHÔNG bắt được (chỉ là biến không tồn tại ở runtime).
+ */
+{
+  const lines = SRC.split('\n');
+  const declLine = lines.findIndex((l) => /^\s*const hasExt1545 = /.test(l)) + 1;
+  check('có đúng MỘT chỗ khai `hasExt1545` (khai 2 chỗ là lại lệch scope)', 
+    lines.filter((l) => /^\s*const hasExt1545 = /.test(l)).length, 1);
+  const depthAt = (n) => {
+    let d = 0;
+    for (let i = 0; i < n; i++) d += (lines[i].match(/\{/g) || []).length - (lines[i].match(/\}/g) || []).length;
+    return d;
+  };
+  /* Độ sâu TƯƠNG ĐỐI so với khối `if (res && res.deferredToSocketRetry …)`: khai ở ngay trong
+   * khối đó = 1; nằm trong một `if` con của nó = 2 (đúng cái sai của 1.93.18). */
+  const anchor = lines.findIndex((l) => /if \(res && res\.deferredToSocketRetry /.test(l)) + 1;
+  const rel = (n) => depthAt(n - 1) - depthAt(anchor - 1);
+  check('`hasExt1545` khai ở DEPTH 1 của khối deferredToSocketRetry (không phải trong khối con)',
+    rel(declLine), 1);
+  const useLine = lines.findIndex((l) => /if \(hasExt1545 && extFallback1545Allowed\(\) && !conv\.__extFallback1545\)/.test(l)) + 1;
+  check('chỗ DÙNG `hasExt1545` ngoài khối ngân sách cũng ở DEPTH 1 (nếu lệch ⇒ ReferenceError)',
+    rel(useLine), 1);
+  check('dòng dùng phải nằm SAU dòng khai (không dùng trước khi khai ⇒ TDZ)',
+    useLine > declLine, true);
+  check('khai `hasExt1545` phải đứng TRƯỚC khối `sockRetryBudgetAllows` (để cả 2 nhánh thấy)',
+    declLine < lines.findIndex((l) => /if \(!sockRetryBudgetAllows\(sockRetryBudgetState\)\) \{/.test(l)) + 1, true);
+}
+
+/* ═══ [v1.93.19-p2] `waitForSocketSynced` PHẢI CHỜ, KHÔNG ĐƯỢC THOÁT KHI SOCKET CHƯA TỒN TẠI ═══
+ * Log 21:19 (bản 1.93.18): `⏳ Socket CHƯA sync (0/1 page) sau 17ms` + `chọn kênh: Ext-trước
+ * (socket chưa sync) 625` + `peak Ext queue/active 369/128` + `Ext p90 6,2 s`. Gốc: hàm chờ
+ * thoát ngay ở vòng đầu vì `SOCKETS[pid]` chưa có ⇒ mọi wave đầu lên kế hoạch ['ext','socket'].
+ * Test dưới khoá 4 mắt xích của bản vá — chạy được cả trước và sau khi vá (chỉ đọc nguồn).
+ */
+{
+  const fn = extractFn('waitForSocketSynced');
+  check('chưa có SOCKETS[pid] mà socket ĐANG được tạo ⇒ CHỜ, không thoát vòng',
+    /if \(!s\) \{[\s\S]{0,260}continue;/.test(fn), true);
+  check('chờ bằng sleepUntil tới hạn (không tự bịa hạn mới, không busy-loop)',
+    /if \(!s\) \{[\s\S]{0,260}await sleepUntil\(Math\.min\(deadline/.test(fn), true);
+  check('KHÔNG có gì đang tạo socket ⇒ trả về ngay (page không có socket không ép chờ 2,5 s)',
+    /if \(!s\) \{[\s\S]{0,200}if \(!inFlight\) return s;/.test(fn), true);
+  check('vẫn coi là CHẾT khi đã có đối tượng mà instance không chạy (isSocketAlive)',
+    /if \(!s\) \{[\s\S]{0,400}if \(!isSocketAlive\(s\)\) return s;/.test(fn), true);
+  const waitSend = extractFn('waitSocketsReadyForSend');
+  check('thiếu promise warm ⇒ TỰ gọi initSocket (không ngồi chờ promise rỗng)',
+    /typeof h\.initSocket === 'function'[\s\S]{0,300}initSocket\(pid\)/.test(waitSend), true);
+}
+
 /* ------------- [v1.92.50] BỐN CHỖ ĐO SAI ĐÃ SẬP Ở LÔ 9 242 CHAT -------------
  * Tất cả đều lộ ra bằng SỐ trong sổ 11:34, không phải bằng suy luận.
  */
@@ -2365,8 +2418,14 @@ const _preSrc = stripComments(SRC);
     (SRC_STABLE.match(/^\/\/ @name .*$/m) || [''])[0] === (SRC.match(/^\/\/ @name .*$/m) || ['x'])[0], true);
   check('[stable] @namespace giữ nguyên bản gốc',
     (SRC_STABLE.match(/^\/\/ @namespace .*$/m) || [''])[0] === (SRC.match(/^\/\/ @namespace .*$/m) || ['x'])[0], true);
-  check('[stable] @version giữ nguyên bản gốc',
-    (SRC_STABLE.match(/^\/\/ @version .*$/m) || [''])[0] === (SRC.match(/^\/\/ @version .*$/m) || ['x'])[0], true);
+  /* [v1.93.19] CHỈ SO BASE, KHÔNG SO SỐ BUILD — người dùng chốt: "chỉ sửa
+   * pancake-send-lite.user.js thôi k cần sửa cái stable". Mỗi lần vá bản lite, số build của
+   * nó tăng (W200.129 …) còn bản stable đứng yên cho tới khi CHÍNH NGƯỜI DÙNG chạy
+   * `npm run stable`. Trước đây test so NGUYÊN chuỗi @version ⇒ mọi bản vá chỉ-vào-lite đều
+   * làm đỏ test, tức cái test đang ép phải đụng vào file mà người dùng đã cấm sửa. */
+  check('[stable] @version cùng BASE với bản gốc (số build chỉ đổi khi chạy npm run stable)',
+    ((SRC_STABLE.match(/^\/\/ @version\s+(\d+\.\d+\.\d+)/m) || [])[1] || 'stable')
+      === ((SRC.match(/^\/\/ @version\s+(\d+\.\d+\.\d+)/m) || [])[1] || 'lite'), true);
 
   // ── (c) TIỆN ÍCH BẢN ỔN ĐỊNH CHỈ KHÁC ĐÚNG ĐƯỜNG DẪN SCRIPT ─────────────
   const rb = path.join(ROOT, 'release/botfake-ext');
