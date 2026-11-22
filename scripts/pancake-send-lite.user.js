@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.23-w200.133
+// @version      1.93.18-w200.128
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.23-W200.133'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.18-W200.128'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3722,17 +3722,7 @@
         resetPageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
         markDelivered(conv.id, 'api'); postSendSideEffects(conv); return;
       } // đã đến nơi — im lặng
-      /* [v1.93.19] SỬA GỐC CA "68 chat / 35 s" (log 14:13 — lô 68 chat, tổng 35 s, mà 18 s
-       * nằm chờ API + 16 s nằm ở cổng chứng minh vắng mặt CHỈ VÌ 3 chat).
-       * Log ghi `⚠ API từ chối (HTTP 200)` — tức `msg` RỖNG: server trả `success:false` mà
-       * không kèm `message`/`error`. Hệ quả kép:
-       *   ① `isDefinitiveNotSent('HTTP 200')` = false ⇒ rơi vào cổng 14 s (đắt) dù
-       *      `certainFail` = true, tức code ĐÃ biết "tin chắc chưa đi";
-       *   ② `noteFbRejected` không chạy ⇒ mất dấu vết "FB đã báo không nhận";
-       *   ③ đọc log tưởng request THÀNH CÔNG (HTTP 200) trong khi thực tế bị từ chối.
-       * Nay: nói đúng sự thật trong chuỗi, để cả log lẫn hàm phán quyết cùng hiểu. */
-      let msg = (data && (data.message || data.error)) || ('HTTP ' + res.status
-        + ((data && data.success === false) ? ' · success:false (không kèm mã lỗi)' : ''));
+      let msg = (data && (data.message || data.error)) || ('HTTP ' + res.status);
       if (res.status === 401 || res.status === 403) capturedToken = null;
       const nm = conv.name || conv.id;
       const certainFail = isCertainHttpNotSent(res.status, data, parsed);
@@ -3824,14 +3814,7 @@
          * ⇒ #551 là câu trả lời của KÊNH API (endpoint messaging/send/), KHÔNG phải bản án cho
          *   khách: Extension đi qua tab Facebook thật vẫn gửi được. Chốt ❌ ở đây là MẤT TIN.
          * Giữ nguyên: vẫn bù kênh khác như cũ. Ghi lại để lần sau không "tối ưu" lại lần nữa. */
-        /* [v1.93.19] `certainFail` (isCertainHttpNotSent) và `isDefinitiveNotSent` là HAI
-         * hàm phán quyết song song, cùng khẳng định "server đã trả lời và tin CHƯA đi"
-         * (theo hợp đồng app: success:false ⇒ chưa tạo tin). Nhưng chỉ hàm thứ hai được
-         * dùng để bỏ cổng 14 s ⇒ mọi ca `success:false` KHÔNG kèm mã lỗi (log 14:13:
-         * 3/3 ca, chuỗi rỗng) bị đẩy vào cổng đắt dù code đã biết chắc. Nay lấy CẢ HAI.
-         * Không nới điều kiện gửi: `definitiveNotSent` chỉ bỏ ĐOẠN CHỜ, không bỏ lần bù
-         * (xem 3 lớp chống lặp ở scheduleBuRetry). */
-        const _definite = isDefinitiveNotSent(msg) || certainFail;
+        const _definite = isDefinitiveNotSent(msg);
         if (_definite) noteFbRejected(conv.id, 'API từ chối: ' + clip(msg, 70));
         logLine('⚠ ' + nm + ' — API từ chối (' + clip(msg, 90) + ')'
           + (win ? ' — ngoài cửa sổ 24h' : ''));
@@ -4040,11 +4023,8 @@
   }
 
   function isDefinitiveNotSent(msg) {
-    /* [v1.93.19] Gộp khoảng trắng trước khi so: chuỗi lỗi hay được ghép từ nhiều nguồn
-     * ("Ext: … | api: …", mảnh JSON, xuống dòng của server) nên "Ngoài  khoảng  thời gian"
-     * hai dấu cách từng không khớp ⇒ mất quyền bỏ cổng 14 s. */
-    const m = String(msg || '').replace(/\s+/g, ' ');
-    if (!m.trim()) return false;
+    const m = String(msg || '');
+    if (!m) return false;
     if (/(#551)|Người này hiện không có mặt|không có mặt/i.test(m)) return true;              // 1545041
     if (/ngoài khoảng thời gian cho phép|outside.*window/i.test(m)) return true;             // (#10) cửa sổ 24h
     if (/kiểm soát thread|đang kiểm soát/i.test(m)) return true;                             // (#10) 2018300
@@ -6786,42 +6766,6 @@
         /* Vẫn đọc lại lịch sử cho CẢ HAI ca: `error_payload` là suy luận từ hợp đồng extension,
          * chưa phải bằng chứng đo được trên hội thoại. Chỉ ĐỌC ⇒ vô hại, và nếu lịch sử CÓ tin
          * thì lật ✅ (không gửi lại). */
-        /* ═══ [v1.93.23] ĐỐI SOÁT SOURCE THẬT — `messageId` LÀ BẰNG CHỨNG DƯƠNG ═══
-         * Nguồn: `0.5.62_0/assets/background.js-EHsGnyIc.js` **có sẵn trên `main`** của repo
-         * (trước đây tôi tìm trong nhánh làm việc nên báo "không có" — SAI, đã đọc lại).
-         *
-         *   isResponseSuccess(e,t){ case "facebook": return e && e.payload &&
-         *       (e.payload.actions && e.payload.actions[0].message_id || e.payload.error_payload) }
-         *   parseSuccessResponse({response:e,platform:t,…}){ case "facebook":
-         *       return e.payload.error_payload ? {}
-         *            : { messageId: e.payload.actions[0].message_id, globalUserId:a,
-         *                timestamp: e.payload.actions[0].timestamp } }
-         *   sendInboxSuccess(e,t,a,r){ return s => { s&&s.success &&
-         *       e.port.postMessage({type:"REPLY_INBOX_PHOTO_SUCCESS", …, messageId:s.messageId,
-         *                          globalUserId, timestamp, retryReason, messageCreatedRange,
-         *                          unreliableTimestamp}) } }
-         *
-         * ⇒ HAI ca được extension báo `success:true`, phân biệt ĐÚNG bằng `messageId`:
-         *   ① có `payload.actions[0].message_id` → `{messageId}` → postMessage **CÓ** messageId
-         *   ② có `payload.error_payload`         → `{}`         → postMessage **KHÔNG** messageId
-         * `messageId` là id tin THẬT của Facebook ⇒ **① là bằng chứng dương** trên hội thoại.
-         * v1.93.2 đã đúng khi bác `res.success` đơn thuần (554 ca ✅ giả), nhưng bác LUÔN cả ①.
-         *
-         * KHÔNG đăng ký đọc lại lịch sử cho ca ① — nói rõ để không ai (kể cả tôi) tưởng có:
-         *   · `messageId` là id tin THẬT của Facebook, không phải suy luận từ hợp đồng;
-         *   · đọc lại lúc này có hại: Pancake thường CHƯA đồng bộ tin vừa gửi ⇒ cổng sẽ trả
-         *     "không thấy" ⇒ hạ một ca ĐÃ CHẮC CHẮN gửi xuống ⚠ (đúng loại ✅→⚠ oan).
-         * KHÔNG đổi số lệnh gửi: ca này không bị bắn lại lần nào. */
-        if (_extMsgId && !ownLock) {
-          extSendCtl.lastOutcomeOk = true;
-          extTimeoutStats.confirmedByMsgId = (extTimeoutStats.confirmedByMsgId || 0) + 1;
-          return {
-            ok: true, sent: true, fired: true, sendBy: 'extension',
-            extMessageId: String(_extMsgId),
-            id: String(_extMsgId),
-            sentAt: _extTs || Date.now(),
-          };
-        }
         if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt, 1, false, 0, true);
         return {
           ok: false, sent: 'maybe', sendBy: 'extension', extClaimedSuccess: true,
@@ -10381,27 +10325,6 @@
         } catch (e0) { /* ignore */ }
         // KHÔNG dựa vào sock.instance để bỏ qua: socket chết mà instance vẫn còn thì bắn là thua.
         // initSocket của app TỰ trả về ngay khi kết nối còn đang chạy (guard isRunning()) — gọi là đủ.
-        /* ═══ [v1.93.20] SỬA LỖI "SOCKET CHƯA SYNC" — 2 khiếm khuyết cộng lại ═══
-         * LOG 14:36 (lô 563 chat, bản 1.93.19):
-         *   🔌 Chờ Socket báo sync…
-         *   ⏳ Socket CHƯA sync (0/1 page) sau **307ms** ⇒ lô đi Extension, chậm ~4×
-         *   🌊 … Socket/page active 0/0, lane chưa tạo lane · 📡 ACK OK/rejected/no-ACK 0/0/0
-         *   🧭 chọn kênh: Ext-trước(socket chưa sync) 109
-         * ⇒ CẢ LÔ đi Extension. Hậu quả kéo theo: 57 ca ⚠ "Ext success nhưng không có bằng chứng".
-         *
-         * KHIẾM KHUYẾT ①  `waitSocketsReadyForSend` chờ `socketWarmPromises[pid]` — mà promise
-         * đó `.catch(() => { delete …; return null })`. Nghĩa là khi socket lỗi/bỏ cuộc, promise
-         * RESOLVE (không reject) với `null` ⇒ `Promise.all(waits)` xong NGAY ⇒ lưới chống treo
-         * 8 000 ms không bao giờ có tác dụng, và lượt gửi chạy tiếp lúc socket CHƯA sync.
-         * Đó là lý do log ghi 307 ms thay vì 8 000 ms.
-         *
-         * KHIẾM KHUYẾT ②  MỌI lần gọi sau đều `return` sớm khi thấy promise cũ ⇒ không ai tạo
-         * promise mới ⇒ socket không bao giờ được thử kết nối lại trong lượt đó.
-         *
-         * NAY: giữ promise VÀ giữ hàm làm mới. `waitSocketsReadyForSend` gọi lại được sau khi
-         * promise cũ kết thúc để có một lần thử MỚI, có hạn chờ thật.
-         * Vẫn KHÔNG đổi quyết định gửi, KHÔNG thêm lệnh gửi nào — chỉ chờ đúng lúc socket sẵn
-         * sàng. Nếu socket thật sự hỏng thì vẫn bỏ cuộc theo hạn và đi Extension như cũ. */
         if (socketWarmPromises[pid]) return; // đang kết nối dở — khỏi làm trùng
         socketWarmPromises[pid] = Promise.resolve()
           .then(() => h.initSocket(pid))
@@ -10452,18 +10375,10 @@
     if (!pending.length) return { waited: 0, ready: pages.length, pages: pages.length };
     const t0 = Date.now();
     try { logLine('🔌 Chờ Socket báo sync (thức ngay khi xong, không có hạn chờ cứng)…'); } catch (e0) { /* ignore */ }
-    /* [v1.93.20] Chờ promise warm RỒI tự kiểm lại; chưa sync thì thử MỘT lần mới với hạn
-     * `waitForSocketSynced(2500)`. Trước đây một promise cũ resolve-bằng-null là hết đường
-     * (xem chú thích dài ở warmUpSockets) ⇒ log "sau 307ms" rồi cả lô đi Extension. */
     const waits = pending.map((pid) => {
       const warm = socketWarmPromises[pid];
-      const first = (warm && typeof warm.then === 'function')
-        ? Promise.resolve(warm).catch(() => null)
-        : Promise.resolve(waitForSocketSynced(h, pid, 2500)).catch(() => null);
-      return first.then(() => {
-        if (isPageSocketReady(pid) || state.stopRequested) return null;   // đã sync ⇒ xong
-        return Promise.resolve(waitForSocketSynced(h, pid, 2500)).catch(() => null); // thử lần mới
-      });
+      if (warm && typeof warm.then === 'function') return Promise.resolve(warm).catch(() => null);
+      return waitForSocketSynced(h, pid).catch(() => null);
     });
     // LƯỚI CHỐNG TREO (không phải hạn chờ tối ưu): nếu initSocket không bao giờ trả về thì
     // vẫn phải chạy lô, không đứng chờ vô hạn. Đường bình thường luôn thức bằng SỰ KIỆN.
@@ -10484,10 +10399,7 @@
       try { logLine('✅ Socket đã sync ' + ready + '/' + pages.length + ' page sau ' + waited + 'ms — lô này đi làn Socket trước.'); } catch (e1) { /* ignore */ }
     } else {
       try {
-        /* [v1.93.20] Nói ĐÚNG sự thật: đây là script HẾT KIÊN NHẪN (đã thử lần mới + hạn 2,5 s),
-         * không phải "socket chậm 307 ms". Số `waited` cũ đọc lên gây hiểu sai hoàn toàn. */
-        logLine('⏳ Socket CHƯA sync (' + ready + '/' + pages.length + ' page) sau ' + waited + 'ms'
-          + ' (đã chờ + thử kết nối lại 1 lần) — lô này sẽ đi Extension trước, '
+        logLine('⏳ Socket CHƯA sync (' + ready + '/' + pages.length + ' page) sau ' + waited + 'ms — lô này sẽ đi Extension trước, '
           + 'chậm hơn ~4 lần so với Socket. Bấm ⏹ Dừng + F5 rồi chạy lại NGAY sẽ lấy lại được làn Socket.');
       } catch (e2) { /* ignore */ }
     }
@@ -10953,35 +10865,10 @@
    * cổng chứng minh vắng mặt, không đổi số lần gửi của bất kỳ ca nào khác. Ca bị chặn bù
    * vẫn được chốt ❌ + vào danh sách gửi tay y như ca ❌ bình thường (không im lặng mất tin). */
   const fbRejectedIds = new Map(); // convId → { at, why } FB đã trả lời dứt khoát "chưa nhận được"
-  /* [v1.93.20] PHÂN LOẠI lý do FB báo không nhận — để TỔNG HỢP không nói sai.
-   * LOG 14:36 in `🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca nào (không có lỗi 1545041)`
-   * trong khi lô đó có 57 ca ⚠. Đường dò 1545041 chỉ canh ĐÚNG một mã; các ca dứt khoát
-   * KHÁC (noThreadIdFound — log có 1 ca Ty Do; success:false rỗng — 7 ca) không được nhắc. */
-  const fbRejectKinds = Object.create(null);
   function noteFbRejected(convId, why) {
     if (!convId) return;
     try { fbRejectedIds.set(String(convId), { at: Date.now(), why: String(why || '') }); } catch (e) { /* ignore */ }
-    try {
-      const w = String(why || '');
-      const k = /1545041|không có mặt/i.test(w) ? '1545041'
-        : /noThreadIdFound/i.test(w) ? 'noThreadId'
-        : /success:false/i.test(w) ? 'successFalseRong'
-        : /#551/.test(w) ? '551'
-        : /#10|ngoài khoảng thời gian/i.test(w) ? '10'
-        : /#100/.test(w) ? '100' : 'khac';
-      fbRejectKinds[k] = (fbRejectKinds[k] || 0) + 1;
-    } catch (eK) { /* ignore */ }
   }
-  /* [v1.93.20] "KHÔNG có ca 1545041" KHÔNG đồng nghĩa "không có ca FB từ chối nào".
-   * Nói rõ còn những ca dứt khoát KHÁC, để TỔNG HỢP không gây hiểu sai. */
-  function fbRejectKindsText() {
-    const ks = Object.keys(fbRejectKinds).filter((k) => k !== '1545041' && fbRejectKinds[k]);
-    if (!ks.length) return ' (không có ca FB từ chối nào khác)';
-    const name = { noThreadId: 'noThreadIdFound', successFalseRong: 'success:false không kèm mã',
-      '551': '#551', '10': '#10 ngoài 24h', '100': '#100', khac: 'lý do khác' };
-    return ' — nhưng CÓ ' + ks.map((k) => fbRejectKinds[k] + ' ca ' + (name[k] || k)).join(' · ');
-  }
-
   function isFbRejected(convId) {
     try { return !!(convId && fbRejectedIds.has(String(convId))); } catch (e) { return false; }
   }
@@ -11396,7 +11283,7 @@
                     ? extTry1545.streak + ' ca liên tiếp bị từ chối'
                     : 'đủ ' + extTry1545.PROBE + ' ca đã định bắn') + ', cứu 0 ⇒ phần còn lại vào danh sách gửi tay)'
                 : '')
-            : (' | 🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca 1545041' + fbRejectKindsText()))
+            : ' | 🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca nào (không có lỗi 1545041)')
           /* [v1.92.45] ĐO TRẦN THẬT CỦA LÀN EXT — để lần sau không tối ưu sai chỗ.
            * HAR làn Ext (90 lệnh / 6,74 s) cho thấy trần ~13,4 lệnh/s và đỉnh in-flight chỉ 42
            * trong khi làn đặt 48–96 ⇒ nâng sàn/trần làn KHÔNG làm lô nhanh hơn. In số đo thật
@@ -12049,14 +11936,9 @@
           // [v1.92.52] noAudit = true: markDelivered() ngay trên đã ghi ✅ vào sổ cho cùng lần gửi này.
           logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅', conv.id, true);
         } else if (r && r.sent === 'maybe' && r.extClaimedSuccess && r.extSuccessNoId) {
-          /* ═══ [v1.93.23] HOÀN NGUYÊN v1.93.14 — ĐỐI SOÁT SOURCE THẬT XÁC NHẬN SUY LUẬN CŨ ═══
-           * v1.93.22 đã bỏ ghi sổ ở ĐÂY vì log 14:36 — nhưng đó là SỬA SAI ĐỐI TƯỢNG:
-           * chuỗi log 14:36 là "Extension báo success — CHƯA xác nhận tin đã tới" ⇒ nhánh
-           * `_extNoId = FALSE` ⇒ `messageId` CÓ ⇒ **không hề** đi qua nhánh này.
-           * Source `0.5.62_0/assets/background.js` (có trên `main`) xác nhận:
-           *   `error_payload` ⇒ `parseSuccessResponse` trả `{}` ⇒ postMessage KHÔNG messageId
-           * ⇒ nhánh này ĐÚNG là "FB từ chối ngầm", ghi sổ "FB đã từ chối" là ĐÚNG.
-           * Nay khôi phục, và ghi rõ căn cứ để không ai (kể cả tôi) đảo lại lần nữa. */
+          /* [v1.93.14] `success` mà KHÔNG `messageId` ⇒ FB trả `error_payload` ⇒ KHÔNG có tin.
+           * Đây KHÔNG phải "chưa xác nhận" mà là BẰNG CHỨNG VẮNG MẶT ⇒ ghi sổ "FB đã từ chối"
+           * (để ca này không bị coi là "cần gửi tay" oan) và KHÔNG gửi thêm lệnh nào. */
           try { noteFbRejected(conv.id, 'Ext báo success nhưng không có messageId = error_payload ⇒ FB từ chối'); } catch (eFbR) { /* ignore */ }
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
           logFailGrouped(name, 'bù qua Extension: success nhưng KHÔNG có messageId ⇒ FB trả error_payload, KHÔNG có tin — không gửi lại', '❌', conv.id);

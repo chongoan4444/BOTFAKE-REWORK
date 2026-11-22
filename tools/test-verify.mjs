@@ -611,62 +611,6 @@ check('đóng ngân sách ghi lại % để in vào log',
   check('API timeout ⇒ KHÔNG dứt khoát', F.isDefinitiveNotSent('HTTP 504'), false);
   check('chuỗi rỗng ⇒ KHÔNG dứt khoát', F.isDefinitiveNotSent(''), false);
 
-  /* ═══ [v1.93.19] CA THẬT log 14:13 — "68 chat mà bù mất 30 s" ═══
-   * 3 chat trả HTTP 200 + success:false KHÔNG kèm message/error ⇒ chuỗi lỗi rỗng.
-   * Trước: chuỗi "HTTP 200" ⇒ isDefinitiveNotSent=false ⇒ cổng chứng minh vắng mặt
-   * 14 s (đắt) dù certainFail đã biết chắc tin CHƯA đi ⇒ tổng 35 s cho 68 chat.
-   * Nay: msg mang đủ ngữ cảnh + `_definite` lấy thêm `certainFail` ⇒ bù ngay (50 ms). */
-  check('lỗi rỗng success:false ⇒ msg nói rõ (không chỉ "HTTP 200")',
-    /success:false \(không kèm mã lỗi\)/.test(stripComments(SRC)), true);
-  check('chốt dứt khoát lấy CẢ certainFail, không chỉ isDefinitiveNotSent',
-    /const _definite = isDefinitiveNotSent\(msg\) \|\| certainFail;/.test(stripComments(SRC)), true);
-  check('isDefinitiveNotSent gộp khoảng trắng trước khi so (chuỗi ghép nhiều nguồn)',
-    /const m = String\(msg \|\| ''\)\.replace\(\/\\s\+\/g, ' '\)/.test(stripComments(SRC)), true);
-
-  /* ═══ [v1.93.20] LÔ 563 CHAT 14:36 — CẢ LÔ ĐI EXTENSION VÌ CHỜ SOCKET HỜI HỢT ═══
-   * Log: `⏳ Socket CHƯA sync (0/1 page) sau 307ms` rồi `📡 ACK 0/0/0`,
-   *      `Socket/page active 0/0 · lane chưa tạo lane`, `chọn kênh: Ext-trước 109`.
-   * Lưới chống treo là 8 000 ms mà chỉ chờ 307 ms ⇒ promise warm resolve-bằng-null.
-   * Hệ quả: 57 ca ⚠ "Extension báo success nhưng KHÔNG có bằng chứng". */
-  const SRC_NC = stripComments(SRC);
-  check('[socket] waiting không chỉ await promise warm cũ (phải thử lần mới khi chưa sync)',
-    /return first\.then\(\(\) => \{[\s\S]{0,200}?isPageSocketReady\(pid\)[\s\S]{0,200}?waitForSocketSynced\(h, pid, 2500\)/.test(SRC_NC), true);
-  check('[socket] cảnh báo KHÔNG được nói "sau 307ms" như thể socket chậm (phải nói đã thử lại)',
-    /đã chờ \+ thử kết nối lại 1 lần/.test(SRC_NC), true);
-
-  /* ═══ [v1.93.20] 🛟 BÁO SAI NGHĨA ═══
-   * Log 14:36: `🛟 … KHÔNG có ca nào (không có lỗi 1545041)` trong khi lô có 57 ca ⚠.
-   * "Không có ca 1545041" ≠ "không có ca FB từ chối nào". */
-  check('[🛟] phân loại lý do FB từ chối (không gộp hết vào 1545041)',
-    /const fbRejectKinds = Object\.create\(null\)/.test(SRC_NC)
-    && /noThreadIdFound/.test(SRC_NC.slice(SRC_NC.indexOf('fbRejectKinds'), SRC_NC.indexOf('fbRejectKinds') + 900)), true);
-  check('[🛟] dòng TỔNG HỢP nói rõ các ca dứt khoát KHÁC khi không có 1545041',
-    /KHÔNG có ca 1545041' \+ fbRejectKindsText\(\)/.test(SRC_NC), true);
-  check('[🛟] hàm fbRejectKindsText tồn tại và nói "chưa chắc không có ca nào"',
-    /function fbRejectKindsText\(\)/.test(SRC_NC)
-    && /không có ca FB từ chối nào khác/.test(SRC_NC), true);
-
-  /* ═══ [v1.93.23] ĐỐI SOÁT SOURCE THẬT `0.5.62_0` (có trên main) ═══
-   * Trước đây tôi tìm source trong NHÁNH LÀM VIỆC nên kết luận sai là "không có trong repo".
-   * Source thật xác nhận 2 ca `success` phân biệt bằng `messageId`:
-   *   error_payload ⇒ parseSuccessResponse trả {} ⇒ KHÔNG messageId
-   *   actions[0].message_id ⇒ {messageId} ⇒ CÓ messageId
-   * ⇒ messageId = bằng chứng DƯƠNG; error_payload = FB từ chối ngầm. */
-  check('[source] có messageId ⇒ chốt ✅ ngay (bằng chứng dương từ FB)',
-    /if \(_extMsgId && !ownLock\) \{[\s\S]{0,320}?ok: true, sent: true, fired: true, sendBy: 'extension'/.test(SRC_NC), true);
-  check('[source] ca error_payload (KHÔNG messageId) vẫn ghi sổ "FB đã từ chối"',
-    /noteFbRejected\(conv\.id, 'Ext báo success nhưng không có messageId = error_payload/.test(SRC_NC), true);
-  check('[source] ca error_payload vẫn chốt ❌ (không có tin được tạo)',
-    /KHÔNG có messageId ⇒ FB trả error_payload, KHÔNG có tin — không gửi lại', '❌'/.test(SRC_NC), true);
-  check('[source] đã gỡ sổ "chưa đủ căn cứ" của 1.93.22 (sửa sai đối tượng)',
-    !/fbUnprovenKinds/.test(SRC_NC), true);
-  /* [v1.93.23] Test cũ của tôi khẳng định "vẫn đăng ký đọc lại" — SAI: code return sớm nên
-   * không đăng ký. Mutation M5 (thêm `if(false)` vào lời gọi) LỌT vì test chỉ tìm tên hàm.
-   * Nay khoá đúng HÀNH VI THẬT: ca có messageId KHÔNG vào sổ ⚠ chờ kiểm chứng. */
-  check('[source] ca có messageId KHÔNG bị đẩy vào sổ ⚠ (không đọc lại — tránh ✅→⚠ oan)',
-    /if \(_extMsgId && !ownLock\) \{[\s\S]{0,700}?return \{\s*ok: true, sent: true, fired: true, sendBy: 'extension'/.test(SRC_NC)
-    && /KHÔNG đăng ký đọc lại lịch sử cho ca ①/.test(SRC), true); // chú thích ⇒ kiểm trên SRC gốc
-
   // --- thử lại được (không thể trùng) ---
   check('1545012 ⇒ thử lại được', F.isTransientServerError('Đã xảy ra lỗi tạm thời, vui lòng thử lại.'), true);
   check('mã 1545012 trần ⇒ thử lại được', F.isTransientServerError('error 1545012'), true);

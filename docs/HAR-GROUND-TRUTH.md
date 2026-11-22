@@ -1,26 +1,7 @@
 # Sự thật gốc rút từ HAR (12 file, ~59 MB)
 
 Tài liệu này ghi lại **mọi kết luận đã kiểm chứng bằng dữ liệu HAR**, để không phải suy đoán lại.
-Cập nhật: 2026-11-11, script 1.93.19.
-
----
-
-## ⛔ QUY TẮC SỬA CODE (chốt 22/11 — người dùng chỉ đạo, KHÔNG tự đảo)
-
-> **"từ giờ quay về sửa bản head thôi, bản stable bảo sửa mới sửa"**
-
-| | |
-|---|---|
-| **Sửa mặc định** | `scripts/pancake-send-lite.user.js` — **bản HEAD/gốc**, mọi thay đổi logic đều vào đây |
-| **Bản stable** | `scripts/pancake-send-stable.user.js` — **CHỈ sửa khi được bảo rõ** |
-| **Sửa bản stable bằng cách** | *không bao giờ* sửa thẳng file; sửa `tools/make-stable.mjs` / `tools/build.mjs` rồi chạy lại generator |
-| **Sau mỗi lần sửa bản gốc** | chạy `node tools/make-stable.mjs` để bản stable đi theo (đây là *sinh lại*, không phải *sửa bản stable*) |
-
-Nghĩa là: bản stable là **sản phẩm dẫn xuất**, tự động hưởng mọi bản vá của bản gốc. Chỉ khi
-người dùng nói rõ "sửa bản stable" thì mới đụng vào `make-stable.mjs` để thêm phép biến đổi riêng.
-
----
-
+Cập nhật: 2026-11-11, script 1.91.80.
 
 ## 0. Phạm vi chính xác (đã đếm lại)
 
@@ -5552,27 +5533,6 @@ Cuối lượt chỉ còn:
 ```
 📊 XONG: ✅ 460/1753 tin (26.2%) · ❌ 2 · ⚠ 1291 · ⏱ 10s · 175.3 tin/giây
 ```
-
-#### [v1.93.19] SỬA Ở **BẢN GỐC** — một lỗi tốc độ thật (khác hẳn "làm lệch giao diện")
-
-Lô 68 chat 14:13: phát lệnh 0,2 s mà người dùng chờ **35 s**. Nguyên nhân không phải tốc độ gửi
-mà là **hai hàm phán quyết bất đồng**: API trả `HTTP 200` + `success:false` **không kèm mã lỗi**
-⇒ `msg = "HTTP 200"` ⇒ `isDefinitiveNotSent()` = false ⇒ rơi cổng chứng minh vắng mặt 14 s,
-dù `certainFail` đã biết chắc tin chưa đi. Vá 3 chỗ (xem `LOG-HAR-CROSSCHECK.md` §51), **giảm
-16 s (−46 %)** trên đúng ca đó.
-
-Ba chỗ vá này **không phải** thay đổi riêng của bản stable — chúng ở bản gốc, nên bản stable
-hưởng nguyên (vẫn chỉ khác bản gốc ở phần log). Version đi theo base: `1.93.19-STABLE`.
-
-#### [v1.93.21] HAI BẢN VÁ TỐC ĐỘ/CHỈ-DÒ-ĐỌC Ở BẢN GỐC
-
-| # | lỗi | vá |
-|---|---|---|
-| ① | chờ Socket hời hợt: promise warm resolve-bằng-`null` ⇒ 307 ms thay vì 8 000 ms ⇒ **cả lô đi Extension** | kiểm lại bằng `isPageSocketReady` + thử kết nối lần mới (2,5 s) |
-| ② | `⏳ … sau 307ms` đọc như "socket chậm" | thêm "(đã chờ + thử kết nối lại 1 lần)" |
-| ③ | `🛟 … KHÔNG có ca nào` khi lô có 57 ca ⚠ | phân loại `fbRejectKinds`, in rõ ca dứt khoát khác |
-
-**Không đổi quyết định gửi, không thêm lệnh gửi.** Chi tiết: `LOG-HAR-CROSSCHECK.md` §52.
 
 #### ĐÃ BỎ HẲN (những thứ bản 1.93.18 đổi và làm lệch bản gốc)
 
