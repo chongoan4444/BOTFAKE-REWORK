@@ -2032,6 +2032,26 @@ check('[upload] có uploadId (khoá đối chiếu phản hồi)', /uploadId: _u
 check('[upload] giữ random= chống cache như app', /'random=' \+ Math\.random\(\)/.test(_upSeg), true);
 check('[upload] không thêm convId cho facebook', /convId/.test(_upSeg), false);
 
+/* ═══ (W) [v1.93.15] `MAKE_MESSENGER_LINK` phải gửi ĐỦ 9 trường + `platform` ═══
+ * ext `class k_`: constructor nhận {pageId, threadId, threadKey, isBusiness, uiVersion, globalId,
+ * conversationUpdatedTime, customerName, platform, convId}. `init()` là
+ * `switch(this.platform){ case "facebook": …; case "instagram_official": … }` ⇒ THIẾU `platform`
+ * thì switch(undefined) rơi ra ngoài ⇒ trả undefined ⇒ KHÔNG BAO GIỜ có `_SUCCESS`.
+ * `getGlobalId()` đẩy tiếp threadKey/isBusiness/conversationUpdatedTime/customerName vào `Ee`
+ * ⇒ thiếu trường nào là MẤT một nguồn dò (threadKey ⇒ nguồn ②, customerName ⇒ nguồn ③④,
+ * conversationUpdatedTime ⇒ timeCursor của nguồn ③). */
+const _mlSeg = (function () {
+  const C = stripComments(SRC);
+  const i = C.indexOf("type: 'MAKE_MESSENGER_LINK'");
+  return i < 0 ? '' : C.slice(i, i + 700);
+})();
+check('[mlink] gửi platform: facebook (thiếu ⇒ switch rơi ra ngoài, không có _SUCCESS)',
+  /platform: 'facebook'/.test(_mlSeg), true);
+check('[mlink] gửi threadKey (nguồn ②)', /threadKey:/.test(_mlSeg), true);
+check('[mlink] gửi customerName (nguồn ③④)', /customerName: custName/.test(_mlSeg), true);
+check('[mlink] gửi conversationUpdatedTime (timeCursor nguồn ③)', /conversationUpdatedTime: updMs/.test(_mlSeg), true);
+check('[mlink] gửi isBusiness (chọn host nhánh 1|2|5)', /isBusiness: true/.test(_mlSeg), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));

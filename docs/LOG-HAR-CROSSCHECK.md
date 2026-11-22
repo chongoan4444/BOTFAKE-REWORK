@@ -2834,3 +2834,62 @@ static startCheck(e, t, a = !0, r = !1) {
 **Script không sửa được** (tham số nằm trong case của ext) ⇒ ghi nhận, không giả định "1 lệnh = 1 request".
 
 **Test khoá:** payload có `uploadId`; vẫn giữ `random=` và `platform`; không thêm `convId`.
+
+---
+
+## 43. `MAKE_MESSENGER_LINK`: thiếu `platform` ⇒ KHÔNG BAO GIỜ có `_SUCCESS`; thiếu 4 trường ⇒ mất 3 nguồn dò
+
+### 43.1 `k_.init()` là `switch(this.platform)`
+
+```js
+// ext 0.5.62 — class k_
+constructor({pageId, threadId, threadKey, isBusiness, uiVersion, globalId,
+             conversationUpdatedTime, customerName, platform, convId}){ … }
+async init(){ switch (this.platform) {
+    case "facebook":           return this.handleFacebook();
+    case "instagram_official": return this.handleInstagram(); } }        // ← KHÔNG có default
+async handleFacebook(){ const e = this.uiVersion || await za.get(this.pageId);
+  switch (e) {
+    case 1: case 2: case 5: {                     // chỉ trả LINK, không có gid
+      const t = e === 5 ? "web.facebook.com" : this.isBusiness ? "business.facebook.com" : "facebook.com";
+      return { link: this.threadId ? `https://${t}/${this.pageId}/inbox/${this.threadId}`
+                                   : `https://${t}/${this.pageId}/inbox` }; }
+    case 3: case 4: case 6: case 7:               // nhánh DUY NHẤT trả globalId
+      return this.getGlobalId().then(t => ({ link: `https://business.facebook.com/latest/inbox/all?…&selected_item_id=${t}`,
+                                             globalId: t })); } }
+getGlobalId(){ return this.globalId ? Promise.resolve(this.globalId)
+  : new Ee({pageId, postId:null, convId:this.convId, convType:"INBOX", threadId:this.threadId,
+            threadKey:this.threadKey, isBusiness:this.isBusiness,
+            conversationUpdatedTime:this.conversationUpdatedTime,
+            customerName:this.customerName}).init() }
+```
+
+**Lỗi 1 (nặng nhất):** script **không gửi `platform`** ⇒ `switch(undefined)` rơi ra khỏi mọi
+`case` ⇒ `init()` trả `undefined` ⇒ `.then(({link, globalId}) => …)` **throw** ⇒ ext post
+`MAKE_MESSENGER_LINK_FAILURE` hoặc không post gì ⇒ adapter hết hạn. Lệnh này vì vậy gần như
+**luôn thất bại** dù timeout 14 000 ms.
+
+**Lỗi 2:** `getGlobalId()` đẩy tiếp `threadKey / isBusiness / conversationUpdatedTime /
+customerName` vào `Ee` ⇒ script cũ chỉ gửi `pageId, convId, threadId` nên nhánh 3|4|6|7 (nhánh
+**duy nhất** trả `globalId`) mất:
+
+| Thiếu trường | Mất nguồn dò của `Ee.getGlobalIdFromInbox` |
+|---|---|
+| `threadKey` | nguồn ② (`Zt` cần `threadKey` + `cquick_token`) |
+| `customerName` | nguồn ④ (`getUserInboxByName`) **và** nhánh khớp TÊN của `findThread` (③) |
+| `conversationUpdatedTime` | `timeCursor = conversationUpdatedTime + 6e4` ⇒ sai lệch ⇒ danh sách thread của ③ rỗng (§32) |
+| `isBusiness` | chọn host ở nhánh 1|2|5 (nhánh link-only) |
+
+### 43.2 ĐÃ SỬA — gửi đủ 9 trường
+
+```js
+adapter.send({ type:'MAKE_MESSENGER_LINK', pageId, convId: key, threadId,
+               threadKey: (full && (full.thread_key || full.threadKey)) || ('t_' + threadId),
+               isBusiness: true, platform: 'facebook',
+               conversationUpdatedTime: updMs, customerName: custName })
+```
+`updMs`/`custName` **đã có sẵn** ở cấp hàm `resolveGlobalId` (dòng 4392 / 4430, trước chỗ dùng
+4649) — đã kiểm bằng đo độ sâu ngoặc: mọi khối `if`/`try`/arrow đều **đóng** trước 4392, nên
+đây là biến cấp hàm chứ không phải biến trong khối (đúng cái bẫy đã ghi ở Errors mục ③).
+
+**Test khoá (5 kịch bản `(W)`).** `npm test`: **424**.

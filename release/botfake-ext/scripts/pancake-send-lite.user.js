@@ -4620,11 +4620,41 @@
         const tryMessengerLink = () => {
           const adapter = window.__ExtensionAdapter__;
           if (settled || !adapter || typeof adapter.send !== 'function') { finishExt(null, 'ext'); return; }
+          /* ═══ [v1.93.15] ĐỦ 9 TRƯỜNG — `k_.getGlobalId()` ĐẨY HẾT VÀO `Ee` ═══
+           * ext `class k_` (case MAKE_MESSENGER_LINK):
+           *   constructor({pageId, threadId, threadKey, isBusiness, uiVersion, globalId,
+           *                conversationUpdatedTime, customerName, platform, convId})
+           *   getGlobalId(){ return this.globalId ? Promise.resolve(this.globalId)
+           *     : new Ee({pageId, postId:null, convId:this.convId, convType:"INBOX",
+           *               threadId:this.threadId, threadKey:this.threadKey,
+           *               isBusiness:this.isBusiness,
+           *               conversationUpdatedTime:this.conversationUpdatedTime,
+           *               customerName:this.customerName}).init() } }
+           * Thiếu trường nào là **mất một nguồn dò** của `Ee.getGlobalIdFromInbox`:
+           *   • thiếu `threadKey`      ⇒ mất nguồn ② (`Zt` cần `threadKey` + `cquick_token`)
+           *   • thiếu `customerName`   ⇒ mất nguồn ④ (`getUserInboxByName`) VÀ nhánh khớp tên
+           *                              của `findThread` (nguồn ③)
+           *   • thiếu `conversationUpdatedTime` ⇒ `timeCursor` sai ⇒ danh sách thread của nguồn ③
+           *                              rỗng (xem §32 — đây là con trỏ LÙI)
+           * Script cũ chỉ gửi `pageId, convId, threadId` ⇒ nhánh 3|4|6|7 (nhánh DUY NHẤT trả
+           * `globalId`) gần như luôn thất bại ⇒ `MAKE_MESSENGER_LINK` chỉ còn tác dụng lấy link.
+           *
+           * `platform: 'facebook'`: `k_.init()` `switch(this.platform)` — THIẾU trường này thì
+           * `switch(undefined)` rơi ra ngoài ⇒ trả `undefined` ⇒ `…SUCCESS` không bao giờ tới ⇒
+           * adapter hết hạn. Script cũ KHÔNG gửi `platform` ⇒ đây là lỗi thứ hai.
+           *
+           * `isBusiness: true` — ext dùng để chọn host ở nhánh 1|2|5
+           * (`e===5 ? "web.facebook.com" : this.isBusiness ? "business.facebook.com" : "facebook.com"`). */
           Promise.resolve().then(() => adapter.send({
             type: 'MAKE_MESSENGER_LINK',
             pageId: pageId,
             convId: key,
             threadId: threadId,
+            threadKey: (full && (full.thread_key || full.threadKey)) || ('t_' + threadId),
+            isBusiness: true,
+            platform: 'facebook',
+            conversationUpdatedTime: updMs,
+            customerName: custName,
             /* ═══ [v1.93.14] BỎ `uiVersion: 6` CỨNG — ĐỂ EXT TỰ DÒ ═══
              * Nguồn `0.5.62_0/assets/background.js`:
              *   class k_{ async handleFacebook(){ const e = this.uiVersion || await za.get(this.pageId);
