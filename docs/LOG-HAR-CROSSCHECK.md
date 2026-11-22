@@ -1093,3 +1093,77 @@ const Q = jc(H);              // Q = true khi error KHÁC 1545041
 `1545041` ∉ `[1357004,1545012,1545006,3252001,1390008]` ⇒ `getErrorHandler` trả **`cannotRetry`**.
 Extension **không có nhãn "khách chặn"** — chỉ có mã lỗi. Việc script coi `1545041` là
 "FB từ chối nhận tin" là **diễn giải của script**, không phải hằng số của extension.
+
+---
+
+## 20. SỬA TOÀN BỘ ĐƯỜNG doc_id THEO EXTENSION THẬT (1.93.13 / W200.124)
+
+Sau §18–§19 còn 3 chỗ sai **cấu trúc** khiến mọi sửa trước đó không có tác dụng.
+
+### 20.1 `window.GraphQLDocId` KHÔNG TỒN TẠI trong trang — `docIdReady()` luôn `false`
+
+```js
+// 0.5.62_0/assets/background.js (SERVICE WORKER)
+const O = new Ll;  O.prepareDocIdsMap();  self.GraphQLDocId = O;
+```
+`self` ở đây là **window của service worker**, không phải trang Pancake.
+`grep -c GraphQLDocId _app-9331d46f21a84eb1.v6.js` = **0**; toàn repo chỉ có `docIdApi()` đọc nó.
+
+⇒ `docIdApi()` luôn `null` ⇒ `docIdReady()` luôn `false` ⇒ câu in ra
+`batch rỗng — THIẾU doc_id ⇒ extension reject "Missing doc_id" (chưa chạy được lần nào)`
+xuất hiện **16/16 dòng trên 30 log**. Đó là **câu in ra**, không phải sự thật về extension:
+extension tự giữ doc_id trong `chrome.storage.local` của nó và **vẫn chạy được**.
+
+**Sửa:** xoá hẳn `docIdApi()`/`docIdReady()`; thêm `extAdapter()` (chỉ kiểm
+`window.__ExtensionAdapter__`). Phán quyết về doc_id **chỉ** dựa vào phản hồi thật của
+`BATCH_GET_GLOBAL_ID`.
+
+### 20.2 doc_id map nằm ở `chrome.storage.local`, KHÔNG phải localStorage trang
+
+```js
+q = { getItem: async n => (await chrome.storage.local.get(n))[n],
+      setItem: (n,e) => chrome.storage.local.set({[n]:e}) };
+persistToLocalStorage(){ … q.setItem(yr, JSON.stringify(e)) }   // yr = "GraphQLDocId_docIdsMap"
+```
+`ensureDocIds()` cũ đọc `window.localStorage.getItem('GraphQLDocId_docIdsMap')` — **sai chỗ**,
+luôn `null`. Đã bỏ hẳn (cùng với `docIdStats.loadedFromLs`).
+
+### 20.3 `PRELOAD_DOC_IDS` nạp ĐÚNG bộ doc_id mà `BATCH_GET_GLOBAL_ID` cần
+
+```js
+O.preloadDocIds(e, t = this.featureNeedsPreloadDocIds)      // ["inbox","comment","sendCommerceProduct","switchProfile","businessInboxComment"]
+  → getFeatureHandlerClass("inbox") = ee
+  → ee.preloadDocIds: loadDocIdsFromView({html, docNames:[Jt,Zt,rt,st], isLoadCompleted:()=>O.isFeatureReady("inbox")})
+```
+`rt`/`st` = `MessengerThreadlistWebGraphQLQuery` / `MessengerThreadlistQuery` — đúng 2 mã
+`Ct.init()` đòi. `ot()` gộp 20 s (`timeout:2e4`), `isAllDocIdLoaded` chặn gọi lặp.
+
+⇒ `PRELOAD_DOC_IDS` là lệnh **đúng và đủ** cho `BATCH_GET_GLOBAL_ID`.
+
+### 20.4 Bỏ cờ chặn — trước đó lệnh chưa từng được gửi
+
+`if (!window.__botfakeTryPreloadDocIds__) return false;` — không ai set cờ ⇒ dù §18 đã sửa
+đúng tên lệnh, **lệnh vẫn chưa bao giờ được gửi**. Đã bỏ. Nay gửi **1 lần/page**
+(`docPreloadSent` là `Set`), đúng tham số `{pageId, isBusiness, country}`, hạn 4 s.
+
+### 20.5 Log nói theo phản hồi thật
+
+| Phản hồi adapter | Câu log |
+|---|---|
+| `data.type` kết thúc `_FAILURE` | `extension TRẢ _FAILURE (nhiều khả năng Missing doc_id — Ct.init reject)` |
+| `success:false, data:null` | `extension KHÔNG phản hồi trong 30 s (adapter hết hạn…)` |
+| `success:true` nhưng list rỗng | `trả success nhưng không có data.threadsWithGlobalId (danh sách rỗng)` |
+
+### 20.6 Bảng "đã phủ / còn nợ" sau §20
+
+**Đã phủ:** tên 7 lệnh gửi ext (6 + PRELOAD) · hình dạng 5 response · `taskId` · timeout
+30 s · `getErrorHandler` 5 mã · `findInternalMessage` 3 điều kiện · nguồn doc_id · ai cấp
+`__ExtensionAdapter__`.
+
+**Còn nợ (chưa chứng minh):**
+1. **Sửa này chưa chạy lần nào trên máy thật.** Cần 1 lô log mới để biết `batch nạp ?/?`.
+2. **570 ca ⚠ lô 08:32** vẫn chưa truy được nguồn — cần log xuất **ngay sau lượt chốt, trước F5**.
+3. **`ensureDocIds` không chờ ext nạp xong** (chỉ gửi). Nếu `BATCH_GET_GLOBAL_ID` chạy ngay
+   sau, ext vẫn có thể chưa nạp xong ⇒ batch rỗng lần 1. `isAllDocIdLoaded` + `ot()` 20 s làm
+   khả năng này thấp nhưng **chưa đo được**.
+4. Lỗi gốc *"ca khách chặn thật bị chốt ⚠"* **vẫn chưa sửa** — §20 chỉ sửa đường gid.

@@ -4438,7 +4438,11 @@
            * Trước bản này `ensureDocIds()` CHỈ được gọi trong `requestBatchGlobalIds`.
            * Nay gọi đúng 1 lần trước lệnh dò (idempotent, chỉ đọc, 0 request mới). */
           const callExtFinderOnce = () => Promise.resolve()
-            .then(() => (docIdReady() ? null : ensureDocIds(finderPayload.pageId).catch(() => null)))
+            /* [v1.93.13] AWAIT lệnh bảo đảm doc_id. `ensureDocIds` chỉ gửi
+             * PRELOAD_DOC_IDS (không chờ ext xong) rồi trả ngay ⇒ không giữ lane lâu.
+             * `Ee.getGlobalIdFromInbox()` cần `[Jt,Zt,rt,st]`; gửi trước lệnh dò để
+             * ext có cơ hội nạp, thay vì dò trong lúc ext chưa có doc_id. */
+            .then(() => ensureDocIds(finderPayload.pageId).catch(() => null))
             .then(() => adapter.send(
               Object.assign({ type: 'GET_GLOBAL_ID_FOR_CONV' }, finderPayload),
               { timeout: extWaitMs }
@@ -8939,22 +8943,36 @@
     BizInboxSearchResultListContainerQuery: 1,
     BizInboxSearchResultFacebookListQuery: 1,
   };
-  const docIdStats = { seenHtml: 0, htmlWithMap: 0, saved: 0, loadedFromLs: 0, viaExtOk: 0, viaExtEmpty: 0 };
+  /* [v1.93.13] bỏ `loadedFromLs` (đường đọc localStorage trang không tồn tại — map nằm ở
+   * `chrome.storage.local` của ext). `viaExtOk` nay = "đã GỬI lệnh", không phải "đã nạp". */
+  const docIdStats = { seenHtml: 0, htmlWithMap: 0, saved: 0, viaExtOk: 0, viaExtEmpty: 0 };
+  /* Tên doc_id bóc được từ HTML — CHỈ để đối chiếu/ghi log, không dùng để quyết định gì. */
+  const docIdSeenFromHtml = Object.create(null);
+  /* Page nào đã được gửi PRELOAD_DOC_IDS (gửi 1 lần/page, không lặp). */
+  const docPreloadSent = new Set();
   const DOCID_NAMES = DOCID_KEEP;   // giữ tên cũ cho chỗ dùng bên dưới
 
-  function docIdApi() {
-    const api = window.GraphQLDocId;
-    if (!api || typeof api.set !== 'function' || typeof api.has !== 'function') return null;
-    return api;
-  }
-  function docIdReady() {
-    const api = docIdApi();
-    if (!api) return false;
-    try {
-      return typeof api.isFeatureReady === 'function'
-        ? !!api.isFeatureReady('inbox')
-        : !!(api.has('MessengerThreadlistWebGraphQLQuery') || api.has('MessengerThreadlistQuery'));
-    } catch (e) { return false; }
+  /* ═══ [v1.93.13] doc_id KHÔNG đọc được từ trong trang — bỏ hẳn ảo giác này ═══
+   * Bản trước đọc `window.GraphQLDocId` và coi đó là "bộ doc_id của extension".
+   * KIỂM LẠI NGUỒN: `self.GraphQLDocId = O` là dòng trong **service worker** của extension
+   * 0.5.62 (`const O=new Ll; O.prepareDocIdsMap(); self.GraphQLDocId=O`). Trang web
+   * Pancake KHÔNG có biến đó: `grep -c GraphQLDocId _app-…v6.js` = **0**.
+   * Toàn repo chỉ có đúng hàm này đọc nó ⇒ `docIdApi()` LUÔN trả `null` ⇒
+   * `docIdReady()` LUÔN `false` ⇒ mọi log in ra
+   *   `batch rỗng — THIẾU doc_id ⇒ extension reject "Missing doc_id" (chưa chạy được lần nào)`
+   * (16/16 dòng, đúng 100 % 30 log). Đó là **câu in ra**, không phải sự thật về extension:
+   * extension có `chrome.storage.local` riêng và tự có doc_id.
+   *
+   * ⇒ Nay KHÔNG đọc gì từ trang nữa (hàm `docIdReady()` đã xoá). Việc nạp do chính
+   *   extension làm trong SW (`case"PRELOAD_DOC_IDS"` → `O.preloadDocIds`, nạp
+   *   `[Jt,Zt,rt,st]` qua khối `ee.preloadDocIds`). Ta chỉ BẢO ĐẢM ĐÃ GỬI lệnh, rồi để
+   *   `BATCH_GET_GLOBAL_ID` trả lời thật (nó tự reject `Missing doc_id` nếu ext chưa có). */
+
+  /* Có `__ExtensionAdapter__` nghĩa là extension Pancake 0.5.62 đang chạy và tự giữ doc_id
+   * trong SW của nó. Đây là điều kiện DUY NHẤT ta kiểm được từ phía trang. */
+  function extAdapter() {
+    const a = window.__ExtensionAdapter__;
+    return (a && typeof a.send === 'function') ? a : null;
   }
   /* CÁCH A — bóc {"resource_map":…} / {"rsrcMap":…} từ HTML BẤT KỲ.
    * Danh sách tên cần lấy: ưu tiên bảng tĩnh DOCID_KEEP; nếu chưa biết tên thì gom theo
@@ -8963,8 +8981,10 @@
     if (!html || typeof html !== 'string' || html.length < 500) return 0;
     if (!html.includes('resource_map') && !html.includes('rsrcMap') && !html.includes('setResourceMap(')) return 0;
     docIdStats.seenHtml++;
-    const api = docIdApi();
-    if (!api) return 0;
+    /* [v1.93.13] KHÔNG ghi vào `window.GraphQLDocId` nữa (không tồn tại trong trang).
+     * Đường bóc HTML này từ trước tới nay KHÔNG BAO GIỜ chạy được (api luôn null) ⇒
+     * `docIdStats.saved` luôn 0. Vẫn giữ phép bóc để đếm/ghi log, nhưng KHÔNG tính là
+     * "đã có doc_id" — chỉ extension mới nạp được doc_id cho chính nó. */
     let saved = 0;
     const take = (name, val) => {
       if (!name || !val) return;
@@ -8975,7 +8995,8 @@
       else if (DOCID_NAMES && DOCID_NAMES[n]) keep = true;
       else if (/GraphQLQuery$/.test(n)) keep = true;   // dạng chuẩn của FB
       if (!keep) return;
-      try { api.set(n, v); saved++; } catch (e) { /* ignore */ }
+      saved++;   // đếm được tên, KHÔNG ghi (xem chú thích trên)
+      try { docIdSeenFromHtml[n] = v; } catch (e) { /* ignore */ }
     };
     // 1) khối JSON: "resource_map":{...}  ·  "rsrcMap":{...}
     for (const key of ['"resource_map":', '"rsrcMap":']) {
@@ -9025,8 +9046,9 @@
       docIdStats.htmlWithMap++;
       docIdStats.saved += saved;
       try {
-        logLine('🧩 [doc_id] +' + saved + ' từ HTML (' + where + ') ⇒ '
-          + (docIdReady() ? 'ĐÃ ĐỦ, batch/dò-lẻ dùng được' : 'chưa đủ bộ cần thiết'));
+        logLine('🧩 [doc_id] thấy ' + saved + ' tên doc_id trong HTML (' + where + ')'
+          + ' — CHỈ ghi nhận để đối chiếu, KHÔNG nạp được vào extension'
+          + ' (doc_id của ext nằm ở chrome.storage.local, không đọc/ghi được từ trang)');
       } catch (e) { /* ignore */ }
     }
     return saved;
@@ -9039,7 +9061,7 @@
       return harvestDocIdsFromHtml(t, 'response');
     } catch (e) { return 0; }
   }
-  /* CÁCH B — hỏi extension nạp hộ. MẶC ĐỊNH TẮT (vẫn cần `window.__botfakeTryPreloadDocIds__`).
+  /* CÁCH B — nhờ extension nạp hộ. NAY BẬT (đã bỏ cờ `__botfakeTryPreloadDocIds__`).
    *
    * ═══ [v1.93.13] SỬA LỖI: `PRELOAD_DOC_IDS` **CÓ** case trong extension 0.5.62 ═══
    * Chú thích cũ ở đây nói "switch của extension 0.5.62 KHÔNG có case đó (đã grep 86 case)"
@@ -9054,19 +9076,29 @@
    *   · `html` bỏ trống ⇒ ext tự fetch `makeInboxViewUrl(pageId,isBusiness)`
    *     = `business.facebook.com/latest/inbox/facebook?asset_id=…`
    *   · cần `docNames` [ge, Oe, Ra, Oa] — bộ doc của đường Instagram
-   *   · nạp vào `O` (GraphQLDocId) = localStorage `GraphQLDocId_docIdsMap`
+   *   · nạp vào `O` = `chrome.storage.local` key `GraphQLDocId_docIdsMap`
+   *     (`persistToLocalStorage(){ … q.setItem(yr, …) }`, `q` = `chrome.storage.local`)
+   *   · `O.preloadDocIds()` là **hàm tổng** (được `ot()` gộp 20 s): nó tự lọc
+   *     `featureNeedsPreloadDocIds = ["inbox","comment","sendCommerceProduct","switchProfile","businessInboxComment"]`,
+   *     bỏ qua feature đã sẵn, rồi gọi `ee.preloadDocIds` — CHÍNH khối nạp `[Jt,Zt,rt,st]`
+   *     mà `BATCH_GET_GLOBAL_ID` cần. ⇒ đúng lệnh, đúng bộ doc_id.
    *
    * ⇒ Tên ĐÚNG là `PRELOAD_DOC_IDS`, tham số đúng là `{pageId, isBusiness, country}`.
    *   KHÔNG có `_SUCCESS`/`_FAILURE` ⇒ `adapter.send` sẽ **timeout** (30 s) rồi trả
    *   `{success:false, data:null}` — nhưng side-effect đã xảy ra. Vì vậy:
    *   · hạn chờ ngắn (4 s) để không giữ lane,
-   *   · phán quyết dựa DUY NHẤT vào `docIdReady()` đọc lại localStorage,
+   *   · phán quyết dựa vào phản hồi THẬT của `BATCH_GET_GLOBAL_ID` (lệnh duy nhất biết sự thật),
    *   · không bao giờ coi "không trả lời" là "đã nạp".
    * Đây là đường CHỈ ĐỌC + ghi cache của extension, KHÔNG gửi tin ⇒ không thể sinh tin trùng. */
   function tryPreloadDocIdsViaExt(pid) {
-    if (!window.__botfakeTryPreloadDocIds__) return Promise.resolve(false);
-    const adapter = window.__ExtensionAdapter__;
-    if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(false);
+    /* [v1.93.13] BỎ CỜ `window.__botfakeTryPreloadDocIds__`.
+     * Cờ này không ai trong repo set ⇒ hàm return false ngay dòng đầu, tức là dù đã sửa
+     * đúng tên lệnh thì lệnh VẪN CHƯA TỪNG ĐƯỢC GỬI. Nay gửi thật.
+     * An toàn: đây là lệnh CHỈ ĐỌC + ghi cache của extension, không gửi tin, không thể sinh
+     * tin trùng. `PRELOAD_DOC_IDS` không có `_SUCCESS`/`_FAILURE` nên phán quyết KHÔNG dựa
+     * vào `res` mà dựa vào phản hồi THẬT của lệnh kế tiếp (`BATCH_GET_GLOBAL_ID`). */
+    const adapter = extAdapter();
+    if (!adapter) return Promise.resolve(false);
     if (!pid) return Promise.resolve(false);
     return Promise.resolve()
       .then(() => adapter.send({
@@ -9076,39 +9108,44 @@
         country: (function () { try { return localStorage.getItem('country') || 'vn'; } catch (e) { return 'vn'; } })(),
       }, { timeout: 4000 }))
       .then((res) => {
-        const ok = docIdReady();
-        if (ok) {
-          docIdStats.viaExtOk++;
-          try { logLine('🧩 [doc_id] extension có phản hồi (res=' + (res && res.success ? 'success' : 'không success')
-            + ') và doc_id ĐÃ ĐỦ ⇒ batch dùng được'); } catch (e) { /* ignore */ }
-        } else {
-          docIdStats.viaExtEmpty++;
-          try { logLine('🧩 [doc_id] extension KHÔNG nạp được (case lạ ⇒ nhiều khả năng extension bỏ qua)'
-            + ' — không tính là lỗi gửi, đường batch vẫn tắt'); } catch (e) { /* ignore */ }
-        }
-        return ok;
+        /* `PRELOAD_DOC_IDS` KHÔNG trả `_SUCCESS`/`_FAILURE` (case chỉ `break`), nên
+         * `adapter.send` sẽ hết hạn rồi trả `{success:false, data:null}` — đó KHÔNG phải lỗi,
+         * side-effect đã xảy ra trong SW. Vì vậy: thử đọc lại qua `BATCH_GET_GLOBAL_ID`
+         * (lệnh duy nhất cho biết sự thật) thay vì đoán từ `res`.
+         * Ở đây chỉ ghi nhận "đã gửi", không kết luận gì về doc_id. */
+        docIdStats.viaExtOk++;
+        try {
+          logLine('🧩 [doc_id] đã gửi PRELOAD_DOC_IDS cho page ' + pid
+            + ' (ext tự nạp [Jt,Zt,rt,st]; phản hồi adapter: '
+            + (res && res.success ? 'success' : 'không có success — bình thường, lệnh này không trả _SUCCESS')
+            + ')');
+        } catch (e) { /* ignore */ }
+        return true;
       })
       .catch(() => { docIdStats.viaExtEmpty++; return false; });
   }
   async function ensureDocIds(pid) {
-    if (docIdReady()) return true;
-    // ① localStorage do extension giữ (đọc thẳng, không đụng gì)
-    try {
-      const raw = window.localStorage && window.localStorage.getItem('GraphQLDocId_docIdsMap');
-      if (raw) {
-        const api = docIdApi();
-        const obj = JSON.parse(raw);
-        let n = 0;
-        Object.keys(obj || {}).forEach((k) => {
-          const v = obj[k] && (obj[k].value || obj[k]);
-          if (v && api && DOCID_KEEP[k]) { try { api.set(k, String(v)); n++; } catch (e) { /* ignore */ } }
-        });
-        if (n) { docIdStats.loadedFromLs += n; }
-      }
-    } catch (e) { /* ignore */ }
-    if (docIdReady()) return true;
-    // ② hỏi extension (mặc định tắt)
-    return tryPreloadDocIdsViaExt(pid);
+    /* [v1.93.13] ĐỌC LẠI NGUỒN — 2 đường cũ đều KHÔNG THỂ chạy, đã bỏ:
+     *  ① `localStorage.getItem('GraphQLDocId_docIdsMap')` — SAI CHỖ.
+     *     `q` của extension = **`chrome.storage.local`** (không phải localStorage):
+     *       q={getItem:async n=>(await chrome.storage.local.get(n))[n], setItem:(n,e)=>chrome.storage.local.set({[n]:e})}
+     *     và `persistToLocalStorage(){ … q.setItem(yr, JSON.stringify(e)) }` với `yr="GraphQLDocId_docIdsMap"`.
+     *     `chrome.storage.local` KHÔNG nhìn thấy được từ trang (khác origin, không qua DOM)
+     *     ⇒ dòng cũ luôn `null` ⇒ `docIdStats.loadedFromLs` luôn 0.
+     *  ② `window.GraphQLDocId` — biến của SW (`self.GraphQLDocId=O`), không có trong trang.
+     *
+     * ⇒ Chỉ còn 1 đường thật: nhờ CHÍNH extension nạp (nó có cookie Facebook, có SW,
+     *   có `chrome.storage.local`, và nạp đúng bộ `[Jt,Zt,rt,st]` mà `BATCH_GET_GLOBAL_ID` cần).
+     * Giữ tên hàm; trả `true` khi đã gửi lệnh (không chờ, không chặn đường gửi tin). */
+    if (!extAdapter()) return false;
+    const key = String(pid || '');
+    if (!key) return false;
+    /* Gửi MỘT lần cho MỖI page (doc_id là cache dùng chung cho mọi page nên ext chỉ cần
+     * nạp lại khi cache hết hạn 5 giờ; gọi lại sau TTL là việc của ext, không phải của ta). */
+    if (docPreloadSent.has(key)) return true;
+    docPreloadSent.add(key);
+    Promise.resolve().then(() => tryPreloadDocIdsViaExt(key)).catch(() => { /* ignore */ });
+    return true;
   }
 
   function requestBatchGlobalIds(pid, force) {
@@ -9121,9 +9158,10 @@
     if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(0);
     /* [v1.93.9] `Ct.init()` của extension reject ngay `Missing doc_id` nếu chưa nạp.
      * Không bảo đảm doc_id thì mọi lần gọi batch đều vô ích ⇒ gọi đúng 1 lần trước. */
-    if (!docIdReady()) {
-      try { logLine('🧩 [doc_id] chưa có ⇒ batch sẽ bị extension từ chối "Missing doc_id"; thử nạp trước…'); } catch (e) { /* ignore */ }
-    }
+    /* [v1.93.13] Điều kiện duy nhất kiểm được từ trang là CÓ adapter (đã kiểm ở trên).
+     * Không còn câu "chưa có doc_id" — ta KHÔNG đọc được doc_id của extension nên không
+     * được phát ngôn về nó. Chỉ bảo đảm đã gửi lệnh nạp, rồi để chính extension trả lời. */
+    try { logLine('🧩 [doc_id] bảo đảm extension đã nạp doc_id trước khi gọi batch…'); } catch (e) { /* ignore */ }
     const promise = Promise.resolve().then(() => ensureDocIds(pageId)).then(() => adapter.send({
       type: 'BATCH_GET_GLOBAL_ID',
       pageId: pageId,
@@ -9168,9 +9206,19 @@
          *   a) thiếu doc_id ⇒ extension reject "Missing doc_id …"  (KHÔNG BAO GIỜ chạy được)
          *   b) extension trả success nhưng không có data.threadsWithGlobalId  (lệnh lạ)
          * Hai nguyên nhân có cách sửa KHÁC NHAU ⇒ phải in ra. */
-        const whyNoList = docIdReady()
-          ? 'extension TRẢ LỜI nhưng không có data.threadsWithGlobalId (lệnh lạ/phiên bản khác)'
-          : 'THIẾU doc_id ⇒ extension reject "Missing doc_id" (chưa chạy được lần nào)';
+        /* [v1.93.13] NÓI THEO PHẢN HỒI THẬT, không đoán.
+         * `Ct.init()` reject `Missing doc_id …` ⇒ ext gửi `BATCH_GET_GLOBAL_ID_FAILURE` ⇒
+         * adapter trả `{success:false, data:{type:"BATCH_GET_GLOBAL_ID_FAILURE",taskId}}`.
+         * Hết hạn 30 s ⇒ `{success:false, data:null}` (KHÔNG có type).
+         * Phân biệt được 3 ca, in đúng ca nào: */
+        const _rd = (res && res.data) || null;
+        const whyNoList = !res
+          ? 'adapter không trả gì (không có __ExtensionAdapter__?)'
+          : (!res.success && _rd && /FAILURE$/.test(String(_rd.type || ''))
+            ? 'extension TRẢ _FAILURE (nhiều khả năng `Missing doc_id` — Ct.init reject)'
+            : (!res.success && !_rd
+              ? 'extension KHÔNG phản hồi trong 30 s (adapter hết hạn — lệnh chưa xong hoặc ext không chạy case này)'
+              : 'extension trả success nhưng không có data.threadsWithGlobalId (danh sách rỗng)'))
         try { logLine('🧩 [doc_id] batch rỗng — ' + whyNoList); } catch (e) { /* ignore */ }
         return 0;
       }
