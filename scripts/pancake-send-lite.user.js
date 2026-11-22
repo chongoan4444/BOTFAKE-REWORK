@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.23-w200.133
+// @version      1.93.24-w200.134
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.23-W200.133'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.24-W200.134'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -6114,7 +6114,10 @@
         sockFiredPending.add(conv.id);
         try {
           const _pidS = String(conv.pageId || String(conv.id || '').split('_')[0] || '');
-          if (_pidS) pageSockSent[_pidS] = (pageSockSent[_pidS] || 0) + 1; // [v1.93.21] mẫu số của cổng 0-ACK
+          if (_pidS) { // [v1.93.21] mẫu số của cổng 0-ACK · [v1.93.24] + mốc lần đầu
+            if (!pageSockSent[_pidS]) pageSockFirstAt[_pidS] = Date.now();
+            pageSockSent[_pidS] = (pageSockSent[_pidS] || 0) + 1;
+          }
           const _st = sockRouteOf((conv.pageId || String(conv.id || '').split('_')[0]));
           if (_st) _st.sent++;
         } catch (eSt) { /* ignore */ }
@@ -7876,7 +7879,8 @@
    * ("đã 2 lần chứng minh hội thoại KHÔNG có tin sau khi bắn Socket") ⇒ nhãn log đang gọi sai
    * tên một cơ chế chống mất tin thành "ACK chết". Nay đếm riêng 2 lý do, chỉ đổi NHÃN. */
   const socketPickDiag = { deadSkip: 0, deadSkipAtProbe: 0, probe: 0, probeOk: 0, notReady: 0, noGid: 0,
-    skipLost: 0, skipAckDead: 0, zeroAckToApi: 0 }; // [v1.93.22] số ca chuyển sang API vì page 0 ACK
+    skipLost: 0, skipAckDead: 0, zeroAckToApi: 0, // [v1.93.22] số ca chuyển sang API vì page 0 ACK
+    deadChannelSkip: 0 }; // [v1.93.24] số ca BỎ Socket vì kênh ACK của page đã chết (>20 s, 0 ACK)
   function isPageAckDead(pid) {
     const at = pageAckDeadAt[pid];
     if (!at) return false;
@@ -8829,10 +8833,17 @@
     if (!hasSock || !hasExt) return seq;
     try {
       const _ackSt = pageSocketAckState(pageId);
-      if (_ackSt.zeroAck && _ackSt.sent >= SOCK_ZERO_ACK_MIN && seq.indexOf('api') > -1
-          && (sendDiag.apiSuccess || 0) > 0) {
-        socketPickDiag.zeroAckToApi++;
-        return ['api', 'ext'].concat(seq.filter((x) => x !== 'api' && x !== 'ext' && x !== 'socket'));
+      if (_ackSt.dead) {
+        /* [v1.93.24] KÊNH ACK CỦA PAGE ĐÃ CHẾT THẬT ⇒ BỎ SOCKET KHỎI THỨ TỰ (không bắn thêm).
+         * Điều kiện vào đây KHÔNG phụ thuộc làn (thứ bị noAckStreak hạ xuống 16–32): dùng
+         * `sent ≥ 20` **và** `≥ 20 000 ms` **và** `ack === 0`.
+         * `api` chỉ được đặt lên đầu khi nó CÓ trong `seq` và đã chứng minh sống — nhưng kể cả
+         * khi API chết thì `ext` vẫn còn, nên KHÔNG ca nào bị bỏ rơi. */
+        socketPickDiag.deadChannelSkip++;
+        const wantApi = seq.indexOf('api') > -1 && (sendDiag.apiSuccess || 0) > 0;
+        const tail = seq.filter((x) => x !== 'socket' && x !== 'api');
+        if (wantApi) socketPickDiag.zeroAckToApi++;
+        return (wantApi ? ['api', 'ext'] : ['ext']).concat(tail.filter((x) => x !== 'ext'));
       }
     } catch (eZA) { /* ignore */ }
     const hint = channelHints[conv.id];
@@ -11026,11 +11037,37 @@
    * docs/DOI-SOAT-LO-5281.md. */
   const pageSockSent = {};             // pageId → số lần đã bắn Socket (lượt này)
   const pageAckGot = {};               // pageId → số ACK thật nhận được (ok+rejected)
+  /* ═══ [v1.93.24] GỐC CỦA "DỒN BÙ EXT": SOCKET CỦA PAGE CHẾT HẲN MÀ VẪN BỊ BẮN VÀO ═══
+   * ĐO ĐƯỢC — hai lô khác nhau, cùng máy, cùng page:
+   *   22/11 (5 281 chat): `📡 SOCKET: ACK OK/rejected/no-ACK 0/0/4884` · `hết hạn chờ 4 884`
+   *   18:56 (10 948 chat): `📡 SOCKET: ACK OK/rejected/no-ACK 5/0/0` · 8 675 ca ⚠
+   * Tức **kênh ACK của Socket không trả lời một lần nào** trong hàng nghìn lần bắn. Mỗi ca
+   * không ACK ⇒ ⚠ ⇒ chờ 14 s chứng minh vắng mặt ⇒ 🛟 bù qua Ext. Đó chính là "dồn bù ext":
+   * Ext không phải nguyên nhân, Ext là nơi hứng hệ quả của 4 884–8 675 ca ⚠.
+   *
+   * VÌ SAO PHẢI CHẶN Ở ĐÂY MÀ KHÔNG CHỈNH NGƯỠNG THEO "SỐ LẦN BẮN" (bản 1.93.22 đã sai):
+   * cùng hàm `recordSocketAckOutcome` (noAckStreak ≥ 2) đã hạ làn Socket xuống sàn 16–32
+   * (`Socket/page limits cuối [16×1]`), nên ngưỡng "≥ 64 lần bắn" chỉ đạt được ở CUỐI lô.
+   * Nay dùng **THỜI GIAN**, thứ không phụ thuộc làn bị hạ: page đã bắn ≥ 20 lần trong ≥ 20 000 ms
+   * mà 0 ACK ⇒ kênh ACK chết thật ⇒ BỎ Socket khỏi thứ tự làn, đi API (nếu API sống) rồi Ext.
+   *   • KHÔNG bắn thêm lệnh nào (chỉ bỏ một kênh khỏi thứ tự) ⇒ không thể sinh tin trùng.
+   *   • Ext hết bị dồn vì không còn 8 675 ca ⚠ sinh ra từ Socket.
+   *   • Page nào có ACK bình thường thì KHÔNG đổi gì (điều kiện đòi ack === 0).
+   * An toàn: nếu API cũng chết thì `seq` vẫn còn `ext` ⇒ tin vẫn đi, không ca nào bị bỏ rơi. */
+  const pageSockFirstAt = {};          // pageId → mốc bắn Socket ĐẦU TIÊN trong lượt
+  const SOCK_CHANNEL_DEAD_MS = 20000;  // 20 s + 0 ACK ⇒ kênh ACK của page coi như chết
+  const SOCK_CHANNEL_DEAD_MIN = 20;    // kèm tối thiểu 20 lần bắn (chống kết luận từ 1–2 ca)
   function pageSocketAckState(pageId) {
     const pid = String(pageId || '');
     const sent = pageSockSent[pid] || 0;
     const got = pageAckGot[pid] || 0;
-    return { sent: sent, ack: got, zeroAck: sent > 0 && got === 0 };
+    const firstAt = pageSockFirstAt[pid] || 0;
+    return {
+      sent: sent, ack: got, zeroAck: sent > 0 && got === 0,
+      elapsedMs: firstAt ? Math.max(0, Date.now() - firstAt) : 0,
+      dead: sent >= SOCK_CHANNEL_DEAD_MIN && got === 0
+        && !!firstAt && (Date.now() - firstAt) >= SOCK_CHANNEL_DEAD_MS,
+    };
   }
   /* ═══ [v1.93.1] FB ĐÃ BÁO "KHÔNG NHẬN ĐƯỢC" THÌ KHÔNG BÙ NỮA ═══
    * ĐO ĐƯỢC trên log 21/11 19:44 (lô 4 281 chat, CÓ sổ kiểm chứng 10 717 dòng):
@@ -11840,6 +11877,9 @@
            /* [v1.93.22] nghiệm thu: ca chuyển sang API vì page 0 ACK. Kỳ vọng > 0 ở lô nào có
             * `📡 no-ACK` lớn mà `🌐 API` đã OK — đó là số ca thoát khỏi vòng "Socket→⚠→Ext". */
            + ' · chuyển API vì page 0 ACK ' + (socketPickDiag.zeroAckToApi || 0) + ' ca'
+           /* [v1.93.24] NGHIỆM THU CỦA BẢN VÁ "KÊNH ACK CHẾT": phải > 0 ở lô nào Socket 0 ACK,
+            * và khi đó `⚠ no-ACK` + `🛟` của lô đó phải GIẢM so với 4 884 / 8 675 ca. */
+           + ' · BỎ Socket vì kênh ACK chết ' + (socketPickDiag.deadChannelSkip || 0) + ' ca'
            + ' · ACK theo page (bắn/ACK) ' + (function () {
              try {
                const ks = Object.keys(pageSockSent);
@@ -14077,6 +14117,7 @@
     try {
       Object.keys(pageSockSent).forEach((k) => { delete pageSockSent[k]; });
       Object.keys(pageAckGot).forEach((k) => { delete pageAckGot[k]; });
+      Object.keys(pageSockFirstAt).forEach((k) => { delete pageSockFirstAt[k]; });
     } catch (ePA) { /* ignore */ }
     Object.keys(proofStats).forEach((k) => { proofStats[k] = 0; }); // [v1.93.21]
     batchStats.finalLogged = false;

@@ -415,3 +415,57 @@ dấu hiệu page nào chuyển API ⇒ bản vá **gần như không chạy**. 
   giây → thấy tin thì ✅, không thấy thì ❌ + vào danh sách gửi tay. Hiện chúng chỉ nằm im.
 - 78 ca `noThreadIdFound` (cả Ext lẫn Socket đều không có thread_id) — đây là nhóm **chắc chắn
   chưa gửi được**, không mơ hồ; nên được xử lý riêng thay vì gộp vào ❌ chung.
+
+---
+
+## §15. GỐC CỦA "DỒN BÙ EXT" — đã tìm ra và đã vá (1.93.24)
+
+### 15.1 Câu trả lời ngắn
+**Ext không phải nguyên nhân.** Ext là nơi hứng hệ quả của một kênh chết: **kênh ACK của Socket
+không trả lời một lần nào** trong hàng nghìn lần bắn.
+
+| | 22/11 (5 281 chat) | 18:56 (10 948 chat) |
+|---|---|---|
+| `📡 SOCKET: ACK OK/rejected/no-ACK` | **0/0/4 884** | **5/0/0** |
+| `🔔 hết hạn chờ (còn nghe tiếp)` | **4 884** | — |
+| ca ⚠ no-ACK | 4 884 | **8 675** |
+
+0 ACK trên 4 884 lần bắn = **0,00 %**. Đó không phải "chậm", đó là kênh chết. Mỗi ca no-ACK đi
+đúng một đường: ⚠ → chờ 14 s chứng minh vắng mặt → `🛟 GỬI CỨU qua Ext` (22/11: 4 844 ca) hoặc
+⚠ → sổ chờ chốt (18:56: ~8 000 ca). Cả hai đều là **hệ quả của cùng một gốc**.
+
+### 15.2 Vì sao bản 1.93.22 không chạy (lỗi thiết kế của tôi)
+Tôi đặt điều kiện `pageSockSent[page] >= 64 && pageAckGot[page] === 0`. Nhưng **cùng hàm**
+`recordSocketAckOutcome` với `noAckStreak ≥ 2` đã hạ làn Socket xuống sàn **16 slot**
+(`Socket/page limits cuối [16×1]` trong log cũ). 16 slot × 4 ms pace ≈ 4 000 lần/s lý thuyết,
+nhưng thực tế mỗi ca giữ slot ~1 s ⇒ phải **hàng chục giây** mới đủ 64 lần. Điều kiện chỉ đúng
+ở cuối lô ⇒ vô dụng. Sai của tôi: đo bằng *số lần bắn* — một đại lượng **phụ thuộc làn**, mà
+làn chính là thứ đang bị bóp.
+
+### 15.3 Bản vá 1.93.24
+Điều kiện mới dùng **thời gian**, không phụ thuộc làn:
+
+```
+sent ≥ 20  &&  (now − lần bắn đầu tiên) ≥ 20 000 ms  &&  ack === 0   ⇒  kênh ACK đã chết
+```
+
+Khi đó `pickBestDirectOrder` **bỏ `socket` khỏi thứ tự làn**: `['api','ext']` nếu API đã chứng
+minh sống, còn không thì `['ext']`.
+- **Không bắn thêm lệnh nào** (chỉ bỏ một kênh khỏi thứ tự) ⇒ không thể sinh tin trùng.
+- `ext` luôn còn trong danh sách ⇒ không ca nào bị bỏ rơi.
+- Page có ACK bình thường: `ack === 0` sai ⇒ **không đổi gì**.
+
+### 15.4 Nghiệm thu (phải đọc số, không được khen suông)
+Trong dòng `🧭 Chẩn đoán globalId` có thêm:
+`· BỎ Socket vì kênh ACK chết N ca`.
+- Ở lô có Socket 0 ACK, **N phải > 0** và **`⚠ no-ACK` phải giảm mạnh** so với 4 884 / 8 675.
+- Nếu N = 0 ⇒ cổng không chạy (sai tiếp) ⇒ phải đọc `ACK theo page (bắn/ACK)` in cùng dòng để
+  biết page có ACK hay không.
+- Nếu N > 0 mà `⚠` **không** giảm ⇒ kết luận "0 ACK là gốc" của tôi SAI ⇒ gỡ, quay lại điều tra
+  tại sao Socket không ACK (hiện chưa biết: socket báo `isRunning`/synced nhưng `/ls_resp` im).
+
+### 15.5 Điều vẫn CHƯA biết (nói thẳng)
+Chưa biết **vì sao** kênh ACK chết. Ứng viên chưa kiểm chứng: helper MQTT sống nhưng mất
+subscribe `/ls_resp`; `requestId` không tăng; FB chặn frame task 46 ở mức page. Bản vá này chỉ
+**ngừng bắn vào kênh chết** — nó không hồi sinh Socket. Muốn hồi sinh thì cần log có
+`requestId` + trạng thái subscribe, hiện chưa có.

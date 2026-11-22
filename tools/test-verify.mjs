@@ -2508,9 +2508,10 @@ check('[v1.93.21b] có bộ đếm ACK thật theo page (chỉ để ĐO, không
  * 4 844 chat 🛟 cứu, 4 844 chat ✅ qua ext, 397 chat ✅ qua API. Giao = ĐÚNG BẰNG NHAU ⇒
  * KHÔNG ca nào đi Ext ngoài đường "Socket không ACK → cứu Ext", và API (chỉ 422 lần thử)
  * là kênh DUY NHẤT trong lô đó có bằng chứng dương (397/422 OK + message_id thật). */
-check('[v1.93.22] page 0-ACK thì đổi làn sang API thay vì bắn Socket tiếp',
-  /zeroAck && _ackSt\.sent >= SOCK_ZERO_ACK_MIN/.test(SRC)
-  && /return \['api', 'ext'\]\.concat/.test(SRC), true);
+/* [v1.93.24] Luật 1.93.22 (đếm số LẦN BẮN ≥ 64) đã bị THAY bằng luật THỜI GIAN — giữ lại
+ * test này nhưng kiểm điều mà nó cần bảo vệ: có một cổng "page 0-ACK" chặn bắn Socket tiếp. */
+check('[v1.93.22→24] có cổng 0-ACK chặn bắn Socket tiếp (nay theo thời gian)',
+  /_ackSt\.dead/.test(SRC) && /zeroAckToApi\+\+/.test(SRC), true);
 check('[v1.93.22] đổi làn CHỈ khi API đã chứng minh sống (không đổi mù)',
   /sendDiag\.apiSuccess \|\| 0\) > 0/.test(SRC), true);
 check('[v1.93.22] ngưỡng 0-ACK có khai báo thật (không dùng biến chưa định nghĩa)',
@@ -2534,6 +2535,18 @@ check('[v1.93.23] đếm riêng ext-success-không-messageId',
   /buStats\.extSuccessNoId\+\+/.test(SRC) && /buStats\.extClaimNoId\+\+/.test(SRC), true);
 check('[v1.93.23] có mốc "vào wave" đo phần đồng bộ đầu lô',
   /sendOpenMark\.syncMs = Math\.max\(0, waveStartedAt/.test(SRC), true);
+
+/* ═══ [v1.93.24] GỐC "DỒN BÙ EXT": KÊNH ACK CỦA PAGE CHẾT MÀ VẪN BẮN SOCKET ═══
+ * 22/11: 4 884 lần bắn / 0 ACK → 4 844 ca 🛟 bù Ext. 18:56: 8 675 ca ⚠. Cùng hội chứng.
+ * Ngưỡng cũ (1.93.22) đếm SỐ LẦN BẮN nên vô dụng khi làn bị noAckStreak hạ về 16. */
+check('[v1.93.24] bỏ Socket khỏi thứ tự khi kênh ACK của page đã chết',
+  /if \(_ackSt\.dead\)/.test(SRC) && /deadChannelSkip\+\+/.test(SRC), true);
+check('[v1.93.24] ngưỡng "kênh chết" dùng THỜI GIAN, không chỉ số lần bắn',
+  /SOCK_CHANNEL_DEAD_MS = \d+/.test(SRC) && /elapsedMs/.test(SRC), true);
+check('[v1.93.24] kênh chết phải giữ ext làm đường lui (không bỏ rơi ca nào)',
+  /\? \['api', 'ext'\] : \['ext'\]/.test(SRC), true);
+check('[v1.93.24] có ghi nhận mốc bắn Socket đầu tiên theo page',
+  /pageSockFirstAt\[_pidS\] = Date\.now\(\)/.test(SRC), true);
 
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
