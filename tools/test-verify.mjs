@@ -2124,6 +2124,17 @@ const _preSrc = stripComments(SRC);
     /photo\.fbId\s*=/.test(fn) || /photo\.fbIds\s*=/.test(fn) || /photo\.items\s*=/.test(fn), false);
   check('[prebind] kết quả đi qua map riêng preBoundFbIds',
     /preBoundFbIds\.set\(/.test(fn), true);
+  /* ═══ BẪY THỨ BA ĐÃ TỰ BẮT: KHÔNG ĐƯỢC BỎ QUA PRE-BIND VÌ `photo.fbIds` ═══
+   * `photoArg` của đường CÂU NHANH mang sẵn `fbIds = apiFbIdsByPage[p]` — đó là fbId
+   * `is_reusable=TRUE` bind cho KÊNH API. `uploadOneTimePhoto` KHÔNG đọc `photo.fbIds`
+   * (chỉ `ctx.nonReusableFbId/FbIds`) ⇒ Socket/Ext vẫn xin bản `is_reusable=false` riêng.
+   * Log 12:34 chạy đúng đường câu nhanh và vẫn đo `bind fbId 1 088 ms/ca` — bằng chứng
+   * bản reusable ấy KHÔNG được dùng lại. Bản nháp đầu `return null` khi thấy `photo.fbIds`
+   * ⇒ tắt pre-bind cho TOÀN BỘ lô câu nhanh ⇒ bản vá vô hiệu đúng ca cần nhất. */
+  check('[prebind] KHÔNG guard theo photo.fbIds (đó là fbId reusable=true của kênh API)',
+    /photo\.fbIds\s*&&\s*Array\.isArray\(photo\.fbIds\)/.test(fn), false);
+  check('[prebind] guard chỉ dựa trên items[].fbId (non-reusable đường gửi thật dùng)',
+    /items\.every\(\(x\) => x && x\.fbId\)/.test(fn), true);
 }
 
 // (1b) `sendOne` nạp fbId đã pre-bind vào `ctx` SAU khối chọn tuyến, KHÔNG chạm `photo`

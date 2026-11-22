@@ -3162,6 +3162,21 @@ const goDirect = batchSkipApi || isApiBlockedForPage(pid) || alreadyTriedApi
 (`#10` ngoài 24h là nhóm lỗi lớn nhất của lô này). Vì vậy kết quả pre-bind **phải** đi qua map
 riêng, và `sendOne` chỉ nạp vào `ctx` **sau** khối chọn tuyến. Có 3 test khoá đúng chỗ này.
 
+### 48.5b ⚠️ BẪY THỨ BA — `photoArg` CÂU NHANH MANG `fbIds` LÀ BẢN `reusable=true` CỦA KÊNH API
+
+`sendOneAndLog` dựng `photoArg` cho đường câu nhanh với
+`fbIds: apiFbIdsByPage[p]` — bộ fbId **`is_reusable=true`** do `sendGroups` bind sẵn cho kênh
+API. `uploadOneTimePhoto` **không đọc** `photo.fbIds`; nó chỉ đọc `ctx.nonReusableFbId` /
+`ctx.nonReusableFbIds` ⇒ Socket/Ext luôn xin bản `is_reusable=false` riêng.
+
+Bằng chứng: log 12:34 chạy đúng đường câu nhanh (`⚡ Dùng câu nhanh "câu 109" (1 ảnh)`) và
+vẫn đo `📷 bind fbId 2 412 ca · TB 1 088 ms/ca` — tức bản reusable **không** được dùng lại.
+
+Bản nháp pre-bind có guard `if (photo.fbIds.length >= items.length) return null` với ý
+"đã bind rồi thì thôi". Sai: nó **tắt pre-bind cho toàn bộ lô câu nhanh** — đúng loại lô cần
+bản vá nhất. Guard nay chỉ dựa trên `photo.items[].fbId` (fbId non-reusable mà đường gửi
+thật sự dùng). Có 2 test khoá.
+
 ### 48.6 Tiêu chí nghiệm thu lần chạy sau (dòng log mới)
 
 ```

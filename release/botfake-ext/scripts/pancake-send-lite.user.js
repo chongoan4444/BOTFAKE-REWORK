@@ -5601,11 +5601,11 @@
    *  vòng wave: await cả wave thì tổng = Σ(bind + phát)). */
   function ensurePreBind(conv) {
     if (!conv || !conv.id || !conv.__photoArg) return Promise.resolve(null);
-    if (!conv.__preBindP) {
-      conv.__preBindP = Promise.resolve()
-        .then(() => bindPhotoForConv(conv, conv.__photoArg))
-        .catch(() => null);
-    }
+    if (conv.__preBindP) return conv.__preBindP; // đã khởi động ở khâu wave ⇒ dùng chung promise
+    try { waveDiag.preBindN++; } catch (e0) { /* ignore */ }
+    conv.__preBindP = Promise.resolve()
+      .then(() => bindPhotoForConv(conv, conv.__photoArg))
+      .catch(() => null);
     return conv.__preBindP;
   }
   async function bindPhotoForConv(conv, photoOverride) {
@@ -5614,9 +5614,16 @@
     if (photo.__bindFail || photo.__bindDone) return photo.__bindRes || null;
     const items = normalizePhotoItems(photo);
     if (!items.length) return null;
-    // Đã có fbId cho MỌI ảnh (câu nhanh API đã bind sẵn bằng reusable=true) ⇒ không bind lại:
-    // Socket/Ext vẫn tự xin bản `is_reusable=false` trong làn gửi như hành vi cũ.
-    if (photo.fbIds && Array.isArray(photo.fbIds) && photo.fbIds.length >= items.length && photo.fbIds.every(Boolean)) return null;
+    /* ═══ GUARD ĐÃ SỬA — BẢN ĐẦU TỰ TẮT PRE-BIND Ở ĐÚNG CA CẦN NHẤT ═══
+     * `photoArg` của đường CÂU NHANH mang sẵn `fbIds = apiFbIdsByPage[p]` — đó là fbId
+     * **`is_reusable=true`** bind cho KÊNH API (`sendGroups` bind theo từng page). Log 12:34
+     * chạy đúng đường này ("câu nhanh, 1 ảnh") và vẫn đo `bind fbId 1 088 ms/ca` ⇒ tức
+     * Socket/Ext KHÔNG dùng lại bản reusable ấy mà xin bản `is_reusable=false` riêng
+     * (`uploadOneTimePhoto` chỉ đọc `ctx.nonReusableFbId/FbIds`, không đọc `photo.fbIds`).
+     * Vì vậy guard cũ `photo.fbIds.length >= items.length ⇒ return null` **bỏ qua pre-bind
+     * cho toàn bộ lô câu nhanh** ⇒ bản vá vô hiệu đúng ở ca cần nó nhất.
+     * Nay pre-bind CHỈ dựa trên thứ đường gửi thật sự dùng: `photo.items[].fbId`
+     * (fbId non-reusable đã có sẵn trên từng item, nếu có). */
     if (items.every((x) => x && x.fbId)) return null;
     const pageId = conv.pageId || String(conv.id).split('_')[0];
     if (!pageId) return null;
