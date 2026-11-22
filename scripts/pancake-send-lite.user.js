@@ -4417,7 +4417,23 @@
             pageId: pageId,
             convId: key,
             threadId: threadId,
-            uiVersion: 6,
+            /* ═══ [v1.93.14] BỎ `uiVersion: 6` CỨNG — ĐỂ EXT TỰ DÒ ═══
+             * Nguồn `0.5.62_0/assets/background.js`:
+             *   class k_{ async handleFacebook(){ const e = this.uiVersion || await za.get(this.pageId);
+             *     switch(e){ case 1: case 2: case 5: → { link }                       // chỉ trả link
+             *                case 3: case 4: case 6: case 7: → getGlobalId().then(…{link, globalId}) } } }
+             * `za` = `self.PageFacebookUIVersion` (class Jc): `get(e)` đọc cache
+             * (`fb_ui_version`, TTL `wl = 6048e5` = 7 ngày), không có thì `new Xc({pageId}).init()`
+             * — tự `GET` 1 trong 7 URL của `makeUrl()` để nhận ra UI version của page.
+             *
+             * Script cũ gửi CỨNG `6` cho MỌI page ⇒ page thật là 1/2/5 (vẫn còn nhiều) bị ÉP vào
+             * nhánh 6 ⇒ đi `Ee.init()` (≈4 graphql + 2 fetch HTML) trong khi nhánh 1/2/5 CHỈ cần
+             * ghép chuỗi link, KHÔNG cần gid. Đó là một phần vì sao 5 000 ms (nay 14 000 ms)
+             * không đủ và vì sao `MAKE_MESSENGER_LINK` hay hết hạn.
+             *
+             * Bỏ trường này ⇒ `uiVersion` = undefined ⇒ ext TỰ DÒ đúng version của page.
+             * Lệnh này CHỈ ĐỌC (tạo link / dò gid), không gửi tin ⇒ không thể sinh tin trùng.
+             * `globalId: null` giữ nguyên ⇒ ext dò khi cần. */
             globalId: null,
             conversationUpdatedTime: isNaN(updMs) ? Date.now() : updMs,
             customerName: custName,

@@ -1977,3 +1977,56 @@ product-pin/crawl. Riêng nhóm `LISTEN_WS`/`LISTEN_INBOX`/`STOP_LISTEN_*`/`PLZ_
   dụng được cho ca đã đi qua Extension.
 - **`LOAD_FACEBOOK_MESSAGES` cần `[Da,Sa]`** — bộ doc_id KHÁC `[Jt,Zt,rt,st]`; nếu ext chưa nạp
   thì lệnh reject `Missing doc_id`, script trả `null` và giữ phán quyết cũ (không sai thêm).
+
+---
+
+## 31. BỎ `uiVersion: 6` CỨNG — ext TỰ DÒ (sửa §27.4)
+
+### 31.1 Bằng chứng
+
+```js
+class k_{ async handleFacebook(){ const e = this.uiVersion || await za.get(this.pageId);
+  switch(e){ case 1: case 2: case 5: { const t = e===5 ? "web.facebook.com"
+                                                 : this.isBusiness ? "business.facebook.com" : "facebook.com";
+              return { link: … } }                              // ← CHỈ TRẢ LINK, không cần gid
+            case 3: case 4: case 6: case 7: … getGlobalId().then(t => ({link, globalId})) } } }
+```
+`za` = `self.PageFacebookUIVersion` (class `Jc`):
+```js
+async get(e){ const a = await this.retrieveFromStorage(e); return a ? Promise.resolve(a)
+                : new Xc({pageId:e}).init().then(async s => await this.set(e, s)) }
+const mn = "fb_ui_version", Yc = 1;          // cache TTL: wl = 6048e5 = 7 ngày
+makeUrl(e){ switch(e){ case 1: `https://www.facebook.com/${pageId}/inbox`
+                       case 2: `https://business.facebook.com/…`
+                       … case 7: `https://business.facebook.com/latest?asset_id=${pageId}` } }
+```
+
+### 31.2 Vì sao đó là lỗi
+
+Script cũ gửi **cứng `uiVersion: 6`** cho **mọi page**.
+
+| Page thật là | Gửi cứng 6 ⇒ ext chạy | Đúng ra |
+|---|---|---|
+| 1 / 2 / 5 | nhánh **6** ⇒ `Ee.init()` = ~4 graphql + 2 fetch HTML | **chỉ ghép chuỗi link** (0 request) |
+| 3 / 4 / 6 / 7 | nhánh 6 ⇒ `Ee.init()` | `Ee.init()` — **đúng** |
+
+⇒ Page là 1/2/5 bị ép vào nhánh **nặng nhất** dù không cần gid. Kết hợp với hàng đợi tuần tự
+(§25.3) và `await Z()` (§26.4, cứ 11 lệnh ext đi `GET https://www.facebook.com` cho mọi host),
+đây là một phần của `Ext p90 0ms → timeout 7000ms` và `MAKE_MESSENGER_LINK` hay hết hạn.
+
+### 31.3 ĐÃ SỬA
+
+Bỏ hẳn trường `uiVersion` khỏi payload `MAKE_MESSENGER_LINK`:
+
+```js
+adapter.send({ type: 'MAKE_MESSENGER_LINK', pageId, convId, threadId,
+               /* KHÔNG uiVersion — ext tự dò `za.get(pageId)` */
+               globalId: null, conversationUpdatedTime, customerName, platform: 'facebook' }, { timeout: 14000 })
+```
+- `uiVersion` = `undefined` ⇒ `this.uiVersion || await za.get(this.pageId)` ⇒ ext **tự dò** đúng version.
+- `za.get()` có cache 7 ngày ⇒ chi phí dò chỉ 1 lần/page, không phải mỗi lệnh.
+- `globalId: null` giữ nguyên ⇒ ext dò gid khi nhánh cần.
+- Lệnh này **CHỈ ĐỌC** (tạo link / dò gid) ⇒ không thể sinh tin trùng.
+
+**Test khoá:** `[ext] MAKE_MESSENGER_LINK KHÔNG gửi cứng uiVersion` — để không ai thêm lại.
+`npm test`: **384 kịch bản** (373 → 383 với 10 test `fbMessagesVerdict` → 384 với test này).

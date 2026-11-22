@@ -1862,6 +1862,15 @@ check('reset đầu lượt phải xoá CẢ HAI chỉ mục của danh sách g�
     fbMessagesVerdict([mk('Dạ vâng ạ', '123', 2000)], '123', 'Dạ', null, at), 'unknown');
 }
 
+/* ═══ (J) [v1.93.14] KHÔNG ĐƯỢC GỬI CỨNG `uiVersion` CHO `MAKE_MESSENGER_LINK` ═══
+ * `class k_.handleFacebook(){ const e = this.uiVersion || await za.get(this.pageId); switch(e){ …
+ *   case 1: case 2: case 5: → CHỈ trả link  ·  case 3: case 4: case 6: case 7: → getGlobalId() } }
+ * Gửi cứng 6 ⇒ page thật là 1/2/5 bị ép vào nhánh nặng nhất (`Ee.init()`: ~4 graphql + 2 fetch HTML)
+ * dù nhánh 1/2/5 chỉ cần ghép chuỗi. Bỏ trống ⇒ ext TỰ DÒ đúng version qua `za.get()`.
+ * Test này giữ cho trường đó KHÔNG bị thêm lại. */
+check('[ext] MAKE_MESSENGER_LINK KHÔNG gửi cứng uiVersion',
+  /type: 'MAKE_MESSENGER_LINK'[\s\S]{0,600}?uiVersion:/.test(stripComments(SRC)), false);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
