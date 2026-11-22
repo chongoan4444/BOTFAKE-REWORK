@@ -58,7 +58,8 @@ BOTFAKE-REWORK/release/botfake-ext/
 ### 1.3 ⚠️ BẮT BUỘC: gỡ bản cũ trước
 
 `manifest.json` **không có trường `key`** (đã kiểm) ⇒ bản load unpacked ra **extension ID
-KHÁC** bản `.crx`. Nghĩa là Chrome coi là **hai extension riêng**, không nâng cấp.
+KHÁC** bản `.crx` cũ. Nghĩa là Chrome coi là **hai extension riêng**, không nâng cấp.
+`update_url` đã bị xoá ở v1.93.18 nên bản load unpacked sẽ KHÔNG bị kênh crx ghi đè nữa.
 
 Hậu quả nếu để cả hai: hai bản cùng chèn vào trang Pancake.
 
@@ -95,23 +96,33 @@ tải lại: **Ctrl+Shift+R**.
 
 ---
 
-## 3. ⚠️ KHÔNG có bản `.crx` mới — đây là bẫy
+## 3. ✅ ĐÃ XOÁ ĐƯỜNG `.crx` (v1.93.18) — cài bằng Load unpacked
 
-Trong repo có `botfake.crx`, **nhưng nó là bản 1.91.43 CŨ** (đã giải nén kiểm bên trong).
+**Trước v1.93.18** trong repo có `botfake.crx` và nó là **bẫy thật**: file bên trong là bản
+**1.91.43** nhưng `update.xml` lại khai `version` MỚI (cuối cùng là `1.93.18`). Chrome cài qua
+`update_url` đọc `update.xml`, thấy "có bản mới", tải `.crx` về — và chạy **code 1.91.43** cũ.
+Bản mới cài tay thì bị ghi đè ở lần cập nhật sau. Không có khoá ký
+(`installer/extension-signing-key.pem`, không có trong repo) thì **không thể** ký `.crx` mới,
+nên đường này không bao giờ đúng được.
 
-`manifest.json` có `update_url` trỏ về
-`https://chongoan4444.github.io/SALESCRIPT/update.xml`, và file đó khai `version='1.92.55'`.
-Nghĩa là **Chrome đang cài từ `.crx` sẽ tự tải bản cũ từ trang đó**, không phải bản ở đây.
+**Nay (người dùng chốt: "kệ cái file crx, xoá luôn đi"):** đã xoá
 
-Chính `npm run build` cũng in cảnh báo này:
+- `botfake.crx` và `update.xml`
+- `update_url` trong `manifest.json`
+- `npm run build:crx` + toàn bộ code ký CRX3 trong `tools/build.mjs`
+- `*.crx` và `update.xml` đã vào `.gitignore` để không ai commit lại
 
-```
-! botfake.crx chứa bản userscript CŨ (khác scripts/pancake-send-lite.user.js).
-  Chrome đang cài từ .crx sẽ vẫn chạy code cũ → chạy "node tools/build.mjs --crx" với khoá ký.
-```
+**Cài đặt từ nay:**
 
-Muốn có `.crx` mới thì cần **khoá ký riêng** (`installer/extension-signing-key.pem`) —
-**không có trong repo** (đã `.gitignore`). Việc này phải làm trên máy bạn.
+| muốn dùng | làm thế này |
+|---|---|
+| Bản gốc | `chrome://extensions` → bật Developer mode → **Load unpacked** → chọn `release/botfake-ext/` |
+| Bản ổn định | **Load unpacked** → chọn `release/botfake-ext-stable/` |
+| Không dùng extension | cài userscript `scripts/pancake-send-lite.user.js` (hoặc `...-stable.user.js`) |
+
+Máy đang cài từ `.crx` cũ: **gỡ hẳn** extension đó rồi làm theo bảng trên. Đừng cài chồng —
+Chrome coi bản `.crx` và bản Load unpacked là hai extension khác nhau (khác khoá ký + khác
+`update_url`), nên chúng **cùng chạy** và cùng gửi tin.
 
 ---
 
@@ -165,7 +176,7 @@ có bị cắt giữa đường không.
 | bạn đang có | làm gì |
 |---|---|
 | Extension load unpacked | Thay folder bằng `release/botfake-ext/` mới, bấm **Reload** ở `chrome://extensions` |
-| Extension cài từ `.crx` | **Gỡ hẳn**, rồi làm §1 (vì `.crx` trong repo là 1.91.43) |
+| Extension cài từ `.crx` cũ | **Gỡ hẳn**, rồi làm §1 (Load unpacked — đường .crx đã xoá) |
 | Userscript Tampermonkey | Dán đè, Ctrl+S, tải lại trang |
 | Vừa extension vừa userscript | **Gỡ một bên** — lưới chặn chỉ cứu một phần, số đo sẽ lẫn |
 

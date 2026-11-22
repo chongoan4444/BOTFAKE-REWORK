@@ -1,6 +1,11 @@
 # Build output
 dist/
 
+# [v1.93.18] KHÔNG phát hành qua .crx nữa (xem docs/CAI-DAT.md §3). Chặn tái sinh để không
+# ai vô tình commit một .crx cũ trỏ tới update.xml đã xoá.
+*.crx
+update.xml
+
 # Khoá ký extension — TUYỆT ĐỐI không commit (repo công khai)
 installer/extension-signing-key.pem
 *.pem

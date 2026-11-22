@@ -7,7 +7,6 @@
   "scripts": {
     "check": "node tools/build.mjs --check",
     "build": "node tools/build.mjs",
-    "build:crx": "node tools/build.mjs --crx",
     "test": "node tools/test-verify.mjs",
     "stable": "node tools/make-stable.mjs",
     "check:stable": "node tools/make-stable.mjs --check",

@@ -12,7 +12,6 @@ website và sửa/tạo JavaScript hoạt động phù hợp với website thự
 manifest.json          khai báo MV3
 version.json           NGUỒN VERSION DUY NHẤT { base, build } — đừng sửa version ở nơi khác
 update.xml             manifest tự cập nhật
-botfake.crx            bản đóng gói đang phát hành
 extension/             background.js, bridge.js, overlay.js, popup.html, popup.js, icons/
 scripts/               pancake-send-lite.user.js  (toàn bộ logic gửi trong tab Pancake)
 tools/build.mjs        đồng bộ version + kiểm tra đường dẫn + đóng gói
@@ -22,7 +21,8 @@ tools/build.mjs        đồng bộ version + kiểm tra đường dẫn + đón
 - `chrome.scripting.executeScript({ files: [...] })` trong `extension/background.js`
   và `extension/popup.js` cũng dùng đường dẫn tính từ gốc repo — di chuyển file là phải sửa cả hai chỗ.
 - Sau khi sửa code, chạy `npm run check` (hoặc `npm run build`) — nó phát hiện version lệch,
-  file manifest trỏ tới không tồn tại, và `.crx` đang phát hành bị cũ.
+  file manifest trỏ tới không tồn tại.
+  (`.crx` + `update.xml` đã xoá ở v1.93.18 — không còn đường phát hành qua Chrome update.)
 
 ## Quy tắc quan trọng
 

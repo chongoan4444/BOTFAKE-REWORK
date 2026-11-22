@@ -9,7 +9,7 @@
  * đúng 2 bệnh đang phải sửa: chốt ✅ oan (mất tin) và bù oan (LẶP CÂU).
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -2350,6 +2350,31 @@ const _preSrc = stripComments(SRC);
   check('[lite] bản gốc KHÔNG bị ảnh hưởng: vẫn in TỔNG HỢP cũ', /logLine\('📊 TỔNG HỢP CHỐT LƯỢT GỬI/.test(stripComments(SRC)), true);
   check('[lite] bản gốc KHÔNG có nhánh IS_STABLE_BUILD cho dòng tổng kết',
     /if \(IS_STABLE_BUILD\) logLine\('📊 XONG/.test(stripComments(SRC)), false);
+}
+
+/* ═══ (AF) [v1.93.18] ĐƯỜNG PHÁT HÀNH `.crx` ĐÃ BỊ XOÁ — KHÔNG ĐƯỢC QUAY LẠI ═══
+ * Người dùng chốt: "kệ cái file crx, xoá luôn đi". Lý do kỹ thuật đứng sau: `update.xml` khai
+ * version MỚI còn `botfake.crx` bên trong là code 1.91.43 ⇒ Chrome cài qua `update_url` chạy
+ * code cũ mà TƯỞNG là bản mới. Không có khoá ký thì không bao giờ ký được .crx mới, nên đường
+ * đó chỉ có thể sai. Test khoá cả 4 mảnh để một lần "dọn dẹp" sau không dựng lại nửa vời. */
+{
+  const ROOTD = path.join(ROOT);
+  check('[crx] KHÔNG còn botfake.crx trong repo', existsSync(path.join(ROOTD, 'botfake.crx')), false);
+  check('[crx] KHÔNG còn update.xml', existsSync(path.join(ROOTD, 'update.xml')), false);
+  // manifest (gốc + 2 folder release) không được có update_url
+  for (const mf of ['manifest.json', 'release/botfake-ext/manifest.json', 'release/botfake-ext-stable/manifest.json']) {
+    const fp = path.join(ROOTD, mf);
+    if (!existsSync(fp)) continue;
+    const m = JSON.parse(readFileSync(fp, 'utf8'));
+    check(`[crx] ${mf} không có update_url`, !!m.update_url, false);
+  }
+  check('[crx] package.json không còn script build:crx', !!(JSON.parse(readFileSync(path.join(ROOTD, 'package.json'), 'utf8')).scripts || {})['build:crx'], false);
+  const BUILD = readFileSync(path.join(ROOTD, 'tools/build.mjs'), 'utf8');
+  check('[crx] build.mjs không còn WANT_CRX', /WANT_CRX/.test(BUILD), false);
+  check('[crx] build.mjs không còn buildCrx', /function buildCrx/.test(BUILD), false);
+  check('[crx] build.mjs không ghi file .crx', /writeFileSync\(abs\(CRX_OUT\)/.test(BUILD), false);
+  check('[crx] .gitignore chặn tái sinh *.crx',
+    /\*\.crx/.test(readFileSync(path.join(ROOTD, '.gitignore'), 'utf8')), true);
 }
 
 if (fails.length) {
