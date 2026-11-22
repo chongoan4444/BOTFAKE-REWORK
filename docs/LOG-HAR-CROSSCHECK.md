@@ -3592,3 +3592,96 @@ dùng thì cần một trong hai thứ **chưa có**:
 
 Khi có, điều kiện đổi là: **có `messageId` ⇒ ✅ ngay** (bỏ được 57 ca ⚠ + đuôi kiểm chứng nền).
 Chưa có thì giữ nguyên — thà chậm hơn là chốt ✅ oan.
+
+---
+
+## §54 — ĐỐI SOÁT `0.5.62_0` (SOURCE THẬT, CÓ TRÊN `main`) (v1.93.23 / W200.133)
+
+### Sai lầm của lượt trước — ghi để không lặp
+
+Tôi đã tìm `0.5.62_0` **trong nhánh làm việc** rồi kết luận "không có trong repo". **SAI.**
+Thư mục này nằm trên **`main`**, không nằm trên nhánh `arena/…`:
+
+```
+0.5.62_0/assets/background.js-EHsGnyIc.js      412 999 bytes
+0.5.62_0/assets/pancext-DIYjn9YU.js
+0.5.62_0/assets/contentscript.js-9v5GTH37.js
+0.5.62_0/manifest.json                          (Pancake v2, MV3, key + update_url)
+0.5.62_0/_metadata/verified_contents.json
+```
+
+Đọc được bằng `git show origin/main:0.5.62_0/assets/background.js-EHsGnyIc.js`.
+
+### Hợp đồng THẬT (trích nguyên văn)
+
+```js
+isResponseSuccess(e,t){switch(t){case"facebook":return e&&e.payload&&
+  (e.payload.actions&&e.payload.actions[0].message_id||e.payload.error_payload);
+  case"instagram":return e&&e.payload&&e.payload.item_token}}
+
+parseSuccessResponse({response:e,platform:t,globalUserId:a,igThreadId:r}){
+  switch(t){case"facebook":return e.payload.error_payload?{}
+    :{messageId:e.payload.actions[0].message_id,globalUserId:a,
+      timestamp:e.payload.actions[0].timestamp};
+  case"instagram":return{globalUserId:r}}}
+
+sendInboxSuccess(e,t,a,r){return s=>{s&&s.success?e.port.postMessage({
+  type:"REPLY_INBOX_PHOTO_SUCCESS",taskId:t,pageId:a,convId:r,
+  messageId:s.messageId,globalUserId:s.globalUserId,timestamp:s.timestamp,
+  retryReason:s.retryReason,messageCreatedRange:s.messageCreatedRange,
+  unreliableTimestamp:s.unreliableTimestamp}):this.sendInboxFail(e,t,a,r)()}}
+```
+
+Chỗ gọi: `b({success:!0,retryReason:…, ...this.parseSuccessResponse({…}), messageCreatedRange:[M,z]})`
+
+### Hai ca `success:true` — phân biệt ĐÚNG bằng `messageId`
+
+| FB trả | `isResponseSuccess` | `parseSuccessResponse` | postMessage | nghĩa |
+|---|---|---|---|---|
+| `actions[0].message_id` | truthy | `{messageId,…}` | **CÓ** `messageId` | **tin ĐÃ tạo trên FB** |
+| `error_payload` | truthy (chính nó) | `{}` | **KHÔNG** `messageId` | FB từ chối ngầm, không có tin |
+| không có cả hai | falsy | không chạy | `REPLY_INBOX_PHOTO_FAILURE` | lỗi |
+
+⇒ **`messageId` LÀ bằng chứng dương.** Suy luận của v1.93.14 **đúng** khi chỉ nói về ca
+`error_payload`; sai ở chỗ **gộp cả ca có `messageId`** vào diện ⚠.
+
+### Đính chính v1.93.22 — tôi đã sửa SAI ĐỐI TƯỢNG
+
+Log 14:36 ghi:
+
+```
+⚠ … Ext: Extension báo success — CHƯA xác nhận tin đã tới (đang đọc lại lịch sử…)
+```
+
+Chuỗi đó ứng với `_extNoId = **false**` ⇒ **`messageId` CÓ** ⇒ nhánh `extSuccessNoId`
+**không hề chạy**. Vậy v1.93.22 (bỏ `noteFbRejected`, đổi ❌→⚠ ở nhánh `error_payload`)
+là sửa **nhầm nhánh**, và tệ hơn: nó **làm yếu** một kết luận đúng.
+
+**Đã hoàn nguyên** nhánh `error_payload` về đúng v1.93.14 (giữ `noteFbRejected` + ❌), kèm
+chú thích ghi rõ căn cứ source.
+
+### Sửa đúng (v1.93.23)
+
+Ca **có** `messageId` ⇒ `sendViaExtension` trả thẳng `ok:true, sent:true, sendBy:'extension'`
++ `extMessageId`, **không** đẩy vào sổ ⚠ chờ kiểm chứng.
+
+Lý do không đọc lại lịch sử cho ca này: Pancake thường **chưa đồng bộ** tin vừa gửi ⇒ cổng sẽ
+trả "không thấy" ⇒ **hạ một ca đã chắc chắn gửi xuống ⚠**. Đó đúng là loại ✅→⚠ oan cần tránh.
+Không đổi số lệnh gửi: ca này không bị bắn lại lần nào.
+
+### Kiểm
+
+`npm test` **550 ca**. Mutation **5/5 bị bắt**:
+
+| mã | đột biến | kết quả |
+|---|---|---|
+| M1 | bỏ chốt ✅ khi có `messageId` | bắt |
+| M2 | bỏ `noteFbRejected` ở `error_payload` | bắt |
+| M3 | `❌` → `⚠` ở `error_payload` | bắt |
+| M4 | chốt ✅ **cả** ca không `messageId` (đúng lỗi 554 ca ✅ giả) | bắt |
+| M5 | chốt ✅ rồi **vẫn** đẩy vào sổ ⚠ | **LỌT lần đầu** — test cũ chỉ tìm tên hàm, đã siết theo hành vi |
+
+### LIMIT — các trường mới thấy trong source, CHƯA dùng
+
+`REPLY_INBOX_PHOTO_SUCCESS` còn mang `messageCreatedRange`, `unreliableTimestamp`,
+`retryReason`. Chưa dùng vì chưa có log nào cho thấy cần; ghi lại để lần sau khỏi phải mò.

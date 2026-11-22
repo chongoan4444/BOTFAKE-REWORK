@@ -646,28 +646,26 @@ check('đóng ngân sách ghi lại % để in vào log',
     /function fbRejectKindsText\(\)/.test(SRC_NC)
     && /không có ca FB từ chối nào khác/.test(SRC_NC), true);
 
-  /* ═══ [v1.93.22] ĐÍNH CHÍNH v1.93.14 — BẰNG CHỨNG TỪ LOG BÁC SUY LUẬN ═══
-   * Log 14:36: 51+6 ca "Ext success nhưng KHÔNG messageId" ĐÃ ĐI TỚI THẬT (chốt lại ✅,
-   * ⚠ 57 → 0). v1.93.14 lại ghi sổ "FB đã từ chối" cho nhóm này, mà sổ đó dùng để CHẶN bù
-   * và cắt gửi tay ⇒ ca đã tới bị xếp ❌ vĩnh viễn. */
-  const iNO = SRC_NC.indexOf('extClaimedSuccess && r.extSuccessNoId');
-  const segNO = iNO < 0 ? '' : SRC_NC.slice(iNO, iNO + 3000);
-  check('[đính chính] nhánh extSuccessNoId KHÔNG còn ghi "FB đã từ chối" (noteFbRejected)',
-    segNO.length > 0 && !/noteFbRejected\(conv\.id, 'Ext báo success nhưng không có messageId/.test(segNO), true);
-  check('[đính chính] nhánh extSuccessNoId dùng sổ RIÊNG "chưa đủ căn cứ" (không chặn gì)',
-    /noteFbRejectedAmbiguous\(/.test(segNO), true);
-  check('[đính chính] nhánh extSuccessNoId KHÔNG chốt ❌ nữa (phải giữ ⚠ để nền kiểm chứng lật)',
-    !/logFailGrouped\(name, 'bù qua Extension: success nhưng KHÔNG có messageId[^']*', '❌'/.test(segNO), true);
-  /* Siết sau mutation M6: ca NGUY HIỂM NHẤT là chốt ✅ khi chưa có bằng chứng (đúng lỗi 554 ca
-   * ✅ giả của v1.93.2). Test trước chỉ bắt ❌ nên đổi ⚠→✅ vẫn xanh ⇒ phải khoá cả hai. */
-  check('[đính chính] nhánh extSuccessNoId chỉ được dùng đúng dấu ⚠ (không ❌, không ✅)',
-    /bù qua Extension: success nhưng KHÔNG có messageId[^']*', '⚠', conv\.id\);/.test(segNO)
-    && !/bù qua Extension: success nhưng KHÔNG có messageId[^']*', '[❌✅]'/.test(segNO), true);
-  check('[đính chính] sổ chưa-đủ-căn-cứ KHÔNG được dùng để chặn bù',
-    !/isFbRejected\([^)]*\)[\s\S]{0,80}fbUnprovenKinds/.test(SRC_NC)
-    && /const fbUnprovenKinds = Object\.create\(null\)/.test(SRC_NC), true);
-  check('[đính chính] TỔNG HỢP in rõ dòng ❔ CHƯA ĐỦ CĂN CỨ',
-    /\+ fbUnprovenText\(\)/.test(SRC_NC) && /CHƯA ĐỦ CĂN CỨ/.test(SRC_NC), true);
+  /* ═══ [v1.93.23] ĐỐI SOÁT SOURCE THẬT `0.5.62_0` (có trên main) ═══
+   * Trước đây tôi tìm source trong NHÁNH LÀM VIỆC nên kết luận sai là "không có trong repo".
+   * Source thật xác nhận 2 ca `success` phân biệt bằng `messageId`:
+   *   error_payload ⇒ parseSuccessResponse trả {} ⇒ KHÔNG messageId
+   *   actions[0].message_id ⇒ {messageId} ⇒ CÓ messageId
+   * ⇒ messageId = bằng chứng DƯƠNG; error_payload = FB từ chối ngầm. */
+  check('[source] có messageId ⇒ chốt ✅ ngay (bằng chứng dương từ FB)',
+    /if \(_extMsgId && !ownLock\) \{[\s\S]{0,320}?ok: true, sent: true, fired: true, sendBy: 'extension'/.test(SRC_NC), true);
+  check('[source] ca error_payload (KHÔNG messageId) vẫn ghi sổ "FB đã từ chối"',
+    /noteFbRejected\(conv\.id, 'Ext báo success nhưng không có messageId = error_payload/.test(SRC_NC), true);
+  check('[source] ca error_payload vẫn chốt ❌ (không có tin được tạo)',
+    /KHÔNG có messageId ⇒ FB trả error_payload, KHÔNG có tin — không gửi lại', '❌'/.test(SRC_NC), true);
+  check('[source] đã gỡ sổ "chưa đủ căn cứ" của 1.93.22 (sửa sai đối tượng)',
+    !/fbUnprovenKinds/.test(SRC_NC), true);
+  /* [v1.93.23] Test cũ của tôi khẳng định "vẫn đăng ký đọc lại" — SAI: code return sớm nên
+   * không đăng ký. Mutation M5 (thêm `if(false)` vào lời gọi) LỌT vì test chỉ tìm tên hàm.
+   * Nay khoá đúng HÀNH VI THẬT: ca có messageId KHÔNG vào sổ ⚠ chờ kiểm chứng. */
+  check('[source] ca có messageId KHÔNG bị đẩy vào sổ ⚠ (không đọc lại — tránh ✅→⚠ oan)',
+    /if \(_extMsgId && !ownLock\) \{[\s\S]{0,700}?return \{\s*ok: true, sent: true, fired: true, sendBy: 'extension'/.test(SRC_NC)
+    && /KHÔNG đăng ký đọc lại lịch sử cho ca ①/.test(SRC), true); // chú thích ⇒ kiểm trên SRC gốc
 
   // --- thử lại được (không thể trùng) ---
   check('1545012 ⇒ thử lại được', F.isTransientServerError('Đã xảy ra lỗi tạm thời, vui lòng thử lại.'), true);
