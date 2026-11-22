@@ -2698,7 +2698,21 @@ sendInbox(e){ const {webOrigin, pageId:a, threadId:r, threadKey:s, globalUserId:
 
 **Hai điều rút ra:**
 1. Thiếu `globalUserId` ⇒ ext **tự dò lại** (chạy trọn `Ee.init()`) rồi gửi lại — **không từ chối**.
-2. `buildSendParams` dựng form từ **`threadKey`/`threadId`**; `globalUserId` chỉ là trường phụ.
+2. **ĐÍNH CHÍNH quan trọng (bản đầu của §41.1 ghi SAI):** `buildSendParams` **KHÔNG** dùng
+   `threadKey`/`threadId` để gửi. Nó chỉ dựng body từ `globalUserId`:
+   ```js
+   async buildSendParams(e){ const {pageId:t, globalUserId:a, files:r, text:s, …} = e; …
+     case"facebook":
+       f["specific_to_list[0]"] = "fbid:" + a;
+       f["specific_to_list[1]"] = "fbid:" + t;
+       f.other_user_fbid = a; … }
+   ```
+   `grep` trong toàn bộ `buildSendParams`: `threadKey` = **0** lần, `threadId` = **0** lần,
+   `globalUserId` = **1** lần. `threadKey` trong `sendInbox` **chỉ** được đưa vào
+   `getGlobalUserId({…})` để **dò** gid — không đi vào body.
+
+   ⇒ Nếu ext không dò ra `globalUserId` thì `other_user_fbid` = `"undefined"` ⇒ **tin không đi
+   được** ở đường này. Vì vậy **KHÔNG** được nói "gửi thread-only là hợp lệ".
 
 ### 41.2 Script đang chốt ❌ nhóm lớn nhất, trước khi gửi
 
@@ -2722,6 +2736,24 @@ Cả hai đều `return { ok:false, sent:false }` **trước khi gửi bất k�
   không dò được — đó mới là ca **chắc chắn** hỏng, §36/§39).
 
 **An toàn:** cả hai chỗ đều nằm **trước** mọi lệnh gửi của chat đó, nên nới ra **không thể**
-sinh tin trùng; chỉ chuyển một ca "chắc chắn thất bại" thành "có thử qua đúng đường app dùng".
+sinh tin trùng; nó chuyển một ca bị chặn sớm thành "thử qua đúng đường app dùng".
+
+### 41.4 GIỚI HẠN phải nói rõ: nới cổng KHÔNG cứu được nếu ext cũng không dò ra gid
+
+Vì `buildSendParams` chỉ dùng `globalUserId` (đính chính ở §41.1), chuỗi thực tế là:
+`thiếu gid → ext chạy `Ee.init()` (dò lại 4 nguồn) → dò ra thì gửi được; không dò ra thì
+`other_user_fbid = undefined` ⇒ tin KHÔNG đi`. Tức cái được lợi không phải "gửi thread-only"
+mà là **một lượt dò nữa bằng cookie/môi trường của extension**, thứ mà script không làm được
+từ trang.
+
+**Bằng chứng HAR (đo trên 12 file):** đường **API** `POST /v1/pages/{p}/conversations/{cid}/messages`
+gửi **176/211** lần `success:true` mà body **không có `global_id`** ⇒ API không cần gid (đã biết,
+§34). Nhưng đường **Extension** thì cần — nên §41.3 chỉ có giá trị ở chỗ "cho ext một lượt dò
+nữa", không phải "bỏ yêu cầu gid".
+
+**Việc còn lại (chưa làm, cần quyết):** với nhóm `Ext không dò ra gid`, đường **duy nhất** còn
+hiệu lực là **API** — và `sendOne` nay đã rơi xuống nhánh cứu hộ có sẵn nên vẫn thử API sau Ext.
+Nếu muốn đi thẳng API cho nhóm này (bỏ 1 lượt chờ Ext vô ích), đó là thay đổi **thứ tự kênh**,
+cần đo riêng trước khi làm.
 
 **Test khoá (3 kịch bản `(U)`).** `npm test`: **416**.
