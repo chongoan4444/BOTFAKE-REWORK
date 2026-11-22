@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.15-w200.125
+// @version      1.93.16-w200.126
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.15-W200.125'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.16-W200.126'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5556,6 +5556,78 @@
       .catch((e) => ({ ok: false, error: String(e && e.message || e) }));
   }
 
+  /* ═══ [v1.93.16] BIND fbId TRƯỚC KHI CHIẾM SLOT — TÁCH KHỎI ĐƯỜNG GỬI ═══
+   * Xem chú thích dài ở `runMainItem`. Hàm này CHỈ LÀM MỘT VIỆC: xin fbId
+   * (`is_reusable=false`, đúng `class N` của `_app` @882612 với `reusable:!1`) và cất vào
+   * `preBoundFbIds` theo ĐÚNG `conv.id` — để `uploadOneTimePhoto()` trong làn gửi trả về 0 ms
+   * thay vì 1 088 ms.
+   *
+   * ⚠️ ĐÃ TỰ BẮT ĐƯỢC MỘT LỖI TRONG BẢN NHÁP ĐẦU — ĐỪNG "TỐI ƯU" LẠI THEO HƯỚNG ĐÓ:
+   * bản nháp ghi thẳng `photo.fbId/fbIds/items[].fbId`. Nhìn thì tiện, nhưng `sendOne` dùng
+   * `const noApiPhoto = !!(photo && !photo.fbId)` để quyết định TUYẾN KÊNH:
+   * `goDirect = … || noApiPhoto || …`. Đặt `fbId` vào `photo` làm `noApiPhoto` chuyển `false`
+   * ⇒ chat ngoài 24h (đang `dynamicDirect` sang Ext/Socket) bị đẩy sang API trước — đổi hành vi
+   * định tuyến đã đo đạc (và đúng là lý do `photoArg` cố tình mang `fbId` của đường API
+   * `reusable=true`). Vì vậy kết quả pre-bind đi qua MAP RIÊNG, chỉ `sendOne` đọc.
+   *
+   * BA BẤT BIẾN (không được nới, mỗi cái đều là một đường sinh tin sai):
+   *   1) KHÔNG BAO GIỜ dùng fbId của chat A cho chat B: map khoá bằng `conv.id`.
+   *      `recycleUnusedFbId()` vẫn xoá `ctx.nonReusableFbId` như cũ.
+   *   2) KHÔNG ĐỔI semantics `is_reusable`: pre-bind dùng `reusable:false` y như đường gửi.
+   *      (Đường API tự bind `reusable:true` riêng qua `fbIdByPage/apiFbIdsByPage` — không dính.)
+   *   3) LỖI KHÔNG ĐƯỢC THROW, KHÔNG ĐƯỢC CHẶN: bind hỏng thì đánh dấu `__bindFail` và để
+   *      đường gửi cũ tự xử lý. Pre-bind là TĂNG TỐC, không phải một cổng mới.
+   * Vì sao bind lại được ở đây (không phải "của chat khác"): fbId `is_reusable=false` là
+   * `{conv_id, content_id}` — cùng content_id nhưng KHÁC conv_id ⇒ fbId khác nhau. App cũng
+   * bind ngay trước `sendMqtt` cho từng ca; ta chỉ chạy đúng lệnh đó SỚM HƠN, song song. */
+  const preBoundFbIds = new Map(); // convId → { fbId, fbIds, at } (is_reusable=false, đã bind TRƯỚC slot)
+  const PREBOUND_TTL_MS = 180000;
+  /** Lấy fbId đã pre-bind cho ĐÚNG chat này rồi XOÁ (dùng một lần).
+   *  Xoá là CỐ Ý: fbId `is_reusable=false` đã bị bắn một lần thì FB có thể đốt; lần bù/retry
+   *  phải xin bản mới (`forceFresh` vẫn chạy như cũ) ⇒ không bao giờ gửi lại fbId đã dùng. */
+  function takePreBoundFbId(convId) {
+    const k = String(convId || '');
+    if (!k) return null;
+    const v = preBoundFbIds.get(k);
+    if (!v) return null;
+    preBoundFbIds.delete(k);
+    if (!v.fbId) return null;
+    if (Date.now() - (v.at || 0) > PREBOUND_TTL_MS) return null; // quá cũ ⇒ bỏ, để đường gửi tự bind
+    return v;
+  }
+  async function bindPhotoForConv(conv, photoOverride) {
+    const photo = photoOverride || (conv && conv.__photoArg);
+    if (!conv || !conv.id || !photo) return null;
+    if (photo.__bindFail || photo.__bindDone) return photo.__bindRes || null;
+    const items = normalizePhotoItems(photo);
+    if (!items.length) return null;
+    // Đã có fbId cho MỌI ảnh (câu nhanh API đã bind sẵn bằng reusable=true) ⇒ không bind lại:
+    // Socket/Ext vẫn tự xin bản `is_reusable=false` trong làn gửi như hành vi cũ.
+    if (photo.fbIds && Array.isArray(photo.fbIds) && photo.fbIds.length >= items.length && photo.fbIds.every(Boolean)) return null;
+    if (items.every((x) => x && x.fbId)) return null;
+    const pageId = conv.pageId || String(conv.id).split('_')[0];
+    if (!pageId) return null;
+    const ctx = conv.__preCtx || (conv.__preCtx = {});
+    try {
+      const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
+      if (up && up.ok && up.fbId) {
+        const ids = (up.fbIds && up.fbIds.length) ? up.fbIds.slice() : [up.fbId];
+        /* KHÔNG GHI vào `photo` (xem chú thích ở đầu hàm): đặt `photo.fbId` làm `noApiPhoto`
+         * trong `sendOne` chuyển false ⇒ đổi TUYẾN KÊNH (chat ngoài 24h bị đẩy API trước).
+         * Kết quả đi qua map riêng, chỉ `sendOne` đọc để nạp vào `ctx.nonReusableFbId`. */
+        preBoundFbIds.set(String(conv.id), { fbId: ids[0], fbIds: ids, at: Date.now() });
+        photo.__bindDone = true;
+        photo.__bindRes = { ok: true, fbId: ids[0], fbIds: ids };
+        return photo.__bindRes;
+      }
+      photo.__bindFail = true;
+      return null;
+    } catch (e) {
+      photo.__bindFail = true; // rơi về đường cũ (tự bind trong làn gửi)
+      return null;
+    }
+  }
+
   async function sendViaSocket(conv, text, photo, ctx) {
     if (photo && !ctx && typeof photo === 'object' && !photo.url && !photo.id) {
       // tương thích ngược nếu nơi nào gọi sendViaSocket(conv, text, ctx)
@@ -7235,6 +7307,26 @@
   const CTX_FETCH_MIN = 8;
   const CTX_FETCH_MAX = 96;
   const PHOTO_UPLOAD_PARALLEL = 96;
+  /* ═══ [v1.93.16] 96 → 192: LÀN ẢNH LÀ NÚT CỔ CHAI CỦA PHA PHÁT ═══
+   * ĐO TỪ LOG 12:34 (2 411 chat, 1 câu nhanh 1 ảnh, bản 1.93.15):
+   *   `📷 bind fbId: 2 412 ca · TB 1 088ms` (max 11 144ms, lỗi 0)
+   *   `⏱ GIỮ SLOT: chờ 292 · chuẩn bị 0 · còn lại 2 142 · tổng 2 142`
+   *   `peak Socket/page active 59/256`  ← LÀN SOCKET CHỈ DÙNG 59/256, không hề nghẽn
+   *   `PHÁT 2 411 lệnh trong 29,4s`     ← 82 lệnh/s
+   * Vật lý: 2 412 × 1 088 ms ÷ 96 làn = **27,3 s** — đúng bằng 93 % của 29,4 s phát.
+   * Bind nằm trong slot (51 % của 2 142 ms) nên `mainCap 192` không bao giờ có ích: worker
+   * ngồi chờ HTTP thay vì bắn. `peak Socket 59` là HỆ QUẢ, không phải nguyên nhân.
+   *
+   * NHÂN LÀN LÀ HỢP LỆ VÌ ĐÂY LÀ HTTP CỦA PANCAKE, KHÔNG PHẢI FACEBOOK:
+   *   • HAR `guianh1.har`: 2 request `/contents/facebook` trả về trong **31 ms và 29 ms**
+   *     (`content_ids` → `fb_ids`), tức trần của đường này rất cao; 1 088 ms trong log là
+   *     ĐỘ TRỄ XẾP HÀNG (96 làn cùng đập vào một endpoint), không phải trần máy chủ.
+   *   • Trần thật đã có sẵn ở tầng dưới: `mainCap 192` slot + `extPrepLane 160` + `apiSendLane 96`
+   *     ⇒ 192 làn ảnh không mở vùng tải mới nào, chỉ để khâu chuẩn bị chạy song song với khâu bắn.
+   *   • Đường này KHÔNG đi qua `business.facebook.com/messaging/send/` (vẫn không dùng) và
+   *     không phải làn gửi — nới nó không thể sinh tin trùng.
+   * GIỮ NGUYÊN trần `mainCap`/`apiSendLane`/`extPrepLane`: chỉ nút cổ chai đang bị đo mới đổi. */
+  const PHOTO_UPLOAD_LANE = 192;
   // Ext finder là đường ĐẮT nhất (đi qua Extension) nhưng cũng là đường duy nhất biết
   // {threadId → globalId} khi HTTP/WS không có. 12 → 20 làn khởi điểm, trần 24 → 32.
   const GID_EXT_INITIAL = 20;
@@ -7663,6 +7755,16 @@
     return true;
   }
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
+  /* ═══ [v1.93.16] PRE-BIND ẢNH — SONG SONG NGOÀI SLOT (xem `bindPhotoForConv` + `runMainItem`) ═══
+   * `PREBIND_PARALLEL` = số chat bind cùng lúc ở khâu TRƯỚC slot. Đây không phải làn mới:
+   * mỗi lần bind vẫn đi qua `photoUploadLane` (192) — hai tầng chồng nhau, tầng trong mới là
+   * tầng điều tiết thật. Đặt bằng đúng `mainCap` (192) để khâu chuẩn bị không bao giờ hẹp hơn
+   * khâu bắn, cũng không rộng hơn (không thể nhiều hơn số worker có thể dùng).
+   * `PREBIND_MAX_PER_WAVE`: trần số chat bind trước mỗi wave. Không có trần thì một wave
+   * 10 000 chat sẽ dựng 10 000 promise trước khi bắn ca đầu tiên ⇒ chậm giây đầu và tốn RAM
+   * trên máy yếu. Vượt trần thì phần dôi ra bind trong slot y như cũ (không bỏ sót ca nào). */
+  const PREBIND_PARALLEL = 192;
+  const PREBIND_MAX_PER_WAVE = 1500;
   function makeLane(parallel) {
     let active = 0;
     let normalSincePriority = 0;
@@ -8026,7 +8128,7 @@
 
   const apiSendLane = makeLane(API_SEND_PARALLEL);
   const ctxFetchLane = makeAdaptiveLane(CTX_FETCH_INITIAL, CTX_FETCH_MIN, CTX_FETCH_MAX);
-  const photoUploadLane = makeLane(PHOTO_UPLOAD_PARALLEL);
+  const photoUploadLane = makeLane(PHOTO_UPLOAD_LANE);
   const gidExtLane = makeAdaptiveLane(GID_EXT_INITIAL, GID_EXT_MIN, GID_EXT_MAX);
 
   // BỘ ĐIỀU TIẾT DÒ GLOBAL_ID (AIMD): phản hồi nhanh/ổn định → tăng dần để lấy
@@ -8740,6 +8842,30 @@
     ctx.wave200Mode = !!opts.wave200Mode;
     ctx.isSocketRetryPass = !!opts.isSocketRetryPass;
     ctx.prioritySocket = !!opts.prioritySocket || !!opts.isSocketRetryPass;
+    /* ═══ [v1.93.16] NẠP fbId ĐÃ PRE-BIND VÀO `ctx` — ĐÚNG CHỖ, KHÔNG ĐỔI ĐỊNH TUYẾN ═══
+     * `prepareDirectCtx` (Socket) và `sendViaExtension` đều đọc `ctx.nonReusableFbId`/`FbIds`
+     * TRƯỚC khi gọi `uploadOneTimePhoto()`; có sẵn giá trị ⇒ 0 ms thay vì 1 088 ms.
+     *
+     * ĐẶT Ở ĐÂY LÀ CÓ CHỦ Ý — SAU khối `if (opts.quick …)` phía trên, KHÔNG PHẢI TRƯỚC:
+     * khối đó tính `noApiPhoto = !!(photo && !photo.fbId)` để chọn TUYẾN KÊNH. Nếu ta nhét fbId
+     * vào `photo` (hoặc chạy trước khi tuyến được chọn) thì chat ngoài 24h sẽ bị đẩy sang API
+     * trước — đổi hành vi đã đo. Ở đây `photo` KHÔNG BỊ CHẠM, chỉ `ctx` (nơi các kênh đọc).
+     *
+     * Không dùng cho `isSocketRetryPass` (khối trên vừa CỐ Ý xoá `ctx.nonReusableFbId`): lần
+     * bắn lại sau khi FB từ chối phải dùng fbId MỚI — fbId `is_reusable=false` đã bị đốt.
+     * Cùng lý do, `takePreBoundFbId()` XOÁ khỏi map sau lần đọc đầu (dùng một lần). */
+    if (!ctx.isSocketRetryPass && photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds) {
+      try {
+        const _pb = takePreBoundFbId(conv.id);
+        if (_pb && _pb.fbId) {
+          if (_pb.fbIds && _pb.fbIds.length > 1) ctx.nonReusableFbIds = _pb.fbIds.slice();
+          else ctx.nonReusableFbId = _pb.fbId;
+          waveDiag.preBindHit++;
+        } else {
+          waveDiag.preBindMiss++;
+        }
+      } catch (ePb) { /* ignore */ }
+    }
     if (ctx.isSocketRetryPass) {
       ctx.socketRetriedOnce = true;
       ctx.wave200Mode = false;
@@ -10370,6 +10496,20 @@
      *                     hàng mới có ms. Nếu lô sau vẫn ra 0 thì con số cũ là số ảo.
      * Ba số này + `bind fbId` + `giữ cổng` phải xấp xỉ `còn lại`; phần dôi ra là CPU bị bóp. */
     prepGidMs: 0, prepGidN: 0, prepBindMs: 0, prepBindN: 0, slotAcqN: 0, slotAcqPosMs: 0,
+    /* [v1.93.16] ĐO KHÂU PRE-BIND ẢNH (ngoài slot) — tiêu chí nghiệm thu của lần chạy sau:
+     *   PRE-BIND ẢNH (goài slot): N ca · <ms> tổng · <ms> TB
+     * và dòng `Giữ slot` phải TỤT đúng bằng phần bind đã dời ra ngoài (log 12:34: `còn lại`
+     * 2 142 ms với bind 1 088 ms ⇒ lô sau kỳ vọng ~1 050 ms, `preBind` ~1 050 ms).
+     * `preBindWallMs` là thời gian THẬT của khâu bind (tường), `preBindMs` là tổng thời gian
+     * các worker còn phải bind TRONG slot (kỳ vọng ≈ 0 sau khi vá). Đọc cả hai mới biết
+     * pre-bind có thật sự dời được việc hay chỉ chạy song song mà vẫn để lại việc. */
+    preBindWallMs: 0, preBindWallWaves: 0, preBindMs: 0, preBindN: 0,
+    /* [v1.93.16] `preBindHit` = số ca `sendOne` THẬT SỰ dùng được fbId đã bind sẵn (0 ms trong
+     * slot). Đây là con số quyết định bản vá có hiệu lực hay không: `preBindHit ≈ số ca có ảnh`
+     * thì đã dời được; `preBindHit = 0` mà vẫn có `preBindN` thì đã bind một đằng mà gửi một nẻo
+     * (đúng lỗi bản nháp đầu — ghi vào `photo` nên route đổi). `preBindMiss` = số ca KHÔNG có
+     * fbId dự phòng (bind hỏng / đã tiêu) ⇒ phải bind trong slot như cũ. */
+    preBindHit: 0, preBindMiss: 0,
     /* [v1.92.54] tách LƯỢT DÒ 1 vs LƯỢT DÒ 2 của khâu global_id (xem chỗ cộng trong prepareDirectCtx) */
     prepGidP1Ms: 0, prepGidP1N: 0, prepGidP2Ms: 0, prepGidP2N: 0,
   };
@@ -11247,6 +11387,17 @@
                 ? ' · 📷 bind fbId: ' + photoUpStats.n + ' ca · TB ' + Math.round(photoUpStats.ms / photoUpStats.n)
                   + 'ms/ca · max ' + photoUpStats.max + 'ms · lỗi ' + photoUpStats.fail
                 : '')
+              /* [v1.93.16] NGHIỆM THU PRE-BIND — dòng số quyết định việc này có dời được việc
+               * hay không. Đọc đúng:
+               *   `PRE-BIND ẢNH` tổng/tường  = thời gian khâu bind chạy TRƯỚC slot (ngoài ghế);
+               *   `còn trong slot`           = phần bind vẫn nằm trong ghế (phải ≈ 0);
+               *   `còn lại` ở đầu dòng GIỮ SLOT phải TỤT đúng chừng ấy.
+               * Log 12:34 (trước bản này): `còn lại 2 142 ms`, bind 1 088 ms, Socket peak 59/256
+               * ⇒ kỳ vọng lô sau: `còn lại` ≈ 1 050 ms, `còn trong slot` ≈ 0, phát nhanh hơn. */
+              + ' · 🧷 PRE-BIND ẢNH: ' + waveDiag.preBindN + ' lần bind ngoài slot · tường '
+                + waveDiag.preBindWallMs + 'ms (' + waveDiag.preBindWallWaves + ' wave) · dùng lại được '
+                + waveDiag.preBindHit + ' ca · hụt ' + waveDiag.preBindMiss + ' ca · còn bind trong slot '
+                + Math.round(waveDiag.preBindMs) + 'ms'
             : '')
           + ' · giữ cổng (bay/retry/ext/api) ' + waveDiag.gateBlockInflight + '/' + waveDiag.gateBlockRetry
           + '/' + waveDiag.gateBlockExt + '/' + waveDiag.gateBlockApi
@@ -13563,6 +13714,34 @@
         }
       }
     }
+    /* ═══ [v1.93.16] GẮN `__photoArg` CHO **TỪNG CHAT** NGAY TẠI ĐÂY (trước mọi wave) ═══
+     * Đây là chỗ DUY NHẤT biết đủ: `photo` (câu nhanh / ảnh đã chọn), `qrPhotoByPage`,
+     * `fbIdByPage`, `apiFbIdsByPage`, `contentIdByPage`. Trước bản này `photoArg` được dựng
+     * MUỘN, bên trong `sendOneAndLog` — tức sau khi worker đã chiếm slot ⇒ bind ảnh (1 088 ms
+     * đo được) nằm TRONG ghế và `mainCap 192` thành vô dụng (`peak Socket 59/256`).
+     *
+     * Nay object đó được dựng SỚM cho mọi chat đích, để khâu pre-bind (ngoài slot) dùng đúng
+     * một object với khâu gửi. KHÔNG đổi payload: bên trong `sendOneAndLog` vẫn dựng `photoArg`
+     * y như cũ (mỗi page một `qrPage` riêng) — nhánh dưới chỉ DÙNG LẠI nếu cùng page.
+     * Không có ảnh ⇒ không gắn gì (đường text-only y nguyên). */
+    if (photo) {
+      try {
+        (sendGroups || []).forEach((g) => {
+          (g.list || []).forEach((c) => {
+            if (!c || !c.id) return;
+            try {
+              const p = c.pageId || String(c.id).split('_')[0];
+              if (!p) return;
+              const qrPage = photo.qr ? qrPhotoByPage[p] : null;
+              if (photo.qr && !qrPage) return; // page không có câu nhanh ⇒ ca này sẽ bị báo lỗi như cũ
+              c.__photoArg = photo.qr
+                ? { items: qrPage.items, url: qrPage.url, id: qrPage.id, fbId: fbIdByPage[p] || '', fbIds: apiFbIdsByPage[p] || [], w: qrPage.w || 0, h: qrPage.h || 0 }
+                : { url: photo.url, id: photo.id || contentIdByPage[p] || '', fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h };
+            } catch (eA0) { /* ignore */ }
+          });
+        });
+      } catch (eA1) { /* ignore */ }
+    }
     // Gửi theo lượt: hỗ trợ tới 50.000 tin/lượt cho quy mô 20.000–30.000 tin nhắn
     const waveEl = shadow && shadow.getElementById('ssb-wave');
     const gapEl = shadow && shadow.getElementById('ssb-gap');
@@ -13730,9 +13909,22 @@
           // Câu nhanh NHIỀU ĐOẠN → gửi từng đoạn lần lượt theo đúng thứ tự của câu lệnh
           r = await sendQrParts(c, multiParts, sendOpts);
         } else {
-          const photoArg = photo.qr
-            ? { items: qrPage.items, url: qrPage.url, id: qrPage.id, fbId: fbIdByPage[p] || '', fbIds: apiFbIdsByPage[p] || [], w: qrPage.w || 0, h: qrPage.h || 0 }
-            : { url: photo.url, id: photo.id || contentIdByPage[p] || '', fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h };
+          /* [v1.93.16] DÙNG LẠI ĐÚNG OBJECT ĐÃ PRE-BIND (xem chỗ gắn `c.__photoArg` trước wave).
+           * PHẢI dùng lại chứ không được dựng object mới: fbId `is_reusable=false` vừa bind
+           * nằm trên object của CHÍNH chat này — dựng mới là mất công bind và quay về 1 088 ms
+           * trong slot. Điều kiện dùng lại chặt: cùng page, cùng ảnh (url+id), cùng số ảnh.
+           * Không khớp ⇒ dựng lại y như bản cũ (không có đường mới nào để gửi sai ảnh). */
+          const _pre = c.__photoArg;
+          const _samePhoto = !!(_pre && _pre.items && qrPage && Array.isArray(qrPage.items)
+            && _pre.items.length === qrPage.items.length
+            && _pre.url === (photo.qr ? qrPage.url : photo.url)
+            && String(_pre.id || '') === String(photo.qr ? (qrPage.id || '') : (photo.id || contentIdByPage[p] || '')));
+          const photoArg = _samePhoto
+            ? _pre
+            : (photo.qr
+              ? { items: qrPage.items, url: qrPage.url, id: qrPage.id, fbId: fbIdByPage[p] || '', fbIds: apiFbIdsByPage[p] || [], w: qrPage.w || 0, h: qrPage.h || 0 }
+              : { url: photo.url, id: photo.id || contentIdByPage[p] || '', fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h });
+          try { c.__photoArg = photoArg; } catch (ePA) { /* ignore */ }
           const fbId = photoArg.fbId || '';
           if (!fbId && c.type === 'comment') {
             done++;
@@ -14298,6 +14490,26 @@
 
           const runMainItem = async (c) => {
             if (state.stopRequested) return null;
+            /* ═══ [v1.93.16] BIND ẢNH TRƯỚC KHI CHIẾM SLOT — KHÔNG GIỮ GHẾ TRONG LÚC CHỜ HTTP ═══
+             * ĐO TỪ LOG 12:34: bind 1 088 ms/ca nằm TRONG 2 142 ms giữ slot (51 %), trong khi
+             * Socket chỉ dùng 59/256 làn và `mainCap 192` vì thế không bao giờ có việc để làm.
+             * 2 412 × 1 088 ms ÷ 96 làn = 27,3 s ≈ 93 % của 29,4 s phát ⇒ nút cổ chai là LÀN ẢNH.
+             *
+             * Nay `.then(c)` (ngay dưới) bind fbId cho MỌI chat CÓ ảnh TRƯỚC, song song, ngoài
+             * slot. Nhánh này chỉ VIỆC ĐẦU TIÊN kiểm lại: `photo` đã có `items[].fbId` chưa —
+             * có rồi thì `uploadOneTimePhoto()` trả ngay trong 0 ms (nó đọc `ctx.nonReusableFbId`
+             * trước khi chạm làn), nên phần nằm trong slot còn lại đúng phần BẮT BUỘC.
+             *
+             * VÌ SAO KHÔNG THỂ GỬI SAI ẢNH / MẤT ẢNH (đây là chỗ dễ tự bắn vào chân):
+             *   • fbId `is_reusable=false` gắn với `conv_id` — bind cho chat NÀO thì chỉ chat đó
+             *     dùng. `bindPhotoForConv` giữ kết quả trên ĐÚNG object `photo` của chat đó;
+             *   • app bind MỚI cho từng lần gửi (`executeBySocketFB` @976271: `reusable:!1` ngay
+             *     trước `sendMqtt`), nên fbId trong `photoArg` chỉ là ĐỐI TƯỢNG DỰ PHÒNG: nếu
+             *     lần bắn thật cần bản mới thì `forceFresh` vẫn xin bản mới như cũ;
+             *   • bind lỗi ⇒ `photo.__bindFail`, nhánh dưới trả `null` ⇒ `sendOne` chạy đúng
+             *     đường cũ (tự bind lại / báo lỗi như trước). KHÔNG có đường mới nào để "gửi
+             *     chữ trơ" khi thiếu ảnh. */
+            { const _tPre0 = Date.now(); if (photo) { try { await bindPhotoForConv(c); } catch (ePre) { /* bind lỗi ⇒ đường cũ xử lý */ } } try { waveDiag.preBindMs += Math.max(0, Date.now() - _tPre0); waveDiag.preBindN++; } catch (ePre2) { /* ignore */ } }
             const _tAcq0 = Date.now();
             const gotMainSlot = await acquireMainSlot();
             if (!gotMainSlot) return null;
@@ -14334,6 +14546,41 @@
             }
           };
 
+          /* ═══ [v1.93.16] PRE-BIND ẢNH CẢ WAVE TRƯỚC KHI MỞ SLOT ═══
+           * ĐO TỪ LOG 12:34 (2 411 chat × 1 ảnh): bind 1 088 ms/ca × 2 412 ca = 2 625 giây-làn;
+           * với làn 96 thì SÀN CỨNG của khâu phát là 27,3 s — và cả lượt phát chỉ 29,4 s
+           * ⇒ **93 % thời gian phát là CHỜ BIND**, không phải bắn. Bằng chứng phụ cùng log:
+           * `peak Socket/page active 59/256` — làn Socket chưa bao giờ được nạp đủ, nên
+           * `mainCap 192` không thể là nút cổ chai. `⏱ GIỮ SLOT … còn lại 2 142 ms` chính là
+           * phần bind nằm TRONG ghế.
+           *
+           * Nay mỗi wave bind trước, song song, ngoài ghế:
+           *   • vẫn đi qua ĐÚNG `photoUploadLane` (nay 192) ⇒ tải lên Pancake vẫn bị điều tiết;
+           *   • ca không ảnh / đã có fbId ⇒ `bindPhotoForConv` trả 0 ms;
+           *   • bind lỗi ⇒ `__bindFail` ⇒ trong slot tự bind lại đúng đường cũ (không mất tin);
+           *   • `runMainItem` vẫn gọi `bindPhotoForConv` (0 ms nếu wave đã bind) để ca phát
+           *     sinh (chat thêm giữa lượt) không bị bỏ sót.
+           * KHÔNG đổi cổng chặn nào, KHÔNG thêm lệnh GỬI nào: đây là khâu chuẩn bị ảnh. */
+          try {
+            if (photo && waveSlice.length) {
+              const preList = waveSlice.filter((c0) => c0 && c0.id && c0.__photoArg).slice(0, PREBIND_MAX_PER_WAVE);
+              if (preList.length) {
+                const _tPreW = Date.now();
+                await runPool(preList, async (c0) => {
+                  if (state.stopRequested || !c0 || !c0.__photoArg) return;
+                  try { await bindPhotoForConv(c0, c0.__photoArg); } catch (ePreW) { /* lỗi ⇒ đường cũ */ }
+                }, PREBIND_PARALLEL).catch(() => {});
+                try {
+                  waveDiag.preBindWallMs += Math.max(0, Date.now() - _tPreW);
+                  waveDiag.preBindWallWaves++;
+                } catch (ePW) { /* ignore */ }
+              }
+              if (waveSlice.length > PREBIND_MAX_PER_WAVE) {
+                logLine('🧷 Wave ' + waveNo + ': ' + waveSlice.length + ' chat, trần pre-bind ' + PREBIND_MAX_PER_WAVE
+                  + ' ⇒ phần dôi ra bind trong slot như cũ (không bỏ sót ca nào).');
+              }
+            }
+          } catch (ePreAll) { /* pre-bind là tăng tốc, không bao giờ được làm hỏng wave */ }
           // Một pool duy nhất: runPool đã rút việc động bằng biến next chung (không chia khúc).
           const wavePromise = runPool(waveSlice, runMainItem, mainCap);
           allMainPromises.push(wavePromise);

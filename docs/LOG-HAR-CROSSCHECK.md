@@ -3083,3 +3083,88 @@ sửa được** — nó nằm trong ext.
 
 **Test khoá:** chú thích trong script phải mô tả `r = true ⇒ ĐỔI PROFILE trước khi gửi`
 (khoá cả văn bản, để lần sau không ai chép lại kết luận ngược).
+
+## 48. TỐC ĐỘ: nút cổ chai của lượt 12:34 KHÔNG phải Socket mà là **làn bind ảnh** (96)
+
+### 48.1 Số đo (log `botfake-log-20261122-123614.txt`, bản 1.93.15-W200.125)
+
+| chỉ số | giá trị |
+|---|---|
+| phát | 2 411 lệnh trong **29,4 s** = 82,07/giây |
+| `⏱ GIỮ SLOT (ms/chat)` | chờ 292 · chuẩn bị 0 · **còn lại 2 142** · tổng 2 142 (n=2 411) |
+| `📷 bind fbId` | **2 412 ca · TB 1 088 ms/ca** · max 11 144 ms · lỗi 0 |
+| `peak Socket/page active` | **59/59** (trần là 256) |
+| `peak Socket/page waiting` | 0/0 |
+| ACK | OK 1 468 · rejected 897 · no-ACK 0 · TB/max 1 490/3 739 ms |
+| thành công | 1 468/2 411 (60,9 %), **toàn bộ qua Socket** |
+
+### 48.2 Phép tính khép kín — không phải suy đoán
+
+```
+2 412 ca × 1 088 ms ÷ 96 làn = 27,3 s      (sàn cứng của khâu bind, nếu làn 96 là nút cổ chai)
+cả lượt phát                = 29,4 s      ⇒ bind chiếm 93 % thời gian phát
+```
+
+Hai số phụ khớp nhau và cùng chỉ về một chỗ:
+* `còn lại 2 142 ms` giữ slot ≈ bind 1 088 ms + dò gid/chuẩn bị ⇒ **51 % thời gian giữ ghế là
+  ngồi chờ HTTP bind ảnh**, không phải bắn.
+* `peak Socket active 59/256` với `waiting 0/0` ⇒ làn Socket **chưa bao giờ được nạp đủ**.
+  Nghĩa là `mainCap 192` không thể là nút cổ chai (nó có 133 ghế trống), và mọi lần "nới làn
+  Socket" đều là nới đúng chỗ không nghẽn.
+
+Đối chiếu 3 lô **không ảnh** cùng máy: `chờ 121–144 · còn lại 687–756 ms/chat ⇒ 247–284/giây`
+(2026-11-21 19:46 & 21:07, 2026-11-19 20:34). Tức khi không có ảnh, cùng bộ khung này chạy
+**nhanh gấp 3,5 lần**. Đây là đối chứng tự nhiên: khác biệt duy nhất là khâu bind ảnh.
+
+### 48.3 Vì sao nới làn ảnh 96 → 192 là hợp lệ (không phải "mở tải mới")
+
+1. **Đây là HTTP của Pancake, không phải Facebook.** HAR `guianh1.har`: 2 request
+   `POST /v1/pages/{p}/contents/facebook` trả về trong **31 ms và 29 ms**
+   (`content_ids` → `fb_ids`). Trần của endpoint rất cao; 1 088 ms trong log là **độ trễ xếp
+   hàng**, không phải trần máy chủ ⇒ nhân làn là giảm xếp hàng, không phải tăng sức ép.
+2. **Trần thật đã có sẵn ở tầng dưới**: `mainCap 192` slot · `extPrepLane 160` · `apiSendLane 96`.
+   192 làn ảnh không mở vùng tải nào mới.
+3. **Không đụng làn gửi**: `mainCap 192`, `API_SEND_PARALLEL 96`, `PREP_PARALLEL_EXT 160` giữ
+   nguyên trong bản này (có test khoá).
+4. **Không thể sinh tin trùng**: bind là khâu chuẩn bị, không phải lệnh gửi. Mỗi lần bind vẫn đi
+   qua `photoUploadLane` (tầng điều tiết thật).
+
+### 48.4 Vá: bind TRƯỚC khi chiếm slot (`bindPhotoForConv` + pre-bind cả wave)
+
+* `sendGroups` dựng `c.__photoArg` cho từng chat **trước mọi wave** (nơi duy nhất biết
+  `qrPhotoByPage` / `fbIdByPage` / `apiFbIdsByPage` / `contentIdByPage`).
+* Mỗi wave: `runPool(preList, bindPhotoForConv, 192)` chạy **trước** `runPool(waveSlice, runMainItem, mainCap)`.
+* `runMainItem` vẫn gọi `bindPhotoForConv` trước `acquireMainSlot()` (0 ms nếu wave đã bind) —
+  để ca phát sinh giữa lượt không bị bỏ sót.
+* Kết quả bind đi vào `preBoundFbIds` (map theo `conv.id`); `sendOne` đọc **một lần**
+  (`takePreBoundFbId`, lấy ra là xoá) rồi nạp `ctx.nonReusableFbId` ⇒ `uploadOneTimePhoto`
+  trả 0 ms trong slot.
+
+### 48.5 ⚠️ BẪY ĐÃ TỰ BẮT — ĐỪNG "TỐI ƯU" LẠI THEO HƯỚNG GHI `photo.fbId`
+
+Bản nháp đầu ghi thẳng `photo.fbId/fbIds/items[].fbId`. Nhìn thì gọn, nhưng `sendOne` chọn
+**tuyến kênh** bằng:
+
+```js
+const noApiPhoto = !!(photo && !photo.fbId);
+const goDirect = batchSkipApi || isApiBlockedForPage(pid) || alreadyTriedApi
+              || noApiPhoto || (photo && hint && hint !== 'api') || textOutWin || photoOutWin;
+```
+
+Đặt `fbId` vào `photo` ⇒ `noApiPhoto` chuyển `false` ⇒ chat **ngoài 24h** đang đi
+`dynamicDirect` sang Ext/Socket sẽ bị **đẩy sang API trước** — đổi đúng thứ tự kênh đã đo
+(`#10` ngoài 24h là nhóm lỗi lớn nhất của lô này). Vì vậy kết quả pre-bind **phải** đi qua map
+riêng, và `sendOne` chỉ nạp vào `ctx` **sau** khối chọn tuyến. Có 3 test khoá đúng chỗ này.
+
+### 48.6 Tiêu chí nghiệm thu lần chạy sau (dòng log mới)
+
+```
+🌊 WAVE: … · ⏱ GIỮ SLOT (ms/chat): chờ … · còn lại ≈1 050 · tổng ≈1 050 · 🧷 PRE-BIND ẢNH:
+   N lần bind ngoài slot · tường <ms> (k wave) · dùng lại được ≈ số ca có ảnh · hụt 0 ·
+   còn bind trong slot ≈ 0ms
+```
+
+* `dùng lại được` (preBindHit) `≈` số ca có ảnh ⇒ bản vá CÓ hiệu lực.
+* `preBindHit = 0` mà `lần bind ngoài slot > 0` ⇒ bind một đằng gửi một nẻo (đúng lỗi §48.5).
+* `còn lại` phải **tụt** đúng chừng phần đã dời (log này: 2 142 → ~1 050 ms), tức tốc độ phát
+  kỳ vọng ~82 → **~150–190 lệnh/giây** trên cùng máy/lô.

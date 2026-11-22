@@ -2099,6 +2099,111 @@ check('[startCheck] chú thích nói đúng: UPLOAD_INBOX_PHOTO không đổi pr
 check('[startCheck] có ghi `.finally(t)` LUÔN chạy t',
   /\.finally\(t\)` chạy `t` TRONG MỌI TRƯỜNG HỢP/.test(SRC), true);
 
+/* ═══ (AB) [v1.93.16] PRE-BIND ẢNH NGOÀI SLOT — 4 BẤT BIẾN ═══
+ * Cơ sở: log 12:34 đo `bind fbId 1 088 ms/ca`, `còn lại 2 142 ms` giữ slot, `peak Socket
+ * 59/256` ⇒ 93 % thời gian phát là CHỜ BIND, không phải bắn. Vá bằng cách bind TRƯỚC khi chiếm
+ * slot (song song) và dùng lại đúng object đã bind. Bốn thứ dưới đây mà sai một cái là hoặc
+ * mất phần tăng tốc, hoặc gửi nhầm ảnh của chat khác — nên khoá cả bốn.
+ * LUÔN chạy trên `stripComments` (bài học §47: test khớp chú thích thì mutation vẫn xanh). */
+const _preSrc = stripComments(SRC);
+
+// (1) bindPhotoForConv tồn tại và KHÔNG BAO GIỜ throw / KHÔNG BAO GIỜ chặn đường gửi
+{
+  const fn = stripComments(extractFn('bindPhotoForConv'));
+  check('[prebind] có hàm bindPhotoForConv', fn.length > 200, true);
+  check('[prebind] lỗi bind KHÔNG throw ra ngoài (chỉ đánh dấu __bindFail)', /catch\s*\(/.test(fn), true);
+  check('[prebind] có đánh dấu __bindFail để đường cũ xử lý', /__bindFail\s*=\s*true/.test(fn), true);
+  check('[prebind] dùng đúng is_reusable=false như app (reusable:!1 @976271)', /reusable: !1/.test(fn) || /false\)/.test(fn), true);
+  // KHÔNG được đổi sang reusable=true (đó là đường API, không phải Socket/Ext)
+  check('[prebind] KHÔNG xin bản reusable=true', /reusable:\s*true/.test(fn), false);
+  /* ═══ BẪY ĐÃ TỰ BẮT: KHÔNG ĐƯỢC GHI fbId VÀO `photo` ═══
+   * `sendOne` quyết định tuyến kênh bằng `const noApiPhoto = !!(photo && !photo.fbId)`.
+   * Đặt fbId vào `photo` ⇒ `noApiPhoto` = false ⇒ chat ngoài 24h bị đẩy sang API trước,
+   * đổi hành vi định tuyến đã đo. Kết quả pre-bind PHẢI đi qua map `preBoundFbIds`. */
+  check('[prebind] KHÔNG ghi fbId vào object photo (sẽ đổi tuyến kênh qua noApiPhoto)',
+    /photo\.fbId\s*=/.test(fn) || /photo\.fbIds\s*=/.test(fn) || /photo\.items\s*=/.test(fn), false);
+  check('[prebind] kết quả đi qua map riêng preBoundFbIds',
+    /preBoundFbIds\.set\(/.test(fn), true);
+}
+
+// (1b) `sendOne` nạp fbId đã pre-bind vào `ctx` SAU khối chọn tuyến, KHÔNG chạm `photo`
+{
+  const fn = stripComments(extractFn('sendOne'));
+  const iNoApi = fn.indexOf('const noApiPhoto');
+  const iTake = fn.indexOf('takePreBoundFbId(');
+  check('[prebind] sendOne có nạp takePreBoundFbId vào ctx', iTake > 0, true);
+  check('[prebind] nạp SAU `noApiPhoto` (không đổi tuyến kênh)', iNoApi > 0 && iTake > 0 && iNoApi < iTake, true);
+  check('[prebind] nạp vào ctx.nonReusableFbId (nơi Socket/Ext đọc)',
+    /ctx\.nonReusableFbId = _pb\.fbId/.test(fn), true);
+  check('[prebind] KHÔNG nạp cho lần bắn lại Socket (fbId cũ đã bị đốt)',
+    /!ctx\.isSocketRetryPass && photo/.test(fn), true);
+}
+
+// (1c) dùng một lần: lấy ra là xoá (fbId is_reusable=false không được bắn lại)
+{
+  const fn = stripComments(extractFn('takePreBoundFbId'));
+  check('[prebind] takePreBoundFbId XOÁ khỏi map sau khi lấy', /preBoundFbIds\.delete\(/.test(fn), true);
+  check('[prebind] có hạn dùng PREBOUND_TTL_MS', /PREBOUND_TTL_MS/.test(fn), true);
+}
+
+// (2) runMainItem bind TRƯỚC acquireMainSlot — đây là toàn bộ ý nghĩa của bản vá
+{
+  // `runMainItem` là arrow function gán biến (`const runMainItem = async (c) => {…}`) nên
+  // `extractFn` (chỉ nhận `function ten(`) không dùng được — cắt theo mốc văn bản.
+  const i = _preSrc.indexOf('const runMainItem = async (c) =>');
+  check('[prebind] tìm thấy runMainItem', i > 0, true);
+  const seg = i > 0 ? _preSrc.slice(i, i + 4000) : '';
+  const iBind = seg.indexOf('bindPhotoForConv(');
+  const iSlot = seg.indexOf('acquireMainSlot()');
+  check('[prebind] runMainItem có gọi bindPhotoForConv', iBind > 0, true);
+  check('[prebind] bindPhotoForConv chạy TRƯỚC acquireMainSlot',
+    iBind > 0 && iSlot > 0 && iBind < iSlot, true);
+}
+
+// (3) Wave pre-bind cả lô TRƯỚC khi mở pool slot
+{
+  const iPre = _preSrc.indexOf('const preList = waveSlice.filter');
+  const iPool = _preSrc.indexOf('runPool(waveSlice, runMainItem, mainCap)');
+  check('[prebind] có khâu pre-bind cả wave', iPre > 0, true);
+  check('[prebind] pre-bind wave chạy TRƯỚC runPool(waveSlice…)', iPre > 0 && iPool > 0 && iPre < iPool, true);
+  check('[prebind] pre-bind có trần số ca mỗi wave (không dựng 10k promise)',
+    /PREBIND_MAX_PER_WAVE/.test(_preSrc), true);
+}
+
+// (4) DÙNG LẠI object đã bind — dựng object mới là mất fbId vừa bind (quay về 1 088 ms)
+{
+  const iReuse = _preSrc.indexOf('const _samePhoto = !!(_pre');
+  check('[prebind] sendOneAndLog dùng lại c.__photoArg đã pre-bind', iReuse > 0, true);
+  check('[prebind] điều kiện dùng lại kiểm CÙNG ẢNH (url + id + số item)',
+    /_pre\.items\.length === qrPage\.items\.length/.test(_preSrc) && /_pre\.url ===/.test(_preSrc), true);
+  check('[prebind] có nhánh dựng lại photoArg y như cũ khi không khớp',
+    /_samePhoto\s*\n?\s*\? _pre/.test(_preSrc) || /\? _pre\s*:/.test(_preSrc), true);
+}
+
+// (5) Làn ảnh 96 → 192, và lý do phải ghi ngay cạnh hằng số
+{
+  check('[prebind] photoUploadLane dùng PHOTO_UPLOAD_LANE', /makeLane\(PHOTO_UPLOAD_LANE\)/.test(_preSrc), true);
+  check('[prebind] PHOTO_UPLOAD_LANE = 192', /const PHOTO_UPLOAD_LANE = 192;/.test(_preSrc), true);
+  check('[prebind] chú thích nêu số đo quyết định (1 088 ms · 2 412 ca · 59/256)',
+    /1 088 ms/.test(SRC) && /2 412 ca/.test(SRC) && /59\/256|59\s*\/\s*256/.test(SRC), true);
+  // Không được nới mainCap / apiSendLane / extPrepLane trong cùng bản vá này
+  check('[prebind] mainCap vẫn 192', /const WAVE_MAIN_TOTAL_CAP = 192;/.test(_preSrc), true);
+  check('[prebind] API_SEND_PARALLEL vẫn 96', /const API_SEND_PARALLEL = 96;/.test(_preSrc), true);
+  check('[prebind] PREP_PARALLEL_EXT vẫn 160', /const PREP_PARALLEL_EXT = 160;/.test(_preSrc), true);
+  check('[prebind] PHOTO_UPLOAD_PARALLEL (hằng cũ) không còn được dùng làm làn',
+    /makeLane\(PHOTO_UPLOAD_PARALLEL\)/.test(_preSrc), false);
+}
+
+// (6) Dòng log nghiệm thu phải tồn tại — không có số thì lần sau lại phải suy đoán
+{
+  check('[prebind] có dòng log PRE-BIND ẢNH để nghiệm thu',
+    /PRE-BIND ẢNH: /.test(_preSrc), true);
+  check('[prebind] dòng log in cả "còn bind trong slot" (phần chưa dời được)',
+    /còn bind trong slot /.test(_preSrc), true);
+  check('[prebind] dòng log in "dùng lại được" (preBindHit) — số quyết định bản vá có hiệu lực)',
+    /dùng lại được /.test(_preSrc) && /preBindHit/.test(_preSrc), true);
+}
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
