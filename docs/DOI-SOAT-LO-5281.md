@@ -469,3 +469,78 @@ Chưa biết **vì sao** kênh ACK chết. Ứng viên chưa kiểm chứng: hel
 subscribe `/ls_resp`; `requestId` không tăng; FB chặn frame task 46 ở mức page. Bản vá này chỉ
 **ngừng bắn vào kênh chết** — nó không hồi sinh Socket. Muốn hồi sinh thì cần log có
 `requestId` + trạng thái subscribe, hiện chưa có.
+
+---
+
+## §16. KIỂM TRA LOGIC — đối chiếu từng bước với mã app Pancake thật
+
+Nguồn đối chiếu: `_app-9331d46f21a84eb1.v6.js` (bundle app) — hàm gửi `version_id:"9942677559150662"`
+và hàm `publish()` đăng ký `PENDING_MESSAGES`. **Không suy đoán, chỉ so mã.**
+
+### 16.1 Thứ ta LÀM ĐÚNG (đã đối chiếu từng trường)
+| hạng mục | app | script | |
+|---|---|---|---|
+| `version_id` | `9942677559150662` | `9942677559150662` | ✓ |
+| `epoch_id` | `w()` | `epochId()` | ✓ |
+| task ảnh: `label 46`, `send_type 3`, `attachment_fbids`, `mark_thread_read 0`, `source 0`, `sync_group 205`, `text null` | ✓ | ✓ | ✓ |
+| task chữ: `send_type 1`, `source 4456448`, `mark_thread_read 1` | ✓ | ✓ | ✓ |
+| task `label 21` (`last_read_watermark_ts`, `sync_group 205`) | ✓ | ✓ | ✓ |
+| thứ tự task: ảnh → chữ → 21 | ✓ | ✓ | ✓ |
+| phân xử ACK: `findAllBlockActions(step,'replaceOptimsiticMessage')` / `'markOptimisticMessageFailed'` | ✓ | ✓ | ✓ |
+| `type` của publish = 3 | ✓ | ✓ | ✓ |
+| khoá `PENDING_MESSAGES` = `${pageId}_${request_id}` | ✓ | ✓ | ✓ |
+| bọc `myEntry.callback` để bắt ACK muộn | app không làm | có — **tốt hơn app** | ✓ |
+
+### 16.2 LỖI TÌM ĐƯỢC: `socketPublishSend` BỎ QUA `firedCb` VÀ CHỜ 12 000 ms
+Đường bắn-nhả gọi:
+```js
+socketPublishSend(helper, pageId, gid, text, attFbIds, (rawKind) => …, { lateApply, onRejected })
+```
+`firedCb` là **tham số thứ 6**, nhưng chữ ký hàm là `(helper, pageId, gid, text, attFbIds, firedCb, opts)`.
+⇒ khớp. Nhưng `publishPromise` bên trong **luôn** giải bằng bộ đếm giờ `ackWaitMs`, và khi có
+`firedCb` thì:
+```js
+publishPromise.then(g => firedCb(classify(g)))   // chỉ chạy khi hết ackWaitMs
+return { kind: 'fired' }
+```
+`firedCb` **không được gọi ở thời điểm publish xong** — nó chỉ chạy sau `ackWaitMs`.
+Nghĩa là chú thích "bắn xong NHẢ NGAY" đúng với GHẾ LÀN, nhưng mỗi ca **vẫn treo một bộ đếm
+1 200–6 000 ms** và một entry `PENDING_MESSAGES` tới **`ackListenMs` ≥ 12 000 ms**.
+
+**Chứng minh bằng số học, không cần log mới:**
+- `ackListenMsFor` chặn dưới **12 000 ms** (đo: p90 = 0/200/300/1000/2000/3000/5000 ms đều cho
+  `nghe 12000 ms`). Trần `ackListenMs ≤ 30 000`.
+- Lô 18:56: 10 948 chat trong **93 s** = 117,7 chat/s; Socket/page cap = **256**.
+- Nếu **cả** 8 675 ca no-ACK đều đi hết cửa sổ nghe 12 s thì phải có **8 675 × 12 ÷ 93 ≈ 1 119**
+  ca cùng tồn tại — vượt xa 256. **Bất khả.**
+⇒ **Phần lớn 8 675 ca là "hết hạn chờ giữ slot" (`mySilent = false`), KHÔNG phải "im lặng thật".**
+
+### 16.3 HỆ QUẢ: cơ chế cắt-kênh-chết của chính script KHÔNG BAO GIỜ CHẠY
+`noteSocketPageLaneOutcome` chỉ tăng `pageAckTimeoutRun` khi **`mySilent === true`**, và
+`ACK_DEAD_PROOF_RUN = 5` đòi **5 ca im lặng thật liên tiếp** mới tuyên bố page ACK chết.
+Nếu `mySilent` hầu như không bao giờ đúng ⇒ **cờ `pageAckDeadAt` không bao giờ được đặt** ⇒
+`isPageAckDead()` luôn false ⇒ `socketSkipReason()` luôn `'unknown'` ⇒ **không có cổng nào cắt
+Socket của page chết**. Dòng `chọn kênh … Socket bị né (mất tin 0 · ACK chết 0)` ở log 18:39
+**khớp đúng suy luận này** (0 ca bị né).
+
+Điều đáng chú ý: script **ĐÃ CÓ** đúng cơ chế cần dùng (`pageAckDeadAt` → `pickBestDirectOrder`
+bỏ Socket → đi Ext/API → dò lại sau 20 s) từ **v1.92.48**, nhưng nó bị khoá sau điều kiện
+`mySilent` mà đại đa số ca không thoả. Bản vá 1.93.24 thêm cổng theo **thời gian + ack === 0**
+để không phụ thuộc `mySilent` — đó là lý do bản vá đó đúng hướng.
+
+### 16.4 SAI Ở CHÍNH DÒNG LOG (không phải ở code gửi)
+`settleSocketResult` trả `error: 'Socket không rõ kết quả (không có ACK)'` cho **mọi** nhánh
+`raw.kind === 'noack'`. Nhưng `classify()` trả `noack` ở **5 chỗ khác nhau**:
+1. `!g.payload` (im lặng thật) → 2. payload không parse được → 3. parse được nhưng **không có**
+`replaceOptimsiticMessage` và **có** cờ lỗi → (và `raw.kind` không tồn tại khi `firedCb` được gọi
+với `{kind:'noack'}` mặc định khi `publish()` throw).
+Chỉ trường hợp 1 mới là "không có ACK". Bốn trường hợp còn lại **CÓ** ACK, chỉ là ACK mang nội
+dung không dùng được. Log 18:56 ghi `📡 ACK OK/rejected/no-ACK 5/0/0` **và** 8 675 dòng
+"không có ACK" **cùng một lúc** — hai câu này phủ định nhau, và người đọc log (kể cả tôi) đã bị
+dắt bởi câu sai. Cần tách nhãn theo `raw.reason`.
+
+### 16.5 Điều vẫn CHƯA biết
+Sau 16.2, `mySilent` **phải** đúng với một số ca (không thể 0 tuyệt đối), nhưng **không có số nào
+trong log** cho biết `pageAckSilentRun`/`pageAckTimeoutRun` đạt tới đâu. Đó là lỗ hổng đo lường
+lớn nhất còn lại: cần in `im lặng THẬT` theo **page** (không chỉ toàn cục) và in giá trị lớn nhất
+`pageAckTimeoutRun` đạt được, để lần sau biết ngưỡng 5 có hợp lý hay không.
