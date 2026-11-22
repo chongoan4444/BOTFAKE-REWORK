@@ -6254,12 +6254,36 @@
             extMsgIdByConv[conv.id] = { messageId: String(_extMsgId), at: _extTs || Date.now() };
           } catch (eMI) { /* ignore */ }
         }
+        /* ═══ [v1.93.14] `success` MÀ KHÔNG CÓ `messageId` = FB TỪ CHỐI NGẦM ═══
+         * Nguồn `0.5.62_0/assets/background.js` (class `se` + `ee`):
+         *   isResponseSuccess(e,t){ case "facebook": return e && e.payload &&
+         *       (e.payload.actions && e.payload.actions[0].message_id || e.payload.error_payload); }
+         *   parseSuccessResponse({response:e,platform:t,…}){ case "facebook":
+         *       return e.payload.error_payload ? {}                                  // ← RỖNG
+         *                                      : { messageId: e.payload.actions[0].message_id,
+         *                                          globalUserId, timestamp: e.payload.actions[0].timestamp }; }
+         * ⇒ Khi FB trả `payload.error_payload` thì ext COI LÀ THÀNH CÔNG
+         *   (`isResponseSuccess` trả chính `error_payload`, truthy) NHƯNG `parseSuccessResponse`
+         *   trả `{}` ⇒ postMessage `REPLY_INBOX_PHOTO_SUCCESS` **không có `messageId`**,
+         *   không có `timestamp`.
+         * ⇒ `success:true` + KHÔNG `messageId` KHÔNG phải "chưa xác nhận": đó là **bằng chứng
+         *   VẮNG MẶT** — FB đã trả `error_payload` ⇒ KHÔNG có tin nào được tạo.
+         * Trước bản này script gộp cả hai vào "maybe + extClaimedSuccess" ⇒ ca này bị đọc lại
+         * lịch sử vô ích 20 s rồi mới chốt, và KHÔNG được ghi vào sổ "FB đã từ chối".
+         * Nay tách cờ `extSuccessNoId` để nhánh xử lý ghi đúng: FB từ chối, không đọc lại lâu. */
+        const _extNoId = !_extMsgId;
+        /* Vẫn đọc lại lịch sử cho CẢ HAI ca: `error_payload` là suy luận từ hợp đồng extension,
+         * chưa phải bằng chứng đo được trên hội thoại. Chỉ ĐỌC ⇒ vô hại, và nếu lịch sử CÓ tin
+         * thì lật ✅ (không gửi lại). */
         if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt, 1, false, 0, true);
         return {
           ok: false, sent: 'maybe', sendBy: 'extension', extClaimedSuccess: true,
+          extSuccessNoId: _extNoId,
           extMessageId: _extMsgId ? String(_extMsgId) : '',
           id: _extMsgId || (res.data && (res.data.timestamp || res.data.convId)) || '',
-          error: 'Extension báo success — CHƯA xác nhận tin đã tới (đang đọc lại lịch sử, không gửi lại)',
+          error: _extNoId
+            ? 'Extension báo success nhưng KHÔNG có messageId ⇒ FB trả error_payload (từ chối ngầm) — không có tin nào được tạo'
+            : 'Extension báo success — CHƯA xác nhận tin đã tới (đang đọc lại lịch sử, không gửi lại)',
         };
       }
       if (res && res.success === false) {
@@ -11049,6 +11073,13 @@
           buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
           // [v1.92.52] noAudit = true: markDelivered() ngay trên đã ghi ✅ vào sổ cho cùng lần gửi này.
           logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅', conv.id, true);
+        } else if (r && r.sent === 'maybe' && r.extClaimedSuccess && r.extSuccessNoId) {
+          /* [v1.93.14] `success` mà KHÔNG `messageId` ⇒ FB trả `error_payload` ⇒ KHÔNG có tin.
+           * Đây KHÔNG phải "chưa xác nhận" mà là BẰNG CHỨNG VẮNG MẶT ⇒ ghi sổ "FB đã từ chối"
+           * (để ca này không bị coi là "cần gửi tay" oan) và KHÔNG gửi thêm lệnh nào. */
+          try { noteFbRejected(conv.id, 'Ext báo success nhưng không có messageId = error_payload ⇒ FB từ chối'); } catch (eFbR) { /* ignore */ }
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
+          logFailGrouped(name, 'bù qua Extension: success nhưng KHÔNG có messageId ⇒ FB trả error_payload, KHÔNG có tin — không gửi lại', '❌', conv.id);
         } else if (r && r.sent === 'maybe' && r.extClaimedSuccess) {
           /* ═══ [v1.93.2] EXT BÁO `success` KHI BÙ: KHÔNG CHỐT ✅ ═══
            * Đây chính là đường sinh ra 554 ca ✅ giả của lô 21/11 20:28: r.ok=true ⇒

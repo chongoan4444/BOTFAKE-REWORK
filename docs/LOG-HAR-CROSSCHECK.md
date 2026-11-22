@@ -1778,3 +1778,73 @@ sẽ khiến ext tự dò `za.get()` — **cần đo** trước. Ghi nhận, kh�
 | `isBusiness` trong `PRELOAD_DOC_IDS` | `ee.makeInboxViewUrl(pageId, isBusiness)` — `isBusiness` **chỉ** đổi host, **và chỉ ở uiVersion 1\|2\|5** (`business.` vs `www.`). Case 3/4/6/7 **bỏ qua tham số này**. `false` của script là hợp lệ. |
 | `REPORT_EXTENSION_STATUS` / `ks()` | `ks` chỉ tồn tại để ext **tự** post danh sách host; script không gửi ⇒ không ảnh hưởng. |
 | `Z()` gọi trong `PRELOAD_DOC_IDS`/`UPLOAD_INBOX_PHOTO`/`REPLY_INBOX_PHOTO`/`SEND_COMMENT` | `sendInbox` **không** gọi `Z()`; `GET_GLOBAL_ID_FOR_CONV`/`BATCH`/`MAKE_MESSENGER_LINK` **không** gọi. Nên `GET_GLOBAL_ID_FOR_CONV` là lệnh **rẻ nhất** — dùng nó thay `MAKE_MESSENGER_LINK` để dò gid là đúng hướng. |
+
+---
+
+## 28. `success` KHÔNG có `messageId` = FB từ chối ngầm (ca thứ 3, trước đây gộp sai)
+
+### 28.1 Hợp đồng thật (đọc đủ 2 hàm, không chỉ 1)
+
+```js
+// class se (base)
+isResponseSuccess(e, t) { switch (t) {
+  case "facebook":  return e && e.payload &&
+      (e.payload.actions && e.payload.actions[0].message_id || e.payload.error_payload);
+  case "instagram": return e && e.payload && e.payload.item_token } }
+
+// class ee (InboxNormal)
+parseSuccessResponse({response:e, platform:t, globalUserId:a, igThreadId:r}) { switch (t) {
+  case "facebook": return e.payload.error_payload ? {}
+                     : { messageId: e.payload.actions[0].message_id,
+                         globalUserId: a, timestamp: e.payload.actions[0].timestamp };
+  case "instagram": return { globalUserId: r } } }
+```
+
+**Đây là chỗ tinh tế đã bị bỏ qua:**
+
+| FB trả | `isResponseSuccess` | `parseSuccessResponse` | Ext post |
+|---|---|---|---|
+| `payload.actions[0].message_id` có | `message_id` (truthy) | `{messageId, timestamp, …}` | `REPLY_INBOX_PHOTO_SUCCESS` **có** `messageId` |
+| `payload.error_payload` | **`error_payload`** (truthy) | **`{}`** | `REPLY_INBOX_PHOTO_SUCCESS` **KHÔNG** `messageId` |
+| không có cả hai | falsy | (không chạy) | `REPLY_INBOX_PHOTO_FAILURE` |
+
+⇒ `error_payload` làm `isResponseSuccess` trả **truthy** ⇒ nhánh `if (this.isResponseSuccess(H,c))`
+⇒ `b({success:!0, ...parseSuccessResponse(...)})` = `{success:true}` **rỗng ruột**.
+
+**Đo trên log:** `ACK rejected 3 552` là số ca script thấy **không có ACK**; trong đó nhiều ca
+Extension báo `success` **không có `messageId`** — vì `error_payload` đến từ **cùng** đường
+Socket/FB `#551`. Từ 3 547 ca ⚠, script trước đây gộp nhóm này vào "chưa xác nhận" ⇒
+**không ghi sổ "FB đã từ chối"** ⇒ ca đó bị tính vào "cần gửi tay" oan.
+
+### 28.2 ĐÃ SỬA
+
+`sendViaExtension` nay trả thêm cờ `extSuccessNoId`:
+```js
+const _extNoId = !_extMsgId;                     // _extMsgId = res.data.messageId
+return { ok:false, sent:'maybe', sendBy:'extension', extClaimedSuccess:true,
+         extSuccessNoId: _extNoId,
+         error: _extNoId
+           ? 'Extension báo success nhưng KHÔNG có messageId ⇒ FB trả error_payload (từ chối ngầm) — không có tin nào được tạo'
+           : 'Extension báo success — CHƯA xác nhận tin đã tới (đang đọc lại lịch sử, không gửi lại)' }
+```
+Nhánh bù (`sendViaBu`) tách riêng **trước** nhánh `extClaimedSuccess` cũ:
+```js
+} else if (r && r.sent === 'maybe' && r.extClaimedSuccess && r.extSuccessNoId) {
+  noteFbRejected(conv.id, 'Ext báo success nhưng không có messageId = error_payload ⇒ FB từ chối');
+  __botfakeTrackStatus__(conv.id, 'fail');
+  logFailGrouped(name, '… success nhưng KHÔNG có messageId ⇒ FB trả error_payload, KHÔNG có tin — không gửi lại', '❌', conv.id);
+```
+- Vẫn **đọc lại lịch sử** cho cả hai ca: `error_payload` là suy luận từ hợp đồng extension, chưa phải
+  bằng chứng đo trên hội thoại. Thấy tin ⇒ lật ✅, **không gửi lại**. Chỉ ĐỌC ⇒ vô hại.
+- Không đổi số lệnh gửi.
+
+### 28.3 Hệ quả cho số học 3 547
+
+`3 552 ACK rejected` nay tách được **3 nhóm nguyên nhân** thay vì 1:
+1. `1545041` → ext `cannotRetry` + `jc=false` ⇒ ext bỏ, **không** gửi lại (§26/§27).
+2. `error_payload` → ext báo `success` nhưng **không** `messageId` ⇒ FB từ chối ngầm (§28).
+3. `execute task timeout` → `Wc/ro` hết hạn (`ao = 35 000`, `Wc` đặt `ao − 5 000 = 30 000`)
+   ⇒ `sendInbox` trả `{success:false, retryReason:"execute task timeout"}` **trước khi gửi**.
+
+Cả 3 đều **không phải "khách chặn"** và đều **không có tin được tạo**. Nhóm 3 mới là nhóm
+"chắc chắn chưa đi" — script đã xử lý đúng từ 1.93.10 (`retryReason` được đọc).
