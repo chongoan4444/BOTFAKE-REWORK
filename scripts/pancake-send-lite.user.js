@@ -4126,6 +4126,60 @@
   // window.findGlobalIdForConv của Pancake trả null cho CẢ Extension mất kết nối,
   // adapter success:false, thiếu data.globalId và exception. Vì vậy null của khâu
   // dò chỉ có nghĩa "CHƯA RÕ", tuyệt đối không phải bằng chứng khách khóa nick.
+  /* ═══ [v1.93.15] `sync_missing_thread_id` — BỔ SUNG `thread_id` TRƯỚC KHI DÒ GID ═══
+   * ĐẶT Ở ĐÂY (ngoài `resolveGlobalId`) là BẮT BUỘC: `threadId` là **tham số** của
+   * `resolveGlobalId`, đã chốt lúc gọi ⇒ mọi nhánh bên trong đều dùng giá trị cũ. Đặt khối
+   * "nếu thiếu threadId thì sync" BÊN TRONG hàm đó là **mã chết** (đã mắc và đã sửa).
+   *
+   * Vì sao cần — nguồn `0.5.62_0/assets/background.js`, `Ee.getGlobalIdFromInbox`:
+   *   nguồn ① `Jt`: `O.get(Jt) && this.threadId`
+   *   nguồn ② `Zt`: `O.get(Zt) && t.cquick_token && this.threadKey`
+   *   nguồn ③ `findThread`: `O.get(rt,st) && (this.threadId || this.customerName)`
+   * ⇒ Thiếu `threadId` thì ① không chạy, ② không chạy, ③ chỉ còn `customerName`.
+   *
+   * VÀ ĐÂY LÀ CHỖ CHẾT NGƯỜI — `Ee.init()` sau khi lấy được kết quả luôn kiểm:
+   *   const o = bn(this.pageId) === true;
+   *   if (this.convType === "INBOX" && !this.isThreadCorrect(i) && !o)
+   *       return t("INCORRECT THREAD");
+   * với `isThreadCorrect(e){ return Array.isArray(e)||(e=[e]),
+   *         e.length === 0 || e.every(t=>!t) || !this.threadId ? false : e.includes(this.threadId) }`
+   * ⇒ `!this.threadId` ⇒ **false** ⇒ **reject `INCORRECT THREAD`** NGAY CẢ KHI nguồn ④ vừa
+   *   tìm ra thread đúng. Tức là: hội thoại thiếu `thread_id` thì extension **vĩnh viễn**
+   *   không trả được gid, dù dò ra thread. Đây là lý do nhóm `INCORRECT THREAD` và nhóm
+   *   "không có gid" trùng nhau rất nhiều.
+   *
+   * `sync_missing_thread_id` trả đúng `{thread_id, thread_key}` để lấp chỗ đó.
+   * Bằng chứng HAR `guisot.har` (2 lần, HTTP 200):
+   *   → {"success":true,"thread_id":"1474059909116660","thread_key":"t_1597054761634327"}
+   *
+   * Hàm này CHỈ ĐỌC (GET), 1 lần/hội thoại/phiên, không throw. */
+  async function ensureThreadId(full, conv, pageId) {
+    try {
+      let threadId = (full && (full.thread_id || full.threadId)) || '';
+      if (threadId) return { threadId: String(threadId), source: 'conv' };
+      const cid = (full && (full.id || full.convId)) || (conv && conv.id) || '';
+      /* Ưu tiên hàm của app nếu trang có (nó tự dispatch setThreadId + xoá cache gid sai),
+       * fallback về bản của script (gọi trực tiếp endpoint). */
+      let tid = null;
+      if (typeof window.__syncMissingThreadId__ === 'function') {
+        try { tid = await window.__syncMissingThreadId__(pageId, cid); } catch (e0) { tid = null; }
+      }
+      if (!tid) {
+        const synced = await syncMissingThreadId(pageId, cid);
+        if (synced && synced.threadId) {
+          if (full) { full.thread_id = synced.threadId; full.thread_key = synced.threadKey; }
+          if (conv) { conv.threadId = synced.threadId; conv.threadKey = synced.threadKey; }
+          return { threadId: String(synced.threadId), source: 'sync' };
+        }
+        return { threadId: '', source: 'none' };
+      }
+      if (full) full.thread_id = String(tid);
+      if (conv) conv.threadId = String(tid);
+      try { gidStats.threadIdSynced++; } catch (e1) { /* ignore */ }
+      return { threadId: String(tid), source: 'app' };
+    } catch (e) { return { threadId: '', source: 'error' }; }
+  }
+
   async function resolveGlobalId(full, threadId, cacheKey, convFromPsid, forceFind, ctx) {
     const key = (full && full.id) || cacheKey;
     const pageId = (full && full.page_id) || (full && full.pageId) || String(cacheKey || '').split('_')[0];
@@ -4370,54 +4424,7 @@
     const extStartDelayMs = discoveryPass === 2 ? 0 : 80;
     const raceTasks = [];
 
-    /* ═══ [v1.93.15] THIẾU `thread_id` ⇒ GỌI `sync_missing_thread_id` (nhánh BỔ SUNG) ═══
-     * Đây không phải "nguồn gid thứ 5": nó KHÔNG trả gid, nó trả `thread_id` + `thread_key`.
-     * Nhưng 3/4 nguồn dò gid của extension ĐỀU CẦN `threadId`:
-     *   nguồn ① `Jt`  : cần `this.threadId`
-     *   nguồn ② `Zt`  : cần `this.threadId` + `this.threadKey` + `t.cquick_token`
-     *   nguồn ③ `findThread`: cần `customerName`/`threadId` (+ `timeCursor`)
-     * ⇒ Hội thoại thiếu `thread_id` thì ①②③ cùng không chạy ⇒ chỉ còn ④ khớp-theo-TÊN
-     *   (và ④ lại rất dễ trả `INCORRECT THREAD`).
-     * Endpoint này lấp đúng chỗ đó ⇒ mở lại ①②③.
-     *
-     * CHỈ GỌI KHI THẬT SỰ THIẾU `threadId` — hội thoại có rồi thì bỏ qua (không tốn request).
-     * Trả `{threadId, threadKey}` hoặc `null`; `firstNonNull` chỉ nhận string/number nên phải
-     * bọc lại đúng kiểu ⇒ dùng hàm riêng, đẩy vào `raceTasks` dưới dạng chuỗi threadId. */
-    if (!threadId) {
-      raceTasks.push((async () => {
-        try {
-          const synced = await syncMissingThreadId(pageId, full && (full.id || full.convId) || conv.id);
-          if (!synced || !synced.threadId) return null;
-          /* Ghi lại vào bản ghi hội thoại để các nhánh SAU (kể cả lượt gửi lại) dùng đúng
-           * threadId/threadKey mới — app cũng dispatch đúng hai trường này (@985925). */
-          try {
-            if (full) { full.thread_id = synced.threadId; full.thread_key = synced.threadKey; }
-            if (conv) { conv.threadId = synced.threadId; conv.threadKey = synced.threadKey; }
-          } catch (eW) { /* ignore */ }
-          /* ═══ KHÔNG trả threadId Ở ĐÂY — VÀ PHẢI CHẠY LẠI VÒNG DÒ GID ═══
-           * `firstNonNull` coi mọi giá trị khác rỗng là **gid** ⇒ trả threadId ở đây sẽ bị
-           * dùng làm gid ⇒ gửi sai người. Nhưng nếu chỉ `return null` thì VÔ DỤNG:
-           * các nhánh gid ở TRÊN đã đóng với `threadId = ''` (chúng kiểm `if (… && threadId)`)
-           * ⇒ chúng đã return null xong rồi, không có cơ hội chạy lại.
-           * ⇒ Phải gọi lại chính vòng dò gid với `threadId` MỚI, rồi trả kết quả đó.
-           * `resolveGlobalIdForConv` là hàm hiện tại; nó KHÔNG đệ quy vô hạn vì lần 2 đã có
-           * `threadId` (điều kiện `if (!threadId)` ở trên không còn đúng).
-           * Chỉ ĐỌC ⇒ không thể sinh tin trùng. */
-          /* Chữ ký thật: `resolveGlobalId(full, threadId, cacheKey, convFromPsid, forceFind, ctx)`.
-           * `cacheKey` là khoá cache của hội thoại — dùng `full.id || conv.id` như chỗ gọi khác.
-           * `forceFind = false`: cho phép dùng cache (nếu vừa sync xong mà cache đã có thì tốt). */
-          const _ck = String((full && (full.id || full.convId)) || conv.id || '');
-          /* `resolveGlobalId` trả **string** hoặc **null** (xem các `return String(...)` / `return null`).
-           * Không bọc object ⇒ đọc thẳng. */
-          const rg = await resolveGlobalId(full, synced.threadId, _ck, conv, false, ctx);
-          if (rg && /^\d+$/.test(String(rg))) {
-            try { gidStats.threadIdSyncSaved++; } catch (eG2) { /* ignore */ }
-            return String(rg);
-          }
-          return null;
-        } catch (eS) { return null; }
-      })());
-    }
+
 
     // Nhánh 1: WebSocket PENDING_MESSAGES + wakingUpLoadThread + wsPoll 60ms (bắt ngay global_id ở <60ms khi loadThread về,
     // giữ PENDING_MESSAGES[pKey] tối đa 30s khớp findGlobalId @823397 trong _app để loadThread cuộn đủ 15 trang!)
@@ -5486,12 +5493,13 @@
     // 1) Giải quyết threadId & globalId TRƯỚC KHI upload ảnh (đúng thứ tự executeBySocketFB @976000 trong _app):
     //    Nếu chat không tìm được globalId thì dừng ngay, không lãng phí 1 lần upload ảnh reusable=false!
     if (!ctx.threadResolved) {
-      let threadId = full.thread_id || full.threadId;
-      if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
-        try { threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id); } catch (e) { /* ignore */ }
-      }
-      ctx.threadId = threadId || null;
+      /* [v1.93.15] Dùng `ensureThreadId` (thử hàm app TRƯỚC, fallback endpoint của script).
+       * Trước đây chỉ thử `window.__syncMissingThreadId__` — nếu trang KHÔNG có hàm đó
+       * (bundle khác version / chưa expose) thì im lặng bỏ qua, dù endpoint vẫn dùng được. */
+      const _ens = await ensureThreadId(full, conv, pageId);
+      ctx.threadId = _ens.threadId || null;
       ctx.threadResolved = true;
+      if (_ens.source === 'sync') { try { gidStats.threadIdSynced++; } catch (e0) { /* ignore */ } }
     }
     const threadId = ctx.threadId;
     if (!ctx.gidResolved) {
@@ -6216,14 +6224,13 @@
     const pageId = full.page_id || conv.pageId || String(conv.id).split('_')[0];
 
     if (!ctx.threadResolved) {
-      let threadId = full.thread_id || full.threadId;
-      if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
-        try {
-          threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id);
-        } catch (e) { /* ignore */ }
-      }
-      ctx.threadId = threadId || null;
+      /* [v1.93.15] Dùng `ensureThreadId` (thử hàm app TRƯỚC, fallback endpoint của script).
+       * Trước đây chỉ thử `window.__syncMissingThreadId__` — nếu trang KHÔNG có hàm đó
+       * (bundle khác version / chưa expose) thì im lặng bỏ qua, dù endpoint vẫn dùng được. */
+      const _ens = await ensureThreadId(full, conv, pageId);
+      ctx.threadId = _ens.threadId || null;
       ctx.threadResolved = true;
+      if (_ens.source === 'sync') { try { gidStats.threadIdSynced++; } catch (e0) { /* ignore */ } }
     }
     const threadId = ctx.threadId;
     if (!threadId) return { ok: false, error: 'Không tìm thấy thread_id' };
@@ -8245,9 +8252,13 @@
     const pageId = full.page_id || full.pageId || conv.pageId || String(conv.id || '').split('_')[0];
     if (!ctx.threadResolved) {
       let threadId = full.thread_id || full.threadId || conv.threadId || '';
-      if (!threadId && !ctx.fastOnly && typeof window.__syncMissingThreadId__ === 'function') {
+      /* [v1.93.15] `ensureThreadId`: thử hàm app TRƯỚC, fallback endpoint của script.
+       * Trước đây chỉ thử `window.__syncMissingThreadId__` ⇒ trang không expose hàm đó thì
+       * im lặng bỏ qua, dù endpoint vẫn dùng được (HAR `guisot.har` đã xác nhận endpoint chạy). */
+      if (!threadId && !ctx.fastOnly) {
         try {
-          threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id);
+          const _ens2 = await ensureThreadId(full, conv, pageId);
+          threadId = _ens2.threadId || '';
           if (threadId) {
             full.thread_id = threadId;
             full.threadId = threadId;

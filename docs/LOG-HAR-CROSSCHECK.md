@@ -2275,3 +2275,55 @@ chú thích có nhắc chuỗi đó nên phải bỏ comment trước), có `tou
 `rememberTouchIds(pageId, req.contentIds)`.
 
 `npm test`: **390**.
+
+---
+
+## 35. GỠ MÃ CHẾT + chứng minh `INCORRECT THREAD` là do THIẾU `thread_id`
+
+### 35.1 Sửa lỗi của chính mình ở §33
+
+Khối "nếu thiếu `threadId` thì gọi `sync_missing_thread_id`" đã được đặt **bên trong**
+`resolveGlobalId` — nơi `threadId` là **tham số đã chốt lúc gọi**. Nó **chưa bao giờ chạy**:
+`resolveGlobalId` chỉ được gọi khi phía ngoài đã có `threadId` (chỗ gọi kiểm `if (!ctx.gidResolved && ctx.threadId)`).
+
+⇒ Đó là **mã chết**. Đã gỡ và thay bằng `ensureThreadId(full, conv, pageId)` khai báo **trước**
+`resolveGlobalId`, gọi ở **cả 3** chỗ:
+- `@5499` đường Socket
+- `@6230` đường Extension
+- `@8257` đường `prepareDirectCtx` (Redux)
+
+### 35.2 `INCORRECT THREAD` là hệ quả TRỰC TIẾP của thiếu `thread_id`
+
+```js
+// Ee.init()
+const { success: r, globalId: s, threadInfoToRecheck: i } = await a, o = bn(this.pageId) === true;
+if (this.convType === "INBOX" && !this.isThreadCorrect(i) && !o)
+    return C.error(`FAIL TO GET GLOBAL ID --> INCORRECT THREAD ${this.threadId}, ${this.threadKey} VS ${i}`),
+           t("INCORRECT THREAD");
+r ? e(s) : (C.error("FAIL TO GET GLOBAL ID"), t());
+
+// isThreadCorrect(e){ return Array.isArray(e) || (e = [e]),
+//   e.length === 0 || e.every(t => !t) || !this.threadId ? false : e.includes(this.threadId) }
+```
+
+| `threadId` | `threadInfoToRecheck` từ nguồn ④ | `isThreadCorrect` | `Ee.init()` |
+|---|---|---|---|
+| `''` (thiếu) | `undefined` | `e.length===0` ⇒ **false** | **reject `INCORRECT THREAD`** |
+| `''` (thiếu) | `['x','y']` | `!this.threadId` ⇒ **false** | **reject `INCORRECT THREAD`** |
+| có | `['x','y']` chứa threadId | `true` | trả `globalId` ✅ |
+
+⇒ Hội thoại **thiếu `thread_id`** thì extension **vĩnh viễn** không trả được gid — **kể cả khi
+nguồn ④ vừa tìm ra đúng thread**. Đó là lý do nhóm `INCORRECT THREAD` (`gidStats.extIncorrectThread`)
+và nhóm "không có gid" trùng nhau rất nhiều: cùng một nguyên nhân gốc.
+
+**Trước đây script chỉ thử `window.__syncMissingThreadId__`** (hàm của app). Nếu trang không
+expose hàm đó (bundle khác version) thì **im lặng bỏ qua** — dù endpoint vẫn dùng được.
+Nay `ensureThreadId` thử hàm app **trước**, không có thì gọi `syncMissingThreadId()` của script.
+
+### 35.3 Test khoá (3 kịch bản `(M)`)
+
+- `ensureThreadId` khai báo **trước** `resolveGlobalId` — chống tái phạm mã chết;
+- `ensureThreadId` có **fallback** `syncMissingThreadId(pageId, cid)`, không chỉ hàm app;
+- **≥ 3** chỗ gọi `ensureThreadId(full, conv, pageId)` (đủ 3 đường: Socket / Ext / Redux).
+
+`npm test`: **393**.

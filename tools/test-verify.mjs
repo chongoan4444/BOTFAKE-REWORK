@@ -1898,6 +1898,26 @@ check('[api] contents/touch lấy id từ sổ theo page (touchIdsByPage)',
 check('[api] có ghi content_ids khi gửi ảnh thành công (2xx)',
   /rememberTouchIds\(pageId, req\.contentIds\)/.test(SRC), true);
 
+/* ═══ (M) [v1.93.15] `ensureThreadId` PHẢI Ở NGOÀI `resolveGlobalId` ═══
+ * `threadId` là THAM SỐ của `resolveGlobalId` (đã chốt lúc gọi) ⇒ đặt khối
+ * "nếu thiếu threadId thì sync" BÊN TRONG hàm đó là MÃ CHẾT (đã mắc một lần, đã gỡ).
+ * Vị trí đúng: khai báo hàm TRƯỚC `async function resolveGlobalId`.
+ * Và phải có fallback: trang không expose `window.__syncMissingThreadId__` thì vẫn gọi được
+ * endpoint của script (HAR `guisot.har` xác nhận endpoint trả `{thread_id, thread_key}`). */
+{
+  const iEns = SRC.indexOf('async function ensureThreadId(');
+  const iRes = SRC.indexOf('async function resolveGlobalId(');
+  check('[ext] ensureThreadId khai báo TRƯỚC resolveGlobalId (không phải mã chết)',
+    iEns > 0 && iRes > 0 && iEns < iRes, true);
+  check('[ext] ensureThreadId thử hàm app TRƯỚC, fallback syncMissingThreadId của script',
+    /ensureThreadId[\s\S]{0,900}?__syncMissingThreadId__[\s\S]{0,900}?syncMissingThreadId\(pageId, cid\)/
+      .test(stripComments(SRC)), true);
+  /* `isThreadCorrect` trả FALSE khi `!this.threadId` ⇒ ext reject "INCORRECT THREAD" ngay cả
+   * khi nguồn ④ tìm ra thread đúng. Phải có đường bổ sung thread_id, không chỉ thử hàm app. */
+  check('[ext] cả 3 chỗ resolveGlobalId đều đi qua ensureThreadId',
+    (stripComments(SRC).match(/ensureThreadId\(full, conv, pageId\)/g) || []).length >= 3, true);
+}
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
