@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.20-w200.130
+// @version      1.93.21-w200.131
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.20-W200.130'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.21-W200.131'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -10345,6 +10345,27 @@
         } catch (e0) { /* ignore */ }
         // KHÔNG dựa vào sock.instance để bỏ qua: socket chết mà instance vẫn còn thì bắn là thua.
         // initSocket của app TỰ trả về ngay khi kết nối còn đang chạy (guard isRunning()) — gọi là đủ.
+        /* ═══ [v1.93.20] SỬA LỖI "SOCKET CHƯA SYNC" — 2 khiếm khuyết cộng lại ═══
+         * LOG 14:36 (lô 563 chat, bản 1.93.19):
+         *   🔌 Chờ Socket báo sync…
+         *   ⏳ Socket CHƯA sync (0/1 page) sau **307ms** ⇒ lô đi Extension, chậm ~4×
+         *   🌊 … Socket/page active 0/0, lane chưa tạo lane · 📡 ACK OK/rejected/no-ACK 0/0/0
+         *   🧭 chọn kênh: Ext-trước(socket chưa sync) 109
+         * ⇒ CẢ LÔ đi Extension. Hậu quả kéo theo: 57 ca ⚠ "Ext success nhưng không có bằng chứng".
+         *
+         * KHIẾM KHUYẾT ①  `waitSocketsReadyForSend` chờ `socketWarmPromises[pid]` — mà promise
+         * đó `.catch(() => { delete …; return null })`. Nghĩa là khi socket lỗi/bỏ cuộc, promise
+         * RESOLVE (không reject) với `null` ⇒ `Promise.all(waits)` xong NGAY ⇒ lưới chống treo
+         * 8 000 ms không bao giờ có tác dụng, và lượt gửi chạy tiếp lúc socket CHƯA sync.
+         * Đó là lý do log ghi 307 ms thay vì 8 000 ms.
+         *
+         * KHIẾM KHUYẾT ②  MỌI lần gọi sau đều `return` sớm khi thấy promise cũ ⇒ không ai tạo
+         * promise mới ⇒ socket không bao giờ được thử kết nối lại trong lượt đó.
+         *
+         * NAY: giữ promise VÀ giữ hàm làm mới. `waitSocketsReadyForSend` gọi lại được sau khi
+         * promise cũ kết thúc để có một lần thử MỚI, có hạn chờ thật.
+         * Vẫn KHÔNG đổi quyết định gửi, KHÔNG thêm lệnh gửi nào — chỉ chờ đúng lúc socket sẵn
+         * sàng. Nếu socket thật sự hỏng thì vẫn bỏ cuộc theo hạn và đi Extension như cũ. */
         if (socketWarmPromises[pid]) return; // đang kết nối dở — khỏi làm trùng
         socketWarmPromises[pid] = Promise.resolve()
           .then(() => h.initSocket(pid))
@@ -10395,10 +10416,18 @@
     if (!pending.length) return { waited: 0, ready: pages.length, pages: pages.length };
     const t0 = Date.now();
     try { logLine('🔌 Chờ Socket báo sync (thức ngay khi xong, không có hạn chờ cứng)…'); } catch (e0) { /* ignore */ }
+    /* [v1.93.20] Chờ promise warm RỒI tự kiểm lại; chưa sync thì thử MỘT lần mới với hạn
+     * `waitForSocketSynced(2500)`. Trước đây một promise cũ resolve-bằng-null là hết đường
+     * (xem chú thích dài ở warmUpSockets) ⇒ log "sau 307ms" rồi cả lô đi Extension. */
     const waits = pending.map((pid) => {
       const warm = socketWarmPromises[pid];
-      if (warm && typeof warm.then === 'function') return Promise.resolve(warm).catch(() => null);
-      return waitForSocketSynced(h, pid).catch(() => null);
+      const first = (warm && typeof warm.then === 'function')
+        ? Promise.resolve(warm).catch(() => null)
+        : Promise.resolve(waitForSocketSynced(h, pid, 2500)).catch(() => null);
+      return first.then(() => {
+        if (isPageSocketReady(pid) || state.stopRequested) return null;   // đã sync ⇒ xong
+        return Promise.resolve(waitForSocketSynced(h, pid, 2500)).catch(() => null); // thử lần mới
+      });
     });
     // LƯỚI CHỐNG TREO (không phải hạn chờ tối ưu): nếu initSocket không bao giờ trả về thì
     // vẫn phải chạy lô, không đứng chờ vô hạn. Đường bình thường luôn thức bằng SỰ KIỆN.
@@ -10419,7 +10448,10 @@
       try { logLine('✅ Socket đã sync ' + ready + '/' + pages.length + ' page sau ' + waited + 'ms — lô này đi làn Socket trước.'); } catch (e1) { /* ignore */ }
     } else {
       try {
-        logLine('⏳ Socket CHƯA sync (' + ready + '/' + pages.length + ' page) sau ' + waited + 'ms — lô này sẽ đi Extension trước, '
+        /* [v1.93.20] Nói ĐÚNG sự thật: đây là script HẾT KIÊN NHẪN (đã thử lần mới + hạn 2,5 s),
+         * không phải "socket chậm 307 ms". Số `waited` cũ đọc lên gây hiểu sai hoàn toàn. */
+        logLine('⏳ Socket CHƯA sync (' + ready + '/' + pages.length + ' page) sau ' + waited + 'ms'
+          + ' (đã chờ + thử kết nối lại 1 lần) — lô này sẽ đi Extension trước, '
           + 'chậm hơn ~4 lần so với Socket. Bấm ⏹ Dừng + F5 rồi chạy lại NGAY sẽ lấy lại được làn Socket.');
       } catch (e2) { /* ignore */ }
     }
@@ -10885,10 +10917,35 @@
    * cổng chứng minh vắng mặt, không đổi số lần gửi của bất kỳ ca nào khác. Ca bị chặn bù
    * vẫn được chốt ❌ + vào danh sách gửi tay y như ca ❌ bình thường (không im lặng mất tin). */
   const fbRejectedIds = new Map(); // convId → { at, why } FB đã trả lời dứt khoát "chưa nhận được"
+  /* [v1.93.20] PHÂN LOẠI lý do FB báo không nhận — để TỔNG HỢP không nói sai.
+   * LOG 14:36 in `🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca nào (không có lỗi 1545041)`
+   * trong khi lô đó có 57 ca ⚠. Đường dò 1545041 chỉ canh ĐÚNG một mã; các ca dứt khoát
+   * KHÁC (noThreadIdFound — log có 1 ca Ty Do; success:false rỗng — 7 ca) không được nhắc. */
+  const fbRejectKinds = Object.create(null);
   function noteFbRejected(convId, why) {
     if (!convId) return;
     try { fbRejectedIds.set(String(convId), { at: Date.now(), why: String(why || '') }); } catch (e) { /* ignore */ }
+    try {
+      const w = String(why || '');
+      const k = /1545041|không có mặt/i.test(w) ? '1545041'
+        : /noThreadIdFound/i.test(w) ? 'noThreadId'
+        : /success:false/i.test(w) ? 'successFalseRong'
+        : /#551/.test(w) ? '551'
+        : /#10|ngoài khoảng thời gian/i.test(w) ? '10'
+        : /#100/.test(w) ? '100' : 'khac';
+      fbRejectKinds[k] = (fbRejectKinds[k] || 0) + 1;
+    } catch (eK) { /* ignore */ }
   }
+  /* [v1.93.20] "KHÔNG có ca 1545041" KHÔNG đồng nghĩa "không có ca FB từ chối nào".
+   * Nói rõ còn những ca dứt khoát KHÁC, để TỔNG HỢP không gây hiểu sai. */
+  function fbRejectKindsText() {
+    const ks = Object.keys(fbRejectKinds).filter((k) => k !== '1545041' && fbRejectKinds[k]);
+    if (!ks.length) return ' (không có ca FB từ chối nào khác)';
+    const name = { noThreadId: 'noThreadIdFound', successFalseRong: 'success:false không kèm mã',
+      '551': '#551', '10': '#10 ngoài 24h', '100': '#100', khac: 'lý do khác' };
+    return ' — nhưng CÓ ' + ks.map((k) => fbRejectKinds[k] + ' ca ' + (name[k] || k)).join(' · ');
+  }
+
   function isFbRejected(convId) {
     try { return !!(convId && fbRejectedIds.has(String(convId))); } catch (e) { return false; }
   }
@@ -11306,7 +11363,7 @@
                     ? extTry1545.streak + ' ca liên tiếp bị từ chối'
                     : 'đủ ' + extTry1545.PROBE + ' ca đã định bắn') + ', cứu 0 ⇒ phần còn lại vào danh sách gửi tay)'
                 : '')
-            : ' | 🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca nào (không có lỗi 1545041)')
+            : (' | 🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca 1545041' + fbRejectKindsText()))
           /* [v1.92.45] ĐO TRẦN THẬT CỦA LÀN EXT — để lần sau không tối ưu sai chỗ.
            * HAR làn Ext (90 lệnh / 6,74 s) cho thấy trần ~13,4 lệnh/s và đỉnh in-flight chỉ 42
            * trong khi làn đặt 48–96 ⇒ nâng sàn/trần làn KHÔNG làm lô nhanh hơn. In số đo thật

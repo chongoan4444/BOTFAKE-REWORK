@@ -623,6 +623,29 @@ check('đóng ngân sách ghi lại % để in vào log',
   check('isDefinitiveNotSent gộp khoảng trắng trước khi so (chuỗi ghép nhiều nguồn)',
     /const m = String\(msg \|\| ''\)\.replace\(\/\\s\+\/g, ' '\)/.test(stripComments(SRC)), true);
 
+  /* ═══ [v1.93.20] LÔ 563 CHAT 14:36 — CẢ LÔ ĐI EXTENSION VÌ CHỜ SOCKET HỜI HỢT ═══
+   * Log: `⏳ Socket CHƯA sync (0/1 page) sau 307ms` rồi `📡 ACK 0/0/0`,
+   *      `Socket/page active 0/0 · lane chưa tạo lane`, `chọn kênh: Ext-trước 109`.
+   * Lưới chống treo là 8 000 ms mà chỉ chờ 307 ms ⇒ promise warm resolve-bằng-null.
+   * Hệ quả: 57 ca ⚠ "Extension báo success nhưng KHÔNG có bằng chứng". */
+  const SRC_NC = stripComments(SRC);
+  check('[socket] waiting không chỉ await promise warm cũ (phải thử lần mới khi chưa sync)',
+    /return first\.then\(\(\) => \{[\s\S]{0,200}?isPageSocketReady\(pid\)[\s\S]{0,200}?waitForSocketSynced\(h, pid, 2500\)/.test(SRC_NC), true);
+  check('[socket] cảnh báo KHÔNG được nói "sau 307ms" như thể socket chậm (phải nói đã thử lại)',
+    /đã chờ \+ thử kết nối lại 1 lần/.test(SRC_NC), true);
+
+  /* ═══ [v1.93.20] 🛟 BÁO SAI NGHĨA ═══
+   * Log 14:36: `🛟 … KHÔNG có ca nào (không có lỗi 1545041)` trong khi lô có 57 ca ⚠.
+   * "Không có ca 1545041" ≠ "không có ca FB từ chối nào". */
+  check('[🛟] phân loại lý do FB từ chối (không gộp hết vào 1545041)',
+    /const fbRejectKinds = Object\.create\(null\)/.test(SRC_NC)
+    && /noThreadIdFound/.test(SRC_NC.slice(SRC_NC.indexOf('fbRejectKinds'), SRC_NC.indexOf('fbRejectKinds') + 900)), true);
+  check('[🛟] dòng TỔNG HỢP nói rõ các ca dứt khoát KHÁC khi không có 1545041',
+    /KHÔNG có ca 1545041' \+ fbRejectKindsText\(\)/.test(SRC_NC), true);
+  check('[🛟] hàm fbRejectKindsText tồn tại và nói "chưa chắc không có ca nào"',
+    /function fbRejectKindsText\(\)/.test(SRC_NC)
+    && /không có ca FB từ chối nào khác/.test(SRC_NC), true);
+
   // --- thử lại được (không thể trùng) ---
   check('1545012 ⇒ thử lại được', F.isTransientServerError('Đã xảy ra lỗi tạm thời, vui lòng thử lại.'), true);
   check('mã 1545012 trần ⇒ thử lại được', F.isTransientServerError('error 1545012'), true);

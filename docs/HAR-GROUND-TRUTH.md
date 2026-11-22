@@ -5564,6 +5564,16 @@ dù `certainFail` đã biết chắc tin chưa đi. Vá 3 chỗ (xem `LOG-HAR-CR
 Ba chỗ vá này **không phải** thay đổi riêng của bản stable — chúng ở bản gốc, nên bản stable
 hưởng nguyên (vẫn chỉ khác bản gốc ở phần log). Version đi theo base: `1.93.19-STABLE`.
 
+#### [v1.93.21] HAI BẢN VÁ TỐC ĐỘ/CHỈ-DÒ-ĐỌC Ở BẢN GỐC
+
+| # | lỗi | vá |
+|---|---|---|
+| ① | chờ Socket hời hợt: promise warm resolve-bằng-`null` ⇒ 307 ms thay vì 8 000 ms ⇒ **cả lô đi Extension** | kiểm lại bằng `isPageSocketReady` + thử kết nối lần mới (2,5 s) |
+| ② | `⏳ … sau 307ms` đọc như "socket chậm" | thêm "(đã chờ + thử kết nối lại 1 lần)" |
+| ③ | `🛟 … KHÔNG có ca nào` khi lô có 57 ca ⚠ | phân loại `fbRejectKinds`, in rõ ca dứt khoát khác |
+
+**Không đổi quyết định gửi, không thêm lệnh gửi.** Chi tiết: `LOG-HAR-CROSSCHECK.md` §52.
+
 #### ĐÃ BỎ HẲN (những thứ bản 1.93.18 đổi và làm lệch bản gốc)
 
 | thứ từng bị đổi | nay |

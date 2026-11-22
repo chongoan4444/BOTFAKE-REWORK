@@ -3421,3 +3421,93 @@ Tiết kiệm **16 s (−46 %)**. 18 s còn lại là độ trễ server — mu�
 ### Đoạn chưa sửa — nói rõ để không tưởng đã xong
 
 `sentAt` vẫn neo ở `Date.now()` lúc nhận lỗi (4 chỗ: 711, 3823, 9140, và các chỗ `fromUncertain`). Nghĩa là khi API **rất chậm**, cổng 14 s vẫn bị đẩy lùi theo độ trễ. Sửa chỗ này cần truyền mốc `apiStartedAt` xuyên qua `fireApiAndWatch → scheduleBuRetry`, ảnh hưởng 9 chỗ gọi ⇒ **tách việc riêng**, làm khi có log chứng minh ca chậm-vì-server vẫn còn đau.
+
+---
+
+## §52 — LÔ 563 CHAT 14:36: CẢ LÔ ĐI EXTENSION VÌ CHỜ SOCKET 307 ms (v1.93.21 / W200.131)
+
+### Log đo được
+
+```
+14:36:56 🔌 Chờ Socket báo sync (thức ngay khi xong, không có hạn chờ cứng)…
+14:36:56 ⏳ Socket CHƯA sync (0/1 page) sau 307ms — lô này sẽ đi Extension trước, chậm hơn ~4 lần
+14:37:00 ⚠ ×51 chat — Extension báo success nhưng KHÔNG có bằng chứng tin đã tới
+14:37:00 ⚠ ×51 chat — bù qua Extension: Extension báo success nhưng CHƯA xác nhận
+14:37:16 📡 SOCKET: ACK OK/rejected/no-ACK 0/0/0
+14:37:16 🌊 peak Socket/page active total/per-page 0/0 · limits cuối [chưa tạo lane]
+14:37:16 🧭 chọn kênh: Ext-trước(socket chưa sync) 109
+14:37:16 📊 ✅ 505/563 (89.7%) [API: 505] · ❌ 1 · ⚠ 57
+```
+
+**Không có dòng nào là "Extension hỏng".** Đọc theo thứ tự:
+
+1. Socket không sync trong 307 ms ⇒ kế hoạch kênh đảo thành `['ext','socket']`.
+2. Extension (của app Pancake — `__ExtensionAdapter__`) trả lời trong 0,8–2,4 s nên **luôn thắng** ⇒ Socket không bao giờ được thử (`ACK 0/0/0`, lane chưa tạo).
+3. Extension trả `success: true` nhưng **không kèm `messageId`** ⇒ script đúng khi không chốt ✅ (v1.93.2/1.93.14).
+4. 57 ca ⚠ được kiểm chứng nền bằng cách đọc lại lịch sử ⇒ 407 ms–31 s sau mới chốt lại: **✅ 505 → 562, ⚠ 57 → 0**.
+
+Kết luận: **cơ chế chống lặp hoạt động đúng**, nhưng có 2 lỗi hiển thị/chờ đợi bên dưới.
+
+### Lỗi ①: chờ Socket hời hợt — promise warm resolve-bằng-`null`
+
+`warmUpSockets` gắn:
+
+```js
+socketWarmPromises[pid] = … .then(…).catch(() => { delete socketWarmPromises[pid]; return null; })
+```
+
+Nghĩa là khi socket lỗi/bỏ cuộc, promise **RESOLVE** với `null`, không reject. Rồi
+`waitSocketsReadyForSend` chỉ `await` promise đó:
+
+```js
+const waits = pending.map((pid) => {
+  const warm = socketWarmPromises[pid];
+  if (warm) return Promise.resolve(warm).catch(() => null);   // ← xong ngay, không kiểm lại
+  return waitForSocketSynced(h, pid).catch(() => null);
+});
+```
+
+⇒ `Promise.all(waits)` xong ngay ⇒ **lưới chống treo 8 000 ms không bao giờ có tác dụng**, lượt gửi chạy tiếp khi socket chưa sync. Đó là lý do log ghi **307 ms** chứ không phải 8 000 ms.
+
+Lỗi phụ: mọi lần gọi sau đều `return` sớm khi thấy promise cũ ⇒ **không ai thử kết nối lại** trong lượt đó.
+
+### Lỗi ①: vá (v1.93.21)
+
+```js
+const first = (warm && typeof warm.then === 'function')
+  ? Promise.resolve(warm).catch(() => null)
+  : Promise.resolve(waitForSocketSynced(h, pid, 2500)).catch(() => null);
+return first.then(() => {
+  if (isPageSocketReady(pid) || state.stopRequested) return null;   // đã sync ⇒ xong
+  return Promise.resolve(waitForSocketSynced(h, pid, 2500)).catch(() => null); // thử lần mới
+});
+```
+
+Chờ promise warm **rồi tự kiểm lại** bằng `isPageSocketReady`; chưa sync thì thử **một lần mới** với hạn 2,5 s. Nếu socket thật sự hỏng thì vẫn bỏ cuộc theo hạn và đi Extension như cũ — **không đổi quyết định gửi, không thêm lệnh gửi nào**.
+
+### Lỗi ②: dòng cảnh báo đọc lên gây hiểu sai
+
+`⏳ Socket CHƯA sync (0/1 page) sau 307ms` — đọc như "socket chậm 307 ms", trong khi thực tế là *script đã bỏ cuộc sau 307 ms*. Nay nói rõ: `… sau 307ms (đã chờ + thử kết nối lại 1 lần)`.
+
+### Lỗi ③: `🛟 … KHÔNG có ca nào` báo sai nghĩa
+
+```
+🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca nào (không có lỗi 1545041)
+```
+
+Lô đó có **57 ca ⚠**, và log có ít nhất `❌ Ty Do — bù Extension không được: noThreadIdFound`. Câu trên đọc lên tưởng "không có gì bất thường". Nguyên nhân: đường dò `1545041` chỉ canh **đúng một mã**; các ca dứt khoát khác (`noThreadIdFound`, `success:false` rỗng) không được nhắc.
+
+Nay: phân loại theo `fbRejectKinds` và in rõ, ví dụ
+
+```
+🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca 1545041 — nhưng CÓ 1 ca noThreadIdFound · 7 ca success:false không kèm mã
+```
+
+### Kiểm
+
+`npm test` **545 ca** (+5). Mutation **5/5 bị bắt**: bỏ thử-lại-lần-mới · bỏ câu "đã thử kết nối lại" · xoá biến `fbRejectKinds` · trả lại câu báo sai nghĩa · xoá hàm `fbRejectKindsText`.
+
+### Chưa sửa — nói rõ
+
+- **`messageId` không dùng làm bằng chứng dương.** Ca `success` **có** `messageId` vẫn bị đánh ⚠ rồi mới kiểm chứng nền. Lý do không đổi: `messageId`/`timestamp` đến từ extension của app Pancake (mã đóng), chưa đối chiếu được với HAR; đổi sang "có `messageId` ⇒ ✅" là **nới** điều kiện, trái với quyết định 1.93.2 ("`res.success` không phải bằng chứng") và có nguy cơ chốt ✅ oan. Cần HAR có `REPLY_INBOX_PHOTO_SUCCESS` thật để chứng minh trước.
+- **Socket chưa sync là chuyện của app Pancake** (`__MqttHelper__.initSocket`). Script chỉ chờ đúng hơn, không ép được app kết nối nhanh hơn.
