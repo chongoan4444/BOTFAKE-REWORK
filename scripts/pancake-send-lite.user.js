@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.19-w200.129
+// @version      1.93.20-w200.130
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.19-W200.129'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.20-W200.130'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5683,6 +5683,13 @@
     }
     ctx = ctx || {};
     if (conv.type === 'comment') return { ok: false, sent: false, error: 'Socket chỉ áp dụng cho inbox' };
+    /* [v1.93.20] PHẠM VI HÀM — sửa lỗi `hasExt1545 is not defined` (775 ca của lô 5 281).
+     * Trước: hằng này được khai báo `const` trong MỘT khối if, rồi dùng ở 2 nhánh NGOÀI khối
+     * ⇒ ReferenceError ⇒ `settleAndFinalize().catch` chốt ⚠ "không rõ" cho ca mà FB đã từ chối
+     * dứt khoát (chưa gửi) ⇒ mất đường chuyển Ext, đẩy nhầm vào danh sách gửi tay.
+     * Khai báo ĐÚNG MỘT LẦN ở đây; mọi nhánh bên dưới chỉ đọc. */
+    const hasExt1545 = !!(typeof window !== 'undefined' && window.__ExtensionAdapter__
+      && typeof window.__ExtensionAdapter__.send === 'function');
     /* [v1.92.48] ĐĂNG KÝ ĐƯỜNG PHỤC HỒI ACK MUỘN cho ĐÚNG lần publish này.
      * `socketPublishSend` gọi hàm này ngay khi đã biết request_id. Đường phục hồi CHỈ ĐỌC
      * (xem chú thích ở lateApply trong socketPublishSend): ok ⇒ markDelivered; rejected ⇒
@@ -6162,7 +6169,18 @@
                * kết luận "chat này không gửi được". FB vừa TỪ CHỐI ĐỨT KHOÁT ⇒ chưa có tin nào
                * được gửi ⇒ thử Extension là AN TOÀN (không thể trùng). Log 16:11: 3 311 ca bị
                * chốt ❌ ở đúng nhánh này trong khi làn Ext trống hoàn toàn. */
-              const hasExt1545 = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
+              /* [v1.93.20] `const` NÀY TỪNG KHAI BÁO TRONG MỘT KHỐI KHÁC ⇒ 775 CA CHẾT.
+               * ĐO ĐƯỢC (log 22/11 17:37, lô 5 281 chat, bản 1.93.19): sổ kiểm chứng có đúng
+               *   775 dòng `⚠ chốt KHÔNG RÕ (vào danh sách gửi tay) · lỗi khi phân xử ACK Socket:
+               *   hasExt1545 is not defined` — và 775 là TOÀN BỘ số dòng 
+               *   "lỗi khi phân xử ACK Socket" của lô (grep: 1 lý do duy nhất, không lý do khác).
+               * GỐC: `hasExt1545` được khai báo bằng `const` BÊN TRONG `if (!sockRetryBudgetAllows…)`
+               * (dòng trên), nhưng dùng lại ở 2 nhánh NGOÀI khối đó (dòng ~6260 và ~6273) ⇒
+               * TDZ/ReferenceError. Lỗi văng ra đúng trong `settleSocketResult(...).then(...)` của
+               * `settleAndFinalize` ⇒ rơi vào `.catch` ⇒ ca đó bị chốt ⚠ "không rõ" dù sự thật là
+               * FB vừa từ chối dứt khoát (chưa gửi) ⇒ đáng lẽ đi tiếp làn Ext, thì lại vào danh
+               * sách GỬI TAY. Đây là lỗi do tôi chèn ở v1.92.41.
+               * NAY: khai báo ở phạm vi hàm `sendViaSocket` (đầu khối settle), dùng chung mọi nhánh. */
               if (hasExt1545 && extFallback1545Allowed()) {
                 /* [v1.92.66] Dùng `noteExt1545Attempt()` (đếm + đóng phanh cứng khi đủ mẫu).
                  * Bản cũ chỉ `tried++` rồi KHÔNG kiểm ngưỡng ở đây ⇒ nếu `.then` của chuỗi bù
@@ -8060,9 +8078,13 @@
   function noteSocketPageLaneOutcome(pageId, kind, latencyMs) {
     try {
       const pid = String(pageId || '');
-      const lane = pid && pageSocketLanes[pid];
-      if (!lane) return;
+      if (!pid) return;
+      /* [v1.93.20] `socketPageLaneCtl` PHẢI CÓ TRƯỚC KHI CÓ LÀN — xem chú thích dài ở
+       * `getPageSocketLane()`. Bản 1.93.19 `return` ngay khi page chưa có làn, và mọi bộ đếm
+       * (noteRecentOutcome · noteAckLatency · sockNoAckRun · ctl.noAckStreak) nằm SAU dòng đó
+       * ⇒ log lô 5 281 in `no-ACK 4884` mà `có no-ACK trong 50 ca gần nhất: 0`. */
       const ctl = socketPageLaneCtl[pid] || (socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0, noAckStreak: 0 });
+      const lane = pageSocketLanes[pid] || null;   // làn có thể chưa tồn tại — chỉ nhánh nới/hạ cần nó
       const ms = Math.max(0, Number(latencyMs) || 0);
       noteRecentOutcome(kind); // [v1.92.48] cửa sổ 50 kết quả gần nhất — điều kiện nới làn (rampAllowed)
       /* [v1.92.18] MẪU ĐỘ TRỄ ACK BỊ CẮT CỤT — SỬA GỐC.
@@ -8079,7 +8101,7 @@
         ctl.noAckStreak = 0;
         sockNoAckRun = 0; // ACK hồi ⇒ reset cầu dao
         if (pid) { delete pageAckTimeoutRun[pid]; delete pageAckHoldExpired[pid]; delete pageAckSilentRun[pid]; if (pageAckDeadAt[pid]) { socketPickDiag.probeOk++; delete pageAckDeadProbeAt[pid]; } delete pageAckDeadAt[pid]; }
-        if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX && rampAllowed()) {
+        if (lane && ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX && rampAllowed()) {
           ctl.fastOk = 0;
           const prevLimit = lane.getLimit();
           const next = lane.setLimit(prevLimit + 8);
@@ -8118,7 +8140,7 @@
           const need = ACK_DEAD_PROOF_RUN; // [v1.92.48] 3 → 5 VÀ đổi đơn vị đếm: xem pageAckSilentRun
           if (pageAckTimeoutRun[pid] >= need && !isPageAckDead(pid)) {
             pageAckDeadAt[pid] = Date.now();
-            try { if (lane.getLimit() > socketLaneFloor) lane.setLimit(socketLaneFloor); } catch (e0) { /* ignore */ }
+            try { if (lane && lane.getLimit() > socketLaneFloor) lane.setLimit(socketLaneFloor); } catch (e0) { /* ignore */ }
             logLine('🧯 Socket ACK của page ' + pid + ' coi như CHẾT (' + need
               + ' lần IM LẶNG THẬT liên tiếp — hết cả cửa sổ nghe ' + Math.round(ms / 1000) + 's mà không có gói nào)'
               + ' — bỏ Socket khỏi thứ tự làn, đi Extension/API cho tới khi hồi (dò lại sau '
@@ -8135,11 +8157,11 @@
            * làn cho phép 384. 16 làn là **1/24** cấu hình ⇒ tự bóp cả lô vì 25 ca no-ACK.
            * Nay: sàn thấp nhất 32, và ACK hồi thì nâng lại NGAY (xem nhánh 'ok' bên dưới). */
           socketLaneFloor = Math.max(SOCKET_LANE_RUNTIME_FLOOR, Math.floor(socketLaneFloor / 2));
-          try { lane.setLimit(Math.max(socketLaneFloor, Math.floor(lane.getLimit() * 0.8))); } catch (e0) { /* ignore */ }
+          try { if (lane) lane.setLimit(Math.max(socketLaneFloor, Math.floor(lane.getLimit() * 0.8))); } catch (e0) { /* ignore */ }
           logLine('🧯 Mất ACK liên tục ' + SOCK_ACK_STORM_RUN + ' tin — hạ SÀN socket xuống '
             + socketLaneFloor + '/page (ACK hồi 20 nhịp liền là nâng lại ' + SOCKET_LANE_MIN + ')');
         }
-        if (ctl.noAckStreak >= SOCKET_LANE_NOACK_BACKOFF_THRESHOLD && lane.getLimit() > socketLaneFloor) {
+        if (lane && ctl.noAckStreak >= SOCKET_LANE_NOACK_BACKOFF_THRESHOLD && lane.getLimit() > socketLaneFloor) {
           ctl.noAckStreak = 0;
           const prevLimit = lane.getLimit();
           const next = lane.setLimit(Math.max(socketLaneFloor, Math.floor(prevLimit * 0.8)));
@@ -8162,7 +8184,7 @@
         if (kind === 'rejected' && ms < fastAckMs()) {
           ctl.fastOk++;
           ctl.noAckStreak = 0;
-          if (ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX && rampAllowed()) {
+          if (lane && ctl.fastOk >= 20 && lane.getLimit() < SOCKET_LANE_MAX && rampAllowed()) {
             ctl.fastOk = 0;
             lane.setLimit(lane.getLimit() + 8);
           }
@@ -8180,7 +8202,7 @@
         const slowAckMs = Math.max(3000, Math.round(((pid && pageLastAckWait[pid]) || 0) * 1.5));
         if (ms >= slowAckMs) {
           ctl.slowAck++;
-          if (ctl.slowAck >= SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD && lane.getLimit() > socketLaneFloor) {
+          if (lane && ctl.slowAck >= SOCKET_LANE_SLOW_ACK_BACKOFF_THRESHOLD && lane.getLimit() > socketLaneFloor) {
             ctl.slowAck = 0;
             const prevLimit = lane.getLimit();
             const next = lane.setLimit(Math.max(socketLaneFloor, Math.floor(prevLimit * 0.85)));
@@ -8607,9 +8629,25 @@
   function getPageSocketLane(pageId) {
     const pid = String(pageId || '');
     if (!pid) return socketLane;
+    /* ═══ [v1.93.20] SỔ ACK CỦA PAGE PHẢI TỒN TẠI TRƯỚC KHI LÀN ĐƯỢC TẠO ═══
+     * ĐO ĐƯỢC (log 22/11 17:37:34, lô 5 281 chat, bản 1.93.19):
+     *   • 📡 `ACK OK/rejected/no-ACK 0/0/4884` — 4 884 ca, không một ACK.
+     *   • cùng dòng: `ACK p50/p90 1050/2415ms (1000 mẫu)` + `bỏ nới lane 0 lần (đuôi p95 > 2200ms: 0
+     *     · có no-ACK trong 50 ca gần nhất: 0)`.
+     *   ⇒ Mâu thuẫn trực tiếp: 4 884 no-ACK mà bộ đếm "50 ca gần nhất" = 0, còn 1 000 mẫu ACK
+     *     thì lại CÓ. Suy ra: ghi nhận ACK đang chết ở một cửa, đếm ở cửa khác.
+     * GỐC (đọc code): `recordSocketAckOutcome()` gọi `noteSocketPageLaneOutcome(pageId, kind, ms)`,
+     * và hàm đó `return` NGAY ở dòng `const lane = pid && pageSocketLanes[pid]; if (!lane) return;`
+     * — tức nó bỏ TRƯỚC mọi bộ đếm, nằm BÊN TRONG hàm. `noteRecentOutcome()` (cửa sổ 50 ca),
+     * `noteAckLatency()` (p50/p90), `sockNoAckRun`, `ctl.noAckStreak` — tất cả nằm SAU dòng return
+     * đó. Mà `socketPageLaneCtl[pid]` (thứ duy nhất được kiểm ở đây) chỉ được tạo BÊN TRONG
+     * `if (!pageSocketLanes[pid])` của hàm này ⇒ page nào lần đầu vào qua nhánh không-có-làn thì
+     * mất sạch số đo của mọi ca (dòng ✅ trong sổ cũng không có ACK nào để chấm).
+     * Nay: tách hẳn 2 việc — `socketPageLaneCtl` khởi tạo ĐỘC LẬP với làn, nên nhánh nào ghi
+     * nhận kết quả cũng tới được bộ đếm. KHÔNG đổi đường gửi, KHÔNG đổi làn. */
+    if (!socketPageLaneCtl[pid]) socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0, noAckStreak: 0 };
     if (!pageSocketLanes[pid]) {
       pageSocketLanes[pid] = makeAdaptivePriorityLane(BUS_PARALLEL_SOCKET, SOCKET_LANE_HARD_FLOOR, SOCKET_LANE_MAX);
-      socketPageLaneCtl[pid] = { fastOk: 0, slowAck: 0, noAckStreak: 0 };
     }
     return pageSocketLanes[pid];
   }
@@ -11197,6 +11235,8 @@
     loopFinished: false,
     loopFinishedAt: 0,   // [v1.92.63] Date.now() lúc phát xong — mốc của ân hạn chốt bảng
     finalLogged: false,
+    tailHoldLogged: false,  // [v1.93.20] đã in dòng "⏳ Chưa in dòng chốt" cho lượt này
+    tailWaitSince: 0,       // [v1.93.20] mốc bắt đầu thấy chuỗi bù còn chạy (tính trần hoãn)
   };
 
   function getBatchSummaryCounts() {
@@ -11222,13 +11262,38 @@
      * (dùng để chốt lượt), `pending` giữ nguyên nghĩa cũ (dùng để hiện "đang kiểm chứng nền").
      * Kiểm chứng xong mà có lật ⚠ → ✅ thì in thêm 1 dòng cập nhật, không mở lại cả bảng. */
     const pendingSend = Math.max(0, (batchStats.total || 0) - settled);
+    /* ═══ [v1.93.20] "CHƯA CÓ KẾT LUẬN" KHÔNG ĐƯỢC ĐẾM CA ⚠ ĐANG CỨU LÀ ĐÃ XONG ═══
+     * ĐO ĐƯỢC (log 22/11, lô 5 281 chat, bản 1.93.19):
+     *   • 17:37:34 in `📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ 818/5 281 (15.5%) … ⚠ 4 463`,
+     *     kèm `⏳ ĐANG CỨU tự động: 2 chat` và `⏳ TẠM ⚠ chưa kết luận: 4 461 chat`.
+     *   • Sổ kiểm chứng của CÙNG file: `✅ đánh dấu ĐÃ TỚI NƠI qua ext` = 4 844 ca, chạy từ
+     *     17:36 tới **17:45** — tức 7,5 phút SAU dòng "chốt lượt".
+     *   • Tổng theo chat: 5 241/5 281 chat có ≥1 ✅, chỉ 40 chat còn ⚠. Số thật là ~99 %, không
+     *     phải 15,5 %.
+     * GỐC (đọc code): `pendingSend` = `total − settled`, mà `settled` cộng luôn `unsure`.
+     * Chat vừa bị chốt ⚠ để vào danh sách GỬI TAY vẫn đang nằm trong `pendingBg` chờ chuỗi bù
+     * Extension (4 844 ca 🛟). Nó bị tính là "đã có kết luận" ⇒ `pendingSend` = 0 rất sớm ⇒
+     * `isDoneAll` = true ⇒ in bảng chốt + đặt `finalLogged` ⇒ mọi lần lật ⚠→✅ sau đó CHỈ in
+     * một dòng `🔎 Cập nhật` mỗi 15 s, còn bảng chốt thì đứng im ở con số 15,5 %.
+     * Hệ quả với người dùng: bảng cuối cùng — thứ duy nhất họ đọc — DẠY họ gửi tay 4 461 chat
+     * vốn đã nhận tin ⇒ đúng nguồn gửi trùng mà cả file này đang chống.
+     * NAY: `pendingSend` trừ thêm số chat ĐANG trong sổ chờ xác nhận nền (`pendingBg` — chính là
+     * sổ mà sweepBgPending/markDelivered dùng để đóng ca). Không đổi đường gửi, không đổi phán
+     * quyết, không thêm lệnh nào; chỉ đổi ĐIỀU KIỆN CHỐT BẢNG.
+     * (Vẫn có trần BG_SETTLE_DEADLINE_MS: quá hạn thì sweepBgPending đóng ca ⇒ bảng chốt được.) */
+    /* [v1.93.20] `bgUnsettled` = số chat CÒN trong sổ chờ xác nhận nền (chuỗi bù Extension /
+     * bắn lại Socket đang chạy). Đây là số mà bảng chốt PHẢI nhìn thấy — xem `tailBusy` ở
+     * `flushBatchSummaryUI()`. KHÔNG trừ nó khỏi `pendingSend` (làm vậy sẽ treo nút Chạy suốt
+     * 8 phút của đuôi bù, trái yêu cầu ưu tiên tốc độ). */
+    let bgUnsettled = 0;
+    try { bgUnsettled = Object.keys(pendingBg).length; } catch (eBg) { bgUnsettled = 0; }
     const pending = pendingSend + verifyPendingNow + extVerifyPendingNow + uncertainVerifyPendingNow;
     return {
       total: batchStats.total || 0,
       okTotal, okApi, okExt, okSocket,
       failTotal, unsureTotal,
       skipTotal: (batchStats.skippedPre || 0) + skipLateTotal,
-      settled, pending, pendingSend,
+      settled, pending, pendingSend, bgUnsettled,
     };
   }
 
@@ -11334,7 +11399,28 @@
           batchStats.lastDeltaLogAt = nowT;
         }
       }
-      if (isDoneAll && !batchStats.finalLogged && c.total > 0) {
+      /* ═══ [v1.93.20] DÒNG CHỐT KHÔNG ĐƯỢC IN KHI CÒN CHUỖI BÙ ĐANG CHẠY ═══
+       * `tailBusy` = còn chat trong sổ chờ xác nhận nền HOẶC còn ca trong danh sách gửi tay
+       * mà chuỗi bù của chính script đang chạy. Đo được ở lô 5 281 chat: dòng chốt in lúc
+       * 17:37:34, rồi 4 844 ca ⚠ lật sang ✅ ext từ 17:36 tới **17:45** ⇒ bảng chốt đứng ở
+       * 15,5 % trong khi số thật cuối cùng là 99,2 % (5 241/5 281 chat có ≥1 ✅).
+       * KHÔNG chặn `isDoneAll` (nút Chạy vẫn nhả đúng như cũ) — chỉ hoãn ĐÚNG dòng chốt, và
+       * hoãn tối đa SUMMARY_TAIL_MAX_MS để không bao giờ treo.
+       * Không đổi đường gửi, không đổi phán quyết của ca nào. */
+      const tailBusyNow = !!(c.bgUnsettled > 0 || countRescuing() > 0);
+      if (tailBusyNow && !batchStats.tailWaitSince) batchStats.tailWaitSince = Date.now();
+      if (!tailBusyNow) batchStats.tailWaitSince = 0;
+      const tailWaitedMs = batchStats.tailWaitSince ? (Date.now() - batchStats.tailWaitSince) : 0;
+      const tailHoldFinal = tailBusyNow && tailWaitedMs < SUMMARY_TAIL_MAX_MS;
+      if (isDoneAll && tailHoldFinal && !batchStats.finalLogged) {
+        // ghi nhận đúng 1 lần: vì sao bảng chưa chốt (đừng để người dùng đoán)
+        if (!batchStats.tailHoldLogged) {
+          batchStats.tailHoldLogged = true;
+          logLine('⏳ Chưa in dòng chốt: ' + c.bgUnsettled + ' chat còn trong sổ chờ xác nhận nền'
+            + ' — chuỗi bù đang chạy (không phải treo). Sẽ chốt khi xong hoặc sau tối đa '
+            + Math.round(SUMMARY_TAIL_MAX_MS / 1000) + 's.');
+        }
+      } else if (isDoneAll && !batchStats.finalLogged && c.total > 0) {
         batchStats.finalLogged = true;
         batchStats.lastLoggedCounts = { ok: c.okTotal, unsure: c.unsureTotal, fail: c.failTotal };
         try { localStorage.setItem(SUMMARY_LS_KEY, html); } catch (e) { /* ignore */ }
@@ -11546,7 +11632,20 @@
           + ' · retry lần ' + sendDiag.sockRetry + ' (cứu ' + sendDiag.sockRetryRecovered + ' · rejected '
           + sendDiag.sockRetryRejected + ' · khác ' + sendDiag.sockRetryOther           + ' · retry ảnh ' + sendDiag.photoRetry
           + ' · bỏ thử lần 2 (ngân sách) ' + sendDiag.sockRetryBudgetSkipped
-          + ' · khách không nhận được ' + sendDiag.recipientUnavailable + ' (chỉ đếm, không lưu)');
+          + ' · khách không nhận được ' + sendDiag.recipientUnavailable + ' (chỉ đếm, không lưu)'
+          /* ═══ [v1.93.20] "0 ACK" PHẢI TỰ NÓI RÕ NÓ KHÔNG PHẢI "0 TIN" ═══
+           * Lô 5 281 chat (22/11 17:37) in đúng dòng này với OK/rejected/no-ACK 0/0/4884, kèm
+           * `ACK p50/p90 1050/2415ms (1000 mẫu)` — hai nửa câu mâu thuẫn nhau, và người đọc
+           * kết luận "Socket chết, 84,5 % chưa gửi". Số thật (sổ kiểm chứng cùng file):
+           * 4 844 ca lật sang ✅ ext sau đó, cuối cùng 5 241/5 281 chat có ≥1 ✅.
+           * Nay: khi no-ACK chiếm ≥ 50 % số lần bắn Socket thì in kèm quy mô đối chứng để
+           * KHÔNG ai đọc dòng này thành "mất 4 884 tin". Chỉ in số đã có, không thêm phép đo. */
+          + (((sendDiag.socketAckOk + sendDiag.socketAckRejected + sendDiag.socketNoAck) > 0
+              && sendDiag.socketNoAck * 2 >= (sendDiag.socketAckOk + sendDiag.socketAckRejected + sendDiag.socketNoAck))
+            ? ' · ⚠ DIỄN GIẢI: no-ACK = CHƯA BIẾT (frame đã publish, chưa có /ls_resp) — KHÔNG phải'
+              + ' "chưa gửi". Đối chứng: ' + sendDiag.socketNoAck + ' ca vào kiểm chứng lịch sử, '
+              + 'số lật sang ✅ sau đó in ở dòng 🔎/🛟 và ở cuối đuôi bù.'
+            : ''));
         /* [v1.92.48] Dòng riêng cho CỬA SỔ NGHE ACK — đây là dòng để nghiệm thu lần chạy sau.
          * Đọc: hold-expired > 0 mà lateOk = 0 ⇒ hạn chờ giữ slot vẫn đang cắt (nên xem lại
          * p90/p95); lateOk > 0 ⇒ cửa sổ nghe đã cứu được đúng số tin trước đây bị bù Ext oan. */
@@ -11637,6 +11736,11 @@
    *     (xem chỗ dựng câu) ⇒ người dùng không bị mời gửi tay khi máy còn đang kiểm chứng.
    * Không thêm lệnh gửi nào, không đổi phán quyết của ca nào ⇒ không thể sinh tin trùng. */
   const SUMMARY_GRACE_MS = 2500;
+  /* [v1.93.20] TRẦN HOÃN DÒNG CHỐT khi còn chuỗi bù nền. Đuôi bù thật của lô 5 281 chat là
+   * ~460 s (⚠→✅ p90 410 s); chặn ở mức này để bảng không chốt sai 15,5 % nhưng cũng không
+   * treo báo cáo vô hạn nếu một chuỗi bù kẹt. Đây là hằng THỜI GIAN ⇒ phải đo lại sau khi
+   * vá: đọc `⏳ Chưa in dòng chốt` + giờ in dòng 📊 để biết đuôi thật còn dài bao nhiêu. */
+  const SUMMARY_TAIL_MAX_MS = 300000;
   function updateBatchSummaryUI() {
     // Trong khi phát từng chat, chưa cần quét các map pending và dựng lại tổng hợp liên tục.
     // Defer thẳng trước khi tính counter, tránh tạo thêm CPU load cho tất cả các tab.
@@ -13767,6 +13871,8 @@
     Object.keys(waveDiag).forEach((k) => { waveDiag[k] = 0; });
     Object.keys(socketPickDiag).forEach((k) => { socketPickDiag[k] = 0; });
     batchStats.finalLogged = false;
+    batchStats.tailHoldLogged = false; // [v1.93.20] trạng thái hoãn chốt phải về 0 mỗi lượt
+    batchStats.tailWaitSince = 0;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
     // Khởi động warmUpSockets + BATCH_GET_GLOBAL_ID NGAY TỪ ĐẦU (chạy song song với lọc tag + upload ảnh)

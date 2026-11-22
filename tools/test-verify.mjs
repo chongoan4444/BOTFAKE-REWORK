@@ -2450,6 +2450,28 @@ const _preSrc = stripComments(SRC);
     /\*\.crx/.test(readFileSync(path.join(ROOTD, '.gitignore'), 'utf8')), true);
 }
 
+/* ═══ [v1.93.20] CHỐNG TÁI PHÁT 2 LỖI ĐÃ GÂY RA BÁO CÁO SAI CỦA LÔ 5 281 CHAT ═══
+ * ĐO ĐƯỢC (log 22/11 17:37:34, bản 1.93.19):
+ *   • 775 dòng sổ `lỗi khi phân xử ACK Socket: hasExt1545 is not defined` ⇒ `const` khai báo
+ *     trong một khối `if` rồi dùng ở nhánh khác ⇒ ReferenceError ⇒ ca bị chốt ⚠ oan.
+ *   • `📡 ACK OK/rejected/no-ACK 0/0/4884` mà `có no-ACK trong 50 ca gần nhất: 0` ⇒
+ *     `noteSocketPageLaneOutcome()` `return` trước mọi bộ đếm khi page chưa có làn.
+ * Test dưới đây khoá đúng hai cấu trúc đó, để lần sau không ai vô tình tái tạo. */
+check('[v1.93.20] hasExt1545 khai báo Ở CẤP HÀM sendViaSocket (không trong khối if)',
+  /^ {4}const hasExt1545 = /m.test(SRC), true);
+check('[v1.93.20] hasExt1545 chỉ khai báo ĐÚNG 1 lần trong toàn file',
+  (SRC.match(/const hasExt1545 =/g) || []).length, 1);
+check('[v1.93.20] noteSocketPageLaneOutcome KHÔNG return sớm khi page chưa có làn',
+  /const lane = pageSocketLanes\[pid\] \|\| null;/.test(SRC), true);
+check('[v1.93.20] socketPageLaneCtl khởi tạo độc lập với làn (getPageSocketLane)',
+  /if \(!socketPageLaneCtl\[pid\]\) socketPageLaneCtl\[pid\] = \{ fastOk: 0, slowAck: 0, noAckStreak: 0 \};/.test(SRC), true);
+check('[v1.93.20] dòng chốt TỔNG HỢP có cổng hoãn khi chuỗi bù còn chạy',
+  /tailHoldFinal/.test(SRC), true);
+check('[v1.93.20] cổng hoãn chốt có trần thời gian (không treo báo cáo)',
+  /const SUMMARY_TAIL_MAX_MS = \d+;/.test(SRC), true);
+check('[v1.93.20] dòng 📡 tự diễn giải "no-ACK ≠ chưa gửi"',
+  /no-ACK = CHƯA BIẾT \(frame đã publish/.test(SRC), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));
