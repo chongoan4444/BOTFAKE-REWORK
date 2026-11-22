@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.21-w200.131
+// @version      1.93.22-w200.132
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.21-W200.131'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.22-W200.132'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -7876,7 +7876,7 @@
    * ("đã 2 lần chứng minh hội thoại KHÔNG có tin sau khi bắn Socket") ⇒ nhãn log đang gọi sai
    * tên một cơ chế chống mất tin thành "ACK chết". Nay đếm riêng 2 lý do, chỉ đổi NHÃN. */
   const socketPickDiag = { deadSkip: 0, deadSkipAtProbe: 0, probe: 0, probeOk: 0, notReady: 0, noGid: 0,
-    skipLost: 0, skipAckDead: 0 };
+    skipLost: 0, skipAckDead: 0, zeroAckToApi: 0 }; // [v1.93.22] số ca chuyển sang API vì page 0 ACK
   function isPageAckDead(pid) {
     const at = pageAckDeadAt[pid];
     if (!at) return false;
@@ -8808,9 +8808,33 @@
       const noSock = seq.filter((x) => x !== 'socket');
       if (noSock.length) return noSock;
     }
+    /* [v1.93.22] Ngưỡng "page này im lặng thật". Lô 22/11: 4 884 lần bắn Socket / 0 ACK ⇒
+     * 64 là mức rất rộng (vượt xa mọi nhiễu ACK chậm bình thường), không cắt sớm oan. */
+    const SOCK_ZERO_ACK_MIN = 64;
+    /* ═══ [v1.93.22] PAGE KHÔNG TRẢ ACK THÌ ĐỪNG BẮN SOCKET NỮA — ĐI API (có bằng chứng thật) ═══
+     * ĐO ĐƯỢC (lô 5 281 chat, 22/11): ba kênh trong cùng một lô:
+     *   · Socket : 4 884 lần bắn → **0 ACK** → 4 844 ca ⚠ → 4 844 ca 🛟 GỬI CỨU qua Ext
+     *   · Ext    : 4 844 lần cứu, **0 dòng chẩn đoán** của làn Ext ⇒ không có bằng chứng nào
+     *   · API    : 422 lần → **397 OK** (94 %) và mỗi ca trả `message_id` thật
+     * ⇒ Trong lô đó API là kênh DUY NHẤT có bằng chứng dương, mà script vẫn bắn Socket 4 884 lần
+     *   rồi đẩy 4 844 ca sang Ext. Đây chính là "cả lô bị dồn vào ext".
+     * NAY: page đã bắn ≥ SOCK_ZERO_ACK_MIN lần mà 0 ACK **và** API đã có ≥1 ca OK trong lượt
+     * (`sendDiag.apiSuccess > 0` — bằng chứng API đang sống) ⇒ đổi thứ tự làn sang ['api','ext'].
+     *   • Không bắn thêm lệnh nào (chỉ đổi THỨ TỰ) ⇒ không thể sinh tin trùng.
+     *   • Bỏ được vòng "Socket 6 s → ⚠ → cứu Ext" cho phần còn lại ⇒ nhanh hơn và bớt Ext.
+     *   • API trả `message_id` ⇒ dòng ✅ có bằng chứng `http200` thay vì `unknown`.
+     * Nếu API chưa từng OK (bị chặn page) thì KHÔNG đổi gì — vẫn đi Ext như cũ. */
     const hasSock = seq.indexOf('socket') > -1;
     const hasExt = seq.indexOf('ext') > -1;
     if (!hasSock || !hasExt) return seq;
+    try {
+      const _ackSt = pageSocketAckState(pageId);
+      if (_ackSt.zeroAck && _ackSt.sent >= SOCK_ZERO_ACK_MIN && seq.indexOf('api') > -1
+          && (sendDiag.apiSuccess || 0) > 0) {
+        socketPickDiag.zeroAckToApi++;
+        return ['api', 'ext'].concat(seq.filter((x) => x !== 'api' && x !== 'ext' && x !== 'socket'));
+      }
+    } catch (eZA) { /* ignore */ }
     const hint = channelHints[conv.id];
     const isSmallBatch = !!(batchStats && batchStats.total > 0 && batchStats.total <= 20);
     // Ở lô nhỏ (<=20 tin): chỉ ưu tiên Socket khi Socket của page ĐÃ ẤM SẴN (isPageSocketReady);
@@ -10605,6 +10629,8 @@
      *   unavailFast = số ca chốt "khách không nhận được" NGAY trong làn gửi (không vào cổng chờ) */
     tailChats: 0, tailMaxMs: 0, unavailFast: 0,
   };
+  /* [v1.93.22] Ba mốc của "mở màn" — xem chú thích ở `batchStats.startedAt` trong sendToAll. */
+  const sendOpenMark = { t0: 0, syncMs: 0, wave1Ms: 0 };
   const waveDiag = {
     waveSize: 0, configuredGapMs: 0, quickEnabled: false, plannedWaves: 0, wavesStarted: 0,
     gateWaitMsTotal: 0, gateWaitMsMax: 0,
@@ -11794,6 +11820,16 @@
            + ' / Socket bị né (mất tin ' + socketPickDiag.skipLost
              + ' · ACK chết ' + socketPickDiag.skipAckDead + ') ' + socketPickDiag.deadSkip
            + ' · dò lại ACK chết ' + socketPickDiag.probe + ' (hồi ' + socketPickDiag.probeOk + ')'
+           /* [v1.93.22] nghiệm thu: ca chuyển sang API vì page 0 ACK. Kỳ vọng > 0 ở lô nào có
+            * `📡 no-ACK` lớn mà `🌐 API` đã OK — đó là số ca thoát khỏi vòng "Socket→⚠→Ext". */
+           + ' · chuyển API vì page 0 ACK ' + (socketPickDiag.zeroAckToApi || 0) + ' ca'
+           + ' · ACK theo page (bắn/ACK) ' + (function () {
+             try {
+               const ks = Object.keys(pageSockSent);
+               if (!ks.length) return '—';
+               return ks.slice(0, 3).map((k) => k.slice(-6) + ':' + (pageSockSent[k] || 0) + '/' + (pageAckGot[k] || 0)).join(' ');
+             } catch (eAckP) { return '—'; }
+           })()
           + ' · lane HTTP ' + ctxFetchLane.getLimit()
           + ' / Ext dò ' + gidExtLane.getLimit()
           /* [v1.92.54] `Ext dò` ĐỨNG Y Ở SÀN 4 suốt 2 lô (13:25 và 13:31) chứng minh đường hồi
@@ -13795,6 +13831,32 @@
       clearSelection();
       logLine('🧹 Đã xóa checkbox/chọn chat ngay khi bắt đầu lượt gửi.');
     }
+    /* ═══ [v1.93.22] NHƯỜNG MỘT KHUNG HÌNH TRƯỚC KHI ĐỒNG BỘ HOÁ CẢ LÔ ═══
+     * TRIỆU CHỨNG NGƯỜI DÙNG BÁO: "cứ thấy lag lúc bắt đầu ấn Gửi là biết ngay nó sẽ dồn vào Ext".
+     * ĐO ĐƯỢC trên log lô 5 281 (22/11) — cửa sổ mở màn 17:35:58 → 17:36:05:
+     *   • 17:35:58  🚀 Bắt đầu gửi (in xong trước khi làm gì)
+     *   • 17:36:03  🌊 Wave 1/11 — qua cổng 337/500 sau **5 484 ms**
+     *   ⇒ 5,4 s đầu lô trôi qua trước khi cổng wave 1 mở.
+     *
+     * MỨC BẰNG CHỨNG — nói đúng cái đo được, không hơn:
+     *   • CHẮC: 5,4 s đầu lô không phải chờ mạng (chưa có việc nào ra khỏi cổng), và ngay sau đó
+     *     có cụm ⚠ **350 ms / 200+ ca** (17:36:05.041 → .388) = hàng trăm hạn chờ cùng hết một lúc.
+     *   • CHƯA CHỨNG MINH: rằng cả 5,4 s đó là main thread bị chặn. Log **không** in mốc "bắt đầu
+     *     khối đồng bộ" và mốc "vào wave 1" tách rời, cũng không in số dòng của #ssb-list, nên
+     *     KHÔNG loại trừ được phần lớn 5,4 s là chờ mạng (prefetch ctx/gid của wave 1 chạy trước).
+     *   • Vì vậy đây là bản vá **giả thuyết có cơ sở**, và nghiệm thu bắt buộc phải là SỐ:
+     *     bản sau phải in `⏱ mở màn: đồng bộ X ms · wave 1 Y ms` rồi so với 5 484 ms này.
+     *
+     * KHỐI ĐỒNG BỘ ĐÓ GỒM (đều trước `state.sending = true`, nên không nhường nhịp nào):
+     *   nạp `nameById` cho CẢ danh sách + `buildSendGroups` + `freezeSendChecklist()` (xoá
+     *   checkbox của mọi dòng trong #ssb-list) + thao tác DOM `clearSelection()`.
+     * NAY: nhường rAF SAU khi lô đã được chốt (`state.sending` bật ở dưới) và TRƯỚC khối đồng
+     * bộ kia ⇒ panel vẽ xong trạng thái "đang gửi" trước, rồi mới làm phần nặng. KHÔNG đổi thứ
+     * tự nghiệp vụ nào, KHÔNG bỏ việc nào, KHÔNG đổi số lần gửi.
+     * Đo nghiệm thu: `⏱ mở màn …` của lô sau so với 5 484 ms ở trên và số `noACK⚠` của wave 1.
+     * Nếu hai số đó KHÔNG giảm thì giả thuyết của tôi SAI — phải gỡ bản vá, không được giữ lại
+     * chỉ vì nó "có vẻ hợp lý" (đúng bài học §10: ba lần trước đã sai theo kiểu này). */
+    try { await nextFrame(); } catch (eF0) { /* nhường nhịp là tối ưu, không được làm hỏng lượt */ }
     const imgState = state.image || null;
     let targets = selectedSnapshot.slice();
     {
@@ -13982,6 +14044,10 @@
     });
     Object.keys(waveDiag).forEach((k) => { waveDiag[k] = 0; });
     Object.keys(socketPickDiag).forEach((k) => { socketPickDiag[k] = 0; });
+    try {
+      Object.keys(pageSockSent).forEach((k) => { delete pageSockSent[k]; });
+      Object.keys(pageAckGot).forEach((k) => { delete pageAckGot[k]; });
+    } catch (ePA) { /* ignore */ }
     Object.keys(proofStats).forEach((k) => { proofStats[k] = 0; }); // [v1.93.21]
     batchStats.finalLogged = false;
     batchStats.tailHoldLogged = false; // [v1.93.20] trạng thái hoãn chốt phải về 0 mỗi lượt
@@ -14166,6 +14232,13 @@
     waveDiag.plannedWaves = sendGroups.reduce((n2, g) => n2 + Math.ceil(g.list.length / WAVE_SIZE), 0);
     batchStats.total = totalAll;
     batchStats.startedAt = Date.now();
+    /* [v1.93.22] MỐC ĐO "MỞ MÀN" — thay cho việc đoán 5,4 s đầu lô là gì.
+     * Lô 22/11: 🚀 in 17:35:58 → 🌊 Wave 1 in 17:36:03 = **5 484 ms** mà log KHÔNG nói
+     * phần nào là khối đồng bộ của ta, phần nào là chờ mạng của wave 1. Ba mốc dưới đây
+     * tách đôi con số đó, để lần sau có số thật trước khi sửa bất cứ thứ gì. */
+    sendOpenMark.t0 = Date.now();
+    sendOpenMark.syncMs = 0;
+    sendOpenMark.wave1Ms = 0;
     resetSockRetryBudget(); // [v1.92.26] ngân sách thử lại Socket đo lại từ đầu mỗi lượt
     updateBatchSummaryUI();
     const useWaves = totalAll > WAVE_SIZE;
@@ -14498,6 +14571,11 @@
     const GATE_EXT_BACKLOG_LIMIT = 1200;
     const WAVE_API_BACKLOG_HIGH_WATER = 96;
 
+    /* [v1.93.22] MỐC A — HẾT KHỐI ĐỒNG BỘ MỞ MÀN. Từ `sendOpenMark.t0` tới đây là phần chạy
+     * đồng bộ trên main thread (nạp nameById cả danh sách, freeze checklist, dựng group…).
+     * Nếu `đồng bộ` ≈ 0 mà wave 1 vẫn 5 s thì nút cổ chai KHÔNG phải main thread — đúng thứ
+     * phải biết trước khi sửa tiếp. */
+    try { sendOpenMark.syncMs = Math.max(0, Date.now() - (sendOpenMark.t0 || Date.now())); } catch (eOM) { /* ignore */ }
     const runGroupWaves200 = async (gtext, fullList) => {
       // Điều phối worker, retry và wave ngay trong tab Pancake; không chuyển job sang service worker.
       const socketRetryQueue = [];
@@ -14980,6 +15058,17 @@
           finally {
             try { gateTimer(); } catch (eGate) { /* ignore */ }
             if (waveGateCheckFn === evaluateGate) waveGateCheckFn = null;
+          }
+          /* [v1.93.22] MỐC B — CỔNG WAVE 1 MỞ. In MỘT LẦN, ở wave 1, tách đôi con số "mở màn":
+           * `đồng bộ` (main thread trước khi phát) vs `wave 1` (tới lúc cổng mở = phần chờ
+           * mạng/prefetch + phát thật). Lô 22/11 chỉ có MỘT con số gộp 5 484 ms nên không kết
+           * luận được gì — dòng này sinh ra để lần sau kết luận được. */
+          if (waveNo === 1 && !sendOpenMark.wave1Ms) {
+            sendOpenMark.wave1Ms = Math.max(0, Date.now() - (sendOpenMark.t0 || Date.now()));
+            logLine('⏱ Mở màn: đồng bộ ' + sendOpenMark.syncMs + ' ms · wave 1 (tới lúc mở cổng) '
+              + sendOpenMark.wave1Ms + ' ms · phần còn lại '
+              + Math.max(0, sendOpenMark.wave1Ms - sendOpenMark.syncMs) + ' ms là chờ mạng/phát thật'
+              + ' — đây là số để biết "lag đầu lô" nằm ở đâu.');
           }
           if (waveStart + WAVE_SIZE < fullList.length && !state.stopRequested) {
             const smartGap = computeSmartGap();

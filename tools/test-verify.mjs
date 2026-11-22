@@ -1113,7 +1113,7 @@ check('[v1.92.55] số đo cổng nằm SAU khối chặn, TRƯỚC nhánh mở 
  * Lô 14:03: né 3 952 nhưng `hết hạn chờ 1 246` và `im lặng THẬT 0`. Cơ chế ACK-chết đòi 5 lần
  * im lặng thật liên tiếp ⇒ không chạy. Thủ phạm là `st.lost >= 2` (chứng minh MẤT TIN). */
 check('[v1.92.55] tách Socket bị né thành 2 lý do (mất tin · ACK chết)',
-  /skipLost: 0, skipAckDead: 0 \}/.test(SRC), true);
+  /skipLost: 0, skipAckDead: 0[^}]*\}/.test(SRC), true);
 /* [v1.92.62] Luật đếm ĐÃ ĐỔI: nguồn là `socketSkipReason()` (tách lostSock khỏi absent/lostExt),
  * không còn đọc trực tiếp `_st.lost` — chính `_st.lost` cũ là thứ bị cộng oan. */
 check('[v1.92.62] đếm lý do né Socket qua socketSkipReason (không đọc _st.lost trực tiếp)',
@@ -2501,6 +2501,26 @@ check('[v1.93.21b] không còn lời gọi markDelivered 2 tham số (thiếu nh
   (SRC.match(/markDelivered\([^,)]+, '[a-z]+'\)/g) || []).length, 0);
 check('[v1.93.21b] có bộ đếm ACK thật theo page (chỉ để ĐO, không chặn)',
   /pageAckGot\[_p\] = \(pageAckGot\[_p\] \|\| 0\) \+ 1/.test(SRC), true);
+
+/* ═══ [v1.93.22] NGUYÊN NHÂN "CẢ LÔ DỒN VÀO EXT" + ĐO ĐƯỢC "LAG ĐẦU LÔ" ═══
+ * ĐO LẠI lô 5 281 bằng đúng bộ lọc theo NỘI DUNG message (bộ lọc cũ chỉ lấy cột emoji nên
+ * gom oan cả 🛟 không-phải-cứu — chính chỗ làm tôi kết luận sai): 4 884 chat ⚠ no-ACK,
+ * 4 844 chat 🛟 cứu, 4 844 chat ✅ qua ext, 397 chat ✅ qua API. Giao = ĐÚNG BẰNG NHAU ⇒
+ * KHÔNG ca nào đi Ext ngoài đường "Socket không ACK → cứu Ext", và API (chỉ 422 lần thử)
+ * là kênh DUY NHẤT trong lô đó có bằng chứng dương (397/422 OK + message_id thật). */
+check('[v1.93.22] page 0-ACK thì đổi làn sang API thay vì bắn Socket tiếp',
+  /zeroAck && _ackSt\.sent >= SOCK_ZERO_ACK_MIN/.test(SRC)
+  && /return \['api', 'ext'\]\.concat/.test(SRC), true);
+check('[v1.93.22] đổi làn CHỈ khi API đã chứng minh sống (không đổi mù)',
+  /sendDiag\.apiSuccess \|\| 0\) > 0/.test(SRC), true);
+check('[v1.93.22] ngưỡng 0-ACK có khai báo thật (không dùng biến chưa định nghĩa)',
+  /const SOCK_ZERO_ACK_MIN = \d+;/.test(SRC), true);
+check('[v1.93.22] đếm số ca chuyển API vì 0-ACK để nghiệm thu',
+  /zeroAckToApi/.test(SRC) && /chuyển API vì page 0 ACK/.test(SRC), true);
+check('[v1.93.22] có mốc đo "mở màn" tách đồng bộ khỏi chờ mạng',
+  /const sendOpenMark = \{/.test(SRC) && /Mở màn: đồng bộ '/.test(SRC), true);
+check('[v1.93.22] nhường một khung hình trước khối đồng bộ mở màn',
+  /await nextFrame\(\); \} catch \(eF0\)/.test(SRC), true);
 
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);

@@ -300,3 +300,57 @@ dòng ✅ sẽ mang nhãn, và `extSuccess` mà CÓ nhãn đó thì biết ngay 
 2. Ext báo `success` **mà không `message_id`** thì **không** được `markDelivered` — chỉ ⚠ +
    kiểm chứng lịch sử (đã có sẵn đường này ở nhánh `res.success` chính, chỉ nhánh late-watch
    là chưa áp).
+
+---
+
+## §13. TÔI ĐẾM SAI LẦN THỨ TƯ — và lần này số đúng lật ngược kết luận của chính tôi
+
+### 13.1 Cái sai
+Ở §12 tôi viết *"🛟 gửi cứu = 423"* (lấy từ dòng chốt) rồi khi binning ra 4 844 lại tự nhủ
+"hai số mâu thuẫn, chưa dùng được". Sai ở chỗ: tôi để **bộ lọc theo cột emoji**, thứ gom oan cả
+những dòng 🛟 không phải dòng cứu. Đếm lại bằng **nội dung message** (không phải emoji):
+
+| nhóm (theo NỘI DUNG) | dòng | chat |
+|---|---|---|
+| `⚠ … không có ACK` | 9 743 | **4 884** |
+| `🛟 … GỬI CỨU 1 lần` | 4 844 | **4 844** |
+| `⏳ … đang bù qua Extension` | 4 844 | **4 844** |
+| `✅ … đánh dấu ĐÃ TỚI NƠI qua ext` | 4 844 | **4 844** |
+| `✅ … đánh dấu ĐÃ TỚI NƠI qua api` | 397 | **397** |
+
+Giao nhau: `🛟` ∩ `⚠no-ACK` = **4 844 / 4 844** · `✅ qua ext` ∩ `🛟` = **4 844 / 4 844** ·
+`🛟` ngoài `⚠` = **0**. Số 423 ở dòng chốt là ảnh chụp **17:37:34**, lúc công việc mới xong 15 %.
+
+### 13.2 Điều số đúng nói ra (khác hẳn điều tôi tưởng)
+**Không có ca nào đi Ext bằng đường khác.** Toàn bộ 4 844 ca đi Ext đều là
+`Socket bắn → không ACK → ⚠ → cứu Ext`. Nghĩa là **Ext không phải nguyên nhân, Ext là hệ quả
+duy nhất** — và cái phải sửa là **vì sao 4 884 lần bắn Socket không có lấy một ACK**.
+
+Đối chiếu kênh thứ ba trong **cùng lô, cùng page**:
+
+| kênh | số lần dùng | kết quả | có bằng chứng dương? |
+|---|---|---|---|
+| Socket | 4 884 | **0 ACK** | không |
+| Ext | 4 844 (cứu) | 0 dòng chẩn đoán | **không** |
+| API | 422 | **397 OK (94 %)** + `message_id` thật | **có** |
+
+⇒ Trong lô đó API là kênh duy nhất chứng minh được tin đã đi, mà script vẫn bắn Socket 4 884 lần
+rồi đẩy 4 844 ca sang Ext. Đây chính là "cả lô dồn vào ext" — và §11.1 (cổng chặn cứu) đã đúng
+khi bị gỡ: chặn cứu = bỏ đúng đường duy nhất còn chạy.
+
+### 13.3 Đã sửa (1.93.22)
+1. **`pickLaneSeq` đổi làn khi page im lặng thật**: page đã bắn ≥ 64 lần mà **0 ACK**, *và* API
+   đã có ≥ 1 ca OK trong lượt (chứng minh API sống) ⇒ làn thành `['api','ext']`. Chỉ đổi **thứ
+   tự**, không bắn thêm lệnh nào ⇒ không thể sinh tin trùng. Số ca chuyển in ở dòng 🧭
+   (`chuyển API vì page 0 ACK N ca`).
+2. **Mốc đo "mở màn"**: `⏱ Mở màn: đồng bộ X ms · wave 1 Y ms · phần còn lại Z ms`.
+3. **Nhường 1 khung hình** trước khối đồng bộ đầu lô (nạp `nameById` cả danh sách + freeze
+   checklist + dựng group).
+
+### 13.4 Phần CHƯA chứng minh — không được coi là đã xong
+- 5 484 ms của wave 1 ở lô 22/11 **chưa** chứng minh là main thread bị chặn: log không tách mốc.
+  Vì vậy (3) là **giả thuyết có cơ sở**, và nghiệm thu của nó là **hai số**: `đồng bộ` phải nhỏ
+  và `noACK⚠` của wave 1 phải giảm. Nếu hai số đó không đổi ⇒ **gỡ (3)**, đừng giữ vì "nghe hợp lý".
+- `✅ qua ext` 4 844 ca vẫn **không có bằng chứng** (§12 nhánh im lặng `sendExtWithLateWatch`).
+  §11.3 đã gắn nhãn; lô sau phải đọc `🧾 Bằng chứng … unknown`. Nếu `extSuccess` chiếm phần lớn
+  thì **mọi con số thành công của lô đó không dùng để kết luận gì** — kể cả để khen bản vá này.
