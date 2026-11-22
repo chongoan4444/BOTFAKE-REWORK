@@ -611,6 +611,18 @@ check('đóng ngân sách ghi lại % để in vào log',
   check('API timeout ⇒ KHÔNG dứt khoát', F.isDefinitiveNotSent('HTTP 504'), false);
   check('chuỗi rỗng ⇒ KHÔNG dứt khoát', F.isDefinitiveNotSent(''), false);
 
+  /* ═══ [v1.93.19] CA THẬT log 14:13 — "68 chat mà bù mất 30 s" ═══
+   * 3 chat trả HTTP 200 + success:false KHÔNG kèm message/error ⇒ chuỗi lỗi rỗng.
+   * Trước: chuỗi "HTTP 200" ⇒ isDefinitiveNotSent=false ⇒ cổng chứng minh vắng mặt
+   * 14 s (đắt) dù certainFail đã biết chắc tin CHƯA đi ⇒ tổng 35 s cho 68 chat.
+   * Nay: msg mang đủ ngữ cảnh + `_definite` lấy thêm `certainFail` ⇒ bù ngay (50 ms). */
+  check('lỗi rỗng success:false ⇒ msg nói rõ (không chỉ "HTTP 200")',
+    /success:false \(không kèm mã lỗi\)/.test(stripComments(SRC)), true);
+  check('chốt dứt khoát lấy CẢ certainFail, không chỉ isDefinitiveNotSent',
+    /const _definite = isDefinitiveNotSent\(msg\) \|\| certainFail;/.test(stripComments(SRC)), true);
+  check('isDefinitiveNotSent gộp khoảng trắng trước khi so (chuỗi ghép nhiều nguồn)',
+    /const m = String\(msg \|\| ''\)\.replace\(\/\\s\+\/g, ' '\)/.test(stripComments(SRC)), true);
+
   // --- thử lại được (không thể trùng) ---
   check('1545012 ⇒ thử lại được', F.isTransientServerError('Đã xảy ra lỗi tạm thời, vui lòng thử lại.'), true);
   check('mã 1545012 trần ⇒ thử lại được', F.isTransientServerError('error 1545012'), true);

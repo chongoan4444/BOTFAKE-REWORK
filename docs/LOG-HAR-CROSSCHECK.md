@@ -3349,3 +3349,75 @@ dòng sổ in `chốt KHÔNG RÕ … · A → B → C`. Định dạng đầu d�
 Bản này **không thêm một lệnh gửi nào**, không đổi hằng số thời gian, không đổi phán quyết
 (⚠ vẫn là ⚠, ❌ vẫn là ❌). Lô 13:46 đã đạt PHÁT **303,5/s** · đuôi **3,5 s** · tổng **7 s**
 với 941 chat — tốc độ không còn nút cổ chai nào để sửa.
+
+---
+
+## §51 — 68 CHAT MÀ BÙ MẤT 30 s: HAI HÀM PHÁN QUYẾT BẤT ĐỒNG (v1.93.19 / W200.129)
+
+### Log đo được (14:13–14:14, lô 68 chat)
+
+```
+14:13:34 🚀 Bắt đầu gửi 68 chat
+14:13:34 🌊 Wave 1/1 — cổng cuối 62/68 sau 45ms
+14:13:52 ⚠ Thu Hoài — API từ chối (HTTP 200)      ← 18 s sau khi phát
+14:13:52 ⚠ Hồng Gấm — API từ chối (HTTP 200)
+14:13:52 ⚠ Hai Tran Thi — API từ chối (HTTP 200)
+14:13:54 ⏳ [68/68] ×3 — đang bù (Socket/Extension)…
+14:14:08 🔎 [68/68] ×3 — chứng minh VẮNG MẶT ⇒ bù an toàn
+14:14:08 📊 XONG: ✅ 68/68 (100.0%) · ⚠ 0 · ⏱ 35s · 1.9 tin/giây
+```
+
+**Phát lệnh chỉ 0,2 s. 68 tin đều tới nơi. Nhưng người dùng chờ 35 s — gấp 175 lần thời gian phát.**
+
+### Phân rã 35 s
+
+| đoạn | thời gian | ai gây ra |
+|---|---|---|
+| phát 68 lệnh | 0,2 s | script (nhanh) |
+| chờ 3 ca API trả lời | **18 s** | server Pancake (treo gần trần 20 s của `timedFetch`) |
+| cổng chứng minh vắng mặt | **16 s** | **script — chỗ sửa được** |
+
+### Nguyên nhân: `msg` rỗng ⇒ hai hàm phán quyết bất đồng
+
+Dòng 3725 (cũ) dựng chuỗi lỗi:
+
+```js
+let msg = (data && (data.message || data.error)) || ('HTTP ' + res.status);
+```
+
+API trả `HTTP 200` + `success:false` mà **không kèm `message` lẫn `error`** ⇒ `msg = "HTTP 200"`.
+
+Rồi ba hệ quả nối tiếp:
+
+1. `certainFail = isCertainHttpNotSent(...)` = **true** (vì `data.success === false`) — code *đã biết* chắc chắn tin chưa đi.
+2. `_definite = isDefinitiveNotSent("HTTP 200")` = **false** — hàm này chỉ nhận `#551` / `#10` / `#100` / `1545012` / `noThreadIdFound`, không nhận `"HTTP 200"`.
+3. ⇒ `scheduleBuRetry(..., { ambiguous:true, definitiveNotSent:false })` ⇒ vào **cổng 14 s** dù không cần.
+
+Cộng thêm defect thứ tư: `at` của cổng lấy `sentAt: Date.now()` **tại lúc nhận lỗi**, không phải lúc bắt đầu gửi ⇒ `target = at + 14000` bị đẩy lùi đúng bằng độ trễ server (18 s ở đây).
+
+**Đối chứng §49:** bản vá 1.93.17 (`definitiveNotSent` bỏ cổng) hoạt động *chỉ khi* chuỗi lỗi chứa mã. Ca chuỗi rỗng đi đúng đường chậm nhất.
+
+### Ba chỗ vá (v1.93.19)
+
+| # | chỗ | vá |
+|---|---|---|
+| ① | dòng 3725 | `msg` mang đủ ngữ cảnh: `HTTP 200 · success:false (không kèm mã lỗi)` |
+| ② | dòng 3818 | `_definite = isDefinitiveNotSent(msg) \|\| certainFail` — dùng **cả hai** hàm phán quyết |
+| ③ | `isDefinitiveNotSent` | gộp khoảng trắng `.replace(/\s+/g,' ')` trước khi so (chuỗi ghép nhiều nguồn) |
+
+**Không nới điều kiện gửi.** `definitiveNotSent` chỉ bỏ *đoạn chờ*, không bỏ lần bù — 3 lớp chống lặp ở `scheduleBuRetry` còn nguyên: `acquireOutbound` giữ khoá ngoài, `triedCh`/`buRetryDone` chặn thử một kênh hai lần, `deliveredIds` chặn chat đã có xác nhận.
+
+### Kết quả mô phỏng đúng ca log 14:13
+
+| | 1.93.18 | 1.93.19 |
+|---|---|---|
+| phát 68 lệnh | 0,2 s | 0,2 s |
+| chờ API (server) | 18 s | 18 s |
+| cổng | 16 s | **0** (bù ngay, delay 50 ms) |
+| **tổng** | **35 s** | **~19 s** |
+
+Tiết kiệm **16 s (−46 %)**. 18 s còn lại là độ trễ server — muốn bỏ phải hạ trần `timedFetch` 20 s, **không làm** (đã có ràng buộc không nới timeout).
+
+### Đoạn chưa sửa — nói rõ để không tưởng đã xong
+
+`sentAt` vẫn neo ở `Date.now()` lúc nhận lỗi (4 chỗ: 711, 3823, 9140, và các chỗ `fromUncertain`). Nghĩa là khi API **rất chậm**, cổng 14 s vẫn bị đẩy lùi theo độ trễ. Sửa chỗ này cần truyền mốc `apiStartedAt` xuyên qua `fireApiAndWatch → scheduleBuRetry`, ảnh hưởng 9 chỗ gọi ⇒ **tách việc riêng**, làm khi có log chứng minh ca chậm-vì-server vẫn còn đau.

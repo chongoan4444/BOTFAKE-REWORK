@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.18-w200.128
+// @version      1.93.19-w200.129
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.18-W200.128'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.19-W200.129'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3722,7 +3722,17 @@
         resetPageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
         markDelivered(conv.id, 'api'); postSendSideEffects(conv); return;
       } // đã đến nơi — im lặng
-      let msg = (data && (data.message || data.error)) || ('HTTP ' + res.status);
+      /* [v1.93.19] SỬA GỐC CA "68 chat / 35 s" (log 14:13 — lô 68 chat, tổng 35 s, mà 18 s
+       * nằm chờ API + 16 s nằm ở cổng chứng minh vắng mặt CHỈ VÌ 3 chat).
+       * Log ghi `⚠ API từ chối (HTTP 200)` — tức `msg` RỖNG: server trả `success:false` mà
+       * không kèm `message`/`error`. Hệ quả kép:
+       *   ① `isDefinitiveNotSent('HTTP 200')` = false ⇒ rơi vào cổng 14 s (đắt) dù
+       *      `certainFail` = true, tức code ĐÃ biết "tin chắc chưa đi";
+       *   ② `noteFbRejected` không chạy ⇒ mất dấu vết "FB đã báo không nhận";
+       *   ③ đọc log tưởng request THÀNH CÔNG (HTTP 200) trong khi thực tế bị từ chối.
+       * Nay: nói đúng sự thật trong chuỗi, để cả log lẫn hàm phán quyết cùng hiểu. */
+      let msg = (data && (data.message || data.error)) || ('HTTP ' + res.status
+        + ((data && data.success === false) ? ' · success:false (không kèm mã lỗi)' : ''));
       if (res.status === 401 || res.status === 403) capturedToken = null;
       const nm = conv.name || conv.id;
       const certainFail = isCertainHttpNotSent(res.status, data, parsed);
@@ -3814,7 +3824,14 @@
          * ⇒ #551 là câu trả lời của KÊNH API (endpoint messaging/send/), KHÔNG phải bản án cho
          *   khách: Extension đi qua tab Facebook thật vẫn gửi được. Chốt ❌ ở đây là MẤT TIN.
          * Giữ nguyên: vẫn bù kênh khác như cũ. Ghi lại để lần sau không "tối ưu" lại lần nữa. */
-        const _definite = isDefinitiveNotSent(msg);
+        /* [v1.93.19] `certainFail` (isCertainHttpNotSent) và `isDefinitiveNotSent` là HAI
+         * hàm phán quyết song song, cùng khẳng định "server đã trả lời và tin CHƯA đi"
+         * (theo hợp đồng app: success:false ⇒ chưa tạo tin). Nhưng chỉ hàm thứ hai được
+         * dùng để bỏ cổng 14 s ⇒ mọi ca `success:false` KHÔNG kèm mã lỗi (log 14:13:
+         * 3/3 ca, chuỗi rỗng) bị đẩy vào cổng đắt dù code đã biết chắc. Nay lấy CẢ HAI.
+         * Không nới điều kiện gửi: `definitiveNotSent` chỉ bỏ ĐOẠN CHỜ, không bỏ lần bù
+         * (xem 3 lớp chống lặp ở scheduleBuRetry). */
+        const _definite = isDefinitiveNotSent(msg) || certainFail;
         if (_definite) noteFbRejected(conv.id, 'API từ chối: ' + clip(msg, 70));
         logLine('⚠ ' + nm + ' — API từ chối (' + clip(msg, 90) + ')'
           + (win ? ' — ngoài cửa sổ 24h' : ''));
@@ -4023,8 +4040,11 @@
   }
 
   function isDefinitiveNotSent(msg) {
-    const m = String(msg || '');
-    if (!m) return false;
+    /* [v1.93.19] Gộp khoảng trắng trước khi so: chuỗi lỗi hay được ghép từ nhiều nguồn
+     * ("Ext: … | api: …", mảnh JSON, xuống dòng của server) nên "Ngoài  khoảng  thời gian"
+     * hai dấu cách từng không khớp ⇒ mất quyền bỏ cổng 14 s. */
+    const m = String(msg || '').replace(/\s+/g, ' ');
+    if (!m.trim()) return false;
     if (/(#551)|Người này hiện không có mặt|không có mặt/i.test(m)) return true;              // 1545041
     if (/ngoài khoảng thời gian cho phép|outside.*window/i.test(m)) return true;             // (#10) cửa sổ 24h
     if (/kiểm soát thread|đang kiểm soát/i.test(m)) return true;                             // (#10) 2018300

@@ -5534,6 +5534,17 @@ Cuối lượt chỉ còn:
 📊 XONG: ✅ 460/1753 tin (26.2%) · ❌ 2 · ⚠ 1291 · ⏱ 10s · 175.3 tin/giây
 ```
 
+#### [v1.93.19] SỬA Ở **BẢN GỐC** — một lỗi tốc độ thật (khác hẳn "làm lệch giao diện")
+
+Lô 68 chat 14:13: phát lệnh 0,2 s mà người dùng chờ **35 s**. Nguyên nhân không phải tốc độ gửi
+mà là **hai hàm phán quyết bất đồng**: API trả `HTTP 200` + `success:false` **không kèm mã lỗi**
+⇒ `msg = "HTTP 200"` ⇒ `isDefinitiveNotSent()` = false ⇒ rơi cổng chứng minh vắng mặt 14 s,
+dù `certainFail` đã biết chắc tin chưa đi. Vá 3 chỗ (xem `LOG-HAR-CROSSCHECK.md` §51), **giảm
+16 s (−46 %)** trên đúng ca đó.
+
+Ba chỗ vá này **không phải** thay đổi riêng của bản stable — chúng ở bản gốc, nên bản stable
+hưởng nguyên (vẫn chỉ khác bản gốc ở phần log). Version đi theo base: `1.93.19-STABLE`.
+
 #### ĐÃ BỎ HẲN (những thứ bản 1.93.18 đổi và làm lệch bản gốc)
 
 | thứ từng bị đổi | nay |
