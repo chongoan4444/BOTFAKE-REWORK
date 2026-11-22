@@ -2270,6 +2270,52 @@ const _preSrc = stripComments(SRC);
   check('[551] BU_PROOF_WAIT_MS vẫn 14 000 cho ca suy luận', /const BU_PROOF_WAIT_MS = 14000;/.test(_preSrcFor551), true);
 }
 
+/* ═══ (AD) [v1.93.18] KHÔNG ĐƯỢC CHỐT ⚠ MÀ KHÔNG GHI LÝ DO (§50) ═══
+ * Cơ sở ĐO (log 22/11 13:46:56, 941 chat, bản 1.93.17): `ACK rejected 730 − 9 ca bù #551 = 721`
+ * = ĐÚNG số `⚠ Không rõ: 721`. Trong sổ kiểm chứng, 721 ca đó có ĐÚNG MỘT dòng ⚠ với lý do
+ * RỖNG, 0 dòng 🛟/❌/🔁, và **0 dòng console** ⇒ không truy được nguyên nhân; người dùng phải
+ * mở tay từng chat. Ba bất biến dưới đây khoá đúng lỗ đó. */
+{
+  const _s50 = stripComments(SRC);
+  // (1) .catch phân xử ACK: phải in log + truyền lý do + nhả khoá outbound
+  const iCatch = _s50.indexOf('catch((eSettle) => {');
+  check('[§50] có nhánh .catch(eSettle) của settleAndFinalize', iCatch > 0, true);
+  /* Cắt ĐÚNG thân nhánh: từ `.catch((eSettle)` tới `void holdLaneForAck` (mốc kết thúc khối).
+   * Cửa sổ N ký tự đã tự lừa một lần: `releaseOutbound` nằm SAU 3 000 ký tự nên mutation xoá
+   * nó vẫn xanh. Mốc theo CẤU TRÚC, không theo số ký tự (bài học §7/§M3 lần trước). */
+  const _iEnd = _s50.indexOf('void holdLaneForAck', iCatch);
+  const blk = (iCatch > 0 && _iEnd > iCatch) ? _s50.slice(iCatch, _iEnd) : '';
+  check('[§50] nhánh đó PHẢI gọi logFailGrouped (bản cũ: 0 dòng console)', /logFailGrouped\(/.test(blk), true);
+  check('[§50] nhánh đó PHẢI truyền lý do cho __botfakeTrackStatus__',
+    /__botfakeTrackStatus__\(conv\.id, 'uncertain', why\)/.test(blk), true);
+  check('[§50] nhánh đó PHẢI nhả khoá outbound (bản cũ: rò khoá ⇒ chat không bao giờ được bù)',
+    /releaseOutbound\(conv\.id\)/.test(blk), true);
+  // (2) KHÔNG chỗ nào được chốt 'uncertain' mà không kèm lý do
+  const noReason = (_s50.match(/'uncertain'\);/g) || []).length;
+  check('[§50] 0 chỗ gọi \'uncertain\' thiếu lý do (mỗi lý do là 1 mắt xích truy vết)', noReason, 0);
+  const withReason = (_s50.match(/'uncertain',\s*(?:'|"|\w)/g) || []).length;
+  check('[§50] có ≥14 chỗ truyền lý do cho ca ⚠', withReason >= 14, true);
+  // (3) lý do phải được NỐI THÊM, không bị lần gọi không-lý-do sau xoá trắng
+  /* Dạng `window.__botfakeTrackStatus__ = function (…) {…}` — KHÔNG có `function <tên>(`
+   * nên `extractFn` không dùng được (bài học §19). Cắt theo index của phép gán. */
+  const iT = _s50.indexOf('__botfakeTrackStatus__ = function');
+  const fnT = iT > 0 ? _s50.slice(iT, iT + 2600) : '';
+  check('[§50] có sổ uncertainReasonById', /uncertainReasonById\s*=\s*\{\}/.test(_s50), true);
+  check('[§50] __botfakeTrackStatus__ nối thêm lý do vào sổ (không ghi đè)',
+    /uncertainReasonById\[convId\]/.test(fnT), true);
+  check('[§50] sổ lý do có đếm trùng (indexOf) — không lặp cùng một câu',
+    /_whyArr\.indexOf\(_whyNew\)/.test(fnT), true);
+  /* Dòng sổ phải dùng CẢ CHUỖI ĐÃ NỐI, không phải `reason` thô. Bản 1.93.17 in
+   * `(reason ? ' · ' + String(reason) : '')` ⇒ lần gọi không-lý-do sau cùng xoá trắng.
+   * Nếu mutation quay lại dạng đó mà test vẫn xanh thì toàn bộ bản vá §50 là vô nghĩa. */
+  check('[§50] dòng sổ dùng chuỗi ĐÃ NỐI (_whyArr.join), không dùng reason thô',
+    /_whyArr\.length \? ' · ' \+ _whyArr\.join\(/.test(fnT), true);
+  check('[§50] KHÔNG còn dạng ghi đè `(reason ? \' · \' + String(reason) : \'\')`',
+    /\(reason \? ' · ' \+ String\(reason\) : ''\)/.test(fnT), false);
+  check('[§50] dòng sổ vẫn bắt đầu bằng "chốt KHÔNG RÕ" (định dạng .txt không đổi)',
+    /chốt KHÔNG RÕ \(vào danh sách gửi tay\)/.test(fnT), true);
+}
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));

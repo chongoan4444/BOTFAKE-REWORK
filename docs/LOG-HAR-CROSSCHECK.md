@@ -3279,3 +3279,73 @@ Không đổi: `BU_ABSENT_CAP 600` · `BU_ENGINE_DEAD_STREAK 12` · `BU_PROOF_WA
   không ảnh: **27 s → ≈ 12 s**.
 * `chặn lặp` phải **vẫn 0** (nếu khác 0 sau bản vá ⇒ tin lặp thật, hoàn nguyên ngay).
 * Số ✅ không được **giảm** so với 454/456. Giảm ⇒ đã cắt nhầm lần bù.
+
+---
+
+## §50 — 721 CA CHỐT ⚠ MÀ SỔ KHÔNG GHI MỘT CHỮ (v1.93.18 / W200.128)
+
+### 50.1 Số đo khớp chính xác từng ca (log 22/11 13:46:56, 941 chat, bản 1.93.17)
+
+```
+📡 ACK OK/rejected/no-ACK   211 / 730 / 0
+📊 ⚠ Không rõ: 721
+730 − 9 (ca bù #551) = 721   ← ĐÚNG BẰNG số ⚠
+✅ 211 + ❌ 9 + ⚠ 721 = 941/941
+```
+
+Trong sổ kiểm chứng, 721 ca đó có **đúng MỘT dòng ⚠, lý do RỖNG**. Quét toàn file:
+
+| dấu cần thấy | số dòng |
+|---|---|
+| `🛟` (chuyển Ext) | **0** |
+| `#551` trong chuỗi của ca ⚠ | **0** |
+| `🔁`, `🚫` | **0** |
+| `xác nhận nền` (console + sổ) | **0** |
+| `không rõ tin đã đi chưa` | **0** |
+| `lỗi nội bộ` | **0** |
+
+⇒ 721 ca **đi qua một chỗ chốt ⚠ không in log, không ghi lý do**. Mọi đường khác đều
+`logFailGrouped` + `auditPush` kèm `reason`.
+
+### 50.2 Nguyên nhân — `.catch` của `settleAndFinalize`
+
+```js
+.catch(() => {
+  sockFiredPending.delete(conv.id);
+  window.__botfakeTrackStatus__(conv.id, 'uncertain');   // ← không log, không reason
+});                                                        // ← và KHÔNG releaseOutbound
+```
+
+Hai lỗi trong 5 dòng:
+
+1. **Không in log, không lý do** ⇒ sổ có dòng ⚠ trống, người dùng phải mở tay từng chat.
+2. **Rò khoá `outboundLock`.** Mọi nhánh anh em trong `finalizeSockBg` đều gọi
+   `releaseOutbound(conv.id)` (6 lần trong khoảng 6130–6270). Nhánh này thì không ⇒
+   `acquireOutbound()` trả `false` cho mọi lần sau của chat đó ⇒ **không bao giờ được bù
+   trong lượt**, và vì không có dòng log nên không ai thấy. Đây đúng là "lỗi im lặng" mà
+   chú thích ở `releaseOutboundIfFinal` cảnh báo.
+
+### 50.3 Lỗi thứ hai — `__botfakeTrackStatus__` XOÁ TRẮNG lý do
+
+Hàm này chạy nhiều lần cho cùng một chat. Chỉ **4/14** chỗ gọi truyền `reason`; 10 chỗ còn
+lại gọi `('uncertain')` trần. Dòng sổ lại in `(reason ? ' · ' + reason : '')` ⇒ **lần gọi
+sau không lý do xoá sạch lý do lần trước đã ghi đúng**.
+
+Nay: `uncertainReasonById[convId]` là mảng mắt xích (tối đa 4, khử trùng bằng `indexOf`),
+dòng sổ in `chốt KHÔNG RÕ … · A → B → C`. Định dạng đầu dòng **không đổi** (`.txt` cũ vẫn đọc được).
+
+Đã bổ sung lý do cho **cả 14 chỗ** gọi `'uncertain'` (trước: 4).
+
+### 50.4 Tiêu chí nghiệm thu lần chạy sau
+
+* Sổ `.txt`: **0 dòng ⚠ có lý do rỗng**. Nếu còn ⇒ có chỗ gọi mới chưa truyền lý do.
+* Câu `· (không chỗ gọi nào ghi lý do)` là dấu hiệu lỗi — phải **không bao giờ** xuất hiện.
+* Chuỗi lý do phải đọc được nguyên nhân, vd:
+  `chốt KHÔNG RÕ (vào danh sách gửi tay) · lỗi khi phân xử ACK Socket: … → giữ ⚠, KHÔNG bắn thêm`.
+* Tổng `✅ + ❌ + ⚠` phải bằng số chat; `⚠` phải giải thích được bằng `ACK rejected − ca bù`.
+
+### 50.5 Không đụng gì tới tốc độ
+
+Bản này **không thêm một lệnh gửi nào**, không đổi hằng số thời gian, không đổi phán quyết
+(⚠ vẫn là ⚠, ❌ vẫn là ❌). Lô 13:46 đã đạt PHÁT **303,5/s** · đuôi **3,5 s** · tổng **7 s**
+với 941 chat — tốc độ không còn nút cổ chai nào để sửa.

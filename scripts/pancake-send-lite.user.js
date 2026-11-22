@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.17-w200.127
+// @version      1.93.18-w200.128
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.17-W200.127'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.18-W200.128'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -3835,14 +3835,14 @@
         && String(laneRes.error || '').indexOf('Lỗi kênh:') === 0
         && !deliveredIds[conv.id] && !finalFailedIds[conv.id] && !uncertainIds[conv.id]) {
         sendDiag.apiUnknown++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'API không rõ (lỗi mạng/quá hạn)');
         logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng/quá hạn) — kiểm chứng lịch sử trước khi bù');
         scheduleUncertainVerify(conv, text, photo, Date.now(), 'lỗi mạng/quá hạn');
       }
     }).catch(() => {
       if (myRun !== runSeq) return;
       sendDiag.apiUnknown++;
-      if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+      if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'API không rõ (lỗi mạng)');
       logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng) — kiểm chứng lịch sử trước khi bù');
       scheduleUncertainVerify(conv, text, photo, Date.now(), 'lỗi mạng');
     });
@@ -6117,7 +6117,7 @@
           }
           if (res && (res.uncertain || res.sent === 'maybe')) {
             if (res.noAck) scheduleSocketVerify(conv, text, photo, res.publishedAt || (Date.now() - 15000));
-            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'xác nhận nền: ' + clip(String(res.error || 'Socket không rõ kết quả'), 70));
             logFailGrouped(nm, '' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)', '⚠', conv.id);
             /* [v1.92.66] GIỮ KHOÁ ở nhánh ⚠ — CỐ Ý, và đây là điểm khác bản nháp đầu của tôi.
              * Ca ⚠ nghĩa là CHƯA BIẾT tin đã đi hay chưa; nhả khoá lúc này cho phép làn Ext/API
@@ -6292,10 +6292,30 @@
           settleOnce.used = true;
           settleSocketResult(rawKind)
             .then((res) => { if (myRun === runSeq) finalizeSockBg(res); })
-            .catch(() => {
+            .catch((eSettle) => {
               sockFiredPending.delete(conv.id);
-              // lỗi khi chờ ACK Socket: phải chốt ⚠, chỉ xóa cờ chờ thì chat kẹt pending vĩnh viễn
-              if (myRun === runSeq && window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+              /* ═══ [v1.93.18] CHỖ NÀY TỪNG LÀ LỖ ĐEN: 721 CA CỦA LÔ 13:46 BIẾN MẤT KHÔNG DẤU ═══
+               * ĐO ĐƯỢC (log 22/11 13:46:56, lô 941 chat, bản 1.93.17):
+               *   • 📡 `ACK OK/rejected/no-ACK 211/730/0` · TỔNG HỢP `⚠ Không rõ: 721`
+               *   • 730 rejected − 9 ca bù #551 = **721 = đúng số ⚠**
+               *   • Trong sổ kiểm chứng: 721 ca đó có ĐÚNG MỘT dòng ⚠, **lý do RỖNG**;
+               *     0 dòng 🛟, 0 dòng ❌, 0 dòng 🔁, và **0 dòng console** — grep
+               *     `xác nhận nền`, `không rõ tin đã đi chưa`, `lỗi nội bộ` đều = 0.
+               * ⇒ Mọi đường chốt ⚠ khác đều in log + ghi lý do; chỉ nhánh này thì không.
+               * Hệ quả thật: không truy được 721 ca "cần gửi tay" là khách chặn hay lỗi kênh,
+               * và người dùng phải mở tay từng chat để biết.
+               * NAY: in log + truyền lý do + NHẢ KHOÁ outbound (xem dưới). */
+              const why = 'lỗi khi phân xử ACK Socket: ' + clip(String(eSettle && eSettle.message || eSettle || 'không rõ'), 80);
+              /* RÒ KHOÁ OUTBOUND — nhánh anh em nào cũng nhả, riêng nhánh này thì không.
+               * `finalizeSockBg` (đường .then) nhả ở MỌI lối ra; `outboundLock` mà còn thì
+               * `acquireOutbound()` trả false cho mọi lần sau ⇒ chat đó không bao giờ được bù
+               * trong lượt (lỗi im lặng: không dòng log, chỉ là chat biến mất). Nhả là an toàn:
+               * `acquireOutbound()` tự chặn bằng `deliveredIds`, nên không thể sinh tin trùng. */
+              if (myRun === runSeq) {
+                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', why);
+                logFailGrouped(conv.id ? (conv.name || conv.id) : '', why + ' — giữ ⚠, KHÔNG bắn thêm (chống trùng)', '⚠', conv.id);
+              }
+              if (!deliveredIds[conv.id]) releaseOutbound(conv.id);
             });
           void holdLaneForAck; // tài liệu hoá ý định; việc nhả ghế do `pageLane` tự làm
         };
@@ -8839,7 +8859,7 @@
             } catch (e0) { /* rơi xuống xử lý cũ */ }
           }
           if (r.uncertain) {
-            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'không rõ: ' + clip(String(r.error || ''), 70));
             logFailGrouped(nm2, '' + r.error + ' (không rõ — không gửi thêm)', '⚠', conv.id);
           } else {
             if (r.windowClosed) windowBlocked++;
@@ -10774,6 +10794,10 @@
   }
   const finalFailedIds = {}; // convId → đã thất bại hẳn (hết kênh hoặc khách khóa nick)
   const uncertainIds = {};   // convId → không rõ kết quả ('maybe')
+  /* [v1.93.18] LÝ DO của ca ⚠ — nối thêm, không ghi đè (xem __botfakeTrackStatus__).
+   * Trước bản này sổ chỉ có MỘT lý do và lần gọi không-lý-do sau cùng xoá trắng nó
+   * ⇒ 721 ca của lô 13:46 không truy được nguyên nhân. Tối đa 4 mắt xích/chat. */
+  const uncertainReasonById = {};
   const skippedLateIds = {}; // convId → bỏ qua lúc gửi (tag cấm / icon điện thoại vừa gắn)
   // Sổ tin bắn-nhả đang chờ xác nhận nền + WATCHDOG: quá 90s mà không kênh nào chốt
   // (fetch treo, ACK mất, bù văng lỗi…) → tự chốt ⚠ để pending về 0: TỔNG HỢP luôn kết thúc,
@@ -11663,8 +11687,19 @@
        * Hệ quả thật: đây đúng là câu hỏi treo từ lô 08:32 (570 ca ⚠) — KHÔNG truy được
        * nguồn vì ca ⚠ không có dòng sổ. Nay ghi sổ, kèm LÝ DO nếu chỗ gọi đưa vào.
        * Chỉ ghi nhận — không thêm lệnh gửi, không đổi phán quyết. */
+      /* ═══ [v1.93.18] KHÔNG ĐƯỢC GHI ĐÈ LÝ DO ĐÃ CÓ ═══
+       * ĐO ĐƯỢC (log 22/11 13:46, lô 941 chat): 721 ca ⚠ vào sổ với lý do **RỖNG** —
+       * không ca nào truy được vì sao. Gốc: hàm này chạy nhiều lần cho cùng một chat, và
+       * ĐA SỐ chỗ gọi truyền `undefined` (8 chỗ chỉ đổi bộ đếm) ⇒ lần gọi sau XOÁ TRẮNG lý do
+       * mà lần gọi trước đã ghi đúng. Nay lý do được NỐI THÊM và khử trùng, nên chuỗi đầy đủ
+       * "ACK rejected → bù → giữ ⚠" còn nguyên trong sổ. Chỉ ghi nhận — không đổi phán quyết,
+       * không thêm lệnh gửi. */
+      const _whyNew = reason ? String(reason) : '';
+      if (!uncertainReasonById[convId]) uncertainReasonById[convId] = [];
+      const _whyArr = uncertainReasonById[convId];
+      if (_whyNew && _whyArr.indexOf(_whyNew) < 0 && _whyArr.length < 4) _whyArr.push(_whyNew);
       auditPush('⚠', convId, '', 'chốt KHÔNG RÕ (vào danh sách gửi tay)'
-        + (reason ? ' · ' + String(reason) : ''));
+        + (_whyArr.length ? ' · ' + _whyArr.join(' → ') : ' · (không chỗ gọi nào ghi lý do)'));
       noteManualResend(convId); // ⚠ = máy không chắc đã gửi ⇒ vào danh sách gửi tay
     } else if (kind === 'skip') {
       if (!skippedLateIds[convId]) { skippedLateIds[convId] = true; summaryCounters.skipLate++; }
@@ -11814,7 +11849,7 @@
       if (extAliveNow && conv.__extSkippedOverload && lateN < 2 && !state.stopRequested) {
         buLateRetryCount[conv.id] = lateN + 1;
         try { delete conv.__extSkippedOverload; } catch (eLo) { /* ignore */ }
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'Extension đang nghỉ hồi sức (bộ ngắt quá tải) — hẹn thử lại 9 s');
         logFailGrouped(name, 'Extension đang nghỉ hồi sức (bộ ngắt quá tải) — chat CHƯA được gửi lần nào '
           + '⇒ hẹn thử lại sau 9 s (lần ' + (lateN + 1) + '/2), không chốt ❌ oan', '⏳', conv.id);
         const myLateRun = runSeq;
@@ -11915,7 +11950,7 @@
            * Nay: giữ ⚠ "chưa xác nhận" + ghi sổ `extClaimSuccess` để lượt đọc lịch sử quyết định
            * (đã đăng ký trong sendViaExtension). Thấy tin ⇒ ✅ · hết lượt không thấy ⇒ ❌.
            * KHÔNG gửi thêm lệnh nào — số lần gửi của ca này không đổi. */
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'Extension báo success nhưng CHƯA xác nhận — đọc lại lịch sử');
           logFailGrouped(name, 'bù qua Extension: Extension báo success nhưng CHƯA xác nhận — giữ ⚠, đọc lại lịch sử (không gửi lại)', '⚠', conv.id);
         } else if (r && r.sent === 'maybe') {
           /* [v1.92.43] NGÂN SÁCH DÒ EXT PHẢI ĐÓNG Ở CẢ NHÁNH NÀY.
@@ -11923,7 +11958,7 @@
            * 200 ca KHÔNG BAO GIỜ đóng, vì ca Ext quá hạn rơi vào nhánh 'maybe' chứ không phải
            * nhánh recipientUnavailable mà tôi chỉ gắn cờ đóng. Nay tính cả nhánh này. */
           if (conv.__extFallback1545) noteExt1545Outcome('unknown'); // quá hạn: chưa phải bằng chứng
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'bù không rõ kết quả: ' + clip(String((r && r.error) || ''), 70));
           logFailGrouped(name, 'bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)', '⚠', conv.id);
         } else if (r && r.recipientUnavailable && !hasMoreAfterSocket) {
           if (conv.__extFallback1545) noteExt1545Outcome('blocked'); // Ext cũng bị chặn — đo tiếp
@@ -12899,7 +12934,7 @@
       try {
         logFailGrouped(conv.name || conv.id,
           'Extension báo success nhưng KHÔNG có bằng chứng tin đã tới — đánh ⚠, đọc lại lịch sử (không gửi lại)', '⚠', conv.id);
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'Extension báo success nhưng KHÔNG có bằng chứng tin đã tới');
       } catch (eCk) { /* ignore */ }
     }
     const myRun = runSeq;
@@ -14040,7 +14075,7 @@
         // ở làn riêng. Vẫn tính ⚠ (để sổ sách đúng) và vẫn ghi uncertainIds — cổng có quyền đi
         // xuyên qua chốt đó vì nó dựa trên BẰNG CHỨNG, không phải phán đoán.
         unsure++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain', 'đang chờ cổng chứng minh vắng mặt: ' + clip(String(r.error || ''), 60));
         logFailGrouped((c.name || c.id), r.error, '🔎', c.id);
       } else if (r.definiteFail || (r.uncertain && r.definitiveNotSent)) {
         /* [v1.92.45] CHẮC CHẮN KHÔNG GỬI ĐƯỢC THÌ ĐỪNG BẮT NGƯỜI DÙNG CHỜ.
@@ -14053,14 +14088,14 @@
          * (Socket mất ACK, Ext quá hạn, API timeout) vẫn đi cổng 10 s như cũ. */
         unsure++;
         sendDiag.unavailFast = (sendDiag.unavailFast || 0) + 1;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain', 'FB từ chối dứt khoát (chốt ngay, không chờ): ' + clip(String(r.error || ''), 60));
         noteManualResend(c.id);
         logFailGrouped((c.name || c.id),
           clip(String(r.error || 'FB không nhận tin'), 160) + ' — FB đã từ chối DỨT KHOÁT ⇒ chốt luôn, không chờ xác nhận',
           '⚠', c.id);
       } else if (r.uncertain) {
         unsure++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain', 'không rõ kết quả: ' + clip(String(r.error || ''), 70));
         // [v1.92.34] Lý do từ làn gửi đã có sẵn câu "không gửi thêm để tránh trùng" ⇒ in thêm
         // một lần nữa chỉ làm dòng log dài gấp đôi mà không thêm thông tin.
         logFailGrouped((c.name || c.id),
@@ -14078,7 +14113,7 @@
         const lateN0 = buLateRetryCount[c.id] || 0;
         buLateRetryCount[c.id] = lateN0 + 1;
         unsure++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain', 'Extension nghẽn (bộ ngắt quá tải) chặn TRƯỚC KHI BẮN — hẹn thử lại');
         logFailGrouped((c.name || c.id), 'Extension nghẽn (bộ ngắt quá tải) chặn TRƯỚC KHI BẮN — chat CHƯA gửi lần nào'
           + ' ⇒ không chốt ❌ oan, hẹn thử lại sau 9 s (lần ' + (lateN0 + 1) + '/2)', '⏳', c.id);
         const myLateRun2 = runSeq;
@@ -14126,7 +14161,7 @@
     // Wave 200: worker chính có semaphore tổng; ACK/socket retry và Extension chạy ở hàng đợi riêng.
     const settleInternalError = (c, e) => {
       done++; unsure++;
-      if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+      if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain', 'lỗi nội bộ: ' + clip(String(e && e.message || e), 70));
       logLine('⚠ ' + (c.name || c.id) + ' — lỗi nội bộ (' + clip(String(e && e.message || e), 80)
         + ') — không rõ tin đã đi chưa, KHÔNG gửi thêm');
       return { ok: false, uncertain: true, error: 'lỗi nội bộ' };
@@ -14341,7 +14376,7 @@
           releaseOutbound(c.id);
         }
         done++; unsure++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain', 'lỗi nội bộ: ' + clip(String(e && e.message || e), 70));
         logLine('⚠ ' + (c.name || c.id) + ' — lỗi nội bộ (' + clip(String(e && e.message || e), 80)
           + ') — không rõ tin đã đi chưa, KHÔNG gửi thêm');
         updateBatchSummaryUI();
