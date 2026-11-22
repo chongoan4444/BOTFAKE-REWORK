@@ -2522,6 +2522,19 @@ check('[v1.93.22] có mốc đo "mở màn" tách đồng bộ khỏi chờ mạ
 check('[v1.93.22] nhường một khung hình trước khối đồng bộ mở màn',
   /await nextFrame\(\); \} catch \(eF0\)/.test(SRC), true);
 
+/* ═══ [v1.93.23] SỐ TRONG DÒNG CHỐT KHÔNG ĐƯỢC CỘNG DỒN QUA CÁC LƯỢT ═══
+ * Log 18:39 in `CÓ 1470 ca lý do khác` cho lô **34 chat** và lô **65 chat** — cùng một số.
+ * `fbRejectedIds` có reset còn `fbRejectKinds` thì không ⇒ mọi con số "ca bị FB từ chối" của
+ * lượt này đều là tổng của cả tab. Cùng loại lỗi đã làm tôi kết luận sai 4 lần. */
+check('[v1.93.23] fbRejectKinds được reset mỗi lượt (không cộng dồn qua lô)',
+  /delete fbRejectKinds\[k\]/.test(SRC), true);
+check('[v1.93.23] có phân rã đuôi ⚠ theo nhánh kết thúc',
+  /buStats\.maybeSilent\+\+/.test(SRC) && /Đuôi ⚠ theo nhánh/.test(SRC), true);
+check('[v1.93.23] đếm riêng ext-success-không-messageId',
+  /buStats\.extSuccessNoId\+\+/.test(SRC) && /buStats\.extClaimNoId\+\+/.test(SRC), true);
+check('[v1.93.23] có mốc "vào wave" đo phần đồng bộ đầu lô',
+  /sendOpenMark\.syncMs = Math\.max\(0, waveStartedAt/.test(SRC), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));

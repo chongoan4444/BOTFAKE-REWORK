@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.22-w200.132
+// @version      1.93.23-w200.133
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.22-W200.132'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.23-W200.133'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -10575,7 +10575,17 @@
   // THỐNG KÊ BÙ theo lượt (in vào dòng TỔNG HỢP cuối log): bù là đường dễ gây LẶP nhất
   // ở lô lớn — đếm theo lý do kích hoạt + số lượt bù bị HỦY vì tin đã đến nơi trong lúc
   // chờ lane, để khỏi phải mò trong log vài nghìn dòng khi truy nguyên nhân lặp
-  const buStats = { ok: 0, cancelled: 0, byWhy: {} };
+  const buStats = { ok: 0, cancelled: 0, byWhy: {},
+    /* ═══ [v1.93.23] PHÂN RÃ ĐUÔI ⚠ — log 18:56 KHÔNG đếm được chỗ này ═══
+     * Lô 10 948 chat in `8675 tin không rõ kết quả (không gửi thêm)` nhưng sổ kiểm chứng KHÔNG
+     * cho biết 8 675 ca đó đi đâu. Muốn phân rã thì phải suy ra bằng hiệu số (proxy) — chính kiểu
+     * suy diễn đã làm tôi kết luận sai 4 lần. Nay đếm thẳng theo nhánh kết thúc:
+     *   · extSuccessNoId : Ext báo success nhưng KHÔNG có messageId  ⇒ FB trả error_payload
+     *   · extSuccessNoId_kept ⚠: như trên nhưng GIỮ ⚠ (không chốt ❌) — đo để so sánh 2 luật
+     *   · extClaimNoId   : Ext báo success, chưa xác nhận (giữ ⚠, chờ đọc lịch sử)
+     *   · maybeSilent    : bù trả 'maybe' không kèm cờ nào ⇒ "bù không rõ kết quả"
+     * CHỈ ĐẾM. Không đổi đường gửi, không đổi số lần gửi của bất kỳ ca nào. */
+    extSuccessNoId: 0, extSuccessNoId_kept: 0, extClaimNoId: 0, maybeSilent: 0 };
   // Đếm các lần BẮN LẠI cùng nội dung ngay trong 1 lần gửi Socket (retry khi FB báo
   // rejected + bắn lại riêng ảnh) — in vào TỔNG HỢP để đối chiếu với phản ánh lặp của khách
   /** Cửa sổ NGHE ACK (giữ entry PENDING lại) — phủ max ACK đã đo 7 988 ms + biên đồng hồ.
@@ -11057,7 +11067,7 @@
 
   function noteFbRejected(convId, why) {
     if (!convId) return;
-    try { fbRejectedIds.set(String(convId), { at: Date.now(), why: String(why || '') }); } catch (e) { /* ignore */ }
+    try { fbRejectedIds.set(String(convId), { at: Date.now(), why: String(why || ''), run: runSeq }); } catch (e) { /* ignore */ }
     try {
       const w = String(why || '');
       const k = /1545041|không có mặt/i.test(w) ? '1545041'
@@ -11578,6 +11588,13 @@
               : ' | 🖐 CẦN GỬI TAY: ' + resendSplit.waiting + ' chat (đã hết kiểm chứng — xem 💾 .txt)')
             : '')
           + (c.skipTotal ? ' | 🧹 Bỏ qua: ' + c.skipTotal : '')
+          /* [v1.93.23] PHÂN RÃ ĐUÔI ⚠ — in THẲNG số ca theo từng nhánh kết thúc, để không phải
+           * suy ra bằng hiệu số như lô 18:56 (8 675 ca "không rõ" mà không biết ca nào ở đâu). */
+          + ((buStats.extSuccessNoId + buStats.extClaimNoId + buStats.maybeSilent)
+            ? ' | 🧩 Đuôi ⚠ theo nhánh: ext-success-không-messageId ' + buStats.extSuccessNoId
+              + ' (chốt ❌) · ext-success-chưa-xác-nhận ' + buStats.extClaimNoId
+              + ' (giữ ⚠) · bù trả maybe im lặng ' + buStats.maybeSilent
+            : '')
           + ((buStats.ok || buStats.cancelled)
             ? ' | 🔁 Bù OK: ' + buStats.ok + ' (' + Object.keys(buStats.byWhy).map((k) => k + ': ' + buStats.byWhy[k]).join(' · ') + ') · hủy bù tránh trùng: ' + buStats.cancelled
             : '')
@@ -12265,6 +12282,7 @@
            * Đây KHÔNG phải "chưa xác nhận" mà là BẰNG CHỨNG VẮNG MẶT ⇒ ghi sổ "FB đã từ chối"
            * (để ca này không bị coi là "cần gửi tay" oan) và KHÔNG gửi thêm lệnh nào. */
           try { noteFbRejected(conv.id, 'Ext báo success nhưng không có messageId = error_payload ⇒ FB từ chối'); } catch (eFbR) { /* ignore */ }
+          buStats.extSuccessNoId++; // [v1.93.23] đếm để dòng chốt phân rã được đuôi ⚠
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
           logFailGrouped(name, 'bù qua Extension: success nhưng KHÔNG có messageId ⇒ FB trả error_payload, KHÔNG có tin — không gửi lại', '❌', conv.id);
         } else if (r && r.sent === 'maybe' && r.extClaimedSuccess) {
@@ -12276,6 +12294,7 @@
            * (đã đăng ký trong sendViaExtension). Thấy tin ⇒ ✅ · hết lượt không thấy ⇒ ❌.
            * KHÔNG gửi thêm lệnh nào — số lần gửi của ca này không đổi. */
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'Extension báo success nhưng CHƯA xác nhận — đọc lại lịch sử');
+          buStats.extClaimNoId++; // [v1.93.23]
           logFailGrouped(name, 'bù qua Extension: Extension báo success nhưng CHƯA xác nhận — giữ ⚠, đọc lại lịch sử (không gửi lại)', '⚠', conv.id);
         } else if (r && r.sent === 'maybe') {
           /* [v1.92.43] NGÂN SÁCH DÒ EXT PHẢI ĐÓNG Ở CẢ NHÁNH NÀY.
@@ -12284,6 +12303,7 @@
            * nhánh recipientUnavailable mà tôi chỉ gắn cờ đóng. Nay tính cả nhánh này. */
           if (conv.__extFallback1545) noteExt1545Outcome('unknown'); // quá hạn: chưa phải bằng chứng
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'bù không rõ kết quả: ' + clip(String((r && r.error) || ''), 70));
+          buStats.maybeSilent++; // [v1.93.23] nhánh "bù không rõ kết quả" — nguồn chính của đuôi ⚠
           logFailGrouped(name, 'bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)', '⚠', conv.id);
         } else if (r && r.recipientUnavailable && !hasMoreAfterSocket) {
           if (conv.__extFallback1545) noteExt1545Outcome('blocked'); // Ext cũng bị chặn — đo tiếp
@@ -13982,6 +14002,8 @@
     batchStats.loopFinishedAt = 0; // [v1.92.63] mốc phát xong — dùng cho ân hạn chốt bảng
     batchStats.dispatchEndedAt = 0;
     buStats.ok = 0; buStats.cancelled = 0; buStats.byWhy = {};
+    buStats.extSuccessNoId = 0; buStats.extSuccessNoId_kept = 0;
+    buStats.extClaimNoId = 0; buStats.maybeSilent = 0; // [v1.93.23] phân rã đuôi ⚠ của lượt này
     logProgressMark.pct = 0; // [v1.92.31] mốc tiến độ tính lại từ đầu mỗi lượt
     buQuietBudgetNote = 0;
     // [v1.92.30] cổng chống lặp: reset sổ mỗi lượt (cache chứng minh cũng xoá để không dùng
@@ -13993,6 +14015,14 @@
     try {
       manualResendList.length = 0; sockRescueStats.tried = 0;
       try { fbRejectedIds.clear(); } catch (eFbr) { /* ignore */ }
+      /* ═══ [v1.93.23] `fbRejectKinds` PHẢI RESET MỖI LƯỢT ═══
+       * LỖI ĐO ĐƯỢC: `fbRejectedIds` có reset còn `fbRejectKinds` (bộ đếm THEO LOẠI) thì không.
+       * Cả hai là biến cấp module ⇒ số đếm CỘNG DỒN qua mọi lượt trong cùng tab.
+       * Bằng chứng trong log: TỔNG HỢP của lô **34 chat** in `CÓ 1470 ca lý do khác`, lô
+       * **65 chat** in đúng `1470` — lô 34 chat không thể có 1 470 ca bị FB từ chối.
+       * Hệ quả: dòng chốt nói sai về đúng cơ chế người đọc dùng để kết luận. Cùng loại lỗi
+       * đã làm tôi kết luận sai 4 lần (§10, §13) — nên vá ngay, không cần chờ log sau. */
+      try { Object.keys(fbRejectKinds).forEach((k) => { delete fbRejectKinds[k]; }); } catch (eFrk) { /* ignore */ }
       fbRejectStats.blockedBu = 0;
       /* [v1.92.66] PHẢI xoá cả hai chỉ mục — nếu không, lần note lại CÙNG chat ở lượt sau sẽ bị
        * `manualResendIds.has()` chặn (bỏ sót chat cần gửi tay) hoặc `dropManualResend()` xoá
@@ -14879,6 +14909,15 @@
           const waveNo = Math.floor(waveStart / WAVE_SIZE) + 1;
           const waveStartedAt = Date.now();
           waveDiag.wavesStarted++;
+          /* [v1.93.23] MỐC "VÀO WAVE" — đo phần ĐỒNG BỘ trước khi wave 1 bắt đầu.
+           * Lô 22/11 in 5 484 ms cho wave 1 và tôi đã suy ra "main thread bị chặn"; log HÔM NAY
+           * bác bỏ: cùng máy, 4 lô liên tiếp mở cổng wave 1 trong **12 / 13 / 14 / 82 ms**
+           * (34 · 65 · 10 948 · 10 948 chat) ⇒ khối đồng bộ đầu lô KHÔNG phải nút cổ chai.
+           * Số 5 484 ms phải có nguyên nhân khác (chưa xác định). Ghi mốc này để lần sau
+           * câu hỏi "5,4 s đó là gì" có sẵn dữ liệu thay vì phải suy diễn. */
+          if (waveNo === 1) {
+            try { sendOpenMark.syncMs = Math.max(0, waveStartedAt - (sendOpenMark.t0 || waveStartedAt)); } catch (eOM2) { /* ignore */ }
+          }
           refreshMainCap(); // [v1.92.43] mỗi wave chia lại slot theo số tab đang gửi
           // [v1.92.11] BỎ CHIA KHÚC TĨNH. Bản cũ chia wave thành WAVE_MAIN_LANES khúc cố định, mỗi
           // khúc một pool riêng ⇒ khúc nào nhiều ca chậm (FB từ chối → chờ ACK lâu) thì 48 làn của

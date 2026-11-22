@@ -354,3 +354,64 @@ khi bị gỡ: chặn cứu = bỏ đúng đường duy nhất còn chạy.
 - `✅ qua ext` 4 844 ca vẫn **không có bằng chứng** (§12 nhánh im lặng `sendExtWithLateWatch`).
   §11.3 đã gắn nhãn; lô sau phải đọc `🧾 Bằng chứng … unknown`. Nếu `extSuccess` chiếm phần lớn
   thì **mọi con số thành công của lô đó không dùng để kết luận gì** — kể cả để khen bản vá này.
+
+---
+
+## §14. LOG 18:39 / 18:56 — hai kết luận của tôi bị chính log này bác bỏ
+
+Người dùng chạy lại trên **cùng máy, cùng page, cùng tab** (script 1.93.21-W200.131), 4 lô liên tiếp.
+Đây là **nhóm đối chứng** mà các log trước không có ⇒ dùng được để bác bỏ giả thuyết.
+
+### 14.1 "Lag đầu lô do main thread" — SAI
+Thời gian từ `🚀 Bắt đầu gửi` tới khi cổng wave 1 mở:
+
+| lô | số chat | ảnh | cổng wave 1 |
+|---|---|---|---|
+| 18:39:18 | 34 | không | **12 ms** |
+| 18:39:27 | 65 | không | **13 ms** |
+| 18:56:21 | 10 948 | không | **14 ms** |
+| 18:56:21 | 10 948 | **CÓ** | **82 ms** |
+
+Ba lô 10 948 chat mở cổng trong 14 ms. Một khối đồng bộ "chặn main thread 5,4 s" không thể chạy
+14 ms ⇒ **5 484 ms của lô 22/11 không phải khối đồng bộ đầu lô**. Thủ phạm thật **chưa xác định**
+(có thể là đúng lúc tải danh sách xong/nén RAM lớn, hoặc `bind` ảnh của lô trước).
+⇒ Mục (3) của §13.3 là **giả thuyết đã bị bác bỏ**, không được trình bày như nguyên nhân.
+
+### 14.2 "Cả lô dồn vào Ext" — KHÔNG còn, nhưng thay bằng lỗi nặng hơn
+Lô 10 948 (18:56:21 → 18:57:54):
+
+| chỉ số | số |
+|---|---|
+| `⚠ Socket không rõ kết quả (không có ACK)` | **8 675** ca |
+| `🛟 GỬI CỨU qua Extension` | ~700 ca |
+| `⚠ bù không rõ kết quả — KHÔNG gửi thêm` | ~8 000 ca |
+| `❌ Ext: noThreadIdFound \| socket: noThreadIdFound` | 78 ca |
+| ✅ chốt trước 18:57:24 | 736 |
+
+So với 22/11: `4 884 → 4 844` được cứu (**99,2 %**). Hôm nay: `8 675 → ~700` (**8,1 %**).
+⇒ **Dồn Ext đã giảm 12 lần**, nhưng KHÔNG phải vì Socket chạy tốt hơn — 8 675 ca `⚠` vẫn y nguyên.
+Nó giảm vì **đường cứu bị chặn**: ~8 000 ca kết thúc ở nhánh "bù không rõ kết quả — KHÔNG gửi thêm".
+Đây là **mất tin im lặng**, không phải thành công. Không được đọc "dồn Ext giảm" thành "đã sửa xong".
+
+### 14.3 Vì sao bản vá 1.93.22 KHÔNG có tác dụng (tự đánh giá)
+`pickLaneSeq` cần `pageSockSent[page] >= 64 && pageAckGot[page] === 0`. Nhưng **cùng hàm**
+`recordSocketAckOutcome` (`noAckStreak` ≥ 2) đã hạ làn Socket xuống sàn **16–32** (`Socket/page
+limits cuối [16×1]`, `[64×1]` trong log cũ). Với 16–32 slot, phải mất **hàng chục giây** mới bắn
+đủ 64 lần ⇒ điều kiện chuyển sang API **chỉ đúng được ở cuối lô**. Đo trên log 10 948: không có
+dấu hiệu page nào chuyển API ⇒ bản vá **gần như không chạy**. Đây là lỗi thiết kế của tôi:
+đặt ngưỡng theo *số lần bắn* mà không xét *số lần ACK dự kiến trong 10–20 s đầu*.
+
+### 14.4 Sửa thật ở 1.93.23
+1. **`fbRejectKinds` reset mỗi lượt.** Lỗi đo được: lô 34 chat in `CÓ 1470 ca lý do khác`, lô 65
+   chat in đúng `1470` ⇒ số này **cộng dồn qua mọi lô trong tab**. Mọi câu "ca bị FB từ chối"
+   trước đây đều là tổng của tab, không phải của lô.
+2. **Phân rã đuôi ⚠ theo nhánh kết thúc** (`🧩 Đuôi ⚠ theo nhánh: …`): log 18:56 không cho biết
+   8 675 ca rơi vào đâu, tôi phải suy ra bằng hiệu số. Nay đếm thẳng.
+3. **Mốc `vào wave`** để câu "5,4 s đó là gì" có dữ liệu, khỏi suy diễn.
+
+### 14.5 Việc chưa làm (cần quyết định, vì đụng đường gửi)
+- Ngưỡng chuyển API phải theo **thời gian + ACK**, không theo số lần bắn (xem 14.3).
+- ~8 000 ca "bù không rõ kết quả" cần một đường **chốt có trách nhiệm**: đọc lại lịch sử sau N
+  giây → thấy tin thì ✅, không thấy thì ❌ + vào danh sách gửi tay. Hiện chúng chỉ nằm im.
+- 78 ca `noThreadIdFound` (cả Ext lẫn Socket đều không có thread_id) — đây là nhóm **chắc chắn
+  chưa gửi được**, không mơ hồ; nên được xử lý riêng thay vì gộp vào ❌ chung.
