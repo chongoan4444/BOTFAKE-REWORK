@@ -2403,8 +2403,20 @@ const _preSrc = stripComments(SRC);
     (SRC_STABLE.match(/^\/\/ @name .*$/m) || [''])[0] === (SRC.match(/^\/\/ @name .*$/m) || ['x'])[0], true);
   check('[stable] @namespace giữ nguyên bản gốc',
     (SRC_STABLE.match(/^\/\/ @namespace .*$/m) || [''])[0] === (SRC.match(/^\/\/ @namespace .*$/m) || ['x'])[0], true);
-  check('[stable] @version giữ nguyên bản gốc',
-    (SRC_STABLE.match(/^\/\/ @version .*$/m) || [''])[0] === (SRC.match(/^\/\/ @version .*$/m) || ['x'])[0], true);
+  /* ═══ [v1.93.27] NGƯỜI DÙNG CHỐT: "chỉ sửa pancake-send-lite.user.js thôi k cần sửa cái stable" ═══
+   * Trước đây bản ổn định bị SINH LẠI mỗi lần build bản gốc, nên nó luôn trùng @version — đó là
+   * lý do kịch bản này xanh trong khi thực tế bản stable bị sửa ngoài ý muốn. Nay `npm run build`
+   * KHÔNG đụng bản stable (xem tools/build.mjs), nên hai bản CÓ THỂ khác version và đó là ĐÚNG.
+   * Điều cần bảo vệ vẫn còn nguyên: bản stable không được mang định danh riêng (đã khoá ở trên
+   * bằng @name / @namespace / PANEL_ID), và nếu khác version thì hiệu lực của nó phải được
+   * KIỂM TRA bằng bộ thử các nhánh, không được coi là "bản mới hơn". */
+  const verOf = (src) => ((src.match(/^\/\/ @version\s+(\S+)/m) || ['', ''])[1] || '').toLowerCase();
+  const vStable = verOf(SRC_STABLE);
+  const vLite = verOf(SRC);
+  check('[stable] @version là số hiệu hợp lệ (dù không bắt buộc trùng bản gốc)',
+    /^1\.\d+\.\d+-w\d+\.\d+$/.test(vStable), true);
+  check('[stable] KHÔNG tự nhận là bản mới hơn bản gốc (stable ≤ lite)',
+    vStable && vLite ? vStable <= vLite : true, true);
 
   // ── (c) TIỆN ÍCH BẢN ỔN ĐỊNH CHỈ KHÁC ĐÚNG ĐƯỜNG DẪN SCRIPT ─────────────
   const rb = path.join(ROOT, 'release/botfake-ext');

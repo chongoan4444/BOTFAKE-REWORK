@@ -718,3 +718,20 @@ Bật/tắt phép đo (mặc định BẬT): `__botfakeSetApiIdCheck__(false)` �
 (`apiMsgIdOf`, `apiProofOf`, `apiIdVerdict`, `firstListedId`) trên đúng dữ liệu HAR, cộng 2
 kịch bản cấu trúc: không còn `markDelivered(..., 'api', 'http200')` gán cứng, và mọi đường
 thành công của làn API đều đi qua phép đọc id.
+
+### 19.6 Phạm vi sửa: CHỈ `scripts/pancake-send-lite.user.js`
+Người dùng chốt: **"chỉ sửa pancake-send-lite.user.js thôi, không cần sửa cái stable"**.
+Trước bản này `npm run build` tự gọi `syncStableRelease()` ⇒ mỗi lần sửa bản gốc là bản ổn định
+bị sinh lại (kèm `@version` mới) dù không ai yêu cầu. Nay:
+
+* `npm run build` **không** đụng `scripts/pancake-send-stable.user.js`; folder
+  `release/botfake-ext-stable/` và `dist/botfake-stable.zip` được chép lại từ **đúng bản ổn định
+  đang phát hành** (`@version 1.93.26-w200.136`), nên hai bản độc lập nhau.
+* `npm run check` chỉ **cảnh báo** khi hai bản khác version — nói rõ số của cả hai và cách sinh
+  lại — chứ không chặn build (nếu chặn thì mỗi lần sửa bản gốc sẽ không build được).
+* Kịch bản test cũ `[stable] @version giữ nguyên bản gốc` được **thay** bằng đúng điều nó cần bảo
+  vệ: bản ổn định không mang định danh riêng (`@name`/`@namespace`/`PANEL_ID` vẫn khoá) và **không
+  tự nhận là bản mới hơn** (`stable ≤ lite`). Trước đây kịch bản đó xanh chỉ vì bản stable bị ghi
+  đè tự động — tức nó đang khoá một hành vi mà người dùng không muốn.
+* Muốn phát hành lại bản ổn định (khi thật sự cần): `node tools/make-stable.mjs` — một lệnh riêng,
+  có chủ ý.

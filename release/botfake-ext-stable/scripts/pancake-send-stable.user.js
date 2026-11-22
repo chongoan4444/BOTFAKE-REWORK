@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.27-w200.137
+// @version      1.93.26-w200.136
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.27-W200.137'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.26-W200.136'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -650,61 +650,6 @@
       if (proofStats[k] == null) proofStats.unknown++;
       else proofStats[k]++;
     } catch (e) { /* ignore */ }
-  }
-  /* ═══ [v1.93.27] BẰNG CHỨNG CỦA LÀN API LÀ `id` CỦA TIN — KHÔNG PHẢI `success:true` ═══
-   * ĐO ĐƯỢC (lô 90 chat 20:04, bản 1.93.25): dòng chốt ghi
-   *   `✅ 89/90 … 🧾 Bằng chứng của 89 ca ✅: messageId 0 · lịch sử 0 · ACK Socket 4 ·
-   *    HTTP 200 85` — tức 85 ca ✅ KHÔNG có một id tin nào, chỉ dựa vào đúng một chữ
-   *   `success:true`. Người dùng kiểm lại: SÓT, và gửi tay lại được ⇒ tin thật chưa đi,
-   *   chỉ bị đánh ✅ sai. Đây đúng bệnh "báo gửi đủ nhưng thực tế sót".
-   * ĐỐI CHIẾU HAR (12 ca gửi API thành công trong `batmesss.har` + 11 trong `tinnhan.har`
-   *   + `guisot/guianh1/tinnhanthread`): MỌI phản hồi thành công đều kèm `id` của tin, đúng
-   *   2 dạng:
-   *     · tin inbox : {"id":"m_iZsc-dimPMuYRJKY…","success":true,"original_error":null}
-   *     · bình luận : {"id":"122203568066953890_1659474325533562","success":true} (post_comment)
-   *   và `id` đó CHÍNH LÀ `messages[].id` của lần GET lịch sử ngay sau đó — đối chiếu 3 tin
-   *   liên tiếp cùng một hội thoại trong `batmesss.har`: khớp 3/3. Không có trường `payload`
-   *   nào trong phản hồi gửi của làn API (payload thuộc làn Socket/extension).
-   * ⇒ `success:true` KHÔNG kèm `id` = server không trả về tin nào ⇒ KHÔNG đủ bằng chứng.
-   *   Nay ca đó KHÔNG được đánh ✅: đếm riêng `apiNoMsgId`, giữ ⚠, đọc lại lịch sử để phân
-   *   xử (chỉ ĐỌC, không bắn thêm). Ca có `id` thì dòng sổ ghi kèm id để người đọc tra được
-   *   từng tin — không còn phải tin vào con số tổng.
-   * KHÔNG đổi kênh, KHÔNG đổi ngưỡng, KHÔNG thêm lệnh gửi. */
-  const API_MSGID_RE = /^(m_[A-Za-z0-9_-]+|\d+_\d+)$/;
-  const API_MSGID_JUNK = { '0': 1, 'null': 1, 'undefined': 1, 'false': 1, 'true': 1 };
-  /** Rút `id` của tin từ phản hồi gửi của API. Trả '' nếu không có id dùng được. */
-  function apiMsgIdOf(data) {
-    try {
-      if (!data || data.success === false) return '';
-      let raw = data.id;
-      if (raw == null || raw === '') raw = data.message_id;
-      if (raw == null || raw === '') raw = data.messageId;
-      if ((raw == null || raw === '') && data.payload && data.payload.actions && data.payload.actions[0]) {
-        raw = data.payload.actions[0].message_id;   // dạng của làn Socket/Ext — chấp nhận nếu có
-      }
-      if (raw == null) return '';
-      if (typeof raw === 'object') return '';
-      const s = String(raw).trim();
-      if (!s || API_MSGID_JUNK[s] === 1) return '';
-      return s;
-    } catch (e) { return ''; }
-  }
-  /** `id` có ĐÚNG hình dạng đã thấy trong HAR (`m_…` hoặc `postid_commentid`) không? */
-  function apiMsgIdKnownShape(id) {
-    return !!id && API_MSGID_RE.test(String(id));
-  }
-  /** [v1.93.27] id tin của làn API theo chat — để đối chiếu lịch sử và tra tay từng ca. */
-  const apiMsgIdByConv = Object.create(null);
-  /**
-   * Ghi id tin của làn API vào sổ THEO CHAT + nhãn bằng chứng cho dòng ✅.
-   * Tách hàm để MỌI chỗ gọi `markDelivered(...,'api',...)` dùng chung một luật:
-   * có id ⇒ 'http200' (kèm id trong dòng sổ); không id ⇒ 'unknown' — nhãn phải nói thật.
-   */
-  function apiProofOf(convId, id) {
-    const mid = String(id || '');
-    if (!mid) return { proof: 'unknown', detail: 'API success:true nhưng KHÔNG kèm id tin' };
-    try { if (convId) apiMsgIdByConv[convId] = mid; } catch (eAp) { /* ignore */ }
-    return { proof: 'http200', detail: 'id ' + clip(mid, 60) };
   }
   const extMsgIdByConv = Object.create(null);
 
@@ -3357,16 +3302,7 @@
       let parsed = true;
       try { data = await res.json(); } catch (e) { parsed = false; }
       if (res.ok && data && data.success) {
-        /* [v1.93.27] Bình luận dùng CHUNG luật bằng chứng với tin inbox: HAR
-         * `{"id":"122203568066953890_1659474325533562","success":true}` — id = post_comment_id.
-         * Không có id ⇒ chưa đủ bằng chứng ⇒ đi cổng "không rõ" (đọc lại lịch sử). */
-        const _mid = apiMsgIdOf(data);
-        if (!_mid) {
-          sendDiag.apiNoMsgId = (sendDiag.apiNoMsgId || 0) + 1;
-          return { ok: false, sent: 'maybe', id: '', sendBy: 'api', apiNoMsgId: true,
-            error: 'API bình luận trả success:true nhưng KHÔNG có id tin' };
-        }
-        return { ok: true, id: _mid, msgIdShaped: apiMsgIdKnownShape(_mid), sendBy: 'api', sent: true };
+        return { ok: true, id: data.id || data.message_id || '', sendBy: 'api', sent: true };
       }
       if (res.status === 401 || res.status === 403) {
         capturedToken = null;
@@ -3799,36 +3735,7 @@
       if (res.ok && data && data.success) {
         sendDiag.apiSuccess++;
         resetPageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
-        /* ═══ [v1.93.27] `success:true` MÀ KHÔNG CÓ `id` TIN ⇒ CHƯA ĐỦ BẰNG CHỨNG ═══
-         * ĐO ĐƯỢC (lô 90 chat 20:04, bản 1.93.25): 85 ca ✅ chỉ có nhãn `http200` —
-         * `🧾 messageId 0` — và người dùng kiểm lại thì SÓT (gửi tay lại được).
-         * HAR: 23/23 phản hồi gửi thành công của làn API đều kèm `id` của tin (xem
-         * API_MSGID_RE). Không có `id` ⇒ server không trả về tin nào ⇒ không được đánh ✅.
-         * Nay: ghi sổ ⚠ (vào danh sách gửi tay — người dùng bấm được), đếm riêng
-         * `apiNoMsgId`, và đọc lại lịch sử để phân xử (CHỈ ĐỌC, không bắn thêm lệnh nào). */
-        const _mid = apiMsgIdOf(data);
-        if (!_mid) {
-          sendDiag.apiNoMsgId = (sendDiag.apiNoMsgId || 0) + 1;
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') {
-            window.__botfakeTrackStatus__(conv.id, 'uncertain',
-              'API trả success:true nhưng KHÔNG có id tin — chưa đủ bằng chứng đã tới nơi');
-          }
-          noteManualResend(conv.id);
-          logLine('⚠ ' + (conv.name || conv.id) + ' — API trả success:true nhưng KHÔNG kèm id tin'
-            + ' (HAR: 23/23 ca gửi được đều có id) — KHÔNG đánh ✅, đọc lại lịch sử để phân xử.');
-          scheduleUncertainVerify(conv, text, photo, apiStartedAt || Date.now(), 'success:true nhưng không có id tin');
-          postSendSideEffects(conv);
-          return;
-        }
-        if (!apiMsgIdKnownShape(_mid) && !sendDiag.apiIdShapeWarned) {
-          sendDiag.apiIdShapeWarned = 1;
-          try { logLine('⚠ id tin của API có dạng lạ (' + clip(_mid, 40) + ') — vẫn ghi sổ, nhưng đối chiếu lịch sử có thể không khớp.'); } catch (eIs) { /* ignore */ }
-        }
-        logFailGrouped(conv.name || conv.id, 'API nhận tin: id ' + clip(_mid, 46) + ' — đánh dấu ĐÃ TỚI NƠI (bằng chứng: server trả id tin)', '✅', conv.id, true);
-        const _proofA = apiProofOf(conv.id, _mid);
-        markDelivered(conv.id, 'api', _proofA.proof, _proofA.detail); postSendSideEffects(conv);
-        try { scheduleApiIdCheck(conv); } catch (eAic2) { /* ignore */ }
-        return;
+        markDelivered(conv.id, 'api', 'http200'); postSendSideEffects(conv); return;
       } // đã đến nơi — im lặng
       /* [v1.93.19] ĐỐI SOÁT 130 REQUEST GỬI THẬT (network-log*.har + logtest4.har trên `main`):
        *   · 21 ca thành công → `payload.actions[0]` đủ 13 trường, có `message_id`
@@ -3867,19 +3774,7 @@
               sendDiag.ctx7RetryOk = (sendDiag.ctx7RetryOk || 0) + 1;
               resetPageRejection(conv.pageId || String(conv.id || '').split('_')[0]);
               logLine('🔁 ' + nm + ' — (#10) do THIẾU CỜ ctx-7-days → gửi lại kèm cờ THÀNH CÔNG.');
-              const _mid2 = apiMsgIdOf(d2); // [v1.93.27] id tin = bằng chứng thật (xem chú thích trên)
-              if (!_mid2) {
-                sendDiag.apiNoMsgId = (sendDiag.apiNoMsgId || 0) + 1;
-                if (window && typeof window.__botfakeTrackStatus__ === 'function') {
-                  window.__botfakeTrackStatus__(conv.id, 'uncertain',
-                    'API (gửi lại kèm cờ ctx-7) trả success:true nhưng KHÔNG có id tin');
-                }
-                noteManualResend(conv.id);
-                scheduleUncertainVerify(conv, text, photo, apiStartedAt || Date.now(), 'success:true nhưng không có id tin');
-                postSendSideEffects(conv); return;
-              }
-              const _proofB = apiProofOf(conv.id, _mid2);
-              markDelivered(conv.id, 'api', _proofB.proof, _proofB.detail); postSendSideEffects(conv); return;
+              markDelivered(conv.id, 'api', 'http200'); postSendSideEffects(conv); return;
             }
             const msg2 = (d2 && (d2.message || d2.error)) || ('HTTP ' + res2.status);
             if (d2 && d2.success === false) msg = msg2; // cờ đã có mà vẫn (#10) → chặn thật của chat này
@@ -3903,21 +3798,8 @@
             if (resTr.ok && dTr && dTr.success) {
               sendDiag.apiSuccess++;
               sendDiag.transientRetryOk = (sendDiag.transientRetryOk || 0) + 1;
+              markDelivered(conv.id, 'api', 'http200'); postSendSideEffects(conv);
               logLine('🔁 ' + nm + ' — lỗi TẠM THỜI (1545012) → gửi lại NGAY, THÀNH CÔNG.');
-              const _mid3 = apiMsgIdOf(dTr); // [v1.93.27] id tin = bằng chứng thật (xem chú thích trên)
-              if (!_mid3) {
-                sendDiag.apiNoMsgId = (sendDiag.apiNoMsgId || 0) + 1;
-                if (window && typeof window.__botfakeTrackStatus__ === 'function') {
-                  window.__botfakeTrackStatus__(conv.id, 'uncertain',
-                    'API (gửi lại do lỗi tạm thời) trả success:true nhưng KHÔNG có id tin');
-                }
-                noteManualResend(conv.id);
-                scheduleUncertainVerify(conv, text, photo, apiStartedAt || Date.now(), 'success:true nhưng không có id tin');
-                postSendSideEffects(conv);
-                return;
-              }
-              const _proofC = apiProofOf(conv.id, _mid3);
-              markDelivered(conv.id, 'api', _proofC.proof, _proofC.detail); postSendSideEffects(conv);
               return;
             }
             const msgTr = (dTr && (dTr.message || dTr.error)) || ('HTTP ' + resTr.status);
@@ -4036,16 +3918,7 @@
       let parsed = true;
       try { data = await res.json(); } catch (e) { parsed = false; }
       if (res.ok && data && data.success) {
-        /* [v1.93.27] `id` tin là BẰNG CHỨNG (HAR 23/23). `success:true` mà không có id ⇒
-         * KHÔNG đánh ✅: đi qua cổng "không rõ" để đọc lại lịch sử (chỉ ĐỌC, không bắn thêm).
-         * Nhờ vậy `markDelivered(...,'http200')` ở mọi chỗ gọi chỉ còn nhận ca CÓ id. */
-        const _mid = apiMsgIdOf(data);
-        if (!_mid) {
-          sendDiag.apiNoMsgId = (sendDiag.apiNoMsgId || 0) + 1;
-          return { ok: false, sent: 'maybe', id: '', sendBy: 'api', apiNoMsgId: true,
-            error: 'API trả success:true nhưng KHÔNG có id tin (HAR: ca gửi được luôn có id)' };
-        }
-        return { ok: true, id: _mid, msgIdShaped: apiMsgIdKnownShape(_mid), sendBy: 'api', sent: true };
+        return { ok: true, id: data.id || data.message_id || '', sendBy: 'api', sent: true };
       }
       if (res.status === 401 || res.status === 403) {
         capturedToken = null; // token cũ — lần sau tự lấy token mới
@@ -9757,20 +9630,6 @@
         : (ctx.fullLoaded && ctx.gidResolved
           ? await channels[ch]()
           : await busEnqueue(() => channels[ch](), ch));
-      /* [v1.93.27] LÀN API BÁO `success:true` MÀ KHÔNG CÓ ID TIN (sendViaApi trả `sent:'maybe'`
-       * + `apiNoMsgId`) ⇒ KHÔNG được rơi vào nhánh "không rõ" rồi im lặng: ghi sổ ⚠ để người
-       * dùng thấy trong danh sách GỬI TAY, và đọc lại lịch sử để phân xử (chỉ ĐỌC). */
-      if (r && r.apiNoMsgId) {
-        sendDiag.apiNoMsgId = (sendDiag.apiNoMsgId || 0) + 1;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') {
-          window.__botfakeTrackStatus__(conv.id, 'uncertain', 'API trả success:true nhưng KHÔNG có id tin');
-        }
-        noteManualResend(conv.id);
-        logFailGrouped((conv.name || conv.id), 'API trả success:true nhưng KHÔNG kèm id tin — KHÔNG đánh ✅, đọc lại lịch sử', '⚠', conv.id);
-        scheduleUncertainVerify(conv, text, photo, Date.now(), 'success:true nhưng không có id tin');
-        return { ok: false, uncertain: true, sent: 'maybe', tried: triedCh.slice(),
-          error: (r.error || 'API không có id tin') + ' — không đánh ✅, đọc lại lịch sử (chống trùng)' };
-      }
       if (r && r.deferredToSocketRetry) {
         return { ok: false, sent: false, deferredToSocketRetry: true, deferredCtx: r.deferredCtx || ctx };
       }
@@ -9781,11 +9640,6 @@
       }
       if (r.ok) {
         markChannel(conv.id, ch);
-        // [v1.93.27] ca làn API có id tin ⇒ đối chiếu id với lịch sử hội thoại (chỉ ĐỌC)
-        if (ch === 'api' && r.id) {
-          apiMsgIdByConv[conv.id] = String(r.id);
-          try { scheduleApiIdCheck(conv); } catch (eAic) { /* ignore */ }
-        }
         return { ok: true, id: r.id || '', sendBy: r.sendBy || ch, sent: true, fired: !!r.fired };
       }
       triedCh.push(ch);
@@ -11142,12 +10996,6 @@
     sockLateAckErr: 0, sockLateUnapplied: 0, sockLateNoack: 0,
     apiQueued: 0, apiStarted: 0, apiFetchAttempts: 0, apiSuccess: 0, apiRejected: 0, apiUnknown: 0,
     api429: 0, api429Retries: 0, apiCancelled: 0, apiFallback: 0,
-    /* [v1.93.27] ĐO BẰNG CHỨNG CỦA LÀN API — thay cho niềm tin vào `success:true`:
-     *   apiNoMsgId     = số ca server trả `success:true` mà KHÔNG kèm `id` tin (KHÔNG được ✅)
-     *   apiIdShapeWarned = đã in cảnh báo "id có dạng lạ" (chỉ 1 lần/lượt)
-     *   apiIdChecked/Found/Missing/Unread = kết quả ĐỐI CHIẾU id tin với lịch sử hội thoại */
-    apiNoMsgId: 0, apiIdShapeWarned: 0,
-    apiIdChecked: 0, apiIdFound: 0, apiIdMissing: 0, apiIdUnread: 0,
     apiQueueWaitMsTotal: 0, apiQueueWaitMsMax: 0, apiFetchMsTotal: 0, apiFetchMsMax: 0,
     // [v1.92.7] Vòng mẫu fetchMs để tính p50. TB bị max kéo lệch nên không phân biệt được
     // "mọi request chậm" với "vài request kẹt"; p50 mới so được với HAR (xem docs §32).
@@ -12203,17 +12051,10 @@
            * `gửi N · nhận N gói (mất-callback > 0)` ⇒ gói VỀ, chỉ là entry bị xoá ⇒ lỗi ở ta,
            * KHÔNG phải lỗi FB ⇒ đừng đổi kênh, hãy sửa cách bắt gói. */
           + ' | ' + packetMonText()
-          + ' | 🧾 Bằng chứng của ' + c.okTotal + ' ca ✅: id tin API ' + proofStats.http200
-            + ' · lịch sử ' + proofStats.history + ' · messageId Ext ' + proofStats.messageId
-            + ' · ACK Socket ' + proofStats.ack + ' · ext-báo-success ' + proofStats.extSuccess
+          + ' | 🧾 Bằng chứng của ' + c.okTotal + ' ca ✅: messageId ' + proofStats.messageId
+            + ' · lịch sử ' + proofStats.history + ' · ACK Socket ' + proofStats.ack
+            + ' · HTTP 200 ' + proofStats.http200 + ' · ext-báo-success ' + proofStats.extSuccess
             + ' · ⚠ KHÔNG có bằng chứng ' + proofStats.unknown
-            /* [v1.93.27] PHÉP ĐO "SÓT": id tin server trả có nằm trong hội thoại không.
-             * Ba số tách hẳn nhau, và ca KHÔNG đọc được phải hiện thành chữ — không được in 0
-             * rồi bị đọc thành "không có gì xảy ra" (lỗi lặp 5 lần của tôi). */
-            + ' | 🔬 id↔lịch sử: đo ' + apiIdCheck.done + '/' + apiIdCheck.total
-            + ' · THẤY ' + apiIdCheck.found + ' · KHÔNG THẤY ' + apiIdCheck.missing
-            + ' · không đọc được ' + apiIdCheck.unread
-            + (sendDiag.apiNoMsgId ? ' · ⚠ API success:true KHÔNG có id tin: ' + sendDiag.apiNoMsgId : '')
           + (function () { try { const t = sockRejectDiagText(); return t ? ' | ' + t : ''; } catch (eSD) { return ''; } })()
           + ' | ❌ Lỗi: ' + c.failTotal
           + (c.unsureTotal ? ' | ⚠ Không rõ: ' + c.unsureTotal : '')
@@ -12454,10 +12295,6 @@
           + ' · p90/p95 ' + sockAckP90() + '/' + (sockAckP95() || 0) + 'ms (' + ackLatRing.length + ' mẫu)');
         logDiag('🌐 API NỀN: queued(nền)/started(nền+đồng bộ)/fetch ' + sendDiag.apiQueued + '/' + sendDiag.apiStarted + '/' + sendDiag.apiFetchAttempts
           + ' · OK/rejected/không rõ ' + sendDiag.apiSuccess + '/' + sendDiag.apiRejected + '/' + sendDiag.apiUnknown
-          /* [v1.93.27] "OK" chỉ được đếm khi server trả ID TIN (HAR 23/23). Ca `success:true`
-           * không kèm id bị tách ra ở đây — nếu số này lớn thì mọi con số OK của lượt đó phải
-           * bị đọc lại trước khi dùng để kết luận. */
-          + (sendDiag.apiNoMsgId ? ' · ⚠ success:true KHÔNG có id tin ' + sendDiag.apiNoMsgId : '')
           + ' · HTTP status [' + apiStatuses + '] · 429/retry ' + sendDiag.api429 + '/' + sendDiag.api429Retries
           + ' · fallback ' + sendDiag.apiFallback + ' · cứu thiếu globalId ' + sendDiag.apiNoGidFallback
           + ' · hủy ' + sendDiag.apiCancelled
@@ -12593,7 +12430,7 @@
   function confirmedOkCount() {
     return summaryCounters.okApi + summaryCounters.okExt + summaryCounters.okSocket;
   }
-  function markDelivered(convId, via, proof, detail) {
+  function markDelivered(convId, via, proof) {
     if (!convId) return;
     clearBgPending(convId);
     /* [v1.93.21] ĐÃ GIAO ĐƯỢC ⇒ KHOÁ NGOÀI HẾT VIỆC.
@@ -12617,10 +12454,7 @@
         /* [v1.93.21] nhãn bằng chứng — xem khối chú thích dài ngay dưới. */
         const _pf = (typeof proof === 'string' && proof) ? proof : 'unknown';
         noteProof(_pf);
-        /* [v1.93.27] `detail` = id tin (API) / văn bản ngắn đi kèm bằng chứng. Dòng sổ phải
-         * đủ để NGƯỜI ĐỌC tra từng ca, không chỉ để tin vào con số tổng — xem API_MSGID_RE. */
-        const _dt = (typeof detail === 'string' && detail) ? (' · ' + detail) : '';
-        auditPush('✅', convId, '', 'đánh dấu ĐÃ TỚI NƠI qua ' + ch + ' [bằng chứng: ' + _pf + _dt + ']');
+        auditPush('✅', convId, '', 'đánh dấu ĐÃ TỚI NƠI qua ' + ch + ' [bằng chứng: ' + _pf + ']');
       }
     } catch (e0) { /* ignore */ }
     /* ═══ [v1.93.21] MỖI DÒNG ✅ PHẢI NÓI NÓ DỰA TRÊN BẰNG CHỨNG NÀO ═══
@@ -12944,13 +12778,7 @@
          * 📡 Socket 0 ACK · 🌐 API chỉ 397 OK · 🧯 Ext quá hạn 0 ⇒ số ✅ đó không có lệnh nào
          * tương ứng. Nay ca này đi đường "không rõ" như các ca chưa xác nhận khác. */
         if (r && r.ok && !r.dupBlocked) {
-          /* [v1.93.27] làn API khi bù cũng PHẢI có id tin mới được ✅ (sendViaApi đã chặn ca
-           * `success:true` không id bằng cách trả `sent:'maybe'`), và dòng sổ ghi kèm id đó. */
-          const _proofD = (ch === 'api') ? apiProofOf(conv.id, r.id) : null;
-          markDelivered(conv.id, ch,
-            r.sendBy === 'extension' ? (r.extMessageId ? 'messageId' : 'extSuccess')
-              : (ch === 'socket' ? 'ack' : _proofD.proof),
-            _proofD ? _proofD.detail : '');
+          markDelivered(conv.id, ch, r.sendBy === 'extension' ? (r.extMessageId ? 'messageId' : 'extSuccess') : (ch === 'socket' ? 'ack' : 'http200'));
           postSendSideEffects(conv);
           markChannel(conv.id, ch); // lần gửi sau vào thẳng kênh vừa thắng
           if (conv.__extFallback1545) noteExt1545Outcome('saved'); // [v1.92.49] Ext CỨU ĐƯỢC ca 1545041
@@ -13266,123 +13094,6 @@
       return snippetVerdict(convs, convId, pageId, psid, want, sentAtMs);
     } catch (e) { return 'unknown'; }
   }
-
-  /* ═══ [v1.93.27] ĐỐI CHIẾU ID TIN CỦA API VỚI LỊCH SỬ — PHÉP ĐO TRỰC TIẾP CỦA "SÓT" ═══
-   * ĐO ĐƯỢC (lô 90 chat 20:04, bản 1.93.25): 85 ca ✅ với bằng chứng duy nhất là `http200`,
-   *   `🧾 messageId 0 · lịch sử 0`; người dùng kiểm tay ⇒ SÓT. Vì thế câu hỏi không còn là
-   *   "server trả success chưa" mà là **"id tin server trả có NẰM TRONG hội thoại không"**.
-   * HAR (`batmesss.har`, 3 tin liên tiếp cùng 1 hội thoại ở idx 19/21/23): `id` trong phản hồi
-   *   gửi CHÍNH LÀ `messages[].id` của lần GET lịch sử ngay sau đó — khớp 3/3. Nên đây là
-   *   phép đo TRỰC TIẾP, không phải suy luận:
-   *     · thấy id ⇒ `apiIdFound`   — tin có thật trong hội thoại.
-   *     · không thấy id trong hội thoại ĐỌC ĐƯỢC ⇒ `apiIdMissing` — phải nhìn thấy trước tiên:
-   *       đó chính là ca "báo gửi mà sót".
-   *     · không đọc được ⇒ `apiIdUnread` — cấm kết luận (đúng lỗi lặp của tôi 5 lần: in số 0
-   *       rồi bị đọc thành "không có gì xảy ra").
-   * CHỈ ĐỌC: 1 request/chat, chạy 1 lần/lượt, không giữ làn gửi, không đổi phán quyết nào.
-   * Tắt được bằng `__botfakeSetApiIdCheck__(false)` khi cần lô lớn tuyệt đối nhanh. */
-  const apiIdCheck = { total: 0, done: 0, found: 0, missing: 0, unread: 0 };
-  let apiIdCheckOn = true;
-  try { apiIdCheckOn = localStorage.getItem('ssb_api_id_check') !== '0'; } catch (eAi) { /* ignore */ }
-  try {
-    window.__botfakeSetApiIdCheck__ = function (on) {
-      apiIdCheckOn = !!on;
-      try { localStorage.setItem('ssb_api_id_check', apiIdCheckOn ? '1' : '0'); } catch (eAi2) { /* ignore */ }
-      try { logLine('🔬 Đối chiếu id tin API với lịch sử: ' + (apiIdCheckOn ? 'BẬT' : 'TẮT')); } catch (eAi3) { /* ignore */ }
-      return apiIdCheckOn;
-    };
-  } catch (eAi4) { /* ignore */ }
-  function firstListedId(msgs) {
-    /* Lịch sử trả tin MỚI NHẤT ở CUỐI (HAR: batmesss idx 26 — mảng tăng dần theo inserted_at).
-     * Đọc từ cuối lên để chắc chắn lấy được tin vừa gửi, kể cả khi cửa sổ 25 tin. */
-    for (let i = (msgs ? msgs.length : 0) - 1; i >= 0; i--) {
-      const m = msgs[i];
-      if (m && m.id) return String(m.id);
-    }
-    return '';
-  }
-  function apiIdVerdict(msgs, id) {
-    if (!id) return 'unknown';
-    if (!Array.isArray(msgs)) return 'unread';
-    for (let i = 0; i < msgs.length; i++) {
-      if (msgs[i] && String(msgs[i].id || '') === String(id)) return 'found';
-    }
-    return 'missing';
-  }
-  function scheduleApiIdCheck(conv) {
-    try {
-      if (!conv || !conv.id) return;
-      if (conv.__apiIdCheckQueued) return;   // mốc "đã xếp hàng" chốt TRƯỚC khi xét công tắc
-      const id = apiMsgIdByConv[conv.id];
-      if (!id) return;
-      conv.__apiIdCheckQueued = true;
-      if (!apiIdCheckOn) return;
-      apiIdCheck.total++;
-      const myRun = runSeq;
-      /* ═══ ĐỌC TỚI 2 LẦN — VÌ 1 LẦN ĐỌC SAI ĐƯỢC ═══
-       * HAR (`batmesss.har`) cho thấy ngay sau lệnh gửi, GET lịch sử ĐẦU TIÊN nhiều khi CHƯA
-       * có tin vừa gửi (idx 47/165/345: lần đọc kế tiếp không thấy id) nhưng lần đọc SAU đó
-       * (idx 347) thì CÓ. Vì vậy 1 lần đọc không đủ để nói "sót" — nếu kết luận từ 1 lần đọc
-       * thì chính bộ đo lại sinh ra ca ⚠ giả, đúng loại lỗi mà cả file này đang sửa.
-       * Nay: đọc ở ~+6 s; chỉ khi KHÔNG thấy mới đọc lại ở ~+15 s rồi mới phán 'missing'.
-       * Ca 'found' dừng ngay (1 request). Chỉ ĐỌC, không giữ làn gửi. */
-      const attemptAt = [6000, 15000];
-      let lastUnread = false;
-      const step = (k) => {
-        if (myRun !== runSeq) return;
-        bgClock.wait(attemptAt[k] - (k ? attemptAt[k - 1] : 0)).then(async () => {
-          try {
-            if (myRun !== runSeq) return;
-            const f = (function () { try { return peekConv(conv) || conv; } catch (e) { return conv; } })();
-            const pageId = (f && (f.page_id || f.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
-            const convId = (f && f.id) || conv.id;
-            const custId = String((f && f.customerId) || conv.customerId
-              || (f && f.customers && f.customers[0] && f.customers[0].id)
-              || (conv.customers && conv.customers[0] && conv.customers[0].id) || '');
-            if (!pageId) { lastUnread = true; return finish('unread'); }
-            const url = apiBase() + '/v1/pages/' + pageId
-              + '/conversations/' + encodeURIComponent(convId)
-              + '/messages?customer_id=' + encodeURIComponent(custId)
-              + '&user_view=true&is_new_api=true&separate_pos=true';
-            const res = await ctxFetchLane(() => fetchJson(url, 2));
-            const msgs = (res && res.ok && res.data && res.data.success !== false)
-              ? (res.data.messages || (res.data.data && res.data.data.messages) || null) : null;
-            const v = apiIdVerdict(msgs, id);
-            if (v === 'found') { return finish('found'); }
-            if (v === 'unread') lastUnread = true;
-            if (k + 1 < attemptAt.length) return step(k + 1);   // chưa thấy ⇒ đọc lại 1 lần nữa
-            return finish(lastUnread ? 'unread' : 'missing');
-          } catch (e) {
-            lastUnread = true;
-            if (k + 1 < attemptAt.length) return step(k + 1);
-            return finish('unread');
-          }
-        });
-      };
-      const finish = (v) => {
-        try {
-          apiIdCheck.done++;
-          if (v === 'found') {
-            apiIdCheck.found++;
-            sendDiag.apiIdFound = (sendDiag.apiIdFound || 0) + 1;
-          } else if (v === 'missing') {
-            apiIdCheck.missing++;
-            sendDiag.apiIdMissing = (sendDiag.apiIdMissing || 0) + 1;
-            /* ĐÂY LÀ CA NGƯỜI DÙNG GẶP: server trả id nhưng đọc 2 lần vẫn KHÔNG thấy tin đó
-             * trong hội thoại. Ghi thẳng vào sổ kiểm chứng để tra tay, kèm id để mở đúng tin. */
-            auditPush('🔎', conv.id, (conv && conv.name) || '',
-              'id tin API KHÔNG có trong hội thoại sau 2 lần đọc (' + clip(id, 46) + ')');
-          } else {
-            apiIdCheck.unread++;
-            sendDiag.apiIdUnread = (sendDiag.apiIdUnread || 0) + 1;
-          }
-        } catch (eF) { /* ignore */ }
-      };
-      step(0);
-    } catch (e) { /* ghi nhận lỗi không được làm hỏng luồng gửi */ }
-  }
-
-
 
   /* ===== [v1.92.30] CỔNG "CHỨNG MINH VẮNG MẶT" TRƯỚC MỌI LẦN BẮN THỨ 2 =====
    * LỖI GỐC CỦA VIỆC LẶP: bù chỉ được phép chạy khi `sent === false`, mà trong code có 6 nguồn trả
@@ -14326,10 +14037,7 @@
           if ((await confirmViaSnippet(conv, f, pageId, convId, want, sentAt)) === 'yes') verdict = 'yes';
         }
         if (verdict === 'yes') {
-          /* [v1.93.27] Nhãn bằng chứng ở đây là 'history' — thứ THẬT SỰ chứng minh tin đã tới
-           * (đọc lại lịch sử thấy đúng tin). Bản cũ ghi 'http200' cho ca này ⇒ `🧾` gộp nó vào
-           * nhóm 85 ca chỉ có `success:true` mà KHÔNG có id ⇒ mất khả năng phân biệt. */
-          markDelivered(conv.id, 'api', 'history', 'thấy tin trong lịch sử (API trả lời trễ)');
+          markDelivered(conv.id, 'api', 'http200');
           try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
           logFailGrouped(nm, 'kiểm chứng: tin ĐÃ tới (API chỉ trả lời trễ) — tính ✅ API', '🔎', conv.id);
           return;
@@ -14889,10 +14597,6 @@
       packetMonReset(); // [v1.93.25] số gói tin phải tính lại từ đầu mỗi lượt
     } catch (ePA) { /* ignore */ }
     Object.keys(proofStats).forEach((k) => { proofStats[k] = 0; }); // [v1.93.21]
-    try {  // [v1.93.27] sổ đối chiếu id tin API phải tính lại từ đầu mỗi lượt
-      apiIdCheck.total = 0; apiIdCheck.done = 0;
-      apiIdCheck.found = 0; apiIdCheck.missing = 0; apiIdCheck.unread = 0;
-    } catch (eAiR) { /* ignore */ }
     batchStats.finalLogged = false;
     batchStats.tailHoldLogged = false; // [v1.93.20] trạng thái hoãn chốt phải về 0 mỗi lượt
     batchStats.tailWaitSince = 0;
@@ -15270,17 +14974,7 @@
         // fired = chỉ ĐÃ BẮN request — CHƯA xác nhận server nhận. Đánh dấu "đã đến nơi" cho
         // kết quả fired sẽ chặn nhầm bước bù nền → "báo gửi nhưng không gửi gì" (bug v1.39.0).
         // Chỉ đánh dấu khi kênh XÁC NHẬN thành công thật (kể cả xác nhận nền — fireApiAndWatch).
-        /* [v1.93.27] ca đi làn API ĐỒNG BỘ: nhãn phải là `http200` + KÈM ID TIN (HAR 23/23).
-         * Bản cũ ghi nhãn `extSuccess` cho cả làn API ⇒ dòng chốt đếm `ext-báo-success` và
-         * che mất sự thật "ca này có id tin hay không". */
-        if (!r.fired) {
-          const _chFin = r.sendBy || 'api';
-          const _proofE = (_chFin === 'api') ? apiProofOf(c.id, r.id) : null;
-          markDelivered(c.id, _chFin,
-            _chFin === 'socket' ? 'ack' : (_chFin === 'api' ? _proofE.proof : 'extSuccess'),
-            _proofE ? _proofE.detail : '');
-          postSendSideEffects(c);
-        }
+        if (!r.fired) { markDelivered(c.id, r.sendBy || 'api', r.sendBy === 'socket' ? 'ack' : 'extSuccess'); postSendSideEffects(c); }
         if (r.fired) { firedN++; noteBgPending(c, r.sendBy); } // vào sổ watchdog — quá 90s tự chốt, không kẹt
         // [v1.92.31] KHÔNG in từng dòng "đã gửi" nữa — chỉ in mốc tiến độ (xem logProgress).
         // [v1.92.35] `ok` ở đây là "đã phát" (ca fired chưa có ACK) ⇒ KHÔNG dùng để báo thành công.
