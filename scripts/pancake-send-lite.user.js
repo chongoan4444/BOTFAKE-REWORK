@@ -9039,17 +9039,42 @@
       return harvestDocIdsFromHtml(t, 'response');
     } catch (e) { return 0; }
   }
-  /* CÁCH B — hỏi extension nạp hộ. DÙNG TÊN RIÊNG, MẶC ĐỊNH TẮT.
-   * Lý do không gửi thẳng 'PRELOAD_DOC_IDS': switch của extension 0.5.62 KHÔNG có case đó
-   * (đã grep 86 case), nên gửi thẳng là rỗng mà không biết. Tên riêng buộc ta phải ĐỌC kết quả
-   * và không bao giờ được coi "không trả lời" là "đã nạp". */
+  /* CÁCH B — hỏi extension nạp hộ. MẶC ĐỊNH TẮT (vẫn cần `window.__botfakeTryPreloadDocIds__`).
+   *
+   * ═══ [v1.93.13] SỬA LỖI: `PRELOAD_DOC_IDS` **CÓ** case trong extension 0.5.62 ═══
+   * Chú thích cũ ở đây nói "switch của extension 0.5.62 KHÔNG có case đó (đã grep 86 case)"
+   * ⇒ SAI, và vì tin vào nó nên script gửi tên bịa `PRELOAD_DOC_IDS_CANDIDATE`,
+   * extension bỏ qua (default case), `doc_id` không bao giờ có ⇒ `batch nạp 0/0` ở MỌI log.
+   *
+   * Case THẬT trong `0.5.62_0/assets/background.js` @400547:
+   *   case"PRELOAD_DOC_IDS":{await Z(); const{pageId:_,isBusiness:g}=r.data;
+   *     O.preloadDocIds({pageId:_, isBusiness:g});       // ← KHÔNG await, không postMessage
+   *     q.setItem("country", r.data.country); break}
+   * Và `O.preloadDocIds({html,pageId,isBusiness})`:
+   *   · `html` bỏ trống ⇒ ext tự fetch `makeInboxViewUrl(pageId,isBusiness)`
+   *     = `business.facebook.com/latest/inbox/facebook?asset_id=…`
+   *   · cần `docNames` [ge, Oe, Ra, Oa] — bộ doc của đường Instagram
+   *   · nạp vào `O` (GraphQLDocId) = localStorage `GraphQLDocId_docIdsMap`
+   *
+   * ⇒ Tên ĐÚNG là `PRELOAD_DOC_IDS`, tham số đúng là `{pageId, isBusiness, country}`.
+   *   KHÔNG có `_SUCCESS`/`_FAILURE` ⇒ `adapter.send` sẽ **timeout** (30 s) rồi trả
+   *   `{success:false, data:null}` — nhưng side-effect đã xảy ra. Vì vậy:
+   *   · hạn chờ ngắn (4 s) để không giữ lane,
+   *   · phán quyết dựa DUY NHẤT vào `docIdReady()` đọc lại localStorage,
+   *   · không bao giờ coi "không trả lời" là "đã nạp".
+   * Đây là đường CHỈ ĐỌC + ghi cache của extension, KHÔNG gửi tin ⇒ không thể sinh tin trùng. */
   function tryPreloadDocIdsViaExt(pid) {
     if (!window.__botfakeTryPreloadDocIds__) return Promise.resolve(false);
     const adapter = window.__ExtensionAdapter__;
     if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(false);
     if (!pid) return Promise.resolve(false);
     return Promise.resolve()
-      .then(() => adapter.send({ type: 'PRELOAD_DOC_IDS_CANDIDATE', pageId: String(pid), isBusiness: false }, { timeout: 6000 }))
+      .then(() => adapter.send({
+        type: 'PRELOAD_DOC_IDS',
+        pageId: String(pid),
+        isBusiness: false,
+        country: (function () { try { return localStorage.getItem('country') || 'vn'; } catch (e) { return 'vn'; } })(),
+      }, { timeout: 4000 }))
       .then((res) => {
         const ok = docIdReady();
         if (ok) {
@@ -9105,7 +9130,21 @@
       // Khớp payload app (@897543): app luôn kèm timeRangeMin. Gửi 0 = lấy mọi mốc,
       // tránh Extension hiểu thiếu trường là không có mapping nào trong khoảng lọc.
       timeRangeMin: 0,
-    }, { timeout: 2000 })).then((res) => {
+      /* [v1.93.13] `maxThreadCount` LÀ THAM SỐ QUYẾT ĐỊNH SỐ LƯỢT GRAPHQL.
+       * Nguồn `0.5.62_0/assets/background.js`:
+       *   const yn=50, ul=250
+       *   class Ct{ constructor({pageId, timeRangeMin, maxThreadCount}){ … this.maxThreadCount = maxThreadCount || ul } }
+       *   async init(){ … for(;;){ let c=yn;
+       *       if(this.maxThreadCount && this.maxThreadCount-s<yn) c=this.maxThreadCount-s;
+       *       const l=await this.getFacebookThreads(a,c);  … } }
+       * ⇒ Mỗi lượt lấy `yn = 50` thread; trần `ul = 250` ⇒ **5 lượt graphqlbatch**.
+       * Script KHÔNG kèm `maxThreadCount` ⇒ ext dùng trần 250 (đúng ý ta), nhưng lại chỉ
+       * chờ **2 000 ms**. 5 lượt graphql thật không thể xong trong 2 s ⇒ phán quyết rơi vào
+       * nhánh timeout ⇒ `batch nạp 0/0` ở mọi log, dù doc_id đã có.
+       * ⇒ nâng hạn chờ lên 30 000 ms (đúng hạn adapter cho mọi lệnh thường: `l = 3e4`).
+       * Lệnh này CHỈ ĐỌC + trả mapping; chờ lâu hơn không sinh thêm lệnh gửi nào.
+       * Không kèm `maxThreadCount` để giữ trần 250 như app. */
+    }, { timeout: 30000 })).then((res) => {
       delete batchGidPromises[pageId];
       const list = res && res.success && res.data && res.data.threadsWithGlobalId;
       /* ═══ [v1.93.6] ĐỪNG ĐÁNH DẤU "ĐÃ NẠP" KHI CHƯA NẠP ĐƯỢC GÌ ═══

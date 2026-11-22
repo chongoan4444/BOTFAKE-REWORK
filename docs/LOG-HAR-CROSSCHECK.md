@@ -968,3 +968,59 @@ Cả 3 lệnh trên đều `postMessage({… taskId …})`. Việc đó **cần*
 `pendingMessages[taskId]`), nhưng `adapter.send` đã tự thêm `taskId` (`{...e, taskId:n}`) nên
 script **không được** tự gửi `taskId` — gửi sẽ ghi đè bộ đếm và làm lệch ghép kết quả.
 Script hiện **không gửi** ở cả 3 lệnh. ✔
+
+---
+
+## 18. Đối chiếu `PRELOAD_DOC_IDS` + `BATCH_GET_GLOBAL_ID` (1.93.13) — 2 LỖI THẬT
+
+### 18.1 `PRELOAD_DOC_IDS` **CÓ** case trong extension — script gửi tên bịa
+
+Chú thích cũ trong script: *"switch của extension 0.5.62 KHÔNG có case đó (đã grep 86 case)"*
+⇒ **SAI**. Case thật @400547:
+
+```js
+case"PRELOAD_DOC_IDS":{await Z(); const{pageId:_,isBusiness:g}=r.data;
+  O.preloadDocIds({pageId:_, isBusiness:g});          // ← KHÔNG await, KHÔNG postMessage
+  q.setItem("country", r.data.country); break}
+```
+
+Script gửi `PRELOAD_DOC_IDS_CANDIDATE` — extension rơi vào default, **bỏ qua im lặng**.
+Đó là lý do `batch nạp 0/0` ở **27/27 log** dù doc_id có sẵn.
+
+Tham số đúng: `{pageId, isBusiness, country}`.
+`O.preloadDocIds({html, pageId, isBusiness})`: `html` bỏ trống ⇒ ext tự fetch
+`business.facebook.com/latest/inbox/facebook?asset_id=…`; nạp vào `O` (GraphQLDocId)
+= localStorage `GraphQLDocId_docIdsMap`.
+
+**Không có `_SUCCESS`/`_FAILURE`** ⇒ `adapter.send` sẽ timeout (30 s) rồi trả `{success:false,data:null}`
+nhưng side-effect ĐÃ xảy ra. Vì vậy: hạn chờ 4 s (không giữ lane), phán quyết dựa DUY NHẤT vào
+`docIdReady()` đọc lại localStorage. Đường CHỈ ĐỌC + ghi cache của extension, không gửi tin.
+
+### 18.2 `BATCH_GET_GLOBAL_ID` cần 5 lượt graphql, script chỉ chờ 2 000 ms
+
+```js
+const yn=50, ul=250
+class Ct{ constructor({pageId, timeRangeMin, maxThreadCount}){ … this.maxThreadCount = maxThreadCount || ul }
+  async init(){ for(;;){ let c=yn;
+      if(this.maxThreadCount && this.maxThreadCount-s<yn) c=this.maxThreadCount-s;
+      const l=await this.getFacebookThreads(a,c);   // graphqlbatch "MessengerGraphQLThreadlistFetcher"
+      … } } }
+```
+
+Mỗi lượt `yn = 50` thread, trần `ul = 250` ⇒ **5 lượt graphqlbatch**.
+Script không kèm `maxThreadCount` (đúng — ext dùng trần 250), nhưng chờ **2 000 ms**.
+5 lượt graphql không thể xong trong 2 s ⇒ luôn rơi nhánh timeout.
+
+Đối chiếu app: `c.Z.send({type:"BATCH_GET_GLOBAL_ID", pageId:e, timeRangeMin:t.timeRangeMin})`
+— **không kèm timeout** ⇒ dùng mặc định `l = 3e4` = **30 000 ms**, và **cũng không kèm
+`maxThreadCount`**.
+
+⇒ Sửa: `timeout: 2000` → `30000`. Chỉ đọc + trả mapping; chờ lâu hơn không sinh thêm lệnh gửi.
+
+### 18.3 Đã đối chiếu, KHÔNG cần sửa
+
+| Lệnh | Kết luận |
+|---|---|
+| `SEND_COMMENT` | Script đã đọc đúng `messageId` (sửa ở 1.93.11). `SEND_COMMENT_FAILURE` 2 hình dạng (`message` hoặc rỗng) — script đọc cả hai ✔ |
+| `LISTEN_INBOX` / `LISTEN_WS` | Là lệnh **bật/tắt listener**, extension tự chạy `Oc`/`$a`. Script không điều khiển — đúng (ACK lấy qua lịch sử, không qua listener) |
+| `timeRangeMin: 0` | `if(this.timeRangeMin!=null && d<this.timeRangeMin) break` ⇒ 0 = lấy mọi mốc ✔ |
