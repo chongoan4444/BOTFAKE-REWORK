@@ -1948,19 +1948,23 @@ bảo đảm `loadMessages` sẵn sàng; ext tự gọi `He.preloadDocIds` khi c
 Bảng cũ ghi "14/68 case đã đối soát". **Sai cả tử số và mẫu số**, vì nó đếm cả tên xuất hiện
 trong **chú thích**. Đếm đúng (`grep "type: *'X'"` = lệnh thật sự gửi):
 
-| Số | Lệnh script GỬI | Trạng thái |
+| Số | Lệnh script GỬI | Trạng thái (cập nhật tới §40) |
 |---|---|---|
-| 1 | `PRELOAD_DOC_IDS` | ✔ §27 — sửa timeout 4 000 → 25 000 (ext không `await`) |
-| 2 | `BATCH_GET_GLOBAL_ID` | ✔ §27.3 — 2 điều kiện `Ct.init` (`Missing doc_id`, `"There is a running job"`), `timeRangeMin:0` đúng |
-| 3 | `GET_GLOBAL_ID_FOR_CONV` | ✔ trả `globalId` **top-level**; rẻ nhất (không `await Z()`) |
-| 4 | `REPLY_INBOX_PHOTO` | ✔ §26/§28 — `jc`/`getErrorHandler`, `success` không `messageId` = `error_payload` |
-| 5 | `MAKE_MESSENGER_LINK` | ✔ §27.4 — `uiVersion:6` cứng ⇒ luôn đi `Ee.init()`; timeout 14 000 |
+| 1 | `PRELOAD_DOC_IDS` | ⚠ §27 sửa timeout lên 25 000 — **SAI, đã đảo ở §40**: case không trả `_SUCCESS` nên chờ là vô ích; nay chờ thích ứng 3 000/800 ms, trần 4 000 ms. **Và lệnh này nạp SAI BỘ doc_id** (`[ea,ge,Oe]`, không có `rt/st`) ⇒ nó KHÔNG làm `BATCH_GET_GLOBAL_ID` chạy được. App **không hề gửi** lệnh này (0 lần) |
+| 2 | `BATCH_GET_GLOBAL_ID` | ⚠ `timeRangeMin:0` đúng, nhưng **luôn reject `Missing doc_id rt/st`** vì §40.1 — `rt/st` chỉ có sau `Ee.init()` |
+| 3 | `GET_GLOBAL_ID_FOR_CONV` | ✔ trả `globalId` **top-level**; rẻ nhất (không `await Z()`). Cũng là đường **đúng để nạp `rt/st`** (xem §40.4) |
+| 4 | `REPLY_INBOX_PHOTO` | ✔ §26/§28 — `jc`/`getErrorHandler`, `success` không `messageId` = `error_payload`; §36 nay BỎ khi thiếu `thread_id` |
+| 5 | `MAKE_MESSENGER_LINK` | ✔ §27.4 —~~`uiVersion:6` cứng~~ **§31 ĐÃ BỎ** (ext tự dò `za`, TTL 5 h) |
 | 6 | `UPLOAD_INBOX_PHOTO` | ✔ `ae.startCheck(_,D)` với `r=!1` ⇒ lần đầu KHÔNG đổi profile |
 | 7 | `SEND_COMMENT` | ✔ `ae.startCheck(_,_,!0,!0)` ⇒ đổi profile ngay; script đã để 35 000 ms |
 | 8 | `ENABLE_FIND_THREAD_BY_USERNAME` | ✔ §25 — `self["findThreadByUsername_"+pageId]`, đọc bởi `bn()` |
-| 9 | `LOAD_FACEBOOK_MESSAGES` | ✔ §29 — MỚI dùng; chuẩn hoá cách đọc + lấy gid miễn phí |
+| 9 | `LOAD_FACEBOOK_MESSAGES` | ✔ §29 — nhưng **§37 sửa tên trường thành `globalUserId`** (app gửi `globalId`, ext bỏ qua) |
 
-⇒ **9/9 = 100% lệnh script gửi đã đối soát với `0.5.62_0/assets/background.js`.**
+⇒ **9/9 lệnh đã đối soát**, trong đó **3 lệnh hoá ra SAI ở các lượt sau** (§31, §37, §40) — đây là
+lý do phải đọc lại cả chuỗi chứ không tin bảng cũ: đối soát "đã xem" ≠ "đã đúng".
+
+**Trạng thái thật hôm nay:** 6/9 lệnh đúng hoàn toàn; 3/9 đã sửa nhưng còn **1 việc treo** —
+`BATCH_GET_GLOBAL_ID` vẫn không chạy được cho tới khi có `Ee.init()` (xem §40.4).
 
 **56 case còn lại: script KHÔNG gửi một lệnh nào trong số đó** (grep `type: 'X'` = 0). Đó không
 phải "chưa đối soát" mà là **không dùng** — gồm LINE/Zalo/appointment/comment-edit/sticker/
@@ -2620,3 +2624,19 @@ Ghi `docIdStats.savedMs` (thời gian tiết kiệm thật) + `preloadFirst`/`pr
 > mỗi lần warm-up. Việc nạp đúng bộ `rt/st` phải do **`Ee.init()`** làm — xem §41.
 
 **Test khoá:** hằng chờ ≤ 4 000 ms; không còn `timeout: 25000` cho `PRELOAD_DOC_IDS`.
+
+### 40.4 Việc CÒN TREO: `BATCH_GET_GLOBAL_ID` chưa có đường nạp `rt/st`
+
+`rt/st` chỉ xuất hiện sau khi `Ee.preloadDocIds` (feature `inbox`) chạy, và nó chỉ chạy từ
+`Ee.getGlobalIdFromInbox` / `Ee.init`. Ba hướng, **chưa chọn hướng nào** (cần xác nhận vì đổi
+thứ tự lệnh trong đường warm-up ảnh hưởng nhịp lô):
+
+| Hướng | Việc phải làm | Đánh đổi |
+|---|---|---|
+| **A. Nạp qua `GET_GLOBAL_ID_FOR_CONV` trước** | thêm 1 lệnh/chat cho chat đầu tiên của page, rồi mới `BATCH_GET_GLOBAL_ID` | tốn đúng **1** lệnh/page là có `rt/st` cho cả phiên; batch sau đó chạy thật (250 mapping/lần) |
+| **B. Bỏ hẳn `BATCH_GET_GLOBAL_ID`** | xoá đường nạp hàng loạt, chỉ dò lẻ từng chat | đúng bằng app (app không batch), nhưng mất đường nạp 250 mapping/lần |
+| **C. Giữ nguyên, coi batch là "best-effort"** | không sửa | batch tiếp tục 0/0 ở 100 % lần chạy; 22 s chờ đã bỏ (§40.3) nhưng vẫn 1 lệnh vô ích/page/phiên |
+
+Chứng cứ để chọn: `BATCH_GET_GLOBAL_ID` **không bao giờ** trả mapping trong 12 HAR và 31 log
+(**0** lần `batch nạp N/M` với N > 0). Nếu chọn C thì nên **bỏ hẳn lệnh** thay vì gửi lệnh
+chắc chắn thất bại — gửi mà biết chắc hỏng chỉ tốn slot và làm log nhiễu.
