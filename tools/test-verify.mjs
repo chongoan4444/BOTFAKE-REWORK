@@ -2490,8 +2490,12 @@ check('[v1.93.21] markDelivered nhả outboundLock (khoá sót biến ca đã gi
  * Lô 5 281 chat: 4 844 dòng `✅ … qua ext` không truy được bằng chứng nào; người dùng kiểm tay
  * thấy 4 000+ chat chưa nhận tin. Nguyên nhân sâu nhất là DÒNG SỔ KHÔNG MANG BẰNG CHỨNG.
  * Đã GỠ luôn cổng chặn cứu Ext của bản nháp (đo lại: 🛟 gửi cứu chỉ 423 ca, không phải 4 844). */
-check('[v1.93.21b] dòng sổ ✅ có nhãn bằng chứng',
-  /\[bằng chứng: ' \+ _pf \+ '\]/.test(SRC), true);
+/* [v1.93.27] kịch bản cũ đòi nguyên văn `_pf + ']'`. Nhãn bằng chứng KHÔNG ĐƯỢC ĐỔI, nhưng
+ * dòng sổ nay có thêm phần `detail` (id tin của API) — đó chính là thứ 1.93.26 thiếu (85 ca ✅
+ * chỉ có `http200`, `messageId 0`). Vì vậy kịch bản được sửa cho đúng ĐIỀU NÓ CẦN BẢO VỆ:
+ * nhãn `_pf` phải còn trong dòng sổ, và `detail` (nếu có) chỉ được nối THÊM, không thay thế. */
+check('[v1.93.21b→27] dòng sổ ✅ có nhãn bằng chứng',
+  /\[bằng chứng: ' \+ _pf \+ _dt \+ '\]/.test(SRC), true);
 check('[v1.93.21b] có sổ đếm bằng chứng + in ở dòng chốt',
   /const proofStats = \{ messageId: 0, history: 0, ack: 0, http200: 0, extSuccess: 0, unknown: 0 \}/.test(SRC)
   && /KHÔNG có bằng chứng ' \+ proofStats\.unknown/.test(SRC), true);
@@ -2809,6 +2813,98 @@ check('[v1.93.24] có ghi nhận mốc bắn Socket đầu tiên theo page',
     /noteFbRejected\(conv\.id, 'Socket ACK rejected = FB từ chối nhận tin' \+ rejectBucketLabel/.test(SRC), true);
   check('[v1.93.26] bộ đếm lý do reset mỗi lượt (không cộng dồn qua lô)',
     /sockRejectDiag\.total = 0;/.test(SRC), true);
+}
+
+/* ═══ [v1.93.27] `success:true` KHÔNG PHẢI BẰNG CHỨNG — BẰNG CHỨNG LÀ `id` CỦA TIN ═══
+ * ĐO ĐƯỢC (log 22/11 20:04, lô 90 chat, bản 1.93.25):
+ *   `✅ 89/90 … 🧾 Bằng chứng của 89 ca ✅: messageId 0 · lịch sử 0 · ACK Socket 4 ·
+ *    HTTP 200 85` ⇒ 85 ca ✅ chỉ dựa vào đúng một chữ `success:true`.
+ *   Người dùng kiểm lại: SÓT, và gửi tay lại được ⇒ tin thật chưa đi, chỉ bị đánh ✅ sai.
+ * HAR (12 ca gửi API thành công trong `batmesss.har`: 10 inbox `m_…` + 2 bình luận
+ *   `postid_commentid`; 11 ca trong `tinnhan.har`): MỌI phản hồi thành công đều kèm `id`.
+ *   Và `id` đó = `messages[].id` của GET lịch sử ngay sau đó (đối chiếu 3 tin liên tiếp
+ *   cùng 1 hội thoại: khớp 3/3) ⇒ đây là phép đo TRỰC TIẾP, không phải suy luận.
+ * Dưới đây là kịch bản CHẠY THẬT trên hàm thật trích từ userscript (không chỉ so regex). */
+{
+  const code27 = [
+    extractFn('clip'),
+    extractFn('apiMsgIdOf'),
+    extractFn('apiMsgIdKnownShape'),
+    extractFn('firstListedId'),
+    extractFn('apiIdVerdict'),
+    SRC.match(/const API_MSGID_RE = .*;/)[0],
+    SRC.match(/const API_MSGID_JUNK = \{[^}]*\};/)[0],
+    'return { apiMsgIdOf, apiMsgIdKnownShape, firstListedId, apiIdVerdict };',
+  ].join('\n');
+  const A = new Function(code27)();
+
+  // ---- (1) ĐỌC ĐÚNG hình dạng thật của HAR ----
+  check('[v1.93.27] đọc được id tin inbox `m_…` từ phản hồi thật của HAR',
+    A.apiMsgIdOf({ id: 'm_iZsc-dimPMuYRJKYBME7DwRAfvx', success: true, original_error: null }), 'm_iZsc-dimPMuYRJKYBME7DwRAfvx');
+  check('[v1.93.27] đọc được id bình luận dạng `postid_commentid` (HAR reply_comment)',
+    A.apiMsgIdOf({ id: '122203568066953890_1659474325533562', success: true }), '122203568066953890_1659474325533562');
+  check('[v1.93.27] chấp nhận `message_id` nếu server đổi tên trường (cùng một sự thật)',
+    A.apiMsgIdOf({ success: true, message_id: 'm_abc123' }), 'm_abc123');
+  check('[v1.93.27] chấp nhận payload.actions[0].message_id (dạng làn Socket/Ext)',
+    A.apiMsgIdOf({ success: true, payload: { actions: [{ message_id: 'm_pay' }] } }), 'm_pay');
+
+  // ---- (2) `success:true` MÀ KHÔNG CÓ ID ⇒ KHÔNG được coi là bằng chứng ----
+  check('[v1.93.27] success:true mà thiếu id ⇒ chuỗi rỗng (KHÔNG đánh ✅)',
+    A.apiMsgIdOf({ success: true }), '');
+  check('[v1.93.27] id = 0 / "null" / "undefined" KHÔNG được coi là id',
+    [A.apiMsgIdOf({ success: true, id: 0 }), A.apiMsgIdOf({ success: true, id: 'null' }),
+      A.apiMsgIdOf({ success: true, id: 'undefined' })].join('|'), '||');
+  check('[v1.93.27] success:false kèm id lạ ⇒ vẫn không phải bằng chứng',
+    A.apiMsgIdOf({ success: false, id: 'm_x', e_code: 551 }), '');
+  check('[v1.93.27] dạng id của HAR được nhận diện (m_… và postid_commentid)',
+    [A.apiMsgIdKnownShape('m_abc-DEF_1'), A.apiMsgIdKnownShape('122203568066953890_1659474325533562')].join('|'), 'true|true');
+
+  // ---- (3) PHÉP ĐO "SÓT": id có nằm trong hội thoại không ----
+  const hist = [
+    { id: 'm_old1' },
+    { id: '122203568066953890_4513146688944224' },   // tin bình luận cũ
+    { id: 'm_TksOYsEU5EwJD8J9sXVPXD' },              // tin vừa gửi (HAR idx 345)
+  ];
+  check('[v1.93.27] id CÓ trong lịch sử ⇒ found (tin thật sự nằm trong hội thoại)',
+    A.apiIdVerdict(hist, 'm_TksOYsEU5EwJD8J9sXVPXD'), 'found');
+  check('[v1.93.27] id KHÔNG có trong lịch sử ⇒ missing (đây chính là ca "báo gửi mà sót")',
+    A.apiIdVerdict(hist, 'm_khongCoTrongHoiThoai'), 'missing');
+  check('[v1.93.27] không đọc được lịch sử ⇒ unread (CẤM kết luận, không phải "không có gì")',
+    A.apiIdVerdict(null, 'm_x'), 'unread');
+  check('[v1.93.27] không có id ⇒ unknown (không được đếm vào found/missing)',
+    A.apiIdVerdict(hist, ''), 'unknown');
+  check('[v1.93.27] lấy được id tin MỚI NHẤT (mảng lịch sử tăng dần theo thời gian)',
+    A.firstListedId(hist), 'm_TksOYsEU5EwJD8J9sXVPXD');
+  check('[v1.93.27] lịch sử rỗng ⇒ chuỗi rỗng (không bịa id)',
+    A.firstListedId([]), '');
+
+  /* ---- (4) KHÔNG chỗ nào còn đánh ✅ làn API bằng nhãn cứng `http200` ----
+   * Đây là điều kiện nghiệm thu chính: nhãn `http200` chỉ được sinh ra từ `apiProofOf()`,
+   * tức chỉ khi ĐÃ có id tin. Bản 1.93.25 có 5 chỗ gán cứng ⇒ 85 ca ✅ không có id. */
+  const SRC_NC = stripComments(SRC);
+  check('[v1.93.27] KHÔNG còn markDelivered(...,\'api\',\'http200\') gán cứng',
+    /markDelivered\([^;]*,\s*'api'\s*,\s*'http200'/.test(SRC_NC), false);
+  check('[v1.93.27] nhãn http200 chỉ sinh từ apiProofOf (có id mới có nhãn)',
+    /\{ proof: 'http200', detail: 'id '\s*\+\s*clip\(mid, 60\) \}/.test(SRC_NC), true);
+  check('[v1.93.27] apiProofOf trả \'unknown\' khi KHÔNG có id (nhãn phải nói thật)',
+    /\{ proof: 'unknown', detail: 'API success:true nhưng KHÔNG kèm id tin' \}/.test(SRC_NC), true);
+  check('[v1.93.27] ca success:true không id bị đẩy sang nhánh ⚠ + đọc lại lịch sử',
+    /apiNoMsgId\. \? ' · ⚠ API success:true KHÔNG có id tin: '|sendDiag\.apiNoMsgId \? ' · ⚠ API success:true KHÔNG có id tin: '/.test(SRC_NC), true);
+  /* 5 = 3 chỗ thành công của `fireApiAndWatch` (lần đầu / gửi lại kèm cờ ctx-7 / gửi lại do
+   * lỗi tạm thời) + 2 đường đồng bộ (`sendViaApi`, `sendCommentViaApi`). Mọi đường báo
+   * thành công của làn API đều PHẢI đi qua đúng một phép đọc id. */
+  check('[v1.93.27] mọi đường thành công của làn API đều đọc id qua apiMsgIdOf',
+    (SRC_NC.match(/const _mid[0-9]? = apiMsgIdOf\(/g) || []).length, 5);
+  check('[v1.93.27] dòng chốt có phép đo id↔lịch sử (3 số tách rời)',
+    /id↔lịch sử: đo ' \+ apiIdCheck\.done/.test(SRC_NC) && /KHÔNG THẤY ' \+ apiIdCheck\.missing/.test(SRC_NC)
+      && /không đọc được ' \+ apiIdCheck\.unread/.test(SRC_NC), true);
+  check('[v1.93.27] sổ đối chiếu reset mỗi lượt (không cộng dồn qua lô)',
+    /apiIdCheck\.missing = 0; apiIdCheck\.unread = 0;/.test(SRC_NC), true);
+  check('[v1.93.27] phép đo đối chiếu CHỈ ĐỌC: dùng fetchJson (GET), không gọi hàm gửi',
+    /const res = await ctxFetchLane\(\(\) => fetchJson\(url, 2\)\);/.test(SRC_NC)
+      && !/scheduleApiIdCheck[\s\S]{0,1500}sendViaApi|scheduleApiIdCheck[\s\S]{0,1500}fireApiAndWatch/.test(SRC_NC), true);
+  check('[v1.93.27] nhãn bằng chứng khi đọc lịch sử thấy tin là \'history\', không phải http200',
+    /markDelivered\(conv\.id, 'api', 'history'/.test(SRC_NC), true);
 }
 
 if (fails.length) {

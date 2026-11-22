@@ -655,3 +655,66 @@ Phân loại này **chỉ đổi nhãn/log** — không đổi phán quyết, kh
 Không có thay đổi nào trên đường gửi. 619/619 test, trong đó 38 kịch bản mới chạy THẬT trên
 helper giả có đúng hình dạng bundle (không chỉ so regex — regex đã từng xanh trong khi code
 không chạy, đó chính là lỗi của 1.93.25).
+
+## §19 — [1.93.27] "BÁO GỬI ĐỦ NHƯNG THỰC TẾ SÓT": `success:true` KHÔNG PHẢI BẰNG CHỨNG
+
+### 19.1 Sự thật đo được (log 22/11 20:04:15–20:05:35, lô 90 chat, bản 1.93.25-W200.135)
+```
+📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công 89/90 tin (98.9%) [API: 85 · Socket: 4]
+ | 🧾 Bằng chứng của 89 ca ✅: messageId 0 · lịch sử 0 · ACK Socket 4 · HTTP 200 85 · ⚠ KHÔNG có bằng chứng 0
+```
+* 85/89 ca ✅ chỉ có **một** bằng chứng: HTTP 200. Không id tin, không lịch sử, không ACK.
+* Sổ kiểm chứng: **mỗi chat đúng một dòng ✅** ⇒ không phải gửi lặp — mà là **báo đã gửi sai**.
+* Người dùng kiểm lại: SÓT, **gửi tay lại được** ⇒ tin thật chưa đi.
+
+### 19.2 Đối chiếu HAR — cái gì thật sự chứng minh tin đã tới
+Quét toàn bộ HAR trong repo, chỉ lấy `POST …/conversations/{id}/messages` của endpoint gửi:
+
+| | số ca |
+|---|---|
+| `success:true` | **23** |
+| trong đó **có `id` tin** | **23/23** |
+| trong đó **KHÔNG có `id`** | **0** |
+
+Hình dạng thật (không có trường `payload` — `payload` thuộc làn Socket/Ext):
+* tin inbox: `{"id":"m_iZsc-dimPMuYRJKY…","success":true,"original_error":null}`
+* bình luận: `{"id":"122203568066953890_1659474325533562","success":true}`
+
+Và **`id` trong phản hồi gửi CHÍNH LÀ `messages[].id` của GET lịch sử ngay sau đó** — đối chiếu
+3 tin liên tiếp cùng một hội thoại (`batmesss.har` idx 19/21/23): khớp 3/3 ⇒ có phép đo trực
+tiếp từng tin, không cần suy luận.
+
+**Một điều phải nhớ (nếu không bộ đo lại sinh ⚠ giả):** lần đọc lịch sử ĐẦU TIÊN sau khi gửi
+nhiều khi **chưa** có tin vừa gửi — `batmesss.har` idx 345: lần đọc 346 KHÔNG có id, lần đọc
+347 thì CÓ. Nên "chưa thấy ở lần đọc 1" ≠ "sót".
+
+### 19.3 Đã sửa gì
+1. **Bằng chứng của làn API = `id` tin.** `apiMsgIdOf()` đọc `id` / `message_id` /
+   `payload.actions[0].message_id`; loại `0`, `"null"`, `"undefined"`. Không có id ⇒
+   **KHÔNG đánh ✅** (đếm `apiNoMsgId`, ghi ⚠ vào danh sách GỬI TAY, đọc lại lịch sử — chỉ ĐỌC).
+2. **Không còn chỗ nào gán cứng nhãn `http200`.** Nhãn đó chỉ sinh từ `apiProofOf()`, tức chỉ
+   khi đã có id; dòng sổ ✅ ghi kèm id (`… qua api [bằng chứng: http200 · id m_…]`) để tra tay.
+3. **Phép đo "sót" chạy thật:** `🔬 id↔lịch sử: đo N/M · THẤY a · KHÔNG THẤY b · không đọc được c`
+   — mỗi ca API có id được đọc lịch sử ở ~+6 s, **chỉ khi không thấy mới đọc lại ở ~+15 s** rồi
+   mới phán `KHÔNG THẤY` (và ghi vào sổ kiểm chứng). `không đọc được` in thành **chữ**, không
+   bao giờ để 0 bị đọc thành "không có gì xảy ra".
+4. Nhãn `history` thay cho `http200` ở ca "đọc lịch sử thấy tin" (trước đây bị gộp chung vào
+   nhóm 85 ca chỉ có `success:true` ⇒ mất khả năng phân biệt).
+
+### 19.4 Cách đọc lô sau (nghiệm thu)
+| dòng | kết luận ĐƯỢC phép rút ra |
+|---|---|
+| `🧾 … id tin API 85 · …` | 85 ca ✅ **có id tin** — tra được từng tin trong lịch sử |
+| `🔬 id↔lịch sử: đo 90/90 · THẤY 90 · KHÔNG THẤY 0 · không đọc được 0` | tin có thật trong hội thoại — hết "báo đủ mà sót" |
+| `KHÔNG THẤY > 0` | **đúng ca người dùng gặp**: id server trả nhưng hội thoại không có ⇒ đọc tiếp `🔎` trong sổ kiểm chứng (có id từng ca) |
+| `không đọc được > 0` | CẤM kết luận về số `THẤY` |
+| `⚠ success:true KHÔNG có id tin: k` | `k` ca server không trả tin ⇒ đã bị hạ xuống ⚠, không còn ✅ giả |
+
+Bật/tắt phép đo (mặc định BẬT): `__botfakeSetApiIdCheck__(false)` — chỉ tắt việc ĐỌC, không
+đổi kênh, không đổi ngưỡng, không thêm lệnh gửi nào.
+
+### 19.5 Test
+`642/642` kịch bản. Nhóm mới `[v1.93.27]` **chạy thật** các hàm trích từ userscript
+(`apiMsgIdOf`, `apiProofOf`, `apiIdVerdict`, `firstListedId`) trên đúng dữ liệu HAR, cộng 2
+kịch bản cấu trúc: không còn `markDelivered(..., 'api', 'http200')` gán cứng, và mọi đường
+thành công của làn API đều đi qua phép đọc id.
