@@ -3511,3 +3511,84 @@ Nay: phân loại theo `fbRejectKinds` và in rõ, ví dụ
 
 - **`messageId` không dùng làm bằng chứng dương.** Ca `success` **có** `messageId` vẫn bị đánh ⚠ rồi mới kiểm chứng nền. Lý do không đổi: `messageId`/`timestamp` đến từ extension của app Pancake (mã đóng), chưa đối chiếu được với HAR; đổi sang "có `messageId` ⇒ ✅" là **nới** điều kiện, trái với quyết định 1.93.2 ("`res.success` không phải bằng chứng") và có nguy cơ chốt ✅ oan. Cần HAR có `REPLY_INBOX_PHOTO_SUCCESS` thật để chứng minh trước.
 - **Socket chưa sync là chuyện của app Pancake** (`__MqttHelper__.initSocket`). Script chỉ chờ đúng hơn, không ép được app kết nối nhanh hơn.
+
+---
+
+## §53 — ĐỐI SOÁT EXTENSION PANCAKE: SUY LUẬN CŨ BỊ LOG BÁC BỎ (v1.93.22 / W200.132)
+
+### Giới hạn đọc được — nói trước, không tô hồng
+
+Đã mở và đối soát **12 file HAR trong repo** (60 868 KB) để tìm bằng chứng trực tiếp:
+
+| tìm gì | kết quả |
+|---|---|
+| `REPLY_INBOX_PHOTO` (postMessage của extension) | **0 dòng / 12 file** — HAR không ghi `postMessage` |
+| POST tới `facebook.com` (extension gửi tin) | **0 request** — extension gửi từ **service worker**, HAR chỉ bắt request của trang |
+| `message_id` trong body response | 28 chỗ, nhưng đọc từ **Pancake**, không phải từ extension |
+| source extension Pancake (`0.5.62_0`) | **không có trong repo** — các chú thích trích nó là quan sát từ trước |
+
+⇒ **Không có cách đối chứng `messageId` bằng dữ liệu trong repo.** Mọi kết luận dưới đây chỉ
+dựa trên thứ ĐO ĐƯỢC: **chính log của người dùng**.
+
+### Bằng chứng từ log 14:36 (bản 1.93.19, lô 563 chat)
+
+```
+14:37:00 ⚠ ×51 "Extension báo success nhưng KHÔNG có bằng chứng tin đã tới"
+14:37:20 🔎 ×20 "kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi — tính ✅ Ext"
+14:37:22 🔎 ×19 · 14:37:24 🔎 ×12 · 14:37:31 · 14:37:34 ×4 · 14:37:37
+14:37:35 🔎 ✅ 560 → 562 · ⚠ 2 → 0
+📊 TỔNG HỢP: ✅ 505 → 562 · ⚠ 57 → 0
+```
+
+**57/57 ca "Extension báo success" ĐI TỚI THẬT.** Không ca nào bị bỏ rơi.
+
+### Sai lầm bị bác bỏ (v1.93.14)
+
+v1.93.14 suy từ mã extension: `success` **không** `messageId` ⇒ FB trả `error_payload` ⇒ **KHÔNG có tin** ⇒ ghi sổ `noteFbRejected()` = "FB đã từ chối".
+
+Sổ đó **không phải sổ ghi chú** — nó là **chốt chặn**:
+
+| chỗ dùng | hậu quả |
+|---|---|
+| dòng 9203 `isFbRejected() && !__extFallback1545` | cắt bù, chốt `recipientUnavailable` |
+| dòng 9237 | chốt ❌, KHÔNG vào danh sách gửi tay |
+| dòng 12824 `socksProof === 'absent' && isFbRejected()` | chặn bù vĩnh viễn |
+
+⇒ Một ca **đã tới nơi** bị ghi "FB từ chối" ⇒ lần sau **xếp ❌ vĩnh viễn**, không bao giờ được thử lại. Đây là lỗi **sai theo chiều nguy hiểm nhất**: báo "không gửi được" cho tin đã gửi.
+
+### Vá (v1.93.22)
+
+| # | trước | nay |
+|---|---|---|
+| ① | `noteFbRejected('Ext báo success nhưng không có messageId …')` | **bỏ hẳn** — bằng chứng đo được mạnh hơn suy luận |
+| ② | sổ `fbRejectedIds` (dùng để CHẶN) | sổ riêng `fbUnprovenKinds` — **chỉ đếm và hiện**, không chặn gì |
+| ③ | chốt `❌` | giữ `⚠`, nền kiểm chứng lịch sử lật ✅ nếu thấy tin |
+| ④ | không hiện trong TỔNG HỢP | thêm dòng `❔ CHƯA ĐỦ CĂN CỨ (không chặn gì, nền kiểm chứng quyết định): N ca …` |
+
+**Vẫn KHÔNG chốt ✅ ngay** — quyết định 1.93.2 giữ nguyên: `res.success` không phải bằng chứng
+(đo được 554 ca ✅ giả ở lô 21/11 20:28). Chỉ khác chỗ **không còn kết luận ngược lại** khi chưa
+có căn cứ.
+
+### Kiểm
+
+`npm test` **551 ca** (+6). Mutation **6/6 bị bắt**, gồm 2 ca đáng chú ý:
+
+| mã | đột biến | ghi chú |
+|---|---|---|
+| M1 | trả lại `noteFbRejected` | bắt được |
+| M2 | bỏ sổ riêng | bắt được |
+| M3 | `⚠` → `❌` | bắt được |
+| M4 | xoá khai báo sổ | bắt được |
+| M5 | bỏ dòng `❔` khỏi TỔNG HỢP | bắt được |
+| M6 | `⚠` → `✅` | **LỌT lần đầu** — test chỉ khoá `❌`; đã siết thêm vế "chỉ được dùng đúng dấu ⚠" rồi bắt được |
+
+### Còn lại — cần dữ liệu mới, không suy đoán thêm
+
+`messageId` **có** trong `REPLY_INBOX_PHOTO_SUCCESS` vẫn chưa dùng làm bằng chứng dương. Muốn
+dùng thì cần một trong hai thứ **chưa có**:
+
+1. HAR/recording có `postMessage` thật của extension (HAR mặc định không bắt), hoặc
+2. source `0.5.62_0` của extension Pancake để đối chiếu `parseSuccessResponse`.
+
+Khi có, điều kiện đổi là: **có `messageId` ⇒ ✅ ngay** (bỏ được 57 ca ⚠ + đuôi kiểm chứng nền).
+Chưa có thì giữ nguyên — thà chậm hơn là chốt ✅ oan.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.21-w200.131
+// @version      1.93.22-w200.132
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.21-W200.131'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.22-W200.132'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -10938,6 +10938,30 @@
   }
   /* [v1.93.20] "KHÔNG có ca 1545041" KHÔNG đồng nghĩa "không có ca FB từ chối nào".
    * Nói rõ còn những ca dứt khoát KHÁC, để TỔNG HỢP không gây hiểu sai. */
+  /* ═══ [v1.93.22] SỔ RIÊNG: "CHƯA ĐỦ CĂN CỨ", KHÔNG PHẢI "FB ĐÃ TỪ CHỐI" ═══
+   * Log 14:36: 57 ca `Ext success nhưng KHÔNG messageId`. v1.93.14 ghi thẳng vào sổ
+   * `fbRejectedIds` ("FB đã từ chối") ⇒ sổ đó dùng để CHẶN bù/cắt gửi tay ⇒ ca ĐÃ TỚI
+   * bị xếp ❌ vĩnh viễn. Nay tách riêng: chỉ để ĐẾM và HIỆN, không chặn gì.
+   * Đây là bằng chứng đo được (57/57 đi tới), mạnh hơn suy luận từ mã extension. */
+  const extClaimNoId = [];
+  const fbUnprovenKinds = Object.create(null);
+  function noteFbRejectedAmbiguous(convId, why) {
+    if (!convId) return;
+    try {
+      const w = String(why || '');
+      const k = /messageId/i.test(w) ? 'extSuccessNoId'
+        : /noThreadIdFound/i.test(w) ? 'noThreadId' : 'khac';
+      fbUnprovenKinds[k] = (fbUnprovenKinds[k] || 0) + 1;
+    } catch (e0) { /* ignore */ }
+  }
+  function fbUnprovenText() {
+    const ks = Object.keys(fbUnprovenKinds).filter((k) => fbUnprovenKinds[k]);
+    if (!ks.length) return '';
+    const name = { extSuccessNoId: 'Ext success không messageId (chưa đủ căn cứ)', noThreadId: 'noThreadIdFound', khac: 'khác' };
+    return ' | ❔ CHƯA ĐỦ CĂN CỨ (không chặn gì, nền kiểm chứng quyết định): '
+      + ks.map((k) => fbUnprovenKinds[k] + ' ca ' + (name[k] || k)).join(' · ');
+  }
+
   function fbRejectKindsText() {
     const ks = Object.keys(fbRejectKinds).filter((k) => k !== '1545041' && fbRejectKinds[k]);
     if (!ks.length) return ' (không có ca FB từ chối nào khác)';
@@ -11361,6 +11385,7 @@
                     : 'đủ ' + extTry1545.PROBE + ' ca đã định bắn') + ', cứu 0 ⇒ phần còn lại vào danh sách gửi tay)'
                 : '')
             : (' | 🛟 Dò Ext cho ca FB từ chối: KHÔNG có ca 1545041' + fbRejectKindsText()))
+          + fbUnprovenText()
           /* [v1.92.45] ĐO TRẦN THẬT CỦA LÀN EXT — để lần sau không tối ưu sai chỗ.
            * HAR làn Ext (90 lệnh / 6,74 s) cho thấy trần ~13,4 lệnh/s và đỉnh in-flight chỉ 42
            * trong khi làn đặt 48–96 ⇒ nâng sàn/trần làn KHÔNG làm lô nhanh hơn. In số đo thật
@@ -12013,12 +12038,32 @@
           // [v1.92.52] noAudit = true: markDelivered() ngay trên đã ghi ✅ vào sổ cho cùng lần gửi này.
           logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅', conv.id, true);
         } else if (r && r.sent === 'maybe' && r.extClaimedSuccess && r.extSuccessNoId) {
-          /* [v1.93.14] `success` mà KHÔNG `messageId` ⇒ FB trả `error_payload` ⇒ KHÔNG có tin.
-           * Đây KHÔNG phải "chưa xác nhận" mà là BẰNG CHỨNG VẮNG MẶT ⇒ ghi sổ "FB đã từ chối"
-           * (để ca này không bị coi là "cần gửi tay" oan) và KHÔNG gửi thêm lệnh nào. */
-          try { noteFbRejected(conv.id, 'Ext báo success nhưng không có messageId = error_payload ⇒ FB từ chối'); } catch (eFbR) { /* ignore */ }
+          /* ═══ [v1.93.22] ĐÍNH CHÍNH v1.93.14 — BẰNG CHỨNG TỪ LOG 14:36 BÁC BỎ SUY LUẬN CŨ ═══
+           * v1.93.14 suy từ mã extension rằng `success` không `messageId` ⇒ FB trả `error_payload`
+           * ⇒ KHÔNG có tin, rồi ghi sổ "FB đã từ chối".
+           *
+           * LOG 14:36 (bản 1.93.19, lô 563 chat) nói NGƯỢC LẠI:
+           *   14:37:00 ⚠ ×51 "Extension báo success nhưng KHÔNG có bằng chứng tin đã tới"
+           *   14:37:20 🔎 ×20 "kiểm chứng Ext: tin ĐÃ đến nơi dù Extension không trả phản hồi — tính ✅"
+           *   14:37:22 🔎 ×19 · 14:37:24 🔎 ×12 · …   ⇒ 57/57 ca ⚠ chốt lại ✅
+           *   📊 505 → 562 ✅, ⚠ 57 → 0
+           * Tức nhóm "success không messageId" ĐI TỚI THẬT. Ghi sổ "FB đã từ chối" cho nó là
+           * GHI SAI SỔ: `isFbRejected()` được dùng để CHẶN bù / cắt gửi tay
+           * (`fbRejectStats.blockedBu`), nên một ca đã tới mà sổ nói "FB từ chối" sẽ bị
+           * xếp ❌ vĩnh viễn và không bao giờ được thử lại.
+           *
+           * LIMIT ĐỌC ĐƯỢC: 12 file HAR trong repo KHÔNG chứa một request POST nào tới
+           * facebook.com, và `postMessage` giữa extension ↔ trang KHÔNG được HAR ghi lại ⇒
+           * KHÔNG có cách đối chứng `messageId` trong repo này. Vì vậy KHÔNG suy luận thêm:
+           * `error_payload` vẫn có thể là 1 trong các hình dạng, nhưng bằng chứng đo được
+           * (57/57 đi tới) mạnh hơn suy luận ⇒ bỏ hẳn việc ghi "FB từ chối" ở đây.
+           * Vẫn KHÔNG chốt ✅ (giữ nguyên 1.93.2: `success` không phải bằng chứng) và vẫn
+           * KHÔNG gửi thêm lệnh nào — chỉ trả về ⚠ để kiểm chứng nền quyết định. */
+          try { noteFbRejectedAmbiguous(conv.id, 'Ext báo success nhưng KHÔNG có messageId — CHƯA đủ bằng chứng FB từ chối (log 14:36: 57/57 ca này ĐI TỚI thật)'); } catch (eFbR) { /* ignore */ }
+          extClaimNoId.push(conv.id);
           if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          logFailGrouped(name, 'bù qua Extension: success nhưng KHÔNG có messageId ⇒ FB trả error_payload, KHÔNG có tin — không gửi lại', '❌', conv.id);
+          /* [v1.93.22] Không chốt ❌: chưa có bằng chứng; nền kiểm chứng sẽ lật ✅ nếu thấy tin. */
+          logFailGrouped(name, 'bù qua Extension: success nhưng KHÔNG có messageId — chưa đủ căn cứ nói FB từ chối, đọc lại lịch sử (không gửi lại)', '⚠', conv.id);
         } else if (r && r.sent === 'maybe' && r.extClaimedSuccess) {
           /* ═══ [v1.93.2] EXT BÁO `success` KHI BÙ: KHÔNG CHỐT ✅ ═══
            * Đây chính là đường sinh ra 554 ca ✅ giả của lô 21/11 20:28: r.ok=true ⇒

@@ -646,6 +646,29 @@ check('đóng ngân sách ghi lại % để in vào log',
     /function fbRejectKindsText\(\)/.test(SRC_NC)
     && /không có ca FB từ chối nào khác/.test(SRC_NC), true);
 
+  /* ═══ [v1.93.22] ĐÍNH CHÍNH v1.93.14 — BẰNG CHỨNG TỪ LOG BÁC SUY LUẬN ═══
+   * Log 14:36: 51+6 ca "Ext success nhưng KHÔNG messageId" ĐÃ ĐI TỚI THẬT (chốt lại ✅,
+   * ⚠ 57 → 0). v1.93.14 lại ghi sổ "FB đã từ chối" cho nhóm này, mà sổ đó dùng để CHẶN bù
+   * và cắt gửi tay ⇒ ca đã tới bị xếp ❌ vĩnh viễn. */
+  const iNO = SRC_NC.indexOf('extClaimedSuccess && r.extSuccessNoId');
+  const segNO = iNO < 0 ? '' : SRC_NC.slice(iNO, iNO + 3000);
+  check('[đính chính] nhánh extSuccessNoId KHÔNG còn ghi "FB đã từ chối" (noteFbRejected)',
+    segNO.length > 0 && !/noteFbRejected\(conv\.id, 'Ext báo success nhưng không có messageId/.test(segNO), true);
+  check('[đính chính] nhánh extSuccessNoId dùng sổ RIÊNG "chưa đủ căn cứ" (không chặn gì)',
+    /noteFbRejectedAmbiguous\(/.test(segNO), true);
+  check('[đính chính] nhánh extSuccessNoId KHÔNG chốt ❌ nữa (phải giữ ⚠ để nền kiểm chứng lật)',
+    !/logFailGrouped\(name, 'bù qua Extension: success nhưng KHÔNG có messageId[^']*', '❌'/.test(segNO), true);
+  /* Siết sau mutation M6: ca NGUY HIỂM NHẤT là chốt ✅ khi chưa có bằng chứng (đúng lỗi 554 ca
+   * ✅ giả của v1.93.2). Test trước chỉ bắt ❌ nên đổi ⚠→✅ vẫn xanh ⇒ phải khoá cả hai. */
+  check('[đính chính] nhánh extSuccessNoId chỉ được dùng đúng dấu ⚠ (không ❌, không ✅)',
+    /bù qua Extension: success nhưng KHÔNG có messageId[^']*', '⚠', conv\.id\);/.test(segNO)
+    && !/bù qua Extension: success nhưng KHÔNG có messageId[^']*', '[❌✅]'/.test(segNO), true);
+  check('[đính chính] sổ chưa-đủ-căn-cứ KHÔNG được dùng để chặn bù',
+    !/isFbRejected\([^)]*\)[\s\S]{0,80}fbUnprovenKinds/.test(SRC_NC)
+    && /const fbUnprovenKinds = Object\.create\(null\)/.test(SRC_NC), true);
+  check('[đính chính] TỔNG HỢP in rõ dòng ❔ CHƯA ĐỦ CĂN CỨ',
+    /\+ fbUnprovenText\(\)/.test(SRC_NC) && /CHƯA ĐỦ CĂN CỨ/.test(SRC_NC), true);
+
   // --- thử lại được (không thể trùng) ---
   check('1545012 ⇒ thử lại được', F.isTransientServerError('Đã xảy ra lỗi tạm thời, vui lòng thử lại.'), true);
   check('mã 1545012 trần ⇒ thử lại được', F.isTransientServerError('error 1545012'), true);
