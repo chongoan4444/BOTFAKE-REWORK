@@ -2189,3 +2189,66 @@ Chữ ký thật: `resolveGlobalId(full, threadId, cacheKey, convFromPsid, force
 - `M` = trong đó **có ra gid**. `M` là số ca đường này **cứu được thật**.
 
 **Chỉ ĐỌC** (GET) ⇒ không thể sinh tin trùng.
+
+---
+
+## 34. ĐỐI SOÁT API PANCAKE (không phải adapter ext) — 12 HAR
+
+### 34.1 Bảng endpoint theo lưu lượng thật trong 12 HAR
+
+| Số lần | Method | Endpoint | Script dùng? |
+|---|---|---|---|
+| 537 | GET | `/v1/pages/{id}/avatar/{id}` | không (chỉ hiển thị) |
+| 164 | POST | `/v1/pages/{id}/contents/facebook` | không (tạo bài) |
+| 100 | GET | `/v1/pages/{id}/conversations` | không — script lấy danh sách từ DOM |
+| **87** | POST | **`/v1/pages/{id}/conversations`** | không |
+| **33** | POST | **`/v1/pages/{id}/check_inbox`** | ✔ @6945 — đúng `POST`, không body, `{"success":true}` |
+| **33** | POST | **`/v1/pages/{id}/contents/touch`** | ✔ @6948 |
+| 13 | POST | `/v1/conversations` | không — **tải danh sách chat** (`type=ALL,INBOX` / `UNREAD`) |
+| 12 | POST | `/v1/logs/pancake_exception_log` | không |
+| **28** | GET | **`/v1/pages/{id}/conversations/{convId}/messages`** | ✔ @2907/@3159/@11917 |
+| **7** | POST | **`/v1/pages/{id}/customers/{custId}/update_global_id`** | ✔ @5546/@6392 |
+
+### 34.2 `GET …/conversations/{convId}/messages` — đã khớp đúng
+
+Query thật trong HAR:
+```
+?customer_id=9a3fa755-9be1-4181-9746-7cf1da15331a
+&user_view=true&is_new_api=true&separate_pos=true
+```
+Script gửi **đủ 4 tham số** ở cả 3 chỗ (`@2907`, `@3159`, `@11917`). `separate_pos=true` và
+`is_new_api=true` là bắt buộc — thiếu `is_new_api` thì API trả định dạng cũ (không có
+`inserted_at`/`from.id` mà `historyVerdict` cần).
+
+### 34.3 `POST …/customers/{custId}/update_global_id` — đã khớp đúng
+
+Body thật (7/7 mẫu giống nhau):
+```json
+{"global_id":"100023175302671","conversation_id":"689375157595846_29617688761165549",
+ "source":"send_inbox","version":1}
+```
+Script gửi đúng 4 trường đó ở **2 chỗ** (`@5550`, `@6396`), kể cả `source:'send_inbox'` và
+`version:1`. `source` KHÁC ⇒ Pancake không gắn gid vào đúng luồng.
+
+### 34.4 `POST …/{pageId}/conversations` (87 lần) — KHÔNG dùng, và đúng là không cần
+
+Đây là endpoint **gửi tin của app**, body là `multipart/form-data` với `action=reply_inbox`.
+Script dùng `POST …/conversations/{convId}/messages` (đường khác, cùng đích) và đã đối soát
+theo 54 request `reply_inbox` trong HAR (§ trước: 19/19 có `is_record_ctx_7_days:true` ⇒
+`success:true`; 24/24 thiếu cờ ⇒ `e_code 10 / e_subcode 2018300`).
+
+⇒ **Không đổi.** Hai đường khác nhau, script đã chọn đường có bằng chứng đầy đủ hơn
+(54 request có đối chứng nhân quả với `is_record_ctx_7_days`).
+
+### 34.5 `POST /v1/conversations` (13 lần) — KHÔNG phải gửi tin
+
+Body: `type = "ALL,INBOX"` / `"UNREAD"`, kèm `pages[...]=0` cho **13 page**. Đây là **tải danh
+sách hội thoại** cho sidebar, trả `{conversations:[…], next_cursor}`. Script lấy danh sách chat
+từ DOM của chính Pancake (đúng dữ liệu đó, không cần gọi lại) ⇒ không dùng là **đúng**.
+
+### 34.6 `GET /v1/conversations/customer/{psid}` — script gửi 1 page, app gửi 13
+
+HAR (`batmesss.har`, 2 mẫu): app gửi **13** `pages[...]=0` trong cùng 1 request; script gửi **1**.
+**Không sửa:** snippet chỉ được dùng để đối chiếu **`convId` + `pageId` cụ thể**, nên 1 page là
+đủ và trả ít dữ liệu hơn (nhanh hơn). Gửi 13 page sẽ nhận cả hội thoại của page khác ⇒
+`absenceVerdict` phải lọc nhiều hơn, không có lợi ích.
