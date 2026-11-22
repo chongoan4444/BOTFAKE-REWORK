@@ -1944,6 +1944,19 @@ check('[He] KHÔNG gửi `globalId:` trong payload LOAD_FACEBOOK_MESSAGES',
 check('[He] gid lấy từ sổ trước khi hỏi ext (peekFastGlobalId)',
   /const gidForHe = \(function \(\) \{[\s\S]{0,300}?peekFastGlobalId\(conv, fullC/.test(stripComments(SRC)), true);
 
+/* ═══ (P) [v1.93.15] KHÔNG tự gửi `GET_BUSINESS_WS_CONTEXT` / `LISTEN_WS` ═══
+ * `LISTEN_WS` của ext = WS **comment** (`Ba`→`$a`, `CommentFb`, `loadPosts`), inbox là
+ * `LISTEN_INBOX`→`Oc`. Script không tự mở WebSocket mà dùng `__MqttHelper__.initSocket`,
+ * và chính `initSocket` của app TỰ gửi `GET_BUSINESS_WS_CONTEXT` (@815899 `i.C1`) ⇒ gửi
+ * thêm từ script là lệnh thứ 10 TRÙNG trong cùng lần warm-up. Khoá lại để không ai
+ * "bổ sung cho đủ 65 case". */
+check('[ws] không tự gửi GET_BUSINESS_WS_CONTEXT (initSocket của app đã gửi)',
+  /GET_BUSINESS_WS_CONTEXT/.test(stripComments(SRC)), false);
+check('[ws] không tự gửi LISTEN_WS (đó là WS comment, không phải inbox)',
+  /type:\s*['"]LISTEN_WS['"]/.test(stripComments(SRC)), false);
+check('[ws] warm-up socket đi qua helper của app (initSocket)',
+  /h\.initSocket\(pid\)/.test(stripComments(SRC)), true);
+
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
   fails.forEach((f) => console.log('  ✗ ' + f));

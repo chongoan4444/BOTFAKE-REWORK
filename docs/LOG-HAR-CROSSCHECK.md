@@ -2448,3 +2448,58 @@ ad.send({ type:'LOAD_FACEBOOK_MESSAGES', pageId, threadId, threadKey, isBusiness
 > Lưu ý phạm vi: nhánh này (`fetchFbMessagesDirect`) chỉ chạy trong cổng chứng minh vắng mặt
 > (`probeBuVerdict`) — **0 lần** trong 31 log đã đo, nên đây là sửa ĐÚNG ĐẮN chứ không phải
 > nguyên nhân của lỗi đang thấy. Ghi rõ để không ai kỳ vọng nó cải thiện số liệu lô ngay.
+
+---
+
+## 38. `GET_BUSINESS_WS_CONTEXT` + `LISTEN_WS`: KHÔNG thiếu lệnh — script đi ĐÚNG đường của app
+
+### 38.1 `LISTEN_WS` là WS của **COMMENT**, không phải inbox
+
+```js
+// ext 0.5.62 @390432
+Ba = new sr({ stopMessageType:"I_WANT_STOP_LISTEN",
+              createInstance:n => new $a(n.accessToken, n.page_id),
+              startInstance:n => n.init().then(() => n.loadPosts()) });
+// class $a{ constructor(e,t){ … const a="CommentFb"; this.cachePostsKey=`${a}_${t}_posts`; …
+//           async prepareCache(){ … } stop(){ … } }
+```
+`case"LISTEN_WS": Ba.start(…)` ⇒ mở **WS bình luận** (`CommentFb`, `loadPosts`).
+Inbox là **`LISTEN_INBOX`** → `va = new sr({createInstance:n => new Oc(...), startInstance:n => n.start()})`.
+⇒ Script **không dùng cả hai** và **không cần**: script không tự mở WebSocket nào
+(`grep "new WebSocket\|wss://"` = 0) mà dùng `window.__MqttHelper__` của chính app.
+
+### 38.2 `initSocket` của app TỰ đi qua `GET_BUSINESS_WS_CONTEXT` — script hưởng lây
+
+```js
+// _app-…v6.js @815899
+async initSocket(e){ if (u.SOCKETS[f] && u.SOCKETS[f].instance.$10.isRunning()) return ok;
+  let m = await (0,p.vk)(i.C1, {funcName:"getBusinessWSContext", from:"initSocket"}, e);
+  if (m?.success && m.data?.response?.wsContext) { let t = m.data.response.wsContext;
+    … new Socket({appId:parseInt(t.context.appId), assetIds:new Map([["PAGE",e]]),
+                  deviceId:t.context.deviceId, endpoint:"wss://edge-chat.facebook.com/chat?region=pnb",
+                  pageId:e, …}) } }
+// ev = async(e,t,n) => { … c.Z.send({type:"GET_BUSINESS_WS_CONTEXT",
+//        pageId:e, deviceId:t, forceReloadIfExpire:n}) … }        ← @900614
+```
+Ext trả: `GET_BUSINESS_WS_CONTEXT_SUCCESS{response:{success:!0, wsContext}}`
+(`tc.getContext(pageId, deviceId||"")`), lỗi ⇒ `_FAILURE{response:{success:!1}}`.
+
+**Script gọi `h.initSocket(pid)`** (warmUpSockets @9791, `ensureAliveSocket`) ⇒ app tự gửi
+`GET_BUSINESS_WS_CONTEXT` ⇒ **script dùng gián tiếp đúng lệnh đó**. Gọi thẳng từ script sẽ là
+lệnh **thứ 10** không cần thiết và **trùng** với lệnh app vừa gửi trong cùng một lần warm-up.
+⇒ **KHÔNG thêm.** Test khoá để không ai "bổ sung cho đủ".
+
+### 38.3 `checkConnection()` là hàm SYNC — đã kiểm, không sửa
+
+```js
+// _app-…v6.js module 715835
+checkConnection(){ let {auth:{extension:t}} = __pancakeReduxStore__.getState(); …
+  if (!t) { … return !1 }                                   // ← chưa có state extension
+  let a = !0; for (var r in t) if (!t[r]) { a = !1; break }
+  return !!a || (window.postMessage({type:"CHECK_EXTENSION", from:"WEBPAGE"}, "*"), …) }
+```
+App `await` ở phần lớn chỗ nhưng hàm **không `async`** ⇒ `await` vô hại; `!checkConnection(...)`
+của script là **đúng**. Nhánh `!t` **không** gửi `CHECK_EXTENSION` (chỉ khi có state mà falsy mới gửi).
+
+Bằng chứng đo: **0/31 log** có dòng "Extension Pancake chưa kết nối" ⇒ nhánh này không chạy thực tế.
+Ghi nhận, **không sửa** (thêm `CHECK_EXTENSION` là thêm lệnh, không có ca nào cần).
