@@ -1351,3 +1351,86 @@ Chỉ BỎ lần thử lại chắc chắn hỏng + chốt ❌ thay ⚠ — **kh
 2. `LOAD_FACEBOOK_MESSAGES` chưa đo — tiềm năng nhưng chưa có số.
 3. 30 case "Khác" chưa đối soát (sticker/profile/appointment/LINE/Zalo/crawl/ecommerce).
    Script không dùng ⇒ rủi ro thấp, **không phủ định** là có ẩn ý.
+
+---
+
+## 23. Đối soát tiếp: `ENABLE_FIND_THREAD_BY_USERNAME` + `INCORRECT THREAD`
+
+### 23.1 `ENABLE_FIND_THREAD_BY_USERNAME` — case chỉ SET một biến trong SW
+
+```js
+case"ENABLE_FIND_THREAD_BY_USERNAME":{const{pageId:_,isEnabled:g}=r.data;
+  const I=`findThreadByUsername_${_}`; self[I]=g;
+  e.port.postMessage({type:"ENABLE_FIND_THREAD_BY_USERNAME_DONE",isEnabled:g}); break}
+```
+Đọc ở `bn(pageId)`:
+```js
+const bn = n => { try { return self[`findThreadByUsername_${n}`] || !1 } catch { return !1 } };
+```
+Dùng ở `Ee.getGlobalIdFromInbox()`:
+```js
+!I && a && bn(this.pageId) && (I = x.find(w =>
+    w.all_participants.edges.map(({node:S})=>S.messaging_actor.name).includes(a)),
+  C.log("THREAD FOUND BY MATCHING USER NAME:", I));
+```
+⇒ Bật cờ = ext có thêm 1 nguồn dò **khớp `customerName` với tên người tham gia**.
+
+**Đo được vì sao đáng bật** (log 22/11 09:54): `Ext trả không có gid 2` · `lần dò chưa ra 29`
+· `gate bỏ Ext no-gid 29` · `15 ca "thiếu gid"` ⇒ 14 ca kết thúc
+❌ `Không tìm được global_id để gửi` rồi `Không tìm thấy globalId thật cho Socket` = hết kênh.
+Cả 4 nguồn trước (`Jt`, `Zt`, `rt/st`, `ge`-tìm-theo-tên) đều đã chạy và cùng không ra.
+
+**Rủi ro và lớp chặn:** khớp theo TÊN có thể trúng NGƯỜI KHÁC nếu 2 khách TRÙNG TÊN.
+Ext có 1 lớp: `isThreadCorrect(threadInfoToRecheck)` phải chứa đúng `threadId`, nếu không
+`Ee.init()` reject `"INCORRECT THREAD"`. NHƯNG lớp đó **so `threadId`**, mà `threadId` có thể
+bị chính bước dò **gán lại**:
+```js
+p = Ct.isAllActorArePage(u);
+p ? this.threadId = u.page_comm_item.id || m || this.threadId
+  : this.threadId ||= u.page_comm_item.id;
+```
+⇒ Không đủ tin để coi là an toàn tuyệt đối.
+
+**ĐÃ SỬA:** bật `ENABLE_FIND_THREAD_BY_USERNAME` **chỉ khi `onFinderNull`** (cả 4 nguồn đã cạn),
+**1 lần/page** (`nameSearchEnabled` Set). Đây là lệnh set-biến, **không gửi tin** ⇒ không thể sinh
+tin trùng. Nếu ext trả gid SAI thì tin đi nhầm người — nên chỉ bật ở chỗ mà phương án thay thế
+là **❌ mất tin**. Log rõ mỗi lần bật để đối chiếu.
+
+### 23.2 `INCORRECT THREAD` bị gộp vào "ext im lặng"
+
+```js
+init(){ … const{success:r,globalId:s,threadInfoToRecheck:i} = await a, o = bn(this.pageId)===!0;
+  if(this.convType==="INBOX" && !this.isThreadCorrect(i) && !o)
+    return C.error(`FAIL TO GET GLOBAL ID --> INCORRECT THREAD ${this.threadId}, ${this.threadKey} VS ${i}`),
+           t("INCORRECT THREAD");
+  r ? e(s) : (C.error("FAIL TO GET GLOBAL ID"), t()) }
+isThreadCorrect(e){ Array.isArray(e)||(e=[e]);
+  return e.length===0 || e.every(t=>!t) || !this.threadId ? !1 : e.includes(this.threadId) }
+```
+Script cũ bỏ `d2.error` ⇒ không phân biệt được:
+- ext **trả lời rõ** "tìm được thread nhưng threadId không khớp" (`INCORRECT THREAD`), và
+- ext **không phản hồi** (adapter hết hạn).
+
+Cả hai đều `finishExt(null)` ⇒ `gidStats.extUnknown++` và
+`noteGidExtResult(extFinderRespondedNoGid, …)` ⇒ bộ đếm sức khoẻ làn Ext nhận ca "mù" sai.
+
+**ĐÃ SỬA:** đọc `errStr2`, tách `gidStats.extIncorrectThread`, log riêng, và **KHÔNG bật
+khớp-theo-tên cho ca này** — vì `isThreadCorrect` chính là lớp đang bảo vệ.
+Thêm vào dòng chẩn đoán: `Ext trả không có gid N (trong đó INCORRECT THREAD M)`.
+
+### 23.3 Đã kiểm, KHÔNG cần sửa
+
+| Case | Kết luận |
+|---|---|
+| `WAKE_UP` | Chỉ ghi `pancx-last-heartbeat` sau ≥9 s. Script không cần gửi |
+| `CHECK_EXTENSION` | `await Fs(), await ks(e)` — không trả `_SUCCESS`; script dùng `adapter.checkConnection()` là đúng lớp |
+| `REPORT_EXTENSION_STATUS` | Echo `r.data`; script không dùng |
+| `PREINITIALIZE_PAGES` | Nạp trước `le(pageId)` cho từng page, nghỉ 2–5 s. Chỉ là làm nóng |
+| `GET_FB_MSG` | Đã đối soát §19.4 |
+| `LOAD_FACEBOOK_MESSAGES` | Trả `{messages, globalId}` 1 lệnh; ghi nhận, chưa dùng (chưa có số) |
+
+### 23.4 Còn nợ
+
+`LOAD_FACEBOOK_MESSAGES` (tiềm năng gộp "gid + kiểm chứng" 1 lệnh) · `GET_IMG_FROM_SHARED_ATTACHMENT`
+· `GET_IG_CONTACT_ID` · `GET_POST_ID_FROM_LINK` · 11 listener · 2 comment · 30 case "Khác".
+Chưa case nào có bằng chứng script cần dùng.

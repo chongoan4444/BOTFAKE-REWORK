@@ -2607,6 +2607,9 @@
     wsHit: 0, extHit: 0, extUnknown: 0, unknown: 0, batchMappings: 0,
     batchReturned: 0, batchFail: 0, extRespondedNoGid: 0, gateSkip: 0,
     shortNoGidWait: 0,
+    /* [v1.93.13] ext TÌM ĐƯỢC thread nhưng `isThreadCorrect()` sai ⇒ `Ee.init()` reject
+     * "INCORRECT THREAD". Tách khỏi `extUnknown` (im lặng) để đọc đúng sức khoẻ làn Ext. */
+    extIncorrectThread: 0,
   };
   function resetGidStats() {
     Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
@@ -4395,8 +4398,52 @@
           customerName: custName,
           convType: 'INBOX', postId: null, convId: null,
         };
+        /* ═══ [v1.93.13] BẬT `ENABLE_FIND_THREAD_BY_USERNAME` KHI ĐÃ DÒ HẾT NGUỒN ═══
+         * Nguồn `0.5.62_0/assets/background.js`:
+         *   case"ENABLE_FIND_THREAD_BY_USERNAME":{const{pageId:_,isEnabled:g}=r.data;
+         *     const I=`findThreadByUsername_${_}`; self[I]=g;
+         *     e.port.postMessage({type:"ENABLE_FIND_THREAD_BY_USERNAME_DONE",isEnabled:g}); break}
+         * Cờ đó được đọc ở `bn(pageId)` trong `Ee.getGlobalIdFromInbox()`:
+         *   I = x.find(w => w.all_participants.edges.map(n=>n.messaging_actor.name).includes(a))
+         *   ;!I && a && bn(this.pageId) && (I = x.find(...cùng phép khớp TÊN...))
+         * ⇒ Khi cờ BẬT, ext còn thêm 1 nguồn dò: khớp **customerName** với danh sách
+         *   người tham gia thread.
+         *
+         * VÌ SAO ĐÁNG BẬT — đo được (log 22/11 09:54, lô 8 572):
+         *   • `Ext trả không có gid 2` / `lần dò chưa ra 29` / `gate bỏ Ext no-gid 29`
+         *   • 15 ca "thiếu gid" ⇒ 14 ca kết thúc ❌ "Không tìm được global_id để gửi"
+         *     rồi "Không tìm thấy globalId thật cho Socket" ⇒ hết kênh.
+         *   Cả 4 nguồn trước đó (Jt, Zt, rt/st, ge-tìm-theo-tên) đều đã chạy và cùng không ra.
+         *
+         * RỦI RO ĐÃ ĐO VÀ CHẶN: khớp theo TÊN có thể trúng NGƯỜI KHÁC nếu 2 khách TRÙNG TÊN.
+         *   Ext đã chặn 1 lớp: `isThreadCorrect(threadInfoToRecheck)` — phải chứa đúng
+         *   `this.threadId`, nếu không thì `Ee.init()` **reject `"INCORRECT THREAD"`**.
+         *   Nhưng lớp đó SO `threadId`, mà `threadId` có thể bị chính bước dò gán lại
+         *   (`p ? this.threadId = page_comm_item.id : this.threadId ||= …`) ⇒ KHÔNG đủ.
+         * ⇒ Ta chỉ bật khi CẢ 4 nguồn đã cạn (không phải mặc định), và chỉ bật 1 LẦN/page
+         *   (mỗi lần bật = 1 lệnh gửi ext; nó chỉ set một biến trong SW, KHÔNG gửi tin).
+         *   Đây KHÔNG phải đường gửi ⇒ không thể sinh tin trùng. Nếu ext trả gid SAI thì
+         *   tin đi nhầm người — nên ghi log rõ để đối chiếu, và đây là lý do chỉ bật sau
+         *   khi mọi nguồn khác đã cạn (khi đó phương án thay thế là ❌ mất tin). */
+        const enableFindThreadByName = () => {
+          try {
+            const ad = window.__ExtensionAdapter__;
+            if (!ad || typeof ad.send !== 'function') return;
+            const pg = String(pageId || '');
+            if (!pg || nameSearchEnabled.has(pg)) return;
+            nameSearchEnabled.add(pg);
+            ad.send({ type: 'ENABLE_FIND_THREAD_BY_USERNAME', pageId: pg, isEnabled: true },
+              { timeout: 5000 }).catch(() => { /* ignore */ });
+            try {
+              logLine('🧩 [gid] đã bật ENABLE_FIND_THREAD_BY_USERNAME cho page ' + pg
+                + ' (4 nguồn gid đều cạn ⇒ cho ext khớp thêm theo TÊN khách; ext vẫn tự so threadId)');
+            } catch (e0) { /* ignore */ }
+          } catch (e) { /* ignore */ }
+        };
         const onFinderNull = () => {
           if (extSettled) return; // timer đã chốt nhánh này — không phát thêm lệnh Ext
+          /* Cạn nguồn ⇒ bật khớp-theo-tên cho các lần dò sau (1 lần/page). */
+          enableFindThreadByName();
           // MAKE_MESSENGER_LINK là lệnh Ext phụ: chỉ dùng khi lô không lớn.
           // Ở lô lớn/Pass 2, bắn thêm lệnh này cho mọi ca khó làm Extension
           // càng nghẽn (log 5.637: khâu dò Ext không cứu được ca nào nhưng
@@ -4487,6 +4534,28 @@
                 extFinderRespondedNoGid = true;
                 if (ctx) ctx.extFinderRespondedNoGid = true;
                 gidStats.extRespondedNoGid++;
+                /* ═══ [v1.93.13] `INCORRECT THREAD` LÀ CÂU TRẢ LỜI RÕ, KHÔNG PHẢI "IM LẶNG" ═══
+                 * `Ee.init()` (0.5.62):
+                 *   if(this.convType==="INBOX" && !this.isThreadCorrect(i) && !bn(this.pageId))
+                 *     return C.error(`FAIL TO GET GLOBAL ID --> INCORRECT THREAD …`),
+                 *            t("INCORRECT THREAD");
+                 *   isThreadCorrect(e){ … e.length===0||e.every(t=>!t)||!this.threadId ? !1
+                 *                          : e.includes(this.threadId) }
+                 * ⇒ ext TÌM ĐƯỢC thread nhưng `threadId` không nằm trong `threadInfoToRecheck`
+                 *   ⇒ "đã dò xong, KẾT QUẢ ÂM có lý do", khác hẳn "không phản hồi".
+                 * Script cũ gộp cả hai vào `finishExt(null)` ⇒ bộ đếm sức khoẻ làn Ext nhận
+                 * một ca "mù" trong khi ext đã trả lời dứt khoát.
+                 * Ca này CŨNG KHÔNG được bật khớp-theo-tên: `isThreadCorrect` chính là lớp
+                 * đang bảo vệ — bật thêm sẽ đúng cái làm nó trượt. */
+                const incorrectThread2 = /INCORRECT THREAD/i.test(errStr2);
+                if (incorrectThread2) {
+                  gidStats.extIncorrectThread = (gidStats.extIncorrectThread || 0) + 1;
+                  try {
+                    logLine('🧩 [gid] Ext trả INCORRECT THREAD (threadId không nằm trong'
+                      + ' threadInfoToRecheck) — câu trả lời RÕ của ext, KHÔNG phải im lặng;'
+                      + ' không bật khớp-theo-tên cho ca này');
+                  } catch (eIT) { /* ignore */ }
+                }
                 // [v1.92.47] ghi vào cầu dao: đóng đường dò Ext khi dồn đủ ca, hoặc khi
                 // CÙNG thread lặp lại "không có gid" (hình dạng lỗi thật trong log console).
                 noteGidFinderNoGid(threadId);
@@ -8911,7 +8980,10 @@
   // phải trả phí kết nối + đồng bộ thread map ~10s (initSocket). Làm nóng ngay lúc bắn lô —
   // chạy song song các bắn API — nên khi nào cần bù Socket thì chỉ còn ~1–2s của sendMessage.
   const socketWarmPromises = {}; // pageId → Promise kết nối socket (đang chạy dở)
-  const batchGidFetchedPages = {}; // pageId → BATCH_GET_GLOBAL_ID (@897543) đã THÀNH CÔNG trong phiên
+  const batchGidFetchedPages = {};
+  /* [v1.93.13] Page nào đã bật khớp-theo-tên cho ext (`ENABLE_FIND_THREAD_BY_USERNAME`).
+   * Mỗi page chỉ gửi 1 lần — cờ đó nằm trong SW của ext, gửi lại vô ích. */
+  const nameSearchEnabled = new Set();
   const batchGidPromises = {}; // pageId → Promise BATCH_GET_GLOBAL_ID đang chạy
 
   // Nạp HÀNG LOẠT { threadId → globalId } mà Extension đã biết trong IndexedDB:
@@ -10483,6 +10555,7 @@
           + ' · lần dò chưa ra ' + gidStats.unknown
           + ' · batch nạp ' + gidStats.batchMappings + '/' + gidStats.batchReturned + ' mapping (lỗi ' + gidStats.batchFail + ')'
           + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
+          + ' (trong đó INCORRECT THREAD ' + (gidStats.extIncorrectThread || 0) + ')'
           + ' · Ext p90 ' + (extLatP90() || 0) + 'ms → timeout ' + extTimeoutMs() + 'ms'
           + ' · ACK p50/p90 ' + (sockAckP50() || 0) + '/' + sockAckP90() + 'ms → ngưỡng nhanh ' + fastAckMs() + 'ms'
           + ' · bỏ nới lane ' + sockRampSkipped + ' lần (đuôi p95 > ' + SOCK_RAMP_P95_MAX_MS + 'ms: '
