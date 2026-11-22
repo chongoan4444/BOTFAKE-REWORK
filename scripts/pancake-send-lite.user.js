@@ -7606,7 +7606,17 @@
   // ⚠→✅ NGAY TẠI CHỖ, không cần đọc lịch sử, không gửi lại ⇒ không thể sinh tin trùng.
   // Giá trị trả về khi quá hạn vẫn là { success:false, data:null } — đúng hình dạng adapter
   // trả khi hết giờ, nên toàn bộ luồng xử lý phía sau giữ nguyên 100 %.
-  const EXT_ADAPTER_HOLD_MS = 60000;
+  /* [v1.93.13] ĐỐI CHIẾU ADAPTER THẬT CỦA APP (`_app-…v6.js`, `window.__ExtensionAdapter__`):
+   *   `send(e,t={}){ … let n=this.currentTaskId++, o=t.timeout || (u.has(e.type)?d:l) … }`
+   *   `let l=3e4, d=12e4, u=new Set(["CONFIG_ROUTING_APP","CACHE_PAGES_ROUTING_APP"])`
+   * ⇒ app chờ **30 s** (`l`) cho mọi lệnh thường, **120 s** (`d`) cho lệnh config.
+   * `REPLY_INBOX_PHOTO` KHÔNG thuộc `u` ⇒ app chờ 30 s.
+   * Script để 60 s — KHÔNG phải giá trị của app. Hạ về 30 s cho khớp:
+   * app còn để bộ ngắt 45 s (`refresh_app`/`stop` có chỗ dùng 45 000) nên 30 s là mức an toàn,
+   * và `softMs` (2,5 s) vẫn là mức phản hồi thực tế; hằng này chỉ là TRẦN để không giữ lane vô hạn.
+   * Đổi 60 s → 30 s chỉ làm lane được NHẢ SỚM HƠN; ca quá hạn vẫn đi đúng đường cũ
+   * (⚠ + kiểm chứng nền, KHÔNG BAO GIỜ gửi lại) nên không mở thêm đường gửi trùng. */
+  const EXT_ADAPTER_HOLD_MS = 30000;
   const EXT_SOFT_MARK = { soft: true };
   const extLateStats = { ok: 0, fail: 0, silent: 0 };
   function sendExtWithLateWatch(adapter, payload, conv, opt) {

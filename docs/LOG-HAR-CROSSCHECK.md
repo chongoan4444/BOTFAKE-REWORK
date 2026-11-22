@@ -858,3 +858,59 @@ Nhánh `restartInbox` chỉ xảy ra ở lỗi KHÁC ⇒ **không phải bằng 
 | `ao = 35e3`, `Wc = ao-5e3` | ext có 30 s/lệnh | script bỏ chờ 2,5 s | Không đổi — đã sửa câu chữ ở 1.93.8, quyết định đúng |
 | `canRetryUsingSocket` | ext TRẢ nhưng **không chỗ nào đọc lại** | script bỏ qua | Đúng |
 | `checkCanReuploadPhotos` | cần đủ 3 trường | script giữ 1545012 là "tạm thời" | Đúng (thiếu 2 trường ⇒ không đủ bằng chứng) |
+
+---
+
+## 16. Đối chiếu ADAPTER THẬT của app (`_app-…v6.js`) — không phải suy đoán
+
+Nguồn: `_app-9331d46f21a84eb1.v6.js` (2 019 782 byte), `window.__ExtensionAdapter__` @869517.
+
+```js
+send(e){ let t=arguments[1]||{};
+  for(let t of ["type"]) if(!Object.hasOwn(e,t)) throw "Message send to extension is missing "+t+" field";
+  let n = this.currentTaskId++,
+      o = t.timeout || (u.has(e.type) ? d : l);
+  …
+  this.pendingMessages[n] = s;
+  window.postMessage({...e, taskId:n, from:"WEBPAGE"}, "*");
+  setTimeout(()=>{ delete this.pendingMessages[n]; t({success:!1, data:null}) }, o);
+}
+let l=3e4, d=12e4, u=new Set(["CONFIG_ROUTING_APP","CACHE_PAGES_ROUTING_APP"])
+```
+Ghép kết quả: `n.type === e.type+"_SUCCESS"` ⇒ `{success:true, data:n}` · `"_FAILURE"` ⇒ `{success:false, data:n}`.
+Listener lọc `"WEBPAGE"!==e.data.from && e.data.taskId in this.pendingMessages`.
+
+### 16.1 ĐÃ SỬA — hạn giữ lane sai giá trị của app
+
+| | App | Script (trước) | Nay |
+|---|---|---|---|
+| Trần chờ adapter | `l = 30 000` (`REPLY_INBOX_PHOTO` ∉ `u`) | `EXT_ADAPTER_HOLD_MS = 60000` | **30000** |
+| Lệnh config | `d = 120 000` | không dùng | không đổi |
+
+Đổi 60 s → 30 s chỉ **nhả lane sớm hơn**. Ca quá hạn vẫn đi đúng đường cũ (⚠ + kiểm chứng
+nền, KHÔNG BAO GIỜ gửi lại) ⇒ không mở thêm đường gửi trùng.
+
+### 16.2 ĐÃ KIỂM — `taskId` KHÔNG phải việc của script
+
+`adapter.send` TỰ sinh `taskId = currentTaskId++` và tự ghép `_SUCCESS`/`_FAILURE`.
+Script gửi `REPLY_INBOX_PHOTO` **không kèm `taskId`** — **ĐÚNG**, và đây là lý do script
+nhận được `res.data.messageId`: adapter trả nguyên `data` của `REPLY_INBOX_PHOTO_SUCCESS`.
+
+### 16.3 ĐÃ KIỂM — `threadKey` và `from` không dùng cho Facebook
+
+Trong `case"REPLY_INBOX_PHOTO"` của extension:
+- `threadKey` (T) chỉ truyền vào `.sendInbox({… threadKey:T …})` của `le(I)`. Extension **không**
+  dùng `threadKey` khi dựng form gửi FB (`buildSendParams` không đọc nó).
+- `from` (Q) chỉ dùng ở nhánh IG: `customerUsername: H || Q.name`.
+
+⇒ Script thiếu 2 field này **không ảnh hưởng** đường Facebook. Chỉ khác nếu gửi IG (script không gửi IG).
+
+### 16.4 ĐÃ KIỂM — các điểm khác, KHÔNG cần sửa
+
+| Điểm | Kết luận |
+|---|---|
+| `isResponseSuccess` đọc ngược | **Không bắt chước.** App cũng dính (nhận `success:true` khi `error_payload` truthy) — nhưng bắt chước là nới sang "báo ✅ sai", đúng thứ đang cấm. Script đã chặn ở tầng trên. |
+| `1357004` | Extension coi là lỗi FB, rơi vào `checkCanReuploadPhotos` → không khớp ⇒ `restartInbox`. Script không xử lý riêng = để đi đường chung. **0 lần** xuất hiện trong 30 log. |
+| Đường verify Ext có so nội dung tin | **Có** — `isMessageDeliveredInHistory(msgs, pageId, want, photo, sentAtMs)` + `confirmViaSnippet`. Không phải "thấy tin bất kỳ là ✅". |
+| `late-watch` chốt ✅ muộn | Chỉ chạy khi `late.success` — tức đã có `REPLY_INBOX_PHOTO_SUCCESS` = FB trả `message_id`. Không phải `res.success` trần. Chỉ **5 lần** / 30 log. |
+| `payload.type` | Adapter REQUIRE `type` (throw nếu thiếu). Script có gửi. ✔ |
