@@ -589,3 +589,69 @@ Ca B là thứ trước đây bị gộp nhầm vào "không có ACK". Nếu rơ
 Bộ đo có trạng thái `noAnchor`: nếu bundle Pancake đổi và không còn `reactToResponse`, dòng chẩn
 đoán in **"KHÔNG ĐO ĐƯỢC"** thay vì im lặng — để không ai đọc "không có số" thành "không có vấn đề".
 Đây là điều kiện bắt buộc: mọi cơ chế mới của bản này đều **tự khai** khi nó không chạy.
+
+
+---
+
+## §18. 1.93.26 — SỬA BỘ ĐO (vì bộ đo của 1.93.25 CHƯA TỪNG CHẠY) + ĐỌC LÝ DO FB TỪ CHỐI
+
+### 18.0 Lô đối chứng 19:44 (10 930 chat) — lô tốt nhất tới nay, và nó bác bỏ giả thuyết "kênh chết"
+| số | giá trị | kiểm chứng |
+|---|---|---|
+| ✅ | 9 385 = 8 815 Socket + 570 API | khớp tuyệt đối |
+| 📡 | ACK 8 815 ok + 1 533 rejected = 10 348 | = `ACK theo page 10 327/10 348` |
+| ❌ | 1 545 = 1 533 rejected + 12 `noThreadIdFound` | khớp |
+| bằng chứng ✅ | ACK 8 815 · HTTP 200 570 · **KHÔNG có bằng chứng 0** | 100 % ca ✅ có bằng chứng |
+| tốc độ | 240 lệnh/s (lô 18:56: 117/s) · giữ slot 670 ms/chat (trước 5 037) | |
+| `im lặng THẬT` | **0** · `dò lại ACK chết 0` · `Socket bị né 0` | ⇒ chưa từng có "kênh ACK chết" |
+
+### 18.1 Bộ đo của 1.93.25 KHÔNG CHẠY — ba lỗi, đều kiểm được
+1. `packetMonReset()` ghi `state = 'idle'` ở đầu mỗi lượt trong khi hàm bọc vẫn sống ⇒ nhãn nói
+   dối; cổng `_pm` (chỉ nhận `state === 'on'`) âm thầm rơi về luật cũ. Từ lô thứ hai trên cùng
+   tab, dòng `📦` in "chưa cài được (idle)" mãi.
+2. `patchMqttHelper()` thoát ở `helper.__botfakePatched` ⇒ **không có đường nào cài lại** bộ đo.
+3. `noCb` (mất-callback) là biến chết: không có lệnh nào tăng. Không thể tăng ở mỏ neo đã chọn —
+   trong bundle, `NOT_FOUND_CALLBACK_FOR_RESPONSE` được in ở handler `/ls_resp` **sau khi**
+   `reactToResponse` đã return.
+
+### 18.2 Cách đo mới (1.93.26) — bọc ĐÚNG NGUỒN, không bọc helper
+Đọc từ bundle:
+```js
+publish(e,t,n,a){ let r=this.SOCKETS[e]; if(null==r||!r.instance) return {success:!1,message:"connection_not_found"};
+  … request_id: ++r.requestId …; this.PENDING_MESSAGES[a]={callback,…}; r.instance.publish(t,…) }
+subscribe("/ls_resp", t => { … u.reactToResponse(e, n.payload, n.request_id) … })   // TRƯỚC khi tra sổ
+```
+* **Mẫu số**: bọc hàm khởi tạo của `helper.publish` ⇒ biết `request_id` THẬT app vừa cấp
+  (bộ đếm nằm trên `SOCKETS[pageId]`, **không** phải trên helper — đọc nhầm chỗ là lỗi tôi đã
+  mắc ở bản nháp và test khoá lại).
+* **Tử số**: bọc hàm khởi tạo của `helper.reactToResponse` ⇒ mỗi gói `/ls_resp`.
+* **Khớp theo `request_id` của chính ta** — không quy đổi thời gian, không so `lastAt`
+  (một `lastAt` phục vụ mọi request đang bay).
+
+Tách bạch 8 con số (không gộp nữa): `gửi` · `nhận` · `KHỚP request_id` · `gói lạ (của app)` ·
+`gói KHÔNG request_id` · `trả lời-không-nói-về-tin` · `chưa có gói sau 30s` ·
+`publish KHÔNG cấp request_id` · `app còn chờ`.
+
+### 18.3 Cách đọc dòng `📦 GÓI TIN` (nghiệm thu)
+| dòng | kết luận ĐƯỢC phép rút ra |
+|---|---|
+| `gửi N · KHỚP 0` · `app còn chờ N` | kênh ACK chết THẬT (gói không về) |
+| `nhận M · gói lạ (của app) M · KHỚP 0` | **kênh sống** — gói của app về đều; ta không có ACK của lệnh gửi |
+| `KHỚP x · trả lời-không-nói-về-tin y` | ca B: gói về, không nói gì về tin ⇒ sửa `thread_id`/`send_type`, **không đổi kênh** |
+| `publish KHÔNG cấp request_id k` | `connection_not_found`: **chưa có lệnh nào đi** — không phải "0 ACK" |
+| `⚠ không đọc được request_id` | số KHỚP **không đủ tin** ⇒ cấm kết luận |
+| `KHÔNG ĐO ĐƯỢC` | bundle đổi ⇒ cấm kết luận |
+
+### 18.4 Lý do FB từ chối — đọc từ chính gói tin
+Lô 19:44 có **1 533 rejected** (gấp ~6 lần mọi lô trước) và **cả 1 533 ca in cùng một câu**, rồi
+bị chốt ❌. Bằng chứng chéo chỉ 32 ca. Nay mỗi gói từ chối được quét CÓ KIỂM SOÁT (chỉ chuỗi/số
+dưới khoá trông như lỗi, hoặc khớp mã lỗi đã biết) và phân vào bucket:
+`noFace (#551/1545041)` · `window (#10)` · `thread (#613)` · `temp (1545012)` ·
+`noUser (#100)` · `KHÔNG đọc được lý do`.
+Nguyên văn câu của FB được in kèm (mẫu) để người đọc tự đánh giá, không phải tin vào nhãn của tôi.
+Phân loại này **chỉ đổi nhãn/log** — không đổi phán quyết, không đổi số lệnh gửi.
+
+### 18.5 Vẫn là bản CHỈ ĐO
+Không có thay đổi nào trên đường gửi. 619/619 test, trong đó 38 kịch bản mới chạy THẬT trên
+helper giả có đúng hình dạng bundle (không chỉ so regex — regex đã từng xanh trong khi code
+không chạy, đó chính là lỗi của 1.93.25).

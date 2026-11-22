@@ -2549,24 +2549,267 @@ check('[v1.93.24] kênh chết phải giữ ext làm đường lui (không bỏ 
 check('[v1.93.24] có ghi nhận mốc bắn Socket đầu tiên theo page',
   /pageSockFirstAt\[_pidS\] = Date\.now\(\)/.test(SRC), true);
 
-/* ═══ [v1.93.25] ĐO KÊNH ACK Ở TẦNG GÓI TIN — XỬ LÝ TRIỆT ĐỂ ═══
- * §16.2 đã chứng minh `mySilent` gần như không bao giờ đúng (cần ~1 119 ca đồng thời cho lô
- * 93 s trong khi cap = 256) ⇒ cổng cắt-kênh của v1.92.48 chưa từng chạy. Nay đo TRỰC TIẾP ở
- * `reactToResponse` của app: đếm gói /ls_resp thật thay vì suy từ bộ đếm giờ của ta. */
-check('[v1.93.25] có bộ đo GÓI TIN bọc reactToResponse của app',
-  /helper\.reactToResponse = function/.test(SRC) && /installPacketMonitor/.test(SRC), true);
-check('[v1.93.25] bộ đo TUYỆT ĐỐI không đổi giá trị trả về của app',
-  /r = orig\.apply\(this, arguments\);/.test(SRC), true);
-check('[v1.93.25] cổng cắt-kênh dựa trên 0 gói /ls_resp, không chỉ mySilent',
-  /_pktDead/.test(SRC) && /_pm\.resp === 0/.test(SRC), true);
-check('[v1.93.25] bundle đổi thì báo KHÔNG ĐO ĐƯỢC, không im lặng',
-  /packetMon\.state = 'noAnchor'/.test(SRC) && /KHÔNG ĐO ĐƯỢC/.test(SRC), true);
-check('[v1.93.25] no-ACK được tách theo lý do (5 nhánh), không gộp một câu',
-  /noAckReason/.test(SRC) && /noReplaceWithErr/.test(SRC) && /noPayload/.test(SRC), true);
-check('[v1.93.25] "noAck" chỉ còn đúng nghĩa "không nhận được gói nào"',
-  /noAck: _rw === 'noPayload'/.test(SRC), true);
-check('[v1.93.25] dòng chốt in số gửi/nhận gói thật theo page',
-  /GÓI TIN \(đo ở reactToResponse của app\)/.test(SRC), true);
+/* ═══ [v1.93.25→26] ĐO KÊNH ACK Ở TẦNG GÓI TIN — XỬ LÝ TRIỆT ĐỂ ═══
+ * 1.93.25 bọc `helper.reactToResponse`, nhưng lô 10 930 chat (19:44) in
+ * `📦 GÓI TIN: chưa cài được bộ đo (idle)` ⇒ bộ đo CHƯA TỪNG chạy: `packetMonReset()` ghi
+ * state='idle' và `patchMqttHelper()` thoát ở `__botfakePatched` nên không có đường cài lại.
+ * 1.93.26 bọc đúng NGUỒN (hàm khởi tạo của `publish` + `reactToResponse`) và đo theo
+ * `request_id` của chính ta. Dưới đây là TEST CHẠY THẬT trên helper giả có hình dạng
+ * đúng như bundle — không chỉ so regex, vì regex đã từng xanh trong khi code không chạy. */
+{
+  const consts = ['SOCK_ORPHAN_MS', 'PACKET_MAP_MAX'].map((n) => {
+    const m = SRC.match(new RegExp('const ' + n + ' = (\\d+);'));
+    if (!m) throw new Error('không tìm thấy hằng ' + n);
+    return `const ${n} = ${m[1]};`;
+  });
+  const monCode = consts.concat([
+    extractFn('clip'),
+    extractFn('_pmBump'),
+    extractFn('packetMonSweep'),
+    extractFn('packetMonReset'),
+    extractFn('installPacketMonitor'),
+    extractFn('packetMonAppPending'),
+    extractFn('packetMonText'),
+    extractFn('collectRejectText'),
+    extractFn('bucketRejectText'),
+    extractFn('noteSockRejectByPacket'),
+    extractFn('rejectBucketLabel'),
+    extractFn('sockRejectDiagText'),
+    SRC.match(/const packetMon = \{[\s\S]*?\n  \};/)[0],
+    SRC.match(/const sockRejectDiag = \{[^}]*\};/)[0],
+    'return { packetMon, sockRejectDiag, installPacketMonitor, packetMonReset, packetMonText,'
+      + ' packetMonAppPending, noteSockRejectByPacket, rejectBucketLabel, sockRejectDiagText,'
+      + ' collectRejectText, bucketRejectText };',
+  ]).join('\n\n');
+
+  /* Helper giả — ĐÚNG hình dạng bundle:
+   *   publish(e,t,n,a){ let r=this.SOCKETS[e]; if(null==r||!r.instance) return
+   *                       {success:!1,message:"connection_not_found"};
+   *                     … request_id: ++r.requestId …; this.PENDING_MESSAGES[key]={…} }
+   *   reactToResponse(e,t,n){ … }   ← handler /ls_resp gọi nó TRƯỚC khi tra sổ
+   * Lưu ý: bộ đếm `requestId` nằm trên **SOCKETS[pageId]** — đọc nhầm lên helper là lỗi
+   * làm "khớp request_id" luôn 0 (đã xảy ra với bản nháp của tôi, nay có test khoá lại).
+   * `connect=false` để mô phỏng đúng ca `connection_not_found`. */
+  const makeHelper = ({ connect = true } = {}) => {
+    const h = {
+      taskId: -1,
+      PENDING_MESSAGES: {},
+      SOCKETS: {},
+      lastType: null,
+      reactToResponseReturn: 'APP_RET',
+      publishReturn: 'PUB_RET',
+      reactToResponse(pageId, payload, requestId) {
+        h.lastType = arguments.length;
+        return h.reactToResponseReturn;
+      },
+      publish(pageId, topic, obj, type) {
+        h.lastType = type;
+        const r = h.SOCKETS[String(pageId)];
+        if (!r || !r.instance) return { success: false, message: 'connection_not_found' };
+        const id = ++r.requestId;
+        h.PENDING_MESSAGES[pageId + '_' + id] = { callback() {} };
+        return h.publishReturn;
+      },
+    };
+    if (connect) h.SOCKETS.P1 = { instance: { publish() {} }, taskId: -1, requestId: -1 };
+    return h;
+  };
+  const global0 = {};
+  const run = (opts) => {
+    const api = new Function('window', monCode)(global0);
+    const h = makeHelper(opts);
+    global0.__MqttHelper__ = h;
+    return { api, h };
+  };
+
+  // ---- (1) CÀI ĐƯỢC, và reset KHÔNG ĐƯỢC xoá nhãn "đang đo" ----
+  {
+    const { api, h } = run();
+    check('[v1.93.26] cài được bộ đo trên helper hình dạng bundle', api.installPacketMonitor(h), 'on');
+    check('[v1.93.26] reset đầu lượt GIỮ nhãn "đang đo" (1.93.25 ghi idle ⇒ đo chết)',
+      (() => { api.packetMonReset(); return api.packetMon.state; })(), 'on');
+    check('[v1.93.25→26] gói tin DÙNG ĐƯỢC sau reset (cổng cắt-kênh không bị vô hiệu)',
+      /\{ sent: packetMon\.sent\[_pidPm\] \|\| 0, matched: packetMon\.matched\[_pidPm\] \|\| 0/.test(stripComments(SRC)),
+      true);
+  }
+
+  // ---- (2) KHÔNG đổi hành vi của app ----
+  {
+    const { api, h } = run();
+    api.installPacketMonitor(h);
+    const ret = h.publish('P1', '/ls_req', { tasks: [{ task_id: 1 }] }, 3);
+    check('[v1.93.26] publish trả ĐÚNG giá trị của app (không bọc lại)', ret, 'PUB_RET');
+    check('[v1.93.26] publish vẫn nhận đủ 4 tham số', h.lastType, 3);
+    check('[v1.93.26] app vẫn tự ghi được PENDING_MESSAGES (ta không chặn)',
+      Object.keys(h.PENDING_MESSAGES).length, 1);
+    const r2 = h.reactToResponse('P1', '{"step":[]}', 0);
+    check('[v1.93.26] reactToResponse trả ĐÚNG giá trị của app', r2, 'APP_RET');
+    check('[v1.93.26] reactToResponse vẫn nhận đủ 3 tham số', h.lastType, 3);
+    check('[v1.93.26] bộ đo CHỈ ĐỌC — không tự xoá sổ của app',
+      Object.keys(h.PENDING_MESSAGES).length, 1);
+  }
+
+  // ---- (3) ĐẾM ĐÚNG: mẫu số, khớp request_id, gói lạ, gói không request_id ----
+  {
+    const { api, h } = run();
+    api.installPacketMonitor(h);
+    api.packetMonReset();
+    // 3 lệnh gửi của ta (request_id 0,1,2)
+    h.publish('P1', '/ls_req', { tasks: [{ task_id: 1 }] }, 3);
+    h.publish('P1', '/ls_req', { tasks: [{ task_id: 2 }] }, 3);
+    h.publish('P1', '/ls_req', { tasks: [{ task_id: 3 }] }, 3);
+    // 1 frame KHÔNG phải gửi tin (nạp thread) — không được vào mẫu số
+    h.publish('P1', '/ls_req', { tasks: [] }, 3);
+    const pm = api.packetMon;
+    check('[v1.93.26] mẫu số chỉ đếm frame GỬI TIN', pm.sent.P1, 3);
+    // gói của ta (id 0) mang replaceOptimsiticMessage
+    h.reactToResponse('P1', JSON.stringify({ step: [{ 0: 'replaceOptimsiticMessage' }] }), 0);
+    check('[v1.93.26] gói KHỚP request_id của ta được đếm', pm.matched.P1, 1);
+    check('[v1.93.26] gói khớp + replace ⇒ đếm "tin đi"', pm.replaced.P1, 1);
+    // gói của app (id 99) — kênh sống nhưng không phải của ta
+    h.reactToResponse('P1', JSON.stringify({ step: [] }), 99);
+    check('[v1.93.26] gói của app KHÔNG bị tính là ACK của ta', pm.matched.P1, 1);
+    check('[v1.93.26] gói của app đếm riêng (chứng minh "kênh sống" ≠ "ta có ACK")', pm.unmatched.P1, 1);
+    // gói KHÔNG có request_id ⇒ app KHÔNG tra PENDING_MESSAGES ⇒ ta không bao giờ được resolve
+    h.reactToResponse('P1', JSON.stringify({ step: [] }), null);
+    check('[v1.93.26] gói KHÔNG có request_id đếm riêng (lớp "mất ACK" ẩn)', pm.respNoId.P1, 1);
+    // gói của ta nhưng step không nói gì về tin (ca B — KHÔNG phải kênh chết)
+    h.reactToResponse('P1', JSON.stringify({ step: [{ 0: 'updateSomethingElse' }] }), 1);
+    check('[v1.93.26] ca B: gói về mà không nói gì về tin được đếm riêng', pm.answeredNoStep.P1, 1);
+  }
+
+  // ---- (4) Số còn treo trong sổ của app = bằng chứng "còn lệnh chưa được trả lời" ----
+  {
+    const { api, h } = run();
+    api.installPacketMonitor(h);
+    api.packetMonReset();
+    h.publish('P1', '/ls_req', { tasks: [{ task_id: 1 }] }, 3);
+    h.publish('P1', '/ls_req', { tasks: [{ task_id: 2 }] }, 3);
+    check('[v1.93.26] đếm đúng số key đang chờ trong sổ của app', api.packetMonAppPending(h, 'P1'), 2);
+    delete h.PENDING_MESSAGES['P1_0'];
+    check('[v1.93.26] app trả lời xong thì số chờ giảm (đo được, không suy luận)',
+      api.packetMonAppPending(h, 'P1'), 1);
+    check('[v1.93.26] không có sổ ⇒ trả -1 (KHÔNG được coi là 0)',
+      api.packetMonAppPending({}, 'P1'), -1);
+  }
+
+  // ---- (5) Dòng chẩn đoán phải nói ĐÚNG ba thứ khác nhau ----
+  {
+    const { api, h } = run();
+    api.installPacketMonitor(h);
+    api.packetMonReset();
+    h.publish('P1', '/ls_req', { tasks: [{ task_id: 1 }] }, 3);
+    h.reactToResponse('P1', JSON.stringify({ step: [] }), 0);
+    const txt = api.packetMonText();
+    check('[v1.93.26] dòng chốt in số KHỚP request_id, không chỉ số gói',
+      /KHỚP request_id/.test(txt) && /gửi 1/.test(txt), true);
+    check('[v1.93.26] dòng chốt in cả "gói KHÔNG request_id" và "trả lời-không-nói-về-tin"',
+      /KHÔNG request_id/.test(txt) && /trả lời-không-nói-về-tin/.test(txt), true);
+  }
+  {
+    const { api } = run();
+    check('[v1.93.26] bundle đổi (không bọc được gì) ⇒ "KHÔNG ĐO ĐƯỢC", không im lặng',
+      api.installPacketMonitor({}), 'noAnchor');
+    check('[v1.93.26] dòng chốt nói rõ kết luận "0 ACK" KHÔNG có cơ sở',
+      /KHÔNG ĐO ĐƯỢC/.test(api.packetMonText()), true);
+  }
+
+  // ---- (7) `connection_not_found` KHÁC HẲN "0 ACK" ----
+  {
+    const { api, h } = run({ connect: false });
+    api.installPacketMonitor(h);
+    api.packetMonReset();
+    const r = h.publish('P1', '/ls_req', { tasks: [{ task_id: 1 }] }, 3);
+    check('[v1.93.26] app không có socket ⇒ publish trả connection_not_found (đúng bundle)',
+      r && r.message, 'connection_not_found');
+    check('[v1.93.26] ca connection_not_found KHÔNG vào mẫu số "đã gửi"', api.packetMon.sent.P1, undefined);
+    check('[v1.93.26] nó được đếm riêng: chưa hề có lệnh nào đi',
+      api.packetMon.notPublished.P1, 1);
+    check('[v1.93.26] dòng chốt in rõ ca này (không gộp vào 0 ACK)',
+      /publish KHÔNG cấp request_id 1/.test(api.packetMonText()), true);
+  }
+
+  // ---- (8) KHÔNG đọc được bộ đếm ⇒ phải NÓI RA, không lặng lẽ coi là 0 ----
+  {
+    const { api, h } = run();
+    h.SOCKETS.P1.requestId = undefined;   // bundle khác đổi tên/kiểu ⇒ không đọc được
+    api.installPacketMonitor(h);
+    api.packetMonReset();
+    h.publish('P1', '/ls_req', { tasks: [{ task_id: 1 }] }, 3);
+    const txt = api.packetMonText();
+    check('[v1.93.26] không đọc được request_id ⇒ đếm riêng', api.packetMon.sentNoId.P1, 1);
+    check('[v1.93.26] dòng chốt cảnh báo số KHỚP "KHÔNG đủ tin"',
+      /KHÔNG đủ tin/.test(txt), true);
+    check('[v1.93.26] mẫu số vẫn phản ánh lệnh đã publish', /gửi 1/.test(txt), true);
+  }
+
+  // ---- (6) CỔNG CẮT KÊNH phải dựa trên số KHỚP, không phải số gói nhận được ----
+  check('[v1.93.25→26] cổng cắt-kênh dùng số KHỚP request_id (gói của app không che được)',
+    /_pm\.matched === 0/.test(stripComments(SRC)) && /_pktDead/.test(SRC), true);
+  check('[v1.93.26] ca B được đếm riêng để KHÔNG đổi kênh oan',
+    /pktAnsweredNoStep\s*\+=\s*_pm\.noStep/.test(stripComments(SRC)), true);
+}
+
+/* ═══ [v1.93.26] LÝ DO FB TỪ CHỐI — ĐỌC TỪ GÓI TIN, KHÔNG ĐOÁN ═══
+ * Lô 10 930 chat (19:44): ACK rejected 1 533 — gấp 6 lần mọi lô trước — và cả 1 533 ca in
+ * CÙNG một câu, rồi bị chốt ❌. Không chỗ nào đọc lý do FB đưa ra ⇒ không ai biết đó là
+ * "khách không có mặt" (❌ đúng) hay "burst-reject tạm thời" (❌ oan). */
+{
+  const consts = ['SOCK_ORPHAN_MS', 'PACKET_MAP_MAX'].map((n) => {
+    const m = SRC.match(new RegExp('const ' + n + ' = (\\d+);'));
+    return `const ${n} = ${m[1]};`;
+  });
+  const code = consts.concat([
+    SRC.match(/const REJ_KEY_RE = .*;/)[0],
+    SRC.match(/const REJ_TXT_RE = .*;/)[0],
+    extractFn('clip'),
+    extractFn('_pmBump'),
+    extractFn('collectRejectText'),
+    extractFn('bucketRejectText'),
+    extractFn('noteSockRejectByPacket'),
+    extractFn('rejectBucketLabel'),
+    extractFn('sockRejectDiagText'),
+    SRC.match(/const sockRejectDiag = \{[^}]*\};/)[0],
+    'return { collectRejectText, bucketRejectText, noteSockRejectByPacket, rejectBucketLabel,'
+      + ' sockRejectDiagText, sockRejectDiag };',
+  ]).join('\n\n');
+  const R = new Function(code)();
+
+  check('[v1.93.26] bắt được lý do dạng chuỗi trong khối failed',
+    R.bucketRejectText('(#551) Người này hiện không có mặt.'), 'noFace');
+  check('[v1.93.26] bắt được "ngoài khoảng thời gian cho phép" ⇒ cửa sổ 24h',
+    R.bucketRejectText('(#10) Tin nhắn nằm ngoài khoảng thời gian cho phép'), 'window');
+  check('[v1.93.26] bắt được lỗi tạm thời ⇒ KHÔNG phải khách chết',
+    R.bucketRejectText('Đã xảy ra lỗi tạm thời, vui lòng thử lại.'), 'temp');
+  check('[v1.93.26] bắt được mã 1545041 dạng số trong JSON',
+    R.bucketRejectText('1545041'), 'noFace');
+  check('[v1.93.26] chuỗi vô nghĩa ⇒ bucket rỗng (không gán bừa)',
+    R.bucketRejectText('Loading'), '');
+
+  // Gói có hình dạng thật: step là mảng, phần tử có khoá kiểu lỗi
+  const pkt = { step: [[{ 0: 'markOptimisticMessageFailed' }, { error: '(#551) Người này hiện không có mặt.' }]] };
+  const out = R.noteSockRejectByPacket(pkt, [[{ 0: 'markOptimisticMessageFailed' }]]);
+  check('[v1.93.26] đọc được lý do từ gói thật ⇒ bucket noFace', out.bucket, 'noFace');
+  check('[v1.93.26] giữ nguyên văn câu của FB để người đọc tự đánh giá',
+    /#551/.test(out.text), true);
+  check('[v1.93.26] dòng TỔNG HỢP in bucket + mẫu nguyên văn',
+    /khách không có mặt/.test(R.sockRejectDiagText()) && /#551/.test(R.sockRejectDiagText()), true);
+
+  // Gói KHÔNG kèm lý do: phải nói thẳng "KHÔNG đọc được", không im lặng
+  const out2 = R.noteSockRejectByPacket({ step: [] }, []);
+  check('[v1.93.26] gói từ chối không kèm lý do ⇒ nhãn "KHÔNG đọc được lý do"',
+    /KHÔNG đọc được lý do/.test(R.sockRejectDiagText()), true);
+  check('[v1.93.26] log từng ca cũng nói rõ (không gộp một câu chung)',
+    /từ chối KHÔNG kèm lý do/.test(R.rejectBucketLabel(out2.bucket, out2.text)), true);
+
+  // Phải đi được vào kết quả của sendViaSocket (không bị bỏ ở classify)
+  check('[v1.93.26] lý do đi theo kết quả rejected ra tới nơi ghi log',
+    /rejectBucket: _rb/.test(SRC) && /rejectBucketLabel\(res\.rejectBucket/.test(SRC), true);
+  check('[v1.93.26] lý do được ghi vào sổ "FB từ chối" của từng chat',
+    /noteFbRejected\(conv\.id, 'Socket ACK rejected = FB từ chối nhận tin' \+ rejectBucketLabel/.test(SRC), true);
+  check('[v1.93.26] bộ đếm lý do reset mỗi lượt (không cộng dồn qua lô)',
+    /sockRejectDiag\.total = 0;/.test(SRC), true);
+}
 
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
