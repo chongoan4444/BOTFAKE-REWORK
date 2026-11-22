@@ -544,3 +544,48 @@ Sau 16.2, `mySilent` **phải** đúng với một số ca (không thể 0 tuy�
 trong log** cho biết `pageAckSilentRun`/`pageAckTimeoutRun` đạt tới đâu. Đó là lỗ hổng đo lường
 lớn nhất còn lại: cần in `im lặng THẬT` theo **page** (không chỉ toàn cục) và in giá trị lớn nhất
 `pageAckTimeoutRun` đạt được, để lần sau biết ngưỡng 5 có hợp lý hay không.
+
+---
+
+## §17. XỬ LÝ TRIỆT ĐỂ (1.93.25) — đo ở tầng gói tin, không suy luận nữa
+
+### 17.1 Vì sao các bản trước chỉ chữa triệu chứng
+Cả 4 lần tôi kết luận sai đều cùng một gốc: **đo qua đại lượng trung gian**.
+`noAckStreak`, `mySilent`, `pageAckTimeoutRun` đều là *bộ đếm giờ của chính script*, không phải
+sự kiện của FB. §16.2 chứng minh bằng số học rằng `mySilent` gần như không bao giờ đúng
+(cần ~1 119 ca đồng thời cho lô 93 s trong khi cap = 256) ⇒ mọi cổng dựa vào nó **chưa từng chạy**,
+kể cả cổng cắt-kênh-chết đã có từ v1.92.48.
+
+### 17.2 Bản 1.93.25 đo TRỰC TIẾP
+Bọc đúng hàm `reactToResponse` của app — hàm được gọi ở **mọi** gói `/ls_resp`
+(`subscribe("/ls_resp", t => { … u.reactToResponse(pageId, payload, request_id) … })`), **trước**
+cả bước tra `PENDING_MESSAGES`:
+
+| đo | ý nghĩa |
+|---|---|
+| `sent[page]` | số lần **ta** publish frame gửi tin (`/ls_req` có tasks) |
+| `resp[page]` | số gói `/ls_resp` **đã thấy** (không phụ thuộc entry còn hay mất) |
+| `replace/failed[page]` | gói mang `replaceOptimsiticMessage` / `markOptimisticMessageFailed` |
+| `noCb[page]` | số gói mà app báo `NOT_FOUND_CALLBACK` (entry đã bị xoá) |
+
+**Chỉ đọc**: `r = orig.apply(this, arguments); return r;` — giữ nguyên giá trị app trả về.
+
+### 17.3 Cổng cắt kênh nay dựa trên bằng chứng trực tiếp
+```
+A. sent ≥ 20  &&  resp === 0  &&  elapsed ≥ 20 s   ⇒ KÊNH ACK CHẾT THẬT ⇒ bỏ Socket khỏi làn
+B. resp > 0 nhưng replace === 0                    ⇒ gói VỀ mà không mang kết quả gửi
+                                                     ⇒ ĐỔI KÊNH VÔ ÍCH (Ext dùng chính kênh này)
+                                                     ⇒ giữ Socket, chỉ ghi chẩn đoán
+```
+Ca B là thứ trước đây bị gộp nhầm vào "không có ACK". Nếu rơi vào B thì việc cần làm là sửa
+`gid`/`thread_id`/`send_type`, **không phải** đổi kênh — và bản vá này không đổi kênh trong ca B.
+
+### 17.4 Nhãn log đã tách (chống tái diễn hiểu sai)
+`noack` nay có `reason`: `noPayload` · `badPayload` · `noReplaceWithErr` · `publishThrow` ·
+`classifyThrow`, và chỉ `noPayload` mới giữ cờ `noAck: true`. Câu "Socket không rõ kết quả
+(không có ACK)" không còn được dùng cho mọi nhánh.
+
+### 17.5 Điều kiện "không bao giờ lặp lại"
+Bộ đo có trạng thái `noAnchor`: nếu bundle Pancake đổi và không còn `reactToResponse`, dòng chẩn
+đoán in **"KHÔNG ĐO ĐƯỢC"** thay vì im lặng — để không ai đọc "không có số" thành "không có vấn đề".
+Đây là điều kiện bắt buộc: mọi cơ chế mới của bản này đều **tự khai** khi nó không chạy.

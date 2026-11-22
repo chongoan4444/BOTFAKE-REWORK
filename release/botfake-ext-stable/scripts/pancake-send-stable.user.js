@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.24-w200.134
+// @version      1.93.25-w200.135
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.24-W200.134'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.25-W200.135'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5277,6 +5277,14 @@
     };
     await paceSocketPublish(pageId);
     const publishedAt = Date.now();
+    /* [v1.93.25] MẪU SỐ của bộ đo gói tin: số lần TA publish frame GỬI TIN (/ls_req có tasks).
+     * Chỉ frame gửi tin mới tính — frame nạp thread (313/145/207) không được lẫn vào. */
+    try {
+      if (Array.isArray(frame.tasks) && frame.tasks.length) {
+        const _pp = String(pageId || '');
+        if (_pp) packetMon.sent[_pp] = (packetMon.sent[_pp] || 0) + 1;
+      }
+    } catch (ePS2) { /* ignore */ }
     // [v1.91.76] Log lượt 10k: ACK TB 2317ms · MAX 15544ms, bucket ≥5s có 420 ca ⇒ ngưỡng
     // 15000ms cắt oan đúng những ACK chậm nhất (mỗi ca bị cắt thành "no-ACK" rồi phải kiểm
     // chứng lịch sử). Nới lên 20000ms cho lô lớn; lô ≤30 chat vẫn 8000ms cho nhanh.
@@ -5460,13 +5468,13 @@
         // Publish ĐÃ được giao cho helper rồi mới mất phản hồi: socket chết lúc này KHÔNG
         // chứng minh được frame chưa đi (FB có thể đã nhận) → 'noack' = không rõ, cấm bù
         // bắn lần 2. 'dead' thật (socket chết TRƯỚC khi publish) đã bị chặn ở đầu hàm.
-        return { kind: 'noack', publishedAt: publishedAt };
+        return { kind: 'noack', reason: 'noPayload', publishedAt: publishedAt };
       }
       socketNoAckStreak[pageId] = 0;
       let resp = null;
       try { resp = JSON.parse(stripJsonPrefix(g.payload)); } catch (e) {
         recordSocketAckOutcome('noack', Date.now() - publishedAt, pageId);
-        return { kind: 'noack', publishedAt: publishedAt };
+        return { kind: 'noack', reason: 'badPayload', publishedAt: publishedAt };
       }
       const replaced = helper.findAllBlockActions(resp.step, 'replaceOptimsiticMessage') || [];
       const failed = helper.findAllBlockActions(resp.step, 'markOptimisticMessageFailed') || [];
@@ -5495,7 +5503,10 @@
         || (Array.isArray(resp.errors) && resp.errors.length) || resp.success === false));
       if (!replaced.length && errFlag) {
         recordSocketAckOutcome('noack', Date.now() - publishedAt, pageId);
-        return { kind: 'noack', publishedAt: publishedAt };
+        /* [v1.93.25] GÓI VỀ, CÓ NỘI DUNG, NHƯNG KHÔNG MANG `replaceOptimsiticMessage` — đây KHÔNG
+         * phải "không có ACK". Nhãn riêng để lần sau không ai (kể cả tôi) đọc nhầm thành
+         * "FB im lặng". Đây là ca `gid`/`thread_id` sai hoặc `send_type` không được FB chấp nhận. */
+        return { kind: 'noack', reason: 'noReplaceWithErr', publishedAt: publishedAt };
       }
       recordSocketAckOutcome('ok', Date.now() - publishedAt, pageId);
       if (lateMode && lateApply) lateApply('ok', Date.now() - publishedAt);
@@ -5505,8 +5516,8 @@
     // Kết quả thật được classify ở nền khi /ls_resp về và gọi firedCb đúng 1 lần.
     if (typeof firedCb === 'function') {
       publishPromise
-        .then((g) => { try { firedCb(classify(g)); } catch (e) { firedCb({ kind: 'noack', publishedAt: publishedAt }); } })
-        .catch(() => firedCb({ kind: 'noack', publishedAt: publishedAt }));
+        .then((g) => { try { firedCb(classify(g)); } catch (e) { firedCb({ kind: 'noack', reason: 'classifyThrow', publishedAt: publishedAt }); } })
+        .catch(() => firedCb({ kind: 'noack', reason: 'publishThrow', publishedAt: publishedAt }));
       /* [v1.92.48] CHỈ ĐỌC — ACK về MUỘN hơn hạn chờ giữ slot nhưng còn trong cửa sổ nghe.
        * Cũ: chỗ nhận đã bị xoá ⇒ gói này mất ⇒ ⚠ ⇒ kiểm chứng ⇒ BẮN CỨU Ext (101 ca lô 10:01).
        * Nay: gói vẫn được giao ⇒ nếu là ✅ thì chốt luôn, KHÔNG bắn cứu ⇒ bớt đúng nguồn trùng.
@@ -6075,12 +6086,24 @@
       if (raw.kind === 'noack') {
         // Khi raw.kind === 'noack', frame ĐÃ được gọi qua helper.publish — luôn đưa vào diện
         // kiểm chứng lịch sử (scheduleSocketVerify) để xác minh tin đã tới chưa rồi mới bắn cứu!
+        /* [v1.93.25] NHÃN PHẢI NÓI ĐÚNG CHUYỆN ĐÃ XẢY RA. Trước bản này MỌI nhánh noack đều in
+         * "không có ACK"; log 18:56 in `📡 ACK OK/rejected/no-ACK 5/0/0` CÙNG LÚC với 8 675 dòng
+         * "không có ACK" — hai câu phủ định nhau, và chính câu sai đó đã dắt tôi đi sai hướng
+         * 2 lần. Nay lý do tách theo `raw.reason` do `classify()` đặt. */
+        const _rw = String(raw.reason || '');
+        const _why = _rw === 'noPayload' ? 'không nhận được gói trả lời nào'
+          : _rw === 'badPayload' ? 'gói trả lời về nhưng không đọc được'
+            : _rw === 'noReplaceWithErr' ? 'gói về nhưng KHÔNG mang kết quả gửi (gid/thread_id sai?)'
+              : _rw === 'publishThrow' ? 'không publish được lệnh (socket/helper lỗi)'
+                : _rw === 'classifyThrow' ? 'lỗi khi phân xử gói trả lời'
+                  : 'không rõ kết quả';
         return {
           ok: false,
           sent: 'maybe',
-          noAck: true,
+          noAck: _rw === 'noPayload',
+          noAckReason: _rw || 'unknown',
           publishedAt: raw.publishedAt || (Date.now() - 15000),
-          error: 'Socket không rõ kết quả (không có ACK)',
+          error: 'Socket không rõ kết quả (' + _why + ')',
         };
       }
       // legacy — helper không có publish: đường sendMessage cũ (kèm bước chờ 1s của app)
@@ -7785,6 +7808,113 @@
   }
   try { window.__botfakeForceExt__ = setForceExtMode; } catch (e) { /* ignore */ }
   const pageLastAckWait = {};   // pageId → hạn chờ vừa dùng cho lần publish gần nhất
+  /* ═══ [v1.93.25] ĐO KÊNH ACK Ở TẦNG GÓI TIN CỦA APP — KHÔNG CÒN SUY LUẬN GIÁN TIẾP ═══
+   * VẤN ĐỀ PHẢI XỬ TRIỆT ĐỂ: hai lô (5 281 và 10 948 chat) đều ~0 % ACK, mọi suy luận từ
+   * `mySilent`/`noAckStreak` đều vòng vo và tôi đã sai 4 lần (§10, §13, §14). Gói tin là nơi
+   * DUY NHẤT biết chắc, nhưng script chỉ nhìn được entry PENDING_MESSAGES của CHÍNH NÓ — khi
+   * app đã xoá entry (gói về kịp) thì ta chỉ thấy `undefined`, KHÔNG phân biệt được:
+   *   (a) FB không trả lời gì,
+   *   (b) app ĐÃ nhận gói nhưng xoá entry trước khi tới lượt ta đọc.
+   * ⇒ Dựng đường ĐO ĐỘC LẬP bằng cách bọc ĐÚNG hàm `reactToResponse` của app — hàm này được
+   * gọi ở MỌI gói `/ls_resp` (`_app`: `subscribe("/ls_resp", t => { … u.reactToResponse(e, n.payload, n.request_id) … })`),
+   * TRƯỚC cả bước tra `PENDING_MESSAGES`. Nhờ vậy ta đếm được gói thật, không phụ thuộc entry.
+   *
+   * CHỈ ĐỌC — tuyệt đối không đổi mã trả về, không chặn, không sửa gói:
+   *   `return r;` giữ nguyên giá trị app trả về (kể cả `undefined`).
+   * Nếu bundle đổi tên hàm: `packetMon.state = 'noAnchor'` và dòng chẩn đoán in ra "KHÔNG ĐO
+   * ĐƯỢC", KHÔNG im lặng như thể "không có gói nào". */
+  const packetMon = {
+    state: 'idle',        // idle | on | noAnchor | err
+    resp: {},             // pageId → số gói /ls_resp ĐÃ THẤY (mọi loại)
+    respWithId: {},       // pageId → số gói có request_id
+    noCb: {},             // pageId → số gói mà app báo NOT_FOUND_CALLBACK (entry đã bị xoá)
+    sent: {},             // pageId → số lần ta publish /ls_req (chỉ frame gửi tin)
+    lastAt: {},           // pageId → mốc gói /ls_resp gần nhất
+    noPid: 0,             // số gói không xác định được pageId (đếm để không mất dấu)
+  };
+  function packetMonReset() {
+    packetMon.state = packetMon.state === 'noAnchor' ? 'noAnchor' : 'idle';
+    ['resp', 'respWithId', 'noCb', 'sent', 'lastAt'].forEach((k) => {
+      Object.keys(packetMon[k]).forEach((p) => { delete packetMon[k][p]; });
+    });
+    packetMon.noPid = 0;
+  }
+  /* Bọc `reactToResponse` trên helper. Gọi nhiều lần vô hại (có cờ `__bfPacketMon`). */
+  function installPacketMonitor(helper) {
+    try {
+      if (!helper || typeof helper !== 'object') return 'nohelper';
+      if (helper.__bfPacketMon) { packetMon.state = 'on'; return 'on'; }
+      if (typeof helper.reactToResponse !== 'function') {
+        packetMon.state = 'noAnchor';
+        return 'noAnchor';
+      }
+      const orig = helper.reactToResponse;
+      helper.reactToResponse = function (pageId, payload, requestId) {
+        let r;
+        try {
+          /* Ghi nhận TRƯỚC khi app xử lý: nếu app ném lỗi thì ta vẫn biết gói đã tới. */
+          const pid = String(pageId || '');
+          if (pid) {
+            packetMon.resp[pid] = (packetMon.resp[pid] || 0) + 1;
+            if (requestId !== undefined && requestId !== null) {
+              packetMon.respWithId[pid] = (packetMon.respWithId[pid] || 0) + 1;
+            }
+            packetMon.lastAt[pid] = Date.now();
+            /* Phân loại gói có mang kết quả gửi tin hay không — CHỈ ĐỌC payload. */
+            try {
+              if (payload) {
+                const o = JSON.parse(payload);
+                const step = o && o.step;
+                const hasReplace = JSON.stringify(step || '').indexOf('replaceOptimsiticMessage') > -1;
+                const hasFail = JSON.stringify(step || '').indexOf('markOptimisticMessageFailed') > -1;
+                const k = hasReplace ? 'replace' : (hasFail ? 'failed' : '');
+                if (k) packetMon[k] = packetMon[k] || {};
+                if (k) packetMon[k][pid] = (packetMon[k][pid] || 0) + 1;
+              }
+            } catch (eP) { /* payload lạ — chỉ cần đếm gói là đủ */ }
+          } else {
+            packetMon.noPid++;
+          }
+        } catch (eM) { /* đo lường không bao giờ được làm hỏng app */ }
+        r = orig.apply(this, arguments);   // ⚠ KHÔNG đổi giá trị trả về của app
+        return r;
+      };
+      helper.__bfPacketMon = true;
+      packetMon.state = 'on';
+      return 'on';
+    } catch (e) {
+      packetMon.state = 'err';
+      return 'err';
+    }
+  }
+  /** Dựng 1 dòng chẩn đoán CHỈ ĐỌC cho TỔNG HỢP — trả lời đúng câu hỏi "kênh ACK có sống không". */
+  function packetMonText() {
+    try {
+      if (packetMon.state === 'noAnchor') {
+        return '📦 GÓI TIN: KHÔNG ĐO ĐƯỢC (bundle app không còn `reactToResponse`) — mọi kết luận về ';
+      }
+      if (packetMon.state !== 'on') {
+        return '📦 GÓI TIN: chưa cài được bộ đo (' + packetMon.state + ')';
+      }
+      const pids = Object.keys(packetMon.resp);
+      if (!pids.length) {
+        return '📦 GÓI TIN: page chưa nhận gói /ls_resp NÀO trong lượt này (đã bắn '
+          + (Object.values(packetMon.sent).reduce((a, b) => a + b, 0) || 0) + ' lệnh)';
+      }
+      const parts = pids.slice(0, 3).map((p) => {
+        const s = packetMon.sent[p] || 0;
+        const r = packetMon.resp[p] || 0;
+        const rc = (packetMon.replace && packetMon.replace[p]) || 0;
+        const fl = (packetMon.failed && packetMon.failed[p]) || 0;
+        const nc = packetMon.noCb[p] || 0;
+        const lastAgo = packetMon.lastAt[p] ? Math.round((Date.now() - packetMon.lastAt[p]) / 1000) : -1;
+        return p.slice(-6) + ' gửi ' + s + ' · nhận ' + r + ' gói (replace ' + rc + ' · failed ' + fl
+          + ' · mất-callback ' + nc + ') · gói cuối ' + (lastAgo < 0 ? '—' : (lastAgo + 's trước'));
+      });
+      return '📦 GÓI TIN (đo ở reactToResponse của app): ' + parts.join(' | ')
+        + (packetMon.noPid ? ' · không rõ page ' + packetMon.noPid + ' gói' : '');
+    } catch (e) { return '📦 GÓI TIN: lỗi dựng dòng (' + (e && e.message || e) + ')'; }
+  }
   const pageAckTimeoutRun = {}; // pageId → số lần no-ACK đủ hạn chờ liên tiếp
   /* [v1.92.48] "ACK CHẾT" PHẢI CÓ BẰNG CHỨNG, KHÔNG PHẢI 3 LẦN HẾT HẠN CHỜ.
    * Lô 10:01: 09:57:19 ba ca no-ACK liên tiếp ⇒ tuyên bố ACK CHẾT ⇒ né Socket 7 665 ca
@@ -7880,7 +8010,8 @@
    * tên một cơ chế chống mất tin thành "ACK chết". Nay đếm riêng 2 lý do, chỉ đổi NHÃN. */
   const socketPickDiag = { deadSkip: 0, deadSkipAtProbe: 0, probe: 0, probeOk: 0, notReady: 0, noGid: 0,
     skipLost: 0, skipAckDead: 0, zeroAckToApi: 0, // [v1.93.22] số ca chuyển sang API vì page 0 ACK
-    deadChannelSkip: 0 }; // [v1.93.24] số ca BỎ Socket vì kênh ACK của page đã chết (>20 s, 0 ACK)
+    deadChannelSkip: 0, // [v1.93.24] số ca BỎ Socket vì kênh ACK của page đã chết (>20 s, 0 ACK)
+    pktChannelDead: 0 }; // [v1.93.25] số ca bỏ Socket vì ĐO GÓI TIN thấy 0 gói /ls_resp trả về
   function isPageAckDead(pid) {
     const at = pageAckDeadAt[pid];
     if (!at) return false;
@@ -8833,7 +8964,26 @@
     if (!hasSock || !hasExt) return seq;
     try {
       const _ackSt = pageSocketAckState(pageId);
-      if (_ackSt.dead) {
+      /* ═══ [v1.93.25] PHÂN BIỆT HAI THẾ GIỚI KHÁC HẲN NHAU — ĐÂY LÀ CHỖ SỬA TRIỆT ĐỂ ═══
+       * Trước bản này mọi thứ đều suy ra từ `noAckStreak`/`mySilent` — hai đại lượng trung
+       * gian, và §16.2 đã chứng minh `mySilent` gần như không bao giờ đúng ⇒ cổng chết-kênh
+       * của chính script (v1.92.48) chưa từng chạy. Nay hỏi THẲNG bộ đo gói tin:
+       *
+       *   A. `đã bắn ≥ 20 lệnh` mà `nhận 0 GÓI /ls_resp` ⇒ kênh ACK thật sự chết.
+       *      ⇒ Bỏ Socket khỏi thứ tự làn. Đây là bằng chứng TRỰC TIẾP, không suy luận.
+       *
+       *   B. `nhận > 0 gói` mà không có `replaceOptimsiticMessage` ⇒ gói VỀ nhưng không mang
+       *      kết quả gửi. Đổi kênh là VÔ ÍCH (Ext cũng dùng chính kênh này) ⇒ KHÔNG bỏ Socket,
+       *      chỉ đánh dấu để chẩn đoán biết phải sửa `gid`/`thread_id`/`send_type`.
+       *
+       * Nếu bộ đo chưa cài được (`noAnchor`) thì quay về luật cũ — không im lặng đổi hành vi. */
+      const _pm = (packetMon.state === 'on')
+        ? { sent: packetMon.sent[String(pageId || '')] || 0, resp: packetMon.resp[String(pageId || '')] || 0 }
+        : null;
+      const _pktDead = !!(_pm && _pm.sent >= SOCK_CHANNEL_DEAD_MIN && _pm.resp === 0
+        && _ackSt.elapsedMs >= SOCK_CHANNEL_DEAD_MS);
+      if (_pktDead) socketPickDiag.pktChannelDead++;
+      if (_pktDead || (_pm === null && _ackSt.dead)) {
         /* [v1.93.24] KÊNH ACK CỦA PAGE ĐÃ CHẾT THẬT ⇒ BỎ SOCKET KHỎI THỨ TỰ (không bắn thêm).
          * Điều kiện vào đây KHÔNG phụ thuộc làn (thứ bị noAckStreak hạ xuống 16–32): dùng
          * `sent ≥ 20` **và** `≥ 20 000 ms` **và** `ack === 0`.
@@ -9733,6 +9883,9 @@
   function patchMqttHelper(helper) {
     if (!helper || typeof helper !== 'object' || helper.__botfakePatched) return;
     helper.__botfakePatched = true;
+    /* [v1.93.25] Cài bộ đo GÓI TIN (chỉ đọc) trước mọi thứ khác — nó phải có mặt trước lần
+     * publish đầu tiên, nếu không lượt đó không có số. */
+    try { installPacketMonitor(helper); } catch (ePM) { /* đo lường không được chặn patch */ }
     try {
       // 1) Vá triggerLoadMoreThreads (@822420): truyền đúng parsed.step (Array) thay vì parsed (Object)
       helper.triggerLoadMoreThreads = function (pageId, parsed) {
@@ -11586,6 +11739,11 @@
           + ' · ⏱ ' + elapsedSec + 's · ' + (elapsedSec > 0 ? (c.settled / elapsedSec).toFixed(1) : '0') + ' tin/giây');
         else logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total
           + ' tin (' + pct + '%)' + chStr
+          /* [v1.93.25] DÒNG QUAN TRỌNG NHẤT ĐỂ CHẨN ĐOÁN "0 % ACK": đo ở tầng gói tin.
+           * `gửi N · nhận 0 gói` ⇒ kênh ACK chết thật (hoặc subscribe mất) ⇒ đổi kênh là đúng.
+           * `gửi N · nhận N gói (mất-callback > 0)` ⇒ gói VỀ, chỉ là entry bị xoá ⇒ lỗi ở ta,
+           * KHÔNG phải lỗi FB ⇒ đừng đổi kênh, hãy sửa cách bắt gói. */
+          + ' | ' + packetMonText()
           + ' | 🧾 Bằng chứng của ' + c.okTotal + ' ca ✅: messageId ' + proofStats.messageId
             + ' · lịch sử ' + proofStats.history + ' · ACK Socket ' + proofStats.ack
             + ' · HTTP 200 ' + proofStats.http200 + ' · ext-báo-success ' + proofStats.extSuccess
@@ -11883,6 +12041,7 @@
            /* [v1.93.24] NGHIỆM THU CỦA BẢN VÁ "KÊNH ACK CHẾT": phải > 0 ở lô nào Socket 0 ACK,
             * và khi đó `⚠ no-ACK` + `🛟` của lô đó phải GIẢM so với 4 884 / 8 675 ca. */
            + ' · BỎ Socket vì kênh ACK chết ' + (socketPickDiag.deadChannelSkip || 0) + ' ca'
+           + ' (đo gói tin: ' + (socketPickDiag.pktChannelDead || 0) + ')'
            + ' · ACK theo page (bắn/ACK) ' + (function () {
              try {
                const ks = Object.keys(pageSockSent);
@@ -14121,6 +14280,7 @@
       Object.keys(pageSockSent).forEach((k) => { delete pageSockSent[k]; });
       Object.keys(pageAckGot).forEach((k) => { delete pageAckGot[k]; });
       Object.keys(pageSockFirstAt).forEach((k) => { delete pageSockFirstAt[k]; });
+      packetMonReset(); // [v1.93.25] số gói tin phải tính lại từ đầu mỗi lượt
     } catch (ePA) { /* ignore */ }
     Object.keys(proofStats).forEach((k) => { proofStats[k] = 0; }); // [v1.93.21]
     batchStats.finalLogged = false;

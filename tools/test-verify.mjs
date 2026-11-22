@@ -2539,14 +2539,34 @@ check('[v1.93.23] có mốc "vào wave" đo phần đồng bộ đầu lô',
 /* ═══ [v1.93.24] GỐC "DỒN BÙ EXT": KÊNH ACK CỦA PAGE CHẾT MÀ VẪN BẮN SOCKET ═══
  * 22/11: 4 884 lần bắn / 0 ACK → 4 844 ca 🛟 bù Ext. 18:56: 8 675 ca ⚠. Cùng hội chứng.
  * Ngưỡng cũ (1.93.22) đếm SỐ LẦN BẮN nên vô dụng khi làn bị noAckStreak hạ về 16. */
-check('[v1.93.24] bỏ Socket khỏi thứ tự khi kênh ACK của page đã chết',
-  /if \(_ackSt\.dead\)/.test(SRC) && /deadChannelSkip\+\+/.test(SRC), true);
+/* [v1.93.25] điều kiện vào cổng nay là `_pktDead || (_pm === null && _ackSt.dead)` */
+check('[v1.93.24→25] bỏ Socket khỏi thứ tự khi kênh ACK của page đã chết',
+  /_pktDead \|\| \(_pm === null && _ackSt\.dead\)/.test(SRC) && /deadChannelSkip\+\+/.test(SRC), true);
 check('[v1.93.24] ngưỡng "kênh chết" dùng THỜI GIAN, không chỉ số lần bắn',
   /SOCK_CHANNEL_DEAD_MS = \d+/.test(SRC) && /elapsedMs/.test(SRC), true);
 check('[v1.93.24] kênh chết phải giữ ext làm đường lui (không bỏ rơi ca nào)',
   /\? \['api', 'ext'\] : \['ext'\]/.test(SRC), true);
 check('[v1.93.24] có ghi nhận mốc bắn Socket đầu tiên theo page',
   /pageSockFirstAt\[_pidS\] = Date\.now\(\)/.test(SRC), true);
+
+/* ═══ [v1.93.25] ĐO KÊNH ACK Ở TẦNG GÓI TIN — XỬ LÝ TRIỆT ĐỂ ═══
+ * §16.2 đã chứng minh `mySilent` gần như không bao giờ đúng (cần ~1 119 ca đồng thời cho lô
+ * 93 s trong khi cap = 256) ⇒ cổng cắt-kênh của v1.92.48 chưa từng chạy. Nay đo TRỰC TIẾP ở
+ * `reactToResponse` của app: đếm gói /ls_resp thật thay vì suy từ bộ đếm giờ của ta. */
+check('[v1.93.25] có bộ đo GÓI TIN bọc reactToResponse của app',
+  /helper\.reactToResponse = function/.test(SRC) && /installPacketMonitor/.test(SRC), true);
+check('[v1.93.25] bộ đo TUYỆT ĐỐI không đổi giá trị trả về của app',
+  /r = orig\.apply\(this, arguments\);/.test(SRC), true);
+check('[v1.93.25] cổng cắt-kênh dựa trên 0 gói /ls_resp, không chỉ mySilent',
+  /_pktDead/.test(SRC) && /_pm\.resp === 0/.test(SRC), true);
+check('[v1.93.25] bundle đổi thì báo KHÔNG ĐO ĐƯỢC, không im lặng',
+  /packetMon\.state = 'noAnchor'/.test(SRC) && /KHÔNG ĐO ĐƯỢC/.test(SRC), true);
+check('[v1.93.25] no-ACK được tách theo lý do (5 nhánh), không gộp một câu',
+  /noAckReason/.test(SRC) && /noReplaceWithErr/.test(SRC) && /noPayload/.test(SRC), true);
+check('[v1.93.25] "noAck" chỉ còn đúng nghĩa "không nhận được gói nào"',
+  /noAck: _rw === 'noPayload'/.test(SRC), true);
+check('[v1.93.25] dòng chốt in số gửi/nhận gói thật theo page',
+  /GÓI TIN \(đo ở reactToResponse của app\)/.test(SRC), true);
 
 if (fails.length) {
   console.log(`✗ ${fails.length}/${pass + fails.length} kịch bản THẤT BẠI:\n`);
