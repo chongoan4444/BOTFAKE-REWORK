@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.18-w200.129
+// @version      1.93.18-w200.130
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.18-W200.129'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.18-W200.130'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -11652,6 +11652,17 @@
     }
     if (summaryUiTimer) { clearTimeout(summaryUiTimer); summaryUiTimer = null; }
     flushBatchSummaryUI();
+    /* ═══ [v1.93.18-W130] GIẢI PHÓNG TRẠNG THÁI LƯỢT — CUỐI LƯỢT ═══
+     * Gọi SAU `flushBatchSummaryUI()` (bảng TỔNG HỢP đã đọc xong mọi bộ đếm) nên KHÔNG làm sai
+     * một con số nào trong báo cáo; và chỉ khi lượt đã chốt hẳn (`isDoneAll`) để không dọn giữa
+     * lúc còn tin đang chờ xác nhận / đang cứu. Đầu lượt kế tiếp vẫn gọi lại lần nữa (lượt có
+     * thể bị F5 / bấm Dừng nên không bao giờ tới được đây). */
+    try {
+      const cEnd = getBatchSummaryCounts();
+      if (batchStats.loopFinished && (cEnd.pendingSend === 0 || state.stopRequested)) {
+        releaseRunCarryover('cuối lượt');
+      }
+    } catch (eRC1) { /* ignore */ }
   }
 
   /* [v1.92.35] SỐ "THÀNH CÔNG" PHẢI LÀ SỐ ĐÃ TỚI NƠI THẬT.
@@ -13418,6 +13429,187 @@
     return { cap: baseCap, peers, hiddenTrim: false, focused };
   }
   let sendLockPending = false; // chặn bấm đúp TRONG 150 ms chờ kiểm khoá (state.sending chưa bật)
+
+  /* ═══════════════════════════════════════════════════════════════════════════════════
+   * [v1.93.18-W130] GIẢI PHÓNG TOÀN BỘ DỮ LIỆU CỦA LƯỢT CŨ — MỘT CHỖ, HAI LẦN GỌI
+   * ═══════════════════════════════════════════════════════════════════════════════════
+   * Yêu cầu của người dùng: "mỗi lượt gửi xong thì sẽ giải phóng hết tất cả dữ liệu cũ
+   * tránh gây lỗi ảnh hưởng lượt sau".
+   *
+   * AUDIT (đếm trong chính file này, không suy đoán): khối reset đầu lượt cũ
+   * (@13591–13760) dọn 47 sổ nhưng còn **80 biến khai trước nó không được chạm tới**.
+   * Trong đó phần lớn là hằng số/cache (phải giữ) — nhưng 20 biến dưới đây là *trạng thái
+   * sống* quyết định LƯỢT SAU đi kênh nào và đi nhanh hay chậm. Đo được trên chính mã:
+   *
+   *  ① `sockRoute` (L7802)         — KHÔNG có lệnh xoá, KHÔNG có TTL. `pageSocketUsable()`
+   *                                 trả false khi `lostSock ≥ 2` ⇒ page bị né Socket VĨNH VIỄN.
+   *                                 Hiện `lostSock` chỉ tăng từ hook test (`__sockTest`) nên ngòi
+   *                                 đã bị tháo — nhưng đó là may, không phải thiết kế. Xoá ở đây
+   *                                 là ĐÓNG hẳn lỗ hổng, và không thể gây mất tin (chỉ QUÊN bằng
+   *                                 chứng XẤU, tức là cho Socket một lượt thử lại).
+   *  ② `pageAckDeadAt` (L7760)     — TTL 600 s. Lượt sau trong cùng tab vẫn "ACK chết" ⇒ đi Ext.
+   *  ③ `pageAckTimeoutRun` (L7744) — bộ đếm dẫn tới ②, cũng không reset.
+   *  ④ `pageAckDeadProbeAt` (L7826)— mốc dò lại của ②, không reset.
+   *  ⑤ `pageLastAckWait` (L7743)   — hạn chờ ACK của page, dùng làm ngưỡng "ACK chậm" để HẠ LÀN.
+   *  ⑥ `socketPageLaneCtl.fastOk/.slowAck` (L8053) — chỉ `noAckStreak` được reset (@11786).
+   *                                 ⇒ lượt mới có thể NỚI làn (+8) bằng bằng chứng của lượt cũ.
+   *  ⑦ `socketLaneFloor` (L7470)   — dòng log cũ ghi thẳng "cầu dao giữ tới hết phiên" và log
+   *                                 16:52 (7 073 chat) cho thấy nó ở lại 16/page suốt phiên ⇒
+   *                                 cả lô sau chạy 1/24 cấu hình. Không phải người dùng đặt ⇒ trả
+   *                                 về `SOCKET_LANE_MIN`. Cờ `socketFloorUserSet` thì TÔN TRỌNG.
+   *  ⑧ `extSendCtl` (L8397)        — bộ ngắt Extension. `probeInFlight` đã reset, còn `openUntil`
+   *                                 /`openStreak`/`timeoutStreak`/`fastStreak` thì KHÔNG ⇒ lượt mới
+   *                                 có thể khởi đầu trong trạng thái "Ext đang nghỉ hồi sức" của
+   *                                 lượt cũ. `latSamples` GIỮ (độ trễ thật của Extension, có trần
+   *                                 24 mẫu — giữ để `extTimeoutMs()` không tụt về sàn 2,5 s oan).
+   *  ⑨ `extSendLane` limit (L8369)  — bị cắt ×0,6 mỗi lần Ext quá hạn (@8569) và KHÔNG có đường
+   *                                 hồi đầu lượt ⇒ đáy 48 (sàn) dính sang lượt sau.
+   * ⑩–⑫ `gidBreaker.closed` (L10738), `extTry1545.closed` (L10722), `apiBlockedPages` (L3944)
+   *                                 — 3 cầu dao "đóng rồi không mở". Hiện số đo 37 log cho thấy
+   *                                 cả 3 đều KHÔNG đóng (0 dòng 🔒/⛔), nhưng cấu trúc thì vẫn là
+   *                                 "đóng vĩnh viễn". Mở lại đầu lượt = mỗi lượt được đo lại từ
+   *                                 đầu. KHÔNG thể sinh tin trùng: cả 3 chỉ chặn/cho phép ĐƯỜNG DÒ
+   *                                 global_id và đường API, không liên quan "đã gửi hay chưa".
+   * ⑬ `channelHints` (L3918)       — sessionStorage, KHÔNG TTL. 1 chat từng thắng Ext sẽ được ưu
+   *                                 tiên Ext MÃI trong tab ⇒ lệch kênh vĩnh viễn. Xoá đầu lượt.
+   * ⑭ `pageBlockStreak` (L3964), `apiThreadBlockStreak` (L3936) — bộ đếm dẫn tới ⑫.
+   * ⑮ `ctx7Retried` (L10693), `buLateRetryCount` (L10703) — chú thích ghi "trong lượt này"
+   *                                 nhưng KHÔNG được dọn ⇒ chat bị chặn vĩnh viễn khỏi: gửi lại
+   *                                 kèm cờ ctx-7-days (⑮a), và hẹn thử lại khi Ext nghẽn (⑮b).
+   * ⑯ `uncertainReasonById` (L10859), `extMsgIdByConv` (L639) — sổ theo convId, không trần, phình
+   *                                 dần qua các lượt (mỗi lượt vài nghìn khoá).
+   * ⑰ `convCtxCache` (L2755)      — cache `{ad_clicks, gid, fetched}` theo convId, **không có
+   *                                 đường xoá nào trong file**. Cache này chứa cờ `ctx-7-days` và
+   *                                 global_id; giữ qua lượt nghĩa là lượt sau dùng lại phán đoán
+   *                                 của lượt trước. Xoá = lượt sau đọc lại (chỉ ĐỌC).
+   * ⑱ `touchIdsByPage` (L7308)    — id ảnh của lượt cũ, `postSendSideEffects` đọc lúc chốt lô ⇒
+   *                                 lượt sau mang `content_ids` của lượt trước đi "touch".
+   * ⑲ `docIdStats`, `extLateStats`, `gidExtCtl`, `batchSeedConv`, `socketNoAckStreak`,
+   *    `socketLastPublishAt`, `updatedGidConvSet`, `lastBgConvById`, `ackLatSorted/ackLatPctCache`
+   *                                 — bộ đếm/bộ nhớ phụ. Một số là số ĐO in ở bảng TỔNG HỢP ⇒
+   *                                 xoá ở đây là để lượt sau KHÔNG in số của lượt trước (đúng loại
+   *                                 lỗi `photoUpStats` đã từng bị: 2 lô khác nhau in y nguyên
+   *                                 12 362 / 1 312 / 9 480 / 0).
+   * ⑳ `preBoundFbIds` (L5613)     — có TTL 180 s nhưng KHÔNG được dọn theo lượt; fbId
+   *                                 `is_reusable=false` của lượt cũ nằm lại.
+   *
+   * ⚠️ CỐ Ý **KHÔNG** đụng (nếu xoá sẽ ĐỔI HÀNH VI hoặc MẤT TIN):
+   *   • `deliveredIds`/`finalFailedIds`/`uncertainIds`/`manualResendList`/`pendingBg` và mọi sổ
+   *     phán xử khác — đã được dọn đúng ở khối @13591, và dọn SAU khi chốt bảng sẽ làm sai số.
+   *   • `persistentGidMap`, `fbMsgCache`, `socketWarmPromises`, `socketReconnectPromises`,
+   *     `batchGidPromises`, `batchGidFetchedPages`, `docPreloadSent`, `docSeedPages`,
+   *     `nameSearchEnabled`, `syncThreadIdTried` — cache/promise CHỈ ĐỌC, có trần hoặc có TTL,
+   *     xoá chỉ làm lượt sau dò lại từ đầu (chậm hơn, không an toàn hơn).
+   *   • `ackLatRing` — giữ qua lượt là CỐ Ý (LANE_CARRY_CLAMP @13621 dùng p95 lượt trước để
+   *     quyết định hạ làn đầu lượt). Xoá sẽ làm mất chốt an toàn đó.
+   *   • `state.sentIds` / `SSB_SENT_IDS` — "chat đã gửi" phải sống qua lượt, đó là tính năng
+   *     chống gửi trùng (đã có luật dọn riêng ở cuối `sendToAll`).
+   *
+   * VỊ TRÍ GỌI: (a) đầu lượt ngay sau khối reset @13591…@13758 và TRƯỚC mọi quyết định chọn
+   * kênh; (b) cuối lượt ngay sau khi bảng TỔNG HỢP đã in xong — để trạng thái của lượt này
+   * không nằm lại nếu người dùng không chạy lượt kế tiếp. Cả hai lần đều an toàn khi gọi lặp.
+   *
+   * KHÔNG thêm lệnh gửi nào, không đổi phán quyết ✅/❌/⚠ của bất kỳ chat nào. Mọi thứ bị xoá
+   * đều là bộ nhớ *để dành* — xoá chỉ khiến lượt sau ĐO LẠI, không bao giờ khiến nó gửi thêm.
+   */
+  function releaseRunCarryover(where) {
+    const dropped = [];
+    let floorBack = '';
+    const wipe = (label, fn) => { try { fn(); dropped.push(label); } catch (e) { /* ignore */ } };
+    /* ① sổ định tuyến theo page — nguồn duy nhất có thể né Socket vĩnh viễn */
+    wipe('sockRoute', () => { Object.keys(sockRoute).forEach((k) => { delete sockRoute[k]; }); });
+    /* ②③④⑤ sổ ACK theo page */
+    wipe('pageAckDeadAt', () => { Object.keys(pageAckDeadAt).forEach((k) => { delete pageAckDeadAt[k]; }); });
+    wipe('pageAckTimeoutRun', () => { Object.keys(pageAckTimeoutRun).forEach((k) => { delete pageAckTimeoutRun[k]; }); });
+    wipe('pageAckDeadProbeAt', () => { Object.keys(pageAckDeadProbeAt).forEach((k) => { delete pageAckDeadProbeAt[k]; }); });
+    wipe('pageLastAckWait', () => { Object.keys(pageLastAckWait).forEach((k) => { delete pageLastAckWait[k]; }); });
+    /* ⑥ bộ đếm nới/hạ làn của từng page (noAckStreak đã có đường reset riêng @11786) */
+    wipe('socketPageLaneCtl', () => {
+      Object.keys(socketPageLaneCtl).forEach((k) => {
+        const c = socketPageLaneCtl[k];
+        if (!c) return;
+        c.fastOk = 0; c.slowAck = 0; c.noAckStreak = 0;
+      });
+    });
+    /* ⑦ sàn làn Socket về mặc định — TÔN TRỌNG sàn do người dùng đặt */
+    wipe('socketLaneFloor', () => {
+      if (!socketFloorUserSet && socketLaneFloor !== SOCKET_LANE_MIN) {
+        floorBack = ' · sàn làn ' + socketLaneFloor + '→' + SOCKET_LANE_MIN;
+        socketLaneFloor = SOCKET_LANE_MIN;
+        Object.keys(pageSocketLanes).forEach((pid) => {
+          const lane = pageSocketLanes[pid];
+          if (lane && typeof lane.setLimit === 'function' && lane.getLimit() < SOCKET_LANE_MIN) {
+            lane.setLimit(SOCKET_LANE_MIN);
+          }
+        });
+      }
+    });
+    /* ⑧ bộ ngắt Extension — GIỮ `latSamples` (độ trễ thật, có trần) */
+    wipe('extSendCtl', () => {
+      extSendCtl.openUntil = 0;
+      extSendCtl.openStreak = 0;
+      extSendCtl.timeoutStreak = 0;
+      extSendCtl.fastStreak = 0;
+      extSendCtl.probeInFlight = false;
+    });
+    /* ⑨ làn Ext gửi: cắt ×0,6 vì quá hạn là phản ứng trong lượt, không phải bản án cho lượt sau */
+    wipe('extSendLane', () => {
+      if (extSendLane.getLimit() !== BUS_PARALLEL_EXT) extSendLane.setLimit(BUS_PARALLEL_EXT);
+    });
+    /* ⑩⑪⑫ 3 cầu dao "đóng rồi không mở" — mở lại để mỗi lượt được ĐO LẠI từ đầu */
+    wipe('gidBreaker', () => {
+      gidBreaker.noGid = 0; gidBreaker.sameThread = 0; gidBreaker.lastThread = ''; gidBreaker.closed = false;
+    });
+    wipe('extTry1545', () => {
+      extTry1545.closed = false; extTry1545.closedWhy = ''; extTry1545.streak = 0;
+      extTry1545.tried = 0; extTry1545.saved = 0; extTry1545.unknown = 0; extTry1545.probes = 0;
+    });
+    wipe('apiBlockedPages', () => {
+      apiBlockedPages = {};
+      try { sessionStorage.removeItem(API_BLOCKED_PAGES_KEY); } catch (eSP) { /* ignore */ }
+    });
+    /* ⑭ bộ đếm dẫn tới ⑫ */
+    wipe('pageBlockStreak', () => { Object.keys(pageBlockStreak).forEach((k) => { delete pageBlockStreak[k]; }); });
+    wipe('apiThreadBlockStreak', () => { apiThreadBlockStreak = 0; });
+    /* ⑬ gợi ý kênh theo chat (không TTL ⇒ phải xoá tay).
+     * PHẢI huỷ luôn timer ghi trễ 400 ms (@3919): nếu không, lần ghi của LƯỢT CŨ sẽ nổ sau
+     * bước dọn này và đẩy nguyên bộ `channelHints` cũ trở lại sessionStorage ⇒ dọn xong rồi
+     * vẫn còn. Đây đúng là kiểu "dọn nửa chừng" mà cơ chế này phải tránh. */
+    wipe('channelHints', () => {
+      if (channelHintSaveTimer) { clearTimeout(channelHintSaveTimer); channelHintSaveTimer = null; }
+      channelHints = {};
+      try { sessionStorage.removeItem(CH_KEY); } catch (eCH) { /* ignore */ }
+    });
+    /* ⑮ hai sổ "trong lượt này" nhưng chưa từng được dọn */
+    wipe('ctx7Retried', () => { Object.keys(ctx7Retried).forEach((k) => { delete ctx7Retried[k]; }); });
+    wipe('buLateRetryCount', () => { Object.keys(buLateRetryCount).forEach((k) => { delete buLateRetryCount[k]; }); });
+    /* ⑯ sổ theo convId không trần */
+    wipe('uncertainReasonById', () => { Object.keys(uncertainReasonById).forEach((k) => { delete uncertainReasonById[k]; }); });
+    wipe('extMsgIdByConv', () => { Object.keys(extMsgIdByConv).forEach((k) => { delete extMsgIdByConv[k]; }); });
+    /* ⑰ cache ctx theo chat — chứa cờ ctx-7-days + global_id của lượt cũ */
+    wipe('convCtxCache', () => { Object.keys(convCtxCache).forEach((k) => { delete convCtxCache[k]; }); });
+    /* ⑱ id ảnh để `contents/touch` */
+    wipe('touchIdsByPage', () => { Object.keys(touchIdsByPage).forEach((k) => { delete touchIdsByPage[k]; }); });
+    /* ⑲ bộ đếm/bộ nhớ phụ + số ĐO in ở TỔNG HỢP (để lượt sau không in số của lượt trước) */
+    wipe('docIdStats', () => { Object.keys(docIdStats).forEach((k) => { docIdStats[k] = 0; }); });
+    wipe('extLateStats', () => { extLateStats.ok = 0; extLateStats.fail = 0; extLateStats.silent = 0; });
+    wipe('gidExtCtl', () => { gidExtCtl.good = 0; gidExtCtl.bad = 0; gidExtCtl.cooldowns = 0; gidExtCtl.rampAtUnknown = 0; });
+    wipe('gidHttpCtl.cooldown', () => { gidHttpCtl.coolUntil = 0; gidHttpCtl.backoffStreak = 0; });
+    wipe('batchSeedConv', () => { Object.keys(batchSeedConv).forEach((k) => { delete batchSeedConv[k]; }); });
+    wipe('socketNoAckStreak', () => { Object.keys(socketNoAckStreak).forEach((k) => { delete socketNoAckStreak[k]; }); });
+    wipe('socketLastPublishAt', () => { Object.keys(socketLastPublishAt).forEach((k) => { delete socketLastPublishAt[k]; }); });
+    wipe('updatedGidConvSet', () => { updatedGidConvSet.clear(); });
+    wipe('lastBgConvById', () => { lastBgConvById = {}; });
+    wipe('ackLatSorted', () => { ackLatSorted.length = 0; ackLatPctCache = null; });
+    /* ⑳ fbId pre-bind của lượt cũ (`is_reusable=false`, TTL 180 s nhưng không dọn theo lượt) */
+    wipe('preBoundFbIds', () => { preBoundFbIds.clear(); });
+    /* In MỘT dòng để lượt sau đọc được là cơ chế này ĐÃ chạy (không im lặng). */
+    try {
+      logLine('🧼 Giải phóng trạng thái lượt cũ (' + where + '): ' + dropped.length
+        + ' sổ đã xoá' + floorBack + ' — lượt sau đo lại từ đầu, không thừa kế quyết định kênh.');
+    } catch (eLg) { /* ignore */ }
+    return dropped.length;
+  }
   async function sendToAll() {
     try { markSendIdleIfSettled(); } catch (e0) { /* ignore */ }
     if (state.sending || state.confirmingSend || sendLockPending) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
@@ -13758,6 +13950,12 @@
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
+    /* ═══ [v1.93.18-W130] GIẢI PHÓNG TRẠNG THÁI CỦA LƯỢT CŨ — ĐẦU LƯỢT ═══
+     * Gọi Ở ĐÂY, không phải chỉ ở cuối lượt trước: lượt trước có thể bị F5 / đóng tab / dừng
+     * giữa chừng nên KHÔNG BAO GIỜ chạy được bước dọn cuối. Đầu lượt là chỗ duy nhất bảo đảm
+     * "lượt mới luôn bắt đầu từ số 0", và nó nằm TRƯỚC mọi quyết định chọn kênh / nới làn.
+     * Không thể sinh tin trùng: hàm này chỉ xoá bộ nhớ ĐỂ DÀNH, không chạm sổ đã gửi. */
+    try { releaseRunCarryover('đầu lượt'); } catch (eRC0) { /* ignore */ }
     // Khởi động warmUpSockets + BATCH_GET_GLOBAL_ID NGAY TỪ ĐẦU (chạy song song với lọc tag + upload ảnh)
     try { warmUpSockets(targets, { forceBatch: true }); } catch (e) { /* ignore */ }
     // [v1.91.75] warmUpSockets(targets) chỉ thấy các chat được đưa vào của lô hiện tại. Với
