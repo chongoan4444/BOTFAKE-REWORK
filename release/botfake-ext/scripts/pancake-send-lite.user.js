@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.18-w200.130
+// @version      1.93.18-w200.131
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.18-W200.130'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.18-W200.131'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -10696,6 +10696,8 @@
   // để 5 178 dòng trùng nhau không nhấn chìm log.
   let buQuietBudgetNote = 0;
   let runSeq = 0; // mỗi lượt gửi 1 số — bù của lượt cũ tự hủy khi có lượt mới (chống gửi lẫn/lặp)
+  /* [W131] runSeq của lượt đã được giải phóng trạng thái ⇒ cổng "1 lần/lượt" cho 🧼 cuối lượt. */
+  let runCarryoverDoneSeq = -1;
   const deliveredIds = {}; // convId → ĐÃ có kênh báo thành công trong lượt này ('api'|'ext'|'socket') — tuyệt đối không gửi lại
   const claimedSendIds = {}; // convId → đã nhận quyền bắn trong lượt này (chống 2 worker / 2 câu cùng 1 chat)
   const outboundLock = {}; // convId → đang/đã bắn tin (chưa xác nhận fail) — chặn POST/publish chồng
@@ -11652,15 +11654,25 @@
     }
     if (summaryUiTimer) { clearTimeout(summaryUiTimer); summaryUiTimer = null; }
     flushBatchSummaryUI();
-    /* ═══ [v1.93.18-W130] GIẢI PHÓNG TRẠNG THÁI LƯỢT — CUỐI LƯỢT ═══
+    /* ═══ [v1.93.18-W131] GIẢI PHÓNG TRẠNG THÁI LƯỢT — CUỐI LƯỢT ═══
      * Gọi SAU `flushBatchSummaryUI()` (bảng TỔNG HỢP đã đọc xong mọi bộ đếm) nên KHÔNG làm sai
      * một con số nào trong báo cáo; và chỉ khi lượt đã chốt hẳn (`isDoneAll`) để không dọn giữa
      * lúc còn tin đang chờ xác nhận / đang cứu. Đầu lượt kế tiếp vẫn gọi lại lần nữa (lượt có
      * thể bị F5 / bấm Dừng nên không bao giờ tới được đây). */
+    /* PHẢI CÓ CỔNG "1 LẦN/LƯỢT" — bản W131 gọi thẳng ở đây nên MỖI lần `flushBatchSummaryUI`
+     * chạy lại (mỗi ca ⚠→✅, mỗi lần bảng vẽ lại) là một dòng 🧼: log thật 18:12 in **22 dòng
+     * "cuối lượt"** cho cùng một lô 739 chat. Nay:
+     *   • `runCarryoverDoneSeq === runSeq` ⇒ lượt này đã dọn rồi, không làm lại;
+     *   • chỉ dọn khi **thật sự xong**: `loopFinished` + không còn tin chờ phán quyết
+     *     + **không còn ca kiểm chứng nền** (`cEnd.pending === 0`). Bản cũ chỉ đòi
+     *     `pendingSend === 0` nên dọn khi còn 11 ca đang kiểm chứng.
+     * Đầu lượt kế tiếp vẫn dọn lại (lượt có thể bị F5/bấm Dừng nên không tới được đây). */
     try {
       const cEnd = getBatchSummaryCounts();
-      if (batchStats.loopFinished && (cEnd.pendingSend === 0 || state.stopRequested)) {
-        releaseRunCarryover('cuối lượt');
+      if (batchStats.loopFinished && (state.stopRequested || cEnd.pending === 0)
+          && runCarryoverDoneSeq !== runSeq) {
+        runCarryoverDoneSeq = runSeq;
+        releaseRunCarryover(state.stopRequested ? 'dừng lượt' : 'xong lượt');
       }
     } catch (eRC1) { /* ignore */ }
   }
@@ -13431,7 +13443,7 @@
   let sendLockPending = false; // chặn bấm đúp TRONG 150 ms chờ kiểm khoá (state.sending chưa bật)
 
   /* ═══════════════════════════════════════════════════════════════════════════════════
-   * [v1.93.18-W130] GIẢI PHÓNG TOÀN BỘ DỮ LIỆU CỦA LƯỢT CŨ — MỘT CHỖ, HAI LẦN GỌI
+   * [v1.93.18-W131] GIẢI PHÓNG TOÀN BỘ DỮ LIỆU CỦA LƯỢT CŨ — MỘT CHỖ, HAI LẦN GỌI
    * ═══════════════════════════════════════════════════════════════════════════════════
    * Yêu cầu của người dùng: "mỗi lượt gửi xong thì sẽ giải phóng hết tất cả dữ liệu cũ
    * tránh gây lỗi ảnh hưởng lượt sau".
@@ -13603,10 +13615,10 @@
     wipe('ackLatSorted', () => { ackLatSorted.length = 0; ackLatPctCache = null; });
     /* ⑳ fbId pre-bind của lượt cũ (`is_reusable=false`, TTL 180 s nhưng không dọn theo lượt) */
     wipe('preBoundFbIds', () => { preBoundFbIds.clear(); });
-    /* In MỘT dòng để lượt sau đọc được là cơ chế này ĐÃ chạy (không im lặng). */
+    /* MỘT DÒNG NGẮN — không giải thích lại trong log (đã có sổ tay ở docs/GIAI-PHONG-LUOT.md).
+     * `where` chỉ còn 2 giá trị nên in thẳng: "đầu lượt" / "xong lượt". */
     try {
-      logLine('🧼 Giải phóng trạng thái lượt cũ (' + where + '): ' + dropped.length
-        + ' sổ đã xoá' + floorBack + ' — lượt sau đo lại từ đầu, không thừa kế quyết định kênh.');
+      logLine('🧼 Giải phóng lượt cũ (' + where + '): ' + dropped.length + ' sổ' + floorBack);
     } catch (eLg) { /* ignore */ }
     return dropped.length;
   }
@@ -13950,7 +13962,7 @@
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
-    /* ═══ [v1.93.18-W130] GIẢI PHÓNG TRẠNG THÁI CỦA LƯỢT CŨ — ĐẦU LƯỢT ═══
+    /* ═══ [v1.93.18-W131] GIẢI PHÓNG TRẠNG THÁI CỦA LƯỢT CŨ — ĐẦU LƯỢT ═══
      * Gọi Ở ĐÂY, không phải chỉ ở cuối lượt trước: lượt trước có thể bị F5 / đóng tab / dừng
      * giữa chừng nên KHÔNG BAO GIỜ chạy được bước dọn cuối. Đầu lượt là chỗ duy nhất bảo đảm
      * "lượt mới luôn bắt đầu từ số 0", và nó nằm TRƯỚC mọi quyết định chọn kênh / nới làn.

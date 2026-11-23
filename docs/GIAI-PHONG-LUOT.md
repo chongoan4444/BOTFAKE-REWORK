@@ -52,7 +52,7 @@ releaseRunCarryover(where)     // ~40 dòng code, mọi nhóm đi qua wipe() có
 | Điểm | Vị trí | Vì sao cần |
 |---|---|---|
 | Đầu lượt | trong `sendToAll`, ngay sau khối reset cũ, **trước** `warmUpSockets`/`BATCH_GET_GLOBAL_ID` | Lượt trước có thể bị F5 / đóng tab / bấm Dừng ⇒ **không bao giờ chạy được bước dọn cuối**. Đầu lượt là chỗ duy nhất bảo đảm "lượt mới luôn bắt đầu từ 0". |
-| Cuối lượt | cuối `updateBatchSummaryUI()`, **sau khi** `flushBatchSummaryUI()` đã in bảng TỔNG HỢP | Để trạng thái không nằm lại khi người dùng không chạy lượt kế tiếp. Đặt **sau** bước in để không làm sai một con số nào trong báo cáo. Chỉ chạy khi lượt đã chốt hẳn (`pendingSend === 0 || stopRequested`). |
+| Xong lượt | cuối `updateBatchSummaryUI()`, **sau khi** `flushBatchSummaryUI()` đã in bảng TỔNG HỢP | Để trạng thái không nằm lại khi người dùng không chạy lượt kế tiếp. Đặt **sau** bước in để không làm sai một con số nào trong báo cáo. **Có cổng "1 lần/lượt"** (`runCarryoverDoneSeq`) và chỉ chạy khi **thật sự xong**: `loopFinished` + `pending === 0` (hết cả kiểm chứng nền) hoặc `stopRequested`. |
 
 Cả hai lời gọi đều bọc `try/catch` riêng, và mỗi nhóm đi qua `wipe()` có `try/catch` riêng ⇒
 một nhóm lỗi không chặn nhóm khác, và dọn dẹp không bao giờ làm hỏng lượt gửi.
@@ -97,8 +97,15 @@ cũ, và `@version` của stable chỉ được so BASE trong `tools/test-verify
 
 ## 5. Số đo cần đọc ở log lô sau
 
-Sau khi chạy 2 lượt liên tiếp trên cùng một tab, log phải có **`🧼 Giải phóng trạng thái lượt cũ`**
-2 lần mỗi lượt (đầu + cuối), kèm số sổ đã xoá. Kiểm tiếp:
+Mỗi lượt phải có **đúng 2 dòng** `🧼 Giải phóng lượt cũ` — một `(đầu lượt)`, một `(xong lượt)`
+hoặc `(dừng lượt)`. Dòng chỉ dài ~35 ký tự: `🧼 Giải phóng lượt cũ (xong lượt): 32 sổ`.
+
+> **Sửa lỗi W131 (log 18:12):** bản W131 gọi thẳng ở `updateBatchSummaryUI()` nên **mỗi lần bảng
+> tổng hợp vẽ lại** (mỗi ca ⚠→✅) là một dòng 🧼 ⇒ **22 dòng "cuối lượt"** cho cùng một lô 739 chat,
+> và lần dọn đầu tiên nổ khi còn **11 ca đang kiểm chứng nền**. Nay có cổng `runCarryoverDoneSeq`
+> (1 lần/lượt) + điều kiện `pending === 0` thay cho `pendingSend === 0`.
+
+Kiểm tiếp:
 
 1. **Lượt 2 không thừa kế:** `🧭 Chẩn đoán globalId` của lượt 2 phải có `ACK p50/p90` tính từ mẫu
    của **chính lượt 2** (không phải số của lượt 1), và `chọn kênh: … Socket bị né` = **0**.
