@@ -1,4 +1,4 @@
-# Giải phóng trạng thái lượt cũ — 1.93.18-W200.130
+# Giải phóng trạng thái lượt cũ — 1.93.18-W200.132
 
 **Yêu cầu:** "mỗi lượt gửi xong thì sẽ giải phóng hết tất cả dữ liệu cũ tránh gây lỗi ảnh hưởng lượt sau".
 
@@ -115,3 +115,109 @@ Kiểm tiếp:
    `🧯 Extension … tạm ngừng bắn Ext`.
 4. **Không đổi tỉ lệ gửi:** ✅/⚠/❌ của lượt 2 phải tương đương lượt 1 cùng quy mô — nếu ✅ **giảm**
    thì phải xem ngay, vì mọi thứ bị xoá đều là bộ nhớ *để dành*, không phải bộ nhớ *đã gửi*.
+
+---
+
+## 6. W200.132 — sửa hồi quy "gửi sót và gửi chậm" của W130/W131
+
+Người dùng chạy W131 rồi báo: *"bản này ảnh hưởng tới đường gửi, gửi sót và gửi chậm"*.
+**Đúng.** Lỗi nằm ở **luật dọn**, không phải ở ý tưởng dọn: W130/W131 xoá chung hai loại
+trạng thái khác hẳn nhau về bản chất.
+
+| Loại | Ví dụ | Đúng phải |
+|---|---|---|
+| **Bộ đếm TRONG LƯỢT** — chỉ có nghĩa trong một lô | `socketPageLaneCtl.fastOk`, `pageBlockStreak`, `ctx7Retried`, `buLateRetryCount`, `docIdStats`, `touchIdsByPage` | **XOÁ** mỗi lượt |
+| **Kiến thức về ĐƯỜNG TRUYỀN** — là kết quả đo, còn giá trị tới khi đường truyền đổi | `ackLatRing/Sorted`, `sockRoute.lostSock`, `pageAckDeadAt`, `socketLaneFloor`, `channelHints`, `convCtxCache` (phần tốt), `preBoundFbIds`, `extMsgIdByConv` | **GIỮ** (đã có TTL/đường tự hồi riêng) |
+
+### 6.1 Ba chỗ hỏng, kèm số đo
+
+**(A) `ackLatSorted` bị xoá nhưng `ackLatRing` được giữ — đây là chỗ chậm 2,0×.**
+
+```js
+// W131 xoá:  ackLatSorted.length = 0;  ackLatPctCache = null;
+// W131 giữ:  ackLatRing        (vì LANE_CARRY_CLAMP cần p95 lượt trước)
+```
+
+`sockAckP90()` đọc `latencyPctFromSorted()`, tức đọc `ackLatSorted` — **mảng vừa bị xoá**.
+Nhưng nó chỉ rơi vào nhánh "chưa đủ mẫu ⇒ 3 000 ms" khi `ackLatRing.length < 20`; ring thì
+vẫn đủ 1 000 mẫu ⇒ hàm trả **0**. Đo bằng cách trích nguyên văn các hàm thật từ userscript:
+
+```
+[trước khi dọn] p90 = 988 ms → hạn GIỮ SLOT = 2 964 ms
+[sau khi dọn W131] p90 = 0   → hạn GIỮ SLOT = 6 000 ms     ← ACK_HOLD_MIN_MS
+⇒ mỗi slot giữ lâu hơn 2,0× ⇒ phát lệnh chậm đi ~2,0×
+⇒ p95 = 0 (giả) nên rampAllowed() = true ⇒ làn leo 384 BẤT CHẤP p95 thật
+```
+
+Slot là **mẫu số của tốc độ**. Và `rampAllowed()` thấy `p95 = 0` nên cho nới làn vô điều
+kiện — đúng cái bẫy mà chú thích `@7685` đã ghi: p95 cao mà vẫn nới làn ⇒ dồn ACK ⇒ sập lô.
+Ca ACK về muộn hơn hạn chờ bị chấm `noack` → kiểm chứng nền → không kịp trả lời trước khi
+chốt bảng ⇒ **⚠ "không rõ"** — đúng hình dạng "gửi sót" người dùng thấy.
+
+> Trạng thái đó là **nửa vời**: xoá mảng dùng để tính phân vị mà giữ cửa sổ mẫu. Hoặc giữ cả
+> hai, hoặc xoá cả hai. W132 **giữ cả hai** — mẫu ACK là độ trễ của *kênh*, không phải phán
+> quyết của chat nào, nên không có lý do gì để nó "của lượt trước".
+
+**(B) `socketLaneFloor` bị kéo về 64 ở mọi lượt.** Sàn này chỉ bị hạ bởi cầu dao no-ACK
+(25 ca liên tiếp) — tức *bằng chứng kênh ACK đang chết*. Ép về 64 đầu lượt = bắn lại đúng
+25 ca no-ACK đầu tiên để **học lại điều vừa biết**. W132: `p95` khoẻ (≤ 2 200 ms) ⇒ hạ sàn cũ
+về 64 như W130 muốn; `p95` xấu ⇒ **giữ** sàn và ghi log. Sàn do người dùng đặt vẫn tuyệt đối
+không bị đụng.
+
+**(C) `convCtxCache` bị xoá sạch.** Lượt sau `ensureConvCtx()` phải gọi lại `/messages`
+(~150–800 ms/chat qua `ctxFetchLane` 48 làn) cho những chat **vừa gửi xong**. W132 chỉ xoá
+entry **hỏng**: chưa `fetched`, còn `inflight` (promise của lượt cũ — giữ là treo), hoặc có
+`httpState`/`httpError` (429/5xx).
+
+Thêm ba chỗ cùng loại: **(D)** `channelHints` — xoá là mất ký ức "chat này đi Ext thì nhanh",
+lô nhỏ quay lại dò Socket `getBusinessWSContext + sendInitMessages` (~3 s); **(E)**
+`preBoundFbIds` (TTL 180 s, xoá sau lần dùng đầu) và `extMsgIdByConv` (nguồn id **duy nhất**
+cho `rescue_mode_inbox` lấy tin từ FB về) — xoá là bỏ đúng thứ đang chống sót; **(F)**
+`gidHttpCtl.coolUntil` — đặt 0 khi đang trong cơn 429 ⇒ đâm tiếp vào API đang chặn.
+
+### 6.2 Sửa cổng "cuối lượt" của W131
+
+W131 đòi `cEnd.pending === 0`, tức **cả kiểm chứng nền xong**, trong khi `markSendIdleIfSettled()`
+chỉ chờ `pendingSend`. Ca ⚠/kiểm chứng hàng trăm giây ⇒ `pending > 0` suốt ⇒ **cổng không bao
+giờ chạy** ⇒ phần lớn lô không có dòng 🧼 "xong lượt" (trái yêu cầu). Ngược lại ở lô lớn,
+`pending` chạm 0 trong khoảnh khắc giữa hai đợt kiểm chứng ⇒ dọn **sớm** ⇒ ACK muộn về sau khi
+đã dọn ⇒ chấm sai ⇒ ⚠ oan.
+
+W132: thứ chặn dọn phải là thứ **đang chạy thật** — `pendingSend === 0` **và**
+`tailBusy = pendingBg > 0 || buRetryTimer rỗng === false || sendLanesBusy()`. Bấm **Dừng** thì
+dọn ngay (người dùng muốn dừng, không chờ đuôi).
+
+### 6.3 Log: đúng 1 dòng/lượt, và số in ra là số thật
+
+```
+🧼 Giải phóng lượt cũ (xong lượt): 20 dọn · 9 giữ
+🧼 Giải phóng lượt cũ (xong lượt): 20 dọn · 9 giữ · sàn 32→64
+```
+
+Lượt chạy trọn vẹn in **một** dòng ở cuối. Lượt kế tiếp gọi lại ở đầu (phòng F5/bấm Dừng) với
+`quiet = true` khi biết chắc lượt trước đã dọn (`runCarryoverDoneSeq === runSeq - 1`) ⇒ **không
+in thêm dòng rỗng**. Số đầu là số nhóm **thực sự đã chạy** (W131 in hằng số `32` vì `wipe()`
+đếm cả nhóm rỗng), số sau là số sổ **giữ lại**.
+
+### 6.4 Nghiệm thu
+
+| Kiểm tra | Kết quả |
+|---|---|
+| `npm test` | **605/605 ✓** (thêm 1 kịch bản: `quiet` ⇒ 1 dòng 🧼) |
+| `npm run check` | ✓ |
+| `npm run check:stable` | ✗ **đúng chủ ý** (stable không bị chạm) |
+| Mutation — xoá lại `ackLatSorted` | ✗ **4/605 đỏ** |
+| Mutation — bỏ cổng `p95` khi hạ sàn | ✗ 1/605 đỏ |
+| Mutation — xoá cả `convCtxCache` (kể cả entry tốt) | ✗ 1/605 đỏ |
+| Mutation — trả cổng cuối lượt về `pending === 0` | ✗ 2/605 đỏ |
+| Mutation — xoá `channelHints` | ✗ 2/605 đỏ |
+| Mutation — bỏ cờ `quiet` | ✗ 1/605 đỏ |
+
+### 6.5 Đọc gì ở log lô sau để biết đã hết sót/chậm
+
+1. `🧭 … ACK p50/p90` của lượt **2** phải là số **thật** (không phải `0`) — nếu ra `0` thì
+   phân vị lại bị xoá: dừng lại đọc mục 6.1(A).
+2. Dòng `🔔 CỬA SỔ NGHE ACK: giữ slot …ms` của lượt 2 phải ≈ `3 × p90 lượt trước`, **không**
+   phải 6 000 ms (6 000 = dấu hiệu p90 đang bị đọc thành 0).
+3. `📡 SOCKET … bỏ nới lane N lần` phải > 0 khi p95 cao — `0` nghĩa là `p95` đang bằng 0 giả.
+4. `🧼` xuất hiện **đúng 1 dòng** cho mỗi lượt (kể cả khi chạy liền nhiều lô nhỏ).
