@@ -55,78 +55,86 @@ function rep(from, to, label) {
   applied.push(label);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- * [v1.93.19] BẢN ỔN ĐỊNH = BẢN GỐC, CHỈ CẮT LOG.
- * Người dùng chốt: "tôi muốn bản stable giống bản gốc về mọi thứ kể cả trên giao diện,
- * nghĩa là bạn copy bản gốc ra, rồi sửa cắt mỗi cái log thôi".
- *
- * ⇒ CHỈ còn 3 phép thay đổi, tất cả đều nằm ngoài giao diện và ngoài cơ chế gửi:
- *   ① TẮT các dòng log chẩn đoán dài (đi qua `logDiag` → no-op).
- *   ② Gộp dòng tổng kết cuối thành MỘT dòng ngắn.
- *   ③ ẨN dòng tiến trình giữa lượt (🟢 "Đang gửi n/N …") — vẫn cập nhật bảng TỔNG HỢP.
- *
- * ĐÃ BỎ HẲN (so với bản trước):
- *   ✗ đổi @name / @namespace / @description / @version  → giữ y như bản gốc
- *   ✗ đổi PANEL_ID (`ssb-root-stable`)                   → giữ `ssb-root`
- *   ✗ đổi APP_VERSION sang `-STABLE`                     → giữ y như bản gốc
- *   ✗ IS_STABLE_BUILD + khoá chống trùng __BOTFAKE_STABLE_ACTIVE__
- *   ✗ kênh extension riêng (__botfakeS / data-botfake-ext-stable)
- *   ✗ công tắc phím Tab mặc định TẮT                     → giữ mặc định BẬT như bản gốc
- *   ✗ đổi 2 câu tooltip
- * Lý do bỏ: chúng làm GIAO DIỆN và HÀNH VI khác bản gốc. Cài cả hai bản cùng lúc vẫn an
- * toàn nhờ `botfakeClaimSlot()` (dùng chung `data-botfake-active`): bản nào nạp trước thì
- * chiếm chỗ, bản sau thấy cờ đã có ⇒ tự tắt. Cơ chế này CÓ SẴN trong bản gốc, không cần
- * thêm cờ riêng.
- * ═══════════════════════════════════════════════════════════════════════════ */
+/* 1. Nhận diện ------------------------------------------------------------- */
+rep('// @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)',
+  '// @name         BOTFAKE LITE — BẢN ỔN ĐỊNH (gửi hàng loạt Pancake)', 'name');
+rep('// @namespace    salescript\n', '// @namespace    salescript-stable\n', 'namespace');
+rep(`// @version      ${base}-${build.toLowerCase()}`,
+  `// @version      ${base}-stable`, 'version');
+rep('// @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).',
+  '// @description  Bản ổn định cho người dùng: gửi hàng loạt trong tab Pancake. KHÔNG nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.', 'description');
 
-/* 1. Chỉ đổi TÊN hiển thị trong header userscript (ngoài giao diện panel) ----- */
-// Giữ nguyên @name/@namespace/@version/@description/@match: đó là thứ Tampermonkey dùng để
-// nhận diện & cập nhật script. Đổi @name sẽ làm Tampermonkey coi đây là script KHÁC (cài
-// chồng thay vì cập nhật) — đúng loại bẫy đã gặp với `.crx`.
-// Người dùng cài trực tiếp file này nên chỉ cần phân biệt bằng TÊN FILE.
+rep("const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác",
+  "const PANEL_ID = 'ssb-root-stable';   // [STABLE] id riêng — không đụng panel của bản gốc", 'panel-id');
+rep(`const APP_VERSION = '${base}-${build}'; // hiện ở tiêu đề panel — đối chiếu với @version trong header`,
+  `const APP_VERSION = '${base}-STABLE'; // [STABLE] hiện ở tiêu đề panel`, 'app-version');
 
-/* 2. Tắt log chẩn đoán dài ------------------------------------------------- */
+/* 2. Cờ chống gửi trùng ---------------------------------------------------- */
+rep(`  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ || !botfakeClaimSlot('lite')) return;
+  window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ = true;`,
+`  /* [STABLE] CHỐNG GỬI TRÙNG KHI CÀI CẢ HAI BẢN:
+   * Bản gốc thoát nếu \`__BOTFAKE_TAB_CLIPBOARD_ACTIVE__\` đã có. Bản ổn định:
+   *   - nếu BẢN GỐC đang chạy trước → tự tắt;
+   *   - nếu CHÍNH NÓ chạy trước → chiếm luôn cờ của bản gốc để bản gốc cũng tự tắt.
+   * Nhờ vậy trong một tab LUÔN chỉ có đúng một bộ gửi, không bao giờ hai bộ cùng bắn. */
+  if (window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ || window.__BOTFAKE_STABLE_ACTIVE__ || !botfakeClaimSlot('stable')) {
+    try { console.warn('[BOTFAKE STABLE] Đã có bản khác chạy trong tab này — bản ổn định tự tắt để tránh gửi trùng.'); } catch (e0) { /* ignore */ }
+    return;
+  }
+  window.__BOTFAKE_STABLE_ACTIVE__ = true;
+  window.__BOTFAKE_TAB_CLIPBOARD_ACTIVE__ = true;
+  const IS_STABLE_BUILD = true;`, 'guard');
+
+/* 3. Log chẩn đoán --------------------------------------------------------- */
 rep('  function logLine(s) {',
-`  // [STABLE] Log cuối chỉ in 1 dòng tổng kết. Các dòng chẩn đoán dài (SOCKET/API/WAVE/
-  // globalId/CHẠY NỀN/Đuôi chờ) đi qua logDiag() và bị tắt ở bản này.
-  // Cơ chế gửi, làn, ngưỡng, giao diện: GIỐNG HỆT bản gốc — không sửa gì.
-  const DIAG_LOGS = false; // bản ổn định: tắt hết dòng chẩn đoán dài
+`  // [STABLE] Chỉ in dòng tổng kết + tiến trình. Các dòng chẩn đoán dài (SOCKET/API/WAVE/globalId)
+  // đi qua logDiag() và bị tắt ở bản này để log cuối gọn, người dùng thường không cần đọc.
+  const DIAG_LOGS = !IS_STABLE_BUILD; // bản ổn định: false ⇒ tắt hết dòng chẩn đoán dài
   function logDiag(s) { if (!DIAG_LOGS) return; try { logLine(s); } catch (e) { /* ignore */ } }
   function logLine(s) {`, 'logdiag-def');
 
-/* 3. Ẩn dòng tiến trình giữa lượt ----------------------------------------- */
-// Người dùng chốt: log chỉ cần số thành công/thất bại + tốc độ ⇒ ẩn 🟢 "Đang gửi n/N (…%)"
-// trong LÚC CHẠY. Bảng TỔNG HỢP trên panel vẫn cập nhật bình thường (updateBatchSummaryUI
-// là đường riêng, không đi qua logLine) — chỉ dòng chữ trong khung log là không in.
-// Tắt ĐÚNG dòng in bên trong `logProgress`, giữ nguyên mọi phép tính (mốc %, bước 10%).
-// Không thay lời gọi ⇒ nếu bản gốc đổi cách gọi thì bản ổn định không lệch.
-rep(`    logLine('🟢 Đang gửi ' + d + '/' + t + ' (' + pct + '%) · ✅ ' + (ok || 0)`,
-  `    if (false) logLine('🟢 Đang gửi ' + d + '/' + t + ' (' + pct + '%) · ✅ ' + (ok || 0)`,
-  'progress-off');
-rep(`      + (fail ? ' · ❌ ' + fail : '') + (unsure ? ' · ⚠ ' + unsure : ''));`,
-  `      + (fail ? ' · ❌ ' + fail : '') + (unsure ? ' · ⚠ ' + unsure : '')); // [STABLE] dòng 🟢 bị tắt`,
-  'progress-off-note');
+/* 4. Nhớ/lọc chat lỗi ------------------------------------------------------ */
+// [v1.92.21] BẢN GỐC ĐÃ XOÁ HẲN cơ chế này (không lưu localStorage, không lọc, không còn nút
+// "🧹 Xóa nhớ lỗi"). Bản ổn định vì thế không cần sửa gì nữa — hai bản dùng chung đúng một hành vi.
+// (Giữ khối ghi chú này để lần sau không ai đi tìm mấy phép thay thế đã bị xoá.)
 
-/* 4. Các dòng chẩn đoán dài → logDiag (bị tắt ở bản này) -------------------- */
+
+/* 5. Công tắc phím Tab: ĐỔI MẶC ĐỊNH (nút đã có sẵn ở bản gốc) ----------------- */
+// Bản gốc: công tắc "TAB:" mặc định BẬT (giữ đúng hành vi cũ: bấm Tab = Chạy).
+// Bản ổn định: cùng nút đó nhưng mặc định TẮT — người dùng mới bấm Tab để chuyển ô sẽ không
+// vô tình mở hộp xác nhận gửi. Người dùng vẫn bật/tắt được y như bản gốc, nhớ qua localStorage.
+rep("    tabSend: (() => { try { return localStorage.getItem('ssb_tab_send_on') !== '0'; } catch (e) { return true; } })(),",
+  "    // [STABLE] mặc định TẮT (bản gốc mặc định BẬT) — xem ghi chú ngay trên trong tools/make-stable.mjs\n    tabSend: (() => { try { return localStorage.getItem('ssb_tab_send_on') === '1'; } catch (e) { return false; } })(),", 'tab-default-off');
+
+
+rep('title="Bấm nút này hoặc nhấn phím Tab để chạy (có bảng xác nhận trước khi gửi)">▶ Chạy (Tab)</button>',
+  'title="Bấm nút này để chạy (có bảng xác nhận trước khi gửi). Muốn dùng phím Tab thì bật công tắc TAB trên tiêu đề.">▶ Chạy</button>', 'send-btn-tip');
+rep("'Khi bấm ▶ Chạy hoặc nhấn phím Tab, script sẽ tự lấy nội dung đang copy trên Clipboard và hiện hộp xác nhận trước khi gửi.'",
+  "'Khi bấm ▶ Chạy (hoặc phím Tab nếu đã bật công tắc TAB), script sẽ tự lấy nội dung đang copy trên Clipboard và hiện hộp xác nhận trước khi gửi.'", 'clip-tip');
+
+/* 6. Kênh riêng với tiện ích bản ổn định ------------------------------------ */
+// Bản gốc nói chuyện với extension qua kênh \`__botfake\` + dấu <html data-botfake-ext="1">.
+// Bản ổn định dùng kênh RIÊNG (__botfakeS / data-botfake-ext-stable, xem tools/build.mjs):
+// cài cả hai tiện ích thì mỗi bên chỉ trả lời lệnh của chính nó ⇒ không thể cùng gửi một tin.
+repAll("ev.data.__botfake !== 1", "ev.data.__botfakeS !== 1", 'chan-recv', 2);
+rep("window.postMessage({ __botfake: 1, dir: 'to_sw', id: id, payload: payload }, '*');",
+  "window.postMessage({ __botfakeS: 1, dir: 'to_sw', id: id, payload: payload }, '*');", 'chan-send');
+rep("getAttribute('data-botfake-ext') === '1'",
+  "getAttribute('data-botfake-ext-stable') === '1'", 'chan-attr');
+rep('  function extCall(payload, waitMs) {',
+`  // [STABLE] Kênh nói chuyện với tiện ích: kênh RIÊNG (__botfakeS + data-botfake-ext-stable),
+  // xem tools/build.mjs. Cài cả hai tiện ích thì mỗi bên chỉ trả lời lệnh của chính nó
+  // ⇒ không thể cùng gửi một tin.
+  function extCall(payload, waitMs) {`, 'chan-note');
+
+/* 7. Log cuối gọn ---------------------------------------------------------- */
 for (const [a, b, label] of [
   ["logLine('⚡ TỐC ĐỘ: '", "logDiag('⚡ TỐC ĐỘ: '", 'diag-tocdo'],
-  ["logLine('🫥 CHẠY NỀN: '", "logDiag('🫥 CHẠY NỀN: '", 'diag-chaynen'],
   ["logLine('🌊 WAVE: script '", "logDiag('🌊 WAVE: script '", 'diag-wave'],
   ["logLine('📡 SOCKET: ACK OK/rejected/no-ACK '", "logDiag('📡 SOCKET: ACK OK/rejected/no-ACK '", 'diag-socket'],
   ["logLine('🌐 API NỀN: queued(nền)/started(nền+đồng bộ)/fetch '", "logDiag('🌐 API NỀN: queued(nền)/started(nền+đồng bộ)/fetch '", 'diag-api'],
   ["logLine('🧭 Chẩn đoán globalId: cache '", "logDiag('🧭 Chẩn đoán globalId: cache '", 'diag-gid'],
 ]) rep(a, b, label);
-
-/* 5. Dòng tổng kết cuối: 1 dòng ngắn -------------------------------------- */
-// Chèn nhánh `if` NGAY TRƯỚC lời gọi cũ, KHÔNG cắt biểu thức 93 dòng (cắt bằng thay-chuỗi-
-// nguyên-văn đã thử và hỏng: neo không khớp). Biểu thức cũ còn nguyên nên `node --check`
-// luôn xanh, và số liệu không đổi (cùng `c`, cùng `elapsedSec`).
-const STABLE_SUMMARY = `if (!DIAG_LOGS) logLine('📊 XONG: ✅ ' + c.okTotal + '/' + c.total + ' tin (' + pct + '%)'
-          + ' · ❌ ' + c.failTotal + ' · ⚠ ' + c.unsureTotal
-          + ' · ⏱ ' + elapsedSec + 's · ' + (elapsedSec > 0 ? (c.settled / elapsedSec).toFixed(1) : '0') + ' tin/giây');
-        else logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total`;
-rep("logLine('📊 TỔNG HỢP CHỐT LƯỢT GỬI: ✅ Đã gửi thành công ' + c.okTotal + '/' + c.total",
-  STABLE_SUMMARY, 'stable-summary');
 
 /* 8. Ghi / kiểm tra -------------------------------------------------------- */
 if (CHECK) {

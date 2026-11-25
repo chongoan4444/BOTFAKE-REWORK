@@ -1,10 +1,10 @@
 /* Overlay tiến độ BOTFAKE trên mọi tab (kể cả không phải Pancake) */
 (function () {
   if (window !== window.top) return;
-  if (window.__BOTFAKE_OVERLAY__) return;
-  window.__BOTFAKE_OVERLAY__ = true;
+  if (window.__BOTFAKE_OVERLAY_STABLE__) return;
+  window.__BOTFAKE_OVERLAY_STABLE__ = true;
 
-  const ID = 'botfake-ext-overlay';
+  const ID = 'botfake-ext-overlay-stable';
   const BOX =
     'position:fixed;right:10px;top:50%;transform:translateY(-50%);bottom:auto;left:auto;' +
     'z-index:2147483646;width:188px;font:11px/1.35 system-ui,Segoe UI,sans-serif;' +

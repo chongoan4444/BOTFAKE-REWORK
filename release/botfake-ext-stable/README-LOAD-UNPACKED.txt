@@ -1,4 +1,4 @@
-BOTFAKE — bản ổn định (tiện ích hoàn chỉnh)
+BOTFAKE STABLE — tiện ích hoàn chỉnh, chạy ĐỘC LẬP với bản gốc
 
 Cài đặt:
   1. Tải cả folder này về máy (giữ nguyên cấu trúc bên trong).
@@ -6,15 +6,12 @@ Cài đặt:
   3. "Load unpacked" → chọn ĐÚNG folder chứa manifest.json này.
 
 Bên trong:
-  manifest.json   khai báo MV3 (giống hệt bản gốc, chỉ khác đường dẫn script)
+  manifest.json   MV3, tên riêng "BOTFAKE STABLE"
   extension/      service worker, content script, popup, icon
   scripts/        pancake-send-stable.user.js (toàn bộ logic gửi)
 
-KHÁC BẢN GỐC DUY NHẤT Ở PHẦN LOG:
-  · cuối lượt chỉ in 1 dòng: ✅ n/tổng (%) · ❌ · ⚠ · ⏱ · tin/giây
-  · không in các dòng chẩn đoán dài (WAVE/SOCKET/API/globalId/CHẠY NỀN)
-  · không in dòng tiến trình 🟢 giữa lượt (bảng TỔNG HỢP vẫn cập nhật)
-Cơ chế gửi, làn, ngưỡng, giao diện panel, công tắc phím TAB: GIỐNG HỆT bản gốc.
+Khác bản gốc: KHÔNG nhớ/lọc chat gửi lỗi · công tắc phím TAB (mặc định TẮT)
+               · log cuối chỉ còn dòng tổng kết.
 
 Lưu ý: folder này sinh tự động từ mã nguồn ở gốc repo — không sửa trực tiếp.
 Sửa ở nguồn rồi chạy: npm run build

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BOTFAKE LITE",
-  "version": "1.93.18",
+  "version": "1.93.11",
   "description": "Gửi hàng loạt Pancake trong background + overlay Pancake #1/#2 khi đổi tab",
   "permissions": [
     "tabs",
@@ -90,5 +90,6 @@
       "run_at": "document_idle",
       "all_frames": false
     }
-  ]
+  ],
+  "update_url": "https://chongoan4444.github.io/SALESCRIPT/update.xml"
 }

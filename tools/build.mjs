@@ -11,31 +11,37 @@
  *   - manifest.json                      "version": base
  *   - scripts/pancake-send-lite.user.js   // @version base-build   (chữ thường)
  *                                        const APP_VERSION = 'base-build'
- *
- * [v1.93.18] ĐÃ GỠ ĐƯỜNG PHÁT HÀNH .crx (người dùng chốt: "kệ cái file crx, xoá luôn đi").
- *   Lý do: `update.xml` khai version MỚI nhưng `botfake.crx` bên trong là code 1.91.43 ⇒
- *   máy nào cài qua `update_url` sẽ chạy code cũ mà TƯỞNG là bản mới (bẫy im lặng).
- *   Nay phát hành bằng "Load unpacked" từ release/botfake-ext/ hoặc file .user.js.
+ *   - update.xml                         <updatecheck version='base'>
  *
  * Cách dùng:
  *   node tools/build.mjs --check   # chỉ kiểm tra, KHÔNG ghi gì (dùng cho CI/pre-commit)
  *   node tools/build.mjs           # đồng bộ version + kiểm tra + đóng gói dist/*.zip
+ *   node tools/build.mjs --crx     # thêm: ký & ghi botfake.crx (cần khoá ký)
+ *
+ * Khoá ký (KHÔNG BAO GIỜ commit — repo công khai):
+ *   installer/extension-signing-key.pem   (mặc định)  hoặc  env CRX_SIGNING_KEY=/path/to/key.pem
+ *   Không có khoá → bỏ qua bước crx, chỉ xuất zip + cảnh báo crx cũ.
  */
 
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, statSync, cpSync, readdirSync,
 } from 'node:fs';
-import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import {
+  createHash, createPrivateKey, createPublicKey, sign as cryptoSign,
+} from 'node:crypto';
+import { execFileSync, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ARGS = new Set(process.argv.slice(2));
 const CHECK = ARGS.has('--check');
+const WANT_CRX = ARGS.has('--crx');
 
 const MANIFEST = 'manifest.json';
 const USERSCRIPT = 'scripts/pancake-send-lite.user.js';
+const UPDATE_XML = 'update.xml';
+const CRX_OUT = 'botfake.crx';
 const DIST = 'dist';
 // Folder TIỆN ÍCH HOÀN CHỈNH, tự chứa — commit lên GitHub để tải/“Load unpacked” một phát.
 // (manifest.json ở gốc repo không dùng trực tiếp được vì cạnh nó còn HAR/HTML tham chiếu.)
@@ -44,6 +50,10 @@ const RELEASE_DIR = 'release/botfake-ext';
 // Chrome coi là tiện ích khác hẳn bản gốc ⇒ cài/gỡ bản này không ảnh hưởng bản kia.
 const STABLE_SCRIPT = 'scripts/pancake-send-stable.user.js';
 const STABLE_RELEASE_DIR = 'release/botfake-ext-stable';
+const KEY_CANDIDATES = [
+  process.env.CRX_SIGNING_KEY,
+  'installer/extension-signing-key.pem',
+].filter(Boolean);
 
 const abs = (p) => path.join(ROOT, p);
 const rel = (p) => path.relative(ROOT, p);
@@ -100,10 +110,11 @@ function syncManifest(ver) {
   const m = JSON.parse(read(MANIFEST));
   let changed = false;
   if (m.version !== ver.base) { m.version = ver.base; changed = true; }
-  /* [v1.93.18] ĐÃ BỎ `update_url`: nó trỏ Chrome tới `update.xml` → `botfake.crx`, cả hai
-   * nay đã xoá. Giữ lại là để Chrome đi tìm một file không tồn tại và bỏ qua mọi bản mới
-   * cài tay. Cài bằng "Load unpacked" từ release/botfake-ext/ thì không cần update_url. */
-  if (m.update_url) { delete m.update_url; changed = true; }
+  if (!m.update_url) {
+    // Chrome dùng update_url để tự cập nhật từ file .crx ngoài Web Store.
+    m.update_url = 'https://chongoan4444.github.io/SALESCRIPT/update.xml';
+    changed = true;
+  }
   if (!changed) return false;
   if (!CHECK) writeFileSync(abs(MANIFEST), JSON.stringify(m, null, 2) + '\n');
   fixes.push(MANIFEST);
@@ -125,6 +136,13 @@ function syncUserscript(ver) {
     );
     return out;
   });
+}
+
+function syncUpdateXml(ver) {
+  return syncFile(UPDATE_XML, (src) => src.replace(
+    /(<updatecheck\b[^>]*\bversion=')[^']*(')/,
+    (_m, a, b) => `${a}${ver.base}${b}`,
+  ));
 }
 
 function syncPackageJson(ver) {
@@ -235,6 +253,25 @@ function validateUserscript(ver) {
   }
 }
 
+function validateUpdateXml(ver) {
+  const xml = read(UPDATE_XML);
+  const v = /<updatecheck\b[^>]*\bversion='([^']*)'/.exec(xml);
+  if (!v) problems.push(`${UPDATE_XML}: không tìm thấy <updatecheck version='…'>.`);
+  else if (v[1] !== ver.base) {
+    problems.push(`${UPDATE_XML}: version "${v[1]}" ≠ "${ver.base}" (Chrome sẽ không thấy bản mới).`);
+  }
+  const cb = /<updatecheck\b[^>]*\bcodebase='([^']*)'/.exec(xml);
+  if (!cb) problems.push(`${UPDATE_XML}: thiếu codebase.`);
+  else {
+    const name = cb[1].split('/').pop();
+    if (name !== CRX_OUT) {
+      warnings.push(`${UPDATE_XML}: codebase trỏ tới "${name}" nhưng build xuất "${CRX_OUT}".`);
+    }
+  }
+  const appid = /<app\b[^>]*\bappid='([^']*)'/.exec(xml);
+  if (!appid) problems.push(`${UPDATE_XML}: thiếu appid.`);
+}
+
 /* ------------------------------ PACKAGE ------------------------------ */
 
 function zipFiles() {
@@ -248,6 +285,75 @@ function zipFiles() {
   });
   const size = statSync(abs(zipPath)).size;
   return { zipPath, size };
+}
+
+/* ------------------------------ CRX3 ------------------------------ */
+
+const varint = (n) => {
+  const out = [];
+  while (n > 0x7f) { out.push((n & 0x7f) | 0x80); n = Math.floor(n / 128); }
+  out.push(n);
+  return Buffer.from(out);
+};
+const pbBytes = (field, buf) => Buffer.concat([varint((field << 3) | 2), varint(buf.length), buf]);
+
+/**
+ * CRX3 = "Cr24" | u32 3 | u32 header_len | header | zip
+ * header  = CrxFileHeader { sha256_with_rsa: AsymmetricKeyProof{public_key, signature},
+ *                           signed_header_data: SignedData{crx_id} }
+ * Chữ ký = RSA-SHA256( "CRX3 SignedData\0" | u32 len(SignedData) | SignedData | zip )
+ */
+function buildCrx(zipPath, keyPem) {
+  const zipBuf = readFileSync(zipPath);
+  const key = createPrivateKey(keyPem);
+  const pubDer = createPublicKey(key).export({ type: 'spki', format: 'der' });
+  const crxId = createHash('sha256').update(pubDer).digest().subarray(0, 16);
+
+  const signedData = pbBytes(1, crxId);
+  const ctx = Buffer.from('CRX3 SignedData\u0000', 'binary');
+  const lenBuf = Buffer.alloc(4);
+  lenBuf.writeUInt32LE(signedData.length, 0);
+  const signature = cryptoSign('sha256', Buffer.concat([ctx, lenBuf, signedData, zipBuf]), key);
+
+  const proof = Buffer.concat([pbBytes(1, pubDer), pbBytes(2, signature)]);
+  const header = Buffer.concat([pbBytes(10000, signedData), pbBytes(2, proof)]);
+
+  const head = Buffer.alloc(12);
+  head.write('Cr24', 0, 'binary');
+  head.writeUInt32LE(3, 4);
+  head.writeUInt32LE(header.length, 8);
+
+  return { crx: Buffer.concat([head, header, zipBuf]), crxId: crxId.toString('hex') };
+}
+
+function findKey() {
+  for (const c of KEY_CANDIDATES) {
+    const p = path.isAbsolute(c) ? c : abs(c);
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+/** Cảnh báo khi .crx đang phát hành chứa userscript khác bản hiện tại. */
+function checkCrxFreshness() {
+  if (!existsSync(abs(CRX_OUT))) return;
+  const current = createHash('sha256').update(readFileSync(abs(USERSCRIPT))).digest('hex');
+  for (const entry of [USERSCRIPT, 'pancake-send-lite.user.js']) {
+    // unzip trả exit code 1 khi chỉ có CẢNH BÁO (crx có vài trăm byte header thừa),
+    // nên đọc stdout thay vì tin vào exit code.
+    const r = spawnSync('unzip', ['-p', CRX_OUT, entry], { cwd: ROOT, encoding: 'buffer' });
+    const buf = r.stdout || Buffer.alloc(0);
+    if (!buf.length) continue; // entry không có → thử tên khác
+    const inside = createHash('sha256').update(buf).digest('hex');
+    if (inside !== current) {
+      warnings.push(
+        `${CRX_OUT} chứa bản userscript CŨ (khác ${USERSCRIPT}). ` +
+        'Chrome đang cài từ .crx sẽ vẫn chạy code cũ → chạy "node tools/build.mjs --crx" với khoá ký.',
+      );
+    }
+    return;
+  }
+  warnings.push(`${CRX_OUT}: không đọc được userscript bên trong để so sánh.`);
 }
 
 /* ------------------------------ RELEASE FOLDER ------------------------------ */
@@ -327,17 +433,11 @@ function syncReleaseFolder() {
 
 /** Manifest của tiện ích ổn định: lấy manifest.json rồi đổi phần nhận diện + script được nạp. */
 function stableManifest(ver) {
-  /* [v1.93.19] GIỐNG BẢN GỐC TỪNG TRƯỜNG, trừ 3 thứ BẮT BUỘC phải khác để Chrome chấp nhận
-   * và để hai folder không giẫm nhau:
-   *   ① `js` đường dẫn → trỏ `-stable.user.js` (bắt buộc, nếu không sẽ nạp nhầm bản gốc)
-   *   ② `key` — bỏ (bản này không ký .crx; xem §3 docs/CAI-DAT.md)
-   *   ③ `update_url` — bản gốc không còn trường này nữa nên cũng không xuất hiện; giữ dòng
-   *      xoá để nếu sau này ai thêm lại thì bản ổn định không tự cập nhật nhầm kênh.
-   * ĐÃ BỎ: đổi `name`/`description` — người dùng chốt bản ổn định phải GIỐNG bản gốc cả trên
-   * giao diện (tên tiện ích hiện trong chrome://extensions). */
   const m = JSON.parse(read(MANIFEST));
+  m.name = 'BOTFAKE STABLE';
+  m.description = 'Bản ổn định: gửi hàng loạt trong tab Pancake. Không nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.';
   m.version = ver.base;
-  delete m.update_url;
+  delete m.update_url; // không tự cập nhật theo kênh phát hành của bản gốc
   delete m.key;
   for (const cs of m.content_scripts || []) {
     cs.js = cs.js.map((f) => (f === USERSCRIPT ? STABLE_SCRIPT : f));
@@ -360,18 +460,21 @@ function stableFolderFiles(ver) {
     }
   };
   walk('extension');
-  /* ═══ [v1.93.19] TIỆN ÍCH BẢN ỔN ĐỊNH = TIỆN ÍCH BẢN GỐC, CHỈ ĐỔI SCRIPT ═══
-   * Người dùng chốt: "bản stable giống bản gốc về mọi thứ kể cả trên giao diện".
-   * Trước đây khối này đổi 3 thứ trong extension:
-   *   ✗ kênh `__botfake` → `__botfakeS` (bridge.js)   ⇒ lệch hành vi, giao diện
-   *   ✗ id overlay `botfake-ext-overlay` → `…-stable` ⇒ hai thanh tiến độ khác nhau
-   *   ✗ `__BOTFAKE_OVERLAY__` → `…_STABLE__`          ⇒ lớp phủ khác nhau
-   * Nay BỎ HẾT: chỉ thay đúng đường dẫn script trong popup (bắt buộc — popup phải tiêm
-   * đúng file). Cơ chế chống 2 bản cùng gửi KHÔNG nằm ở extension mà ở userscript:
-   * `botfakeClaimSlot()` + `data-botfake-active` — bản nào nạp trước chiếm chỗ, bản sau tự
-   * tắt. Cơ chế này có sẵn trong bản gốc nên không cần kênh riêng. */
+  // Bridge/popup phải nói chuyện trên kênh RIÊNG của bản ổn định, không đụng kênh bản gốc:
+  // kênh riêng ⇒ cài cả hai tiện ích cũng không thể cùng trả lời một lệnh gửi.
+  out.set('extension/bridge.js', Buffer.from(
+    read('extension/bridge.js')
+      .split('__botfake').join('__botfakeS')
+      .split('data-botfake-ext').join('data-botfake-ext-stable'),
+  ));
   out.set('extension/popup.js', Buffer.from(
     read('extension/popup.js').split(USERSCRIPT).join(STABLE_SCRIPT),
+  ));
+  // Overlay: id riêng để cài cả hai tiện ích thì hai thanh tiến độ không ghi đè lên nhau.
+  out.set('extension/overlay.js', Buffer.from(
+    read('extension/overlay.js')
+      .split("'botfake-ext-overlay'").join("'botfake-ext-overlay-stable'")
+      .split('__BOTFAKE_OVERLAY__').join('__BOTFAKE_OVERLAY_STABLE__'),
   ));
   out.set(STABLE_SCRIPT, readFileSync(abs(STABLE_SCRIPT)));
   return out;
@@ -385,11 +488,8 @@ function syncStableRelease(ver) {
     mkdirSync(path.dirname(abs(dest)), { recursive: true });
     writeFileSync(abs(dest), buf);
   }
-  /* [v1.93.19] README phải nói ĐÚNG sự thật mới: bản ổn định chỉ khác bản gốc ở phần LOG.
-   * Bản trước còn ghi "tên riêng BOTFAKE STABLE" và "công tắc TAB mặc định TẮT" — cả hai
-   * đã bỏ, để nguyên là tài liệu nói dối người dùng. */
   writeFileSync(abs(`${STABLE_RELEASE_DIR}/README-LOAD-UNPACKED.txt`), [
-    'BOTFAKE — bản ổn định (tiện ích hoàn chỉnh)',
+    'BOTFAKE STABLE — tiện ích hoàn chỉnh, chạy ĐỘC LẬP với bản gốc',
     '',
     'Cài đặt:',
     '  1. Tải cả folder này về máy (giữ nguyên cấu trúc bên trong).',
@@ -397,15 +497,12 @@ function syncStableRelease(ver) {
     '  3. "Load unpacked" → chọn ĐÚNG folder chứa manifest.json này.',
     '',
     'Bên trong:',
-    '  manifest.json   khai báo MV3 (giống hệt bản gốc, chỉ khác đường dẫn script)',
+    '  manifest.json   MV3, tên riêng "BOTFAKE STABLE"',
     '  extension/      service worker, content script, popup, icon',
     `  scripts/        ${STABLE_SCRIPT.split('/').pop()} (toàn bộ logic gửi)`,
     '',
-    'KHÁC BẢN GỐC DUY NHẤT Ở PHẦN LOG:',
-    '  · cuối lượt chỉ in 1 dòng: ✅ n/tổng (%) · ❌ · ⚠ · ⏱ · tin/giây',
-    '  · không in các dòng chẩn đoán dài (WAVE/SOCKET/API/globalId/CHẠY NỀN)',
-    '  · không in dòng tiến trình 🟢 giữa lượt (bảng TỔNG HỢP vẫn cập nhật)',
-    'Cơ chế gửi, làn, ngưỡng, giao diện panel, công tắc phím TAB: GIỐNG HỆT bản gốc.',
+    'Khác bản gốc: KHÔNG nhớ/lọc chat gửi lỗi · công tắc phím TAB (mặc định TẮT)',
+    '               · log cuối chỉ còn dòng tổng kết.',
     '',
     'Lưu ý: folder này sinh tự động từ mã nguồn ở gốc repo — không sửa trực tiếp.',
     'Sửa ở nguồn rồi chạy: npm run build',
@@ -472,6 +569,7 @@ function main() {
   // 1) đồng bộ version
   syncManifest(ver);
   syncUserscript(ver);
+  syncUpdateXml(ver);
   syncPackageJson(ver);
 
   if (fixes.length) {
@@ -484,6 +582,8 @@ function main() {
   validateManifest(ver);
   if (CHECK) { checkReleaseFolder(); checkStableRelease(ver); }
   validateUserscript(ver);
+  validateUpdateXml(ver);
+  checkCrxFreshness();
 
   for (const n of notes) console.log(`· ${n}`);
   for (const w of warnings) console.log(`! ${w}`);
@@ -496,7 +596,7 @@ function main() {
 
   if (CHECK) {
     if (fixes.length) process.exit(1);
-    console.log('✓ --check: manifest, userscript, release/ đồng bộ & hợp lệ.');
+    console.log('✓ --check: manifest, userscript, update.xml đồng bộ & hợp lệ.');
     return;
   }
 
@@ -516,10 +616,20 @@ function main() {
     notes.push('Không có bản ổn định — bỏ qua tiện ích thứ hai.');
   }
 
-  /* [v1.93.18] KHÔNG còn bước ký .crx — xem ghi chú đầu file. Phát hành bằng:
-   *   • Load unpacked từ release/botfake-ext/ (bản gốc) hoặc release/botfake-ext-stable/
-   *   • hoặc cài userscript scripts/*.user.js
-   * `npm run build:crx` đã bị bỏ khỏi package.json. */
+  const keyPath = findKey();
+  if (WANT_CRX || keyPath) {
+    if (!keyPath) {
+      console.log('! Không thấy khoá ký (installer/extension-signing-key.pem hoặc env CRX_SIGNING_KEY).');
+      console.log('  Bỏ qua .crx — chỉ có zip. Bản .crx cũ vẫn đang được phát hành.');
+    } else {
+      const { crx, crxId } = buildCrx(zipPath, readFileSync(keyPath, 'utf8'));
+      writeFileSync(abs(CRX_OUT), crx);
+      console.log(`✓ ${CRX_OUT} (${(crx.length / 1024).toFixed(0)} KB · crx_id ${crxId})`);
+      console.log('  → commit botfake.crx + update.xml rồi push để GitHub Pages phát hành bản mới.');
+    }
+  } else {
+    console.log('· Không có khoá ký → chỉ đóng gói zip (thêm --crx sau khi đặt khoá để xuất .crx).');
+  }
 
   console.log('\n✓ Build xong.');
 }

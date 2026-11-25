@@ -12,6 +12,7 @@ DOM & API trước khi sửa code.
 manifest.json                     # khai báo MV3 — nguồn sự thật về quyền/entry-point
 version.json                      # NGUỒN VERSION DUY NHẤT { base, build }
 update.xml                        # manifest tự cập nhật (Chrome đọc từ GitHub Pages)
+botfake.crx                       # bản đóng gói đang phát hành (phải build lại khi sửa code)
 package.json                      # lệnh build/check (không có dependency)
 
 extension/                        # code tiện ích (service worker, content script, popup)
@@ -121,6 +122,7 @@ Version chỉ khai báo **một lần** trong `version.json`:
 ```bash
 npm run check      # kiểm tra version + mọi đường dẫn manifest tồn tại (dùng cho CI, không ghi file)
 npm run build      # đồng bộ version + xuất dist/botfake.zip
+npm run build:crx  # thêm: ký & ghi botfake.crx (cần khoá ký)
 ```
 
 Khoá ký **không bao giờ commit** (repo công khai):
@@ -130,13 +132,12 @@ installer/extension-signing-key.pem      # mặc định
 CRX_SIGNING_KEY=/path/to/key.pem         # hoặc qua biến môi trường
 ```
 
-**[v1.93.18] Đã bỏ hẳn đường `.crx`** — phát hành bằng `release/botfake-ext/` (Load unpacked)
-hoặc file `.user.js`. Ghi chú cũ về crx được giữ lại ở đây chỉ để đối chiếu lịch sử: nếu crx
-đang phát hành chứa userscript khác bản hiện tại thì Chrome cài từ `.crx`
+Không có khoá → build vẫn xuất zip nhưng **giữ nguyên `botfake.crx` cũ**; `npm run check`
+sẽ cảnh báo nếu crx đang phát hành chứa userscript khác bản hiện tại (Chrome cài từ `.crx`
 sẽ chạy code cũ dù bạn đã sửa).
 
 Quy trình phát hành: sửa code → tăng `base`/`build` trong `version.json` →
-`GỠ HẲN extension cài từ `.crx` rồi cài lại bằng `release/botfake-ext/` (Load unpacked).
+`npm run build:crx` → commit `botfake.crx` + `update.xml` → push (GitHub Pages phục vụ).
 
 ## Cơ chế gửi – nhận phản hồi – bù (v1.91.73)
 

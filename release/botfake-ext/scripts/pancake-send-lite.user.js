@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.18-w200.133
+// @version      1.93.11-w200.122
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.18-W200.133'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.11-W200.122'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -634,10 +634,6 @@
     };
   }
 
-  // [v1.93.13] SỔ messageId extension trả về (REPLY_INBOX_PHOTO_SUCCESS có `messageId`).
-  // Lượt đọc lại lịch sử đối chiếu với sổ này; chỉ ĐỌC, không gửi thêm.
-  const extMsgIdByConv = Object.create(null);
-
   let lastBgConvById = {};
   let lastBgPhoto = null;
   let lastBgText = '';
@@ -702,13 +698,12 @@
                 // "không rõ" (socket mất ACK / Ext quá hạn) ⇒ vừa gọi scheduleBuRetry (bù qua
                 // kênh khác) trong khi tin CÓ THỂ đã đi ⇒ nguy cơ gửi 2 lần. Nay "không rõ" chốt
                 // ⚠ + ghi uncertainIds (để mọi đường bù khác cũng bị chặn), KHÔNG gửi thêm.
-                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'bù không rõ: ' + clip((r && r.error) || '', 60));
+                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
                 logLine('⚠ ' + nm + ' — bù: ' + clip((r && r.error) || 'không rõ', 90) + ' — KHÔNG gửi thêm (chống trùng)');
               } else if (r && !r.ok) {
                 logLine('⚠ ' + nm + ' — bù: ' + clip((r && r.error) || 'không rõ', 90));
-                /* [v1.93.17] cùng lý do như ở sendViaApi: lỗi DỨT KHOÁT ⇒ bù ngay, khỏi cổng 10 s. */
                 scheduleBuRetry(conv, tx, lastBgPhoto, nm, 'API từ chối (' + clip(msg.error || '', 90) + ')', ['api'],
-                  { ambiguous: true, definitiveNotSent: isDefinitiveNotSent(msg.error), via: 'api', sentAt: Date.now() });
+                  { ambiguous: true, via: 'api', sentAt: Date.now() });
               }
             })
             .catch((e) => { logLine('❌ ' + nm + ' — bù lỗi: ' + (e && e.message || e)); })
@@ -741,141 +736,10 @@
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-  /* ═══ [v1.93.13] `/rescue_mode_inbox` — ÉP PANCAKE KÉO LẠI TIN TỪ FACEBOOK ═══
-   * Nguồn `0.5.62_0/assets/background.js` (`class Oc` = LISTEN_INBOX):
-   *   async trigger_to_pancake(e){
-   *     const { url:t, headers:a } = Ne(this.accessToken, `/v1/pages/${this.page_id}/rescue_mode_inbox`);
-   *     return await Ce(t, { message_ids: e }, {}, { headers: a } ); }
-   *   handle_list_messages(e,t){ const a = t.nodes.map(s => s.message_id);
-   *     const r = await this.trigger_to_pancake(a);
-   *     if(r.success && r.continue && t.page_info?.has_previous_page) …load_list_messages(…, before) }
-   *
-   * Nghĩa: ext đọc danh sách `message_id` trên **facebook.com** (graphql `MessengerGraphQLThreadFetcher`),
-   * rồi gọi endpoint Pancake này để Pancake KÉO LẠI các tin đó từ FB về hội thoại.
-   * ⇒ Đây là cách DUY NHẤT trong extension khiến server Pancake **cập nhật ngay** những tin
-   * FB ĐÃ NHẬN mà Pancake chưa hiển thị.
-   *
-   * VÌ SAO SCRIPT CẦN — đo được (log 22/11 09:54, lô 8 572):
-   *   • ACK rejected 3 552 ⇒ 3 547 ca ⚠ "kiểm chứng: đọc 4 lần chưa thấy tin — GIỮ ⚠"
-   *   • `HTTP không có gid 56` · `can_inbox=false 0/56` — tức yêu cầu gửi ĐÃ tới Pancake
-   *   • nhưng `/conversations/{id}/messages` trả KHÔNG có tin đó ⇒ script kết luận "chưa đi"
-   *   Trong khi đó FB trả ACK rejected: FB nói KHÔNG nhận ⇒ hai nguồn nói khác nhau.
-   *   Có những ca FB ĐÃ nhận (tin nằm trên Messenger) mà Pancake chưa kéo về ⇒ script đọc
-   *   lịch sử 4 lần đều rỗng ⇒ chốt ⚠ oan (hoặc ❌ oan) ⇒ mất tin / gửi tay sai.
-   *   `/rescue_mode_inbox` giải đúng ca đó.
-   *
-   * AN TOÀN: hàm này KHÔNG gửi tin, KHÔNG tạo tin. Nó chỉ bảo Pancake ĐỌC LẠI từ FB và
-   * đồng bộ vào hội thoại ⇒ không thể sinh tin trùng. Gọi nhiều lần vô hại.
-   * Chỉ gọi khi các lần đọc lịch sử đều KHÔNG thấy tin (không gọi tràn lan). */
-  function rescueInboxMessages(pageId, messageIds) {
-    try {
-      const ids = (Array.isArray(messageIds) ? messageIds : [])
-        .map((x) => String(x == null ? '' : x)).filter((x) => /^\d+$/.test(x));
-      if (!ids.length) return Promise.resolve(false);
-      /* `message_ids` phải là id THẬT của tin trên FB. Script chỉ biết id tin của Pancake
-       * (`message_id` sau khi gửi) nên KHÔNG tự bịa id. Chỉ nhận id do nơi gọi đưa vào
-       * (vd. `res.data.messageId` của REPLY_INBOX_PHOTO_SUCCESS có thể là id FB). */
-      const body = { message_ids: ids };
-      const url0 = apiBase() + '/v1/pages/' + pageId + '/rescue_mode_inbox';
-      /* ═══ [v1.93.15] HAI ĐIỂM SAI ĐÃ SỬA ═══
-       * ① ext KHÔNG gửi `{message_ids: [...]}` — `Ce` nhận `body` là **giá trị nguyên**:
-       *      Ce = async(n, e, t={}, a={}) => la(n, { method:"POST", headers:{…}, body:e, params:t }, …)
-       *      trigger_to_pancake(e){ … return await Ce(t, { message_ids: e }, {}, { headers: a }) }
-       *    ⇒ body là JSON `{"message_ids": e}` — nhưng ở tầng `la` nó còn được bọc/xử lý;
-       *    với `BOTFAKE_BG_FETCH` script thì `bodyObj` được serialize thành JSON ⇒ TƯƠNG ĐƯƠNG.
-       *    Giữ `bodyObj: {message_ids}` (không đổi) — đã đúng hình dạng.
-       * ② XÁC THỰC: ext đi bằng `Authorization: Bearer <jwt từ cookie "jwt">`, KHÔNG bằng
-       *    `?access_token=`. Script cũ (qua `bgFetchJson`) chỉ thêm `access_token` ⇒ dễ 401/403.
-       *    Nay: thử Bearer trước; nếu không gửi được (SW không đọc được cookie) thì lùi về
-       *    `access_token` như cũ — vẫn CHỈ ĐỌC, không gửi tin. */
-      return bgFetchJson(url0, 2, {
-        method: 'POST', bodyObj: body, timeoutMs: 12000,
-        authHeader: 'jwt', headers: null,
-      })
-        .then((r) => {
-          if (r && (r.ok || r.success)) return true;
-          /* lùi về đường cũ (access_token) — không tăng số lần gọi khi đường đầu đã thành công */
-          return bgFetchJson(url0, 1, { method: 'POST', bodyObj: body, timeoutMs: 12000 })
-            .then((r2) => !!(r2 && (r2.ok || r2.success)))
-            .catch(() => false);
-        })
-        .catch(() => false);
-    } catch (e) { return Promise.resolve(false); }
-  }
-
   function apiBase() {
     // getHostname() trong _app: dev.pages.fm → https://dev.pancake.vn/api; còn lại → origin + /api
     if (location.hostname === 'dev.pages.fm') return 'https://dev.pancake.vn/api';
     return location.origin.replace(/\/$/, '') + '/api';
-  }
-
-  /* ═══ [v1.93.15] `sync_missing_thread_id` — ĐƯỜNG CỨU KHI HỘI THOẠI KHÔNG CÓ `thread_id` ═══
-   * Nguồn app THẬT (`_app-…v6.js` @985925):
-   *   let eF = …, (e=pageId, t=convId, n) => {
-   *     let { auth:{ accessToken: o } } = a();
-   *     let n = await (0,T.Koh)("https://pages.fm/api/v1/pages/" + e
-   *                             + "/conversations/" + t + "/sync_missing_thread_id?access_token=" + o);
-   *     let a = null;
-   *     if (n.success && n.thread_id) { a = n.thread_id;
-   *       r(setThreadId({ pageId:e, conversationId:t, threadId:a, threadKey:n.thread_key }));
-   *       p.Z.set(t, null); }                       // ← XOÁ cache gid của hội thoại đó
-   *     return a };
-   *   window.__syncMissingThreadId__ = eF;
-   *
-   * BẰNG CHỨNG THẬT (HAR `guisot.har`, 2 lần, HTTP 200):
-   *   GET https://pancake.vn/api/v1/pages/898735919982398/conversations/
-   *                898735919982398_28877217668608600/sync_missing_thread_id?
-   *   → {"success":true,"thread_id":"1474059909116660","thread_key":"t_1597054761634327"}
-   *
-   * VÌ SAO ĐÂY LÀ ĐƯỜNG CỨU ĐÚNG — nối trực tiếp vào 4 nguồn gid của `Ee.getGlobalIdFromInbox`:
-   *   • nguồn ① `Jt` cần `this.threadId`
-   *   • nguồn ② `Zt` cần `this.threadId` **và** `this.threadKey` **và** `t.cquick_token`
-   *   • nguồn ③ `findThread` cần `customerName`/`threadId`
-   *   ⇒ Hội thoại THIẾU `thread_id` thì cả ① ② ③ đều không chạy (chỉ còn ④ khớp-theo-TÊN).
-   *   Endpoint này TRẢ ĐÚNG `thread_id` + `thread_key` ⇒ mở lại được ①②③.
-   *   Đây là câu trả lời cho nhóm `HTTP không có gid 56` / `Ext trả không có gid` / 14 ca
-   *   "Không tìm được global_id để gửi" mà 4 nguồn cùng bó tay.
-   *
-   * CHỈ ĐỌC (GET, không tạo tin). Trả `{ threadId, threadKey }` hoặc `null`.
-   * Giới hạn: 1 lần/hội thoại/phiên (endpoint gọi xong là hội thoại đã có thread_id nên
-   * gọi lại vô nghĩa), và chỉ gọi khi hội thoại THẬT SỰ thiếu `thread_id`. */
-  /* [v1.93.15] App KHÔNG cache "đã thử": `eF(page_id, convId)` được gọi lại MỖI lần gửi khi
-   * hội thoại vẫn thiếu `thread_id` (`executeBySocketFB` @975143, `executeByExtOnce` @964502,
-   * `executeByExtInChunks` @962696). HAR `guisot.har` cho thấy đúng 1 lần cho conv đó — vì app
-   * gọi 1 lần rồi dùng kết quả cho cả lần gửi, KHÔNG phải vì nó nhớ "đã thử".
-   * Script cũ cache VĨNH VIỄN theo phiên (`Set` không TTL) ⇒ chỉ cần 1 lần lỗi mạng/timeout là
-   * hội thoại đó MẤT `thread_id` cho tới khi tải lại trang, dù lần sau endpoint trả bình thường.
-   * Nay: giữ chặn gọi trùng trong CÙNG một đợt (45 s) để không spam, nhưng cho phép thử lại sau. */
-  const SYNC_TID_RETRY_MS = 45000;
-  const syncThreadIdTried = new Map(); // key -> thời điểm thử (ms)
-  function syncMissingThreadId(pageId, convId) {
-    return Promise.resolve().then(() => {
-      const pid = String(pageId || '');
-      const cid = String(convId || '');
-      if (!pid || !cid) return null;
-      const key = pid + '|' + cid;
-      const triedAt = syncThreadIdTried.get(key);
-      if (triedAt && Date.now() - triedAt < SYNC_TID_RETRY_MS) return null;
-      syncThreadIdTried.set(key, Date.now());
-      if (syncThreadIdTried.size > 4000) {
-        const cut = Date.now() - SYNC_TID_RETRY_MS;
-        syncThreadIdTried.forEach((v, k) => { if (v < cut) syncThreadIdTried.delete(k); });
-      }
-      const url = apiBase() + '/v1/pages/' + encodeURIComponent(pid)
-        + '/conversations/' + encodeURIComponent(cid)
-        + '/sync_missing_thread_id?access_token=' + encodeURIComponent(getToken());
-      return fetchJson(url, 1, { timeoutMs: 8000 }).then((r) => {
-        if (!r || !r.ok || !r.data || r.data.success !== true) return null;
-        const tid = r.data.thread_id;
-        const tkey = r.data.thread_key;
-        if (!tid || !/^\d+$/.test(String(tid))) return null;
-        try { gidStats.threadIdSynced++; } catch (e) { /* ignore */ }
-        /* App XOÁ cache gid của hội thoại này (`p.Z.set(t, null)`) vì threadKey vừa đổi ⇒
-         * gid cũ (nếu có) tính theo thread cũ. Script không có cache gid "tạm" như app,
-         * nhưng ghi đè threadKey vào bản ghi để các nguồn ①②③ dùng đúng khoá mới. */
-        return { threadId: String(tid), threadKey: tkey ? String(tkey) : ('t_' + String(tid)) };
-      }).catch(() => null);
-    });
   }
 
   /* ============================ ACCESS TOKEN ============================ */
@@ -1625,37 +1489,13 @@
 
   function bgFetchJson(url, tries, reqOpts) {
     let swUrl = String(url || '');
-    const _authHdr = reqOpts && reqOpts.authHeader;
-    /* Đọc cookie `jwt` (hostOnly) — ĐÚNG như `vc` của ext:
-     *   vc = async(n,e) => (await chrome.cookies.getAll({url:n, name:"jwt"})).find(s=>s.hostOnly&&s.value)?.value
-     * Trang web KHÔNG đọc được cookie httpOnly ⇒ phải đi qua extension. Ở đây ta KHÔNG có API
-     * riêng để hỏi ext lấy cookie, nên dùng chính request của ext: `BOTFAKE_BG_FETCH` được SW
-     * xử lý (cùng SW đã gửi `Ac`/`Yi`); ta chỉ cần đặt cờ `authHeader: 'jwt'` và để SW gắn
-     * Bearer. Nếu SW không hỗ trợ thì request trả lỗi và ta lùi về `access_token`.
-     * ⇒ `_jwtHeaders` là CỜ, không phải token: giá trị gửi đi là `{ __botfakeAuth: 'jwt' }`
-     * để phía SW nhận biết mà tự lấy cookie của chính nó (nó có `chrome.cookies`). */
-    const _jwtHeaders = _authHdr === 'jwt' ? { __botfakeAuth: 'jwt' } : null;
-    /* ═══ [v1.93.15] `Authorization: Bearer <jwt>` — ĐÚNG CÁCH EXT XÁC THỰC PANCAKE ═══
-     * ext 0.5.62:
-     *   class Yi{ constructor(e,t){ …, this.apiBase=t } url(e){ return `${this.apiBase}${e}` }
-     *             headers(e={}){ return {...e, Authorization:`Bearer ${cn(...)}`} } }
-     *   vc = async(n,e) => (await chrome.cookies.getAll({url:n, name:"jwt"})).find(s=>s.hostOnly&&s.value)?.value
-     *   Ne = (n,e) => { if (!(n instanceof Yi)) throw new Error("missing_pancake_session");
-     *                   return { url:n.url(e), headers:n.headers() } }
-     *   Ce = async(n, e, t={}, a={}) => la(n, {method:"POST",
-     *          headers:{...a.headers, "Content-Type":"application/json"}, body:e, params:t}, …)
-     * ⇒ mọi call Pancake của ext đi bằng **Bearer jwt từ cookie**, KHÔNG bằng `?access_token=`.
-     * `rescue_mode_inbox` là một trong số đó. Khi truyền `authHeader` thì KHÔNG thêm
-     * `access_token` vào query nữa (đúng hình dạng request của ext). */
-    if (swUrl && !_authHdr && !/[?&]access_token=/.test(swUrl)) {
+    if (swUrl && !/[?&]access_token=/.test(swUrl)) {
       const tok = getToken() || 'cookie_session';
       swUrl += (swUrl.indexOf('?') > -1 ? '&' : '?') + 'access_token=' + encodeURIComponent(tok);
     }
     return extCall({
       type: 'BOTFAKE_BG_FETCH',
       url: swUrl,
-      headers: (reqOpts && (reqOpts.headers || _jwtHeaders)) || null,
-      authMode: _authHdr === 'jwt' ? 'jwt' : null,
       tries: tries || 3,
       method: (reqOpts && reqOpts.method) || 'GET',
       bodyObj: (reqOpts && reqOpts.bodyObj) || null,
@@ -2763,34 +2603,6 @@
     wsHit: 0, extHit: 0, extUnknown: 0, unknown: 0, batchMappings: 0,
     batchReturned: 0, batchFail: 0, extRespondedNoGid: 0, gateSkip: 0,
     shortNoGidWait: 0,
-    /* [v1.93.13] ext TÌM ĐƯỢC thread nhưng `isThreadCorrect()` sai ⇒ `Ee.init()` reject
-     * "INCORRECT THREAD". Tách khỏi `extUnknown` (im lặng) để đọc đúng sức khoẻ làn Ext. */
-    extIncorrectThread: 0,
-    /* [v1.93.14] ĐỌC LỊCH SỬ TRỰC TIẾP TỪ FB qua `LOAD_FACEBOOK_MESSAGES`:
-     * `fbDirectMessages` = số lần lệnh trả được danh sách tin;
-     * `fbDirectSavedGid` = số lần lấy được `globalId` từ chính phản hồi đó (nguồn gid THẬT,
-     * không phụ thuộc `ENABLE_FIND_THREAD_BY_USERNAME`, không cần 4 nguồn `Ee.init`). */
-    fbDirectMessages: 0, fbDirectSavedGid: 0,
-    /* [v1.93.15] Số lần gửi `globalUserId` cho `LOAD_FACEBOOK_MESSAGES` để ext KHỎI tự dò gid
-     * (`He.getGlobalId()` trả `this.globalId` ngay). App thật KHÔNG làm được điều này vì gửi
-     * sai tên trường (`globalId` thay vì `globalUserId`). */
-    fbDirectGidSkippedResolve: 0,
-    /* [v1.93.15] Số ca THIẾU `updated_at`. Với các ca này `conversationUpdatedTime` phải lùi 1 ngày
-     * (xem chú thích ở `updMs`), vì nó là `before` của `findThread` chứ không phải mốc lọc. */
-    updMissing: 0,
-    /* [v1.93.15] Số ca được `sync_missing_thread_id` trả về `thread_id` thật ⇒ mở lại được
-     * nguồn gid ①②③ của `Ee.getGlobalIdFromInbox` (trước đó cả 3 đều không chạy vì thiếu threadId). */
-    threadIdSynced: 0,
-    /* [v1.93.15] Số ca `sync_missing_thread_id` CỨU ĐƯỢC thật (có gid sau khi chạy lại vòng dò).
-     * Đây là thước đo trực tiếp của nhóm `HTTP không có gid 56`. */
-    threadIdSyncSaved: 0,
-    /* [v1.93.15] Số ca BỎ lệnh gửi vì KHÔNG có `thread_id` — đúng hợp đồng app
-     * (`errorMessage:"noThreadIdFound"`). Ca này CHẮC CHẮN chưa gửi. */
-    noThreadIdFound: 0,
-    /* [v1.93.15] Số lần GỬI `REPLY_INBOX_PHOTO` mà KHÔNG có `globalUserId` — đúng như app
-     * (`sendInbox`: `if (platform === "facebook" && !i) getGlobalUserId(...).then(… sendInbox)`).
-     * Trước đây nhóm này bị cổng `gidGateSkipExt` chốt ❌ (168 dòng log) trước khi gửi. */
-    extThreadOnlySent: 0,
   };
   function resetGidStats() {
     Object.keys(gidStats).forEach((k) => { gidStats[k] = 0; });
@@ -3355,35 +3167,26 @@
      *   case"UPLOAD_INBOX_PHOTO":  ae.startCheck(_, D);          // D() gửi, D(s) = switch profile rồi gửi
      *   case"SEND_COMMENT":        ae.startCheck(pageId, _, !0, !0);
      *
-     *   static startCheck(e, t, a = !0, r = !1) {   // e=pageId  t=hàm gửi  a=confirmProfile
-     *     const s = () => { ae.startCheck(e, t, a, !0) };      // lần 2: r = true
-     *     r ? (new ae(e, a).init().then(…).catch(…).finally(t))  // ĐỔI PROFILE → rồi mới gửi
-     *       : t(s);                                             // GỬI NGAY, không đổi profile
+     *   static startCheck(e, t, a = !0, r = !1) {   // e=pageId  t=hàm gửi
+     *     const s = () => ae.startCheck(e, t, a, !0);   // retry KHÔNG kèm cờ r
+     *     r ? new ae(e, a).init().then(()=>{}).catch(()=>{}).finally(t)   // ← BỎ QUA KẾT QUẢ
+     *       : t(s);
      *   }
      *
-     * ═══ [v1.93.15] ĐÍNH CHÍNH — bản v1.93.8 viết NGƯỢC nhánh `r` ═══
-     * Bản cũ ghi: "`SEND_COMMENT` truyền `!0,!0` ⇒ lần 1 đi `new ae(...).init().finally(t)`".
-     * Đúng ra: `!0,!0` ⇒ `r = true` ⇒ **lần 1 LÀ đổi profile** (`.finally(t)` gửi SAU khi đổi).
-     * `UPLOAD_INBOX_PHOTO` gọi `ae.startCheck(_, D)` = `(e=pageId, t=D, a=!0, r=!1)` ⇒ **KHÔNG
-     * đổi profile** ở lần 1, chỉ `t(s)`.
-     * ⇒ Câu "`UPLOAD_INBOX_PHOTO` KHÔNG switch profile nên ảnh đi nhánh này" đúng KẾT LUẬN,
-     *   nhưng lý do phải là "vì `r = false`", không phải "vì `D()` rỗng".
+     * Hệ quả (đo được bằng code, không suy đoán):
+     *  a) `new ae(pageId, confirmProfile=true).init()` = **đổi profile Facebook sang page**.
+     *     `checkValidProfile()` đọc `business.facebook.com`; nếu `confirmProfile && !currentProfile.id`
+     *     (handler fanpage / HTML đổi cấu trúc / 429 / ≥500) ⇒ `switchNoResponse = true; return`
+     *     ⇒ `switchResult` KHÔNG BAO GIỜ được gán ⇒ `finally(t)` chạy `t(s)` với cờ `r = true`
+     *     ⇒ lần 2 cũng chỉ `init()` rồi `finally(t)` ⇒ **KHÔNG BAO GIỜ GỬI BÌNH LUẬN**,
+     *     mà `t` (là hàm gửi) vẫn được gọi nên nếu `t` là hàm "gửi + báo kết quả" thì có thể
+     *     báo SAI. Đây là lý do phải đọc kết quả thật trước khi tin.
      *
-     * HỆ QUẢ ĐÚNG (đọc theo `class ae` thật):
-     *  a) `new ae(pageId, confirmProfile).init()` → `checkValidProfile()`:
-     *       - `status >= 500 || status === 429` ⇒ `switchNoResponse = true; return`  (KHÔNG đổi)
-     *       - `confirmProfile && !currentProfile.id`   ⇒ `switchNoResponse = true; return`  (KHÔNG đổi)
-     *       - `currentProfile.id !== pageId`           ⇒ `switchProfile(a, profiles)`    (ĐỔI)
-     *       - bằng nhau                                ⇒ `switchResult = "not_needed"`
-     *     **`.finally(t)` chạy `t` TRONG MỌI TRƯỜNG HỢP**, kể cả khi `init()` reject.
-     *  b) ⇒ Với `UPLOAD_INBOX_PHOTO` (`r=false`): `s()` = `startCheck(e,t,a,true)` ⇒ nếu lần 1
-     *     thất bại và `D(s)` gọi `s()`, lần 2 SẼ đổi profile rồi `t` lại. Nhưng `D` **không gọi
-     *     `w`** ở nhánh thành công và chỉ gọi `w`/`_FAILURE` khi lỗi ⇒ **1 lần upload** trong
-     *     thực tế, trừ khi `le(pageId)` reject *sau* khi đã upload thành công (hiếm).
-     *  c) Với `SEND_COMMENT` (`r=true`): ext **luôn đổi profile trước khi gửi** ⇒ nếu đang ở
-     *     profile khác page, việc đổi làm chậm mỗi bình luận và có thể thất bại theo (a).
-     *     Nhưng `.finally(t)` nghĩa là **`t` vẫn chạy** ⇒ vẫn có lần gửi thật, kết quả do `t`
-     *     quyết định (`SEND_COMMENT_SUCCESS`/`_FAILURE`) — script đọc đúng chỗ đó.
+     *  b) `getProfileSetting()` dùng `G(html, '{"require":…RelayPrefetchedStreamCache…')`;
+     *     nếu HTML không còn khối đó ⇒ `t = []` ⇒ `currentProfile = {}` ⇒ rơi đúng vào (a).
+     *
+     *  c) `UPLOAD_INBOX_PHOTO` gọi `D()` (rỗng) ⇒ KHÔNG switch profile; chỉ ảnh bình luận
+     *     đi nhánh này. ⇒ Câu "mất globalId" là **của nhánh upload ảnh**, không phải nhánh gửi.
      *
      * Vì vậy KHÔNG được coi "không có res.success" là "không rõ" một cách mù quáng:
      * `res.data` là `undefined` ⇒ extension KHÔNG hề báo gửi xong (nó chỉ switch profile rồi
@@ -3471,10 +3274,6 @@
     if (opts.forceCtx7) ctx7 = true;
 
     const items = normalizePhotoItems(photo);
-    /* [v1.93.15] `content_ids` THẬT của lần gửi này — dùng lại cho `contents/touch` cuối lô
-     * (HAR: body `{"content_ids":["f22adca4-…"]}`, KHÔNG phải mảng rỗng).
-     * Chỉ là id Pancake cấp cho ảnh (đã có sẵn trong `photo.items`), không tạo gì mới. */
-    const contentIdsForTouch = items.map((x) => x.id).filter(Boolean);
     if (items.length > 1) {
       const fbIds = (Array.isArray(photo.fbIds) && photo.fbIds.length >= items.length)
         ? photo.fbIds.slice(0, items.length)
@@ -3497,7 +3296,7 @@
       // code app: 24 ca thiếu cờ = chat ngoài cửa sổ. Gửi cờ khi không đủ điều kiện là bịa
       // thêm dữ liệu server không mong đợi ⇒ trả lại hành vi gốc của app.
       if (ctx7) jsonBody.is_record_ctx_7_days = true;
-      return { url: url, isJson: true, jsonBody: jsonBody, ctx7: ctx7, contentIds: contentIdsForTouch };
+      return { url: url, isJson: true, jsonBody: jsonBody, ctx7: ctx7 };
     }
 
     const fd = new FormData();
@@ -3516,7 +3315,7 @@
       if (p0.h) fd.append('height', String(p0.h));
     }
     fd.append('send_by_platform', 'web'); // request thật của app luôn có (cả text lẫn ảnh)
-    return { url: url, fd: fd, isJson: false, ctx7: ctx7, contentIds: contentIdsForTouch };
+    return { url: url, fd: fd, isJson: false, ctx7: ctx7 };
   }
 
   // ⚡ CHẾ ĐỘ NHANH: bắn request API qua cổng điều tiết apiSendLane (64 luồng HTTP song song),
@@ -3681,16 +3480,6 @@
             const statusKey = String(Number(response.status) || 0);
             sendDiag.apiStatusCounts[statusKey] = (sendDiag.apiStatusCounts[statusKey] || 0) + 1;
             if (Number(response.status) === 429) sendDiag.api429++;
-            /* [v1.93.15] Gom `content_ids` của ảnh vừa gửi ĐƯỢC (2xx) để `contents/touch`
-             * cuối lô có id THẬT (HAR: `{"content_ids":["f22adca4-…"]}`) thay vì mảng rỗng.
-             * Chỉ 2xx mới ghi: 4xx/5xx ⇒ ảnh không lên ⇒ touch cũng vô nghĩa. */
-            try {
-              const st = Number(response.status) || 0;
-              if (st >= 200 && st < 300 && req && Array.isArray(req.contentIds) && req.contentIds.length) {
-                rememberTouchIds(pageId, req.contentIds);
-                try { if (conv) conv.__sentContentIds = req.contentIds.slice(); } catch (eC) { /* ignore */ }
-              }
-            } catch (eRT) { /* ignore */ }
           }
           return response;
         } finally {
@@ -3804,26 +3593,14 @@
          * hiện không có mặt", vẫn được bù Socket rồi Ext, rồi đánh ✅. Chỉ ghi sổ khi lỗi là
          * DỨT KHOÁT (`isDefinitiveNotSent` — hàm có sẵn: #551 / ngoài 24h / #10 kiểm soát thread
          * / #100 không tồn tại). Lỗi tạm thời KHÔNG ghi ⇒ vẫn bù bình thường như cũ. */
-        /* [v1.93.13] ĐÃ THỬ chốt ❌ ngay khi API trả #551 — ĐO LẠI THÌ SAI, GIỮ NGUYÊN ĐƯỜNG CŨ.
-         * 414 dòng `⚠ … API từ chối ((#551) Người này hiện không có mặt.)` trên 30 log nghe như
-         * "FB nói dứt khoát", nhưng đó là log TRUNG GIAN, không phải trạng thái cuối.
-         * Đối chứng sổ kiểm chứng: 380 tên ca từng bị #551, trong đó **29 ca ĐƯỢC CỨU THẬT**
-         * (7,6 %) — vd log 17/11 16:27, conv `769625892902516_28615693248109700` (Hà Hồ):
-         *   16:15:41 ⚠ API từ chối ((#551) Người này hiện không có mặt.)
-         *   16:20:30 ✅ bù THÀNH CÔNG qua Extension     ← sổ ghi "kênh ext"
-         * ⇒ #551 là câu trả lời của KÊNH API (endpoint messaging/send/), KHÔNG phải bản án cho
-         *   khách: Extension đi qua tab Facebook thật vẫn gửi được. Chốt ❌ ở đây là MẤT TIN.
-         * Giữ nguyên: vẫn bù kênh khác như cũ. Ghi lại để lần sau không "tối ưu" lại lần nữa. */
-        const _definite = isDefinitiveNotSent(msg);
-        if (_definite) noteFbRejected(conv.id, 'API từ chối: ' + clip(msg, 70));
+        if (isDefinitiveNotSent(msg)) noteFbRejected(conv.id, 'API từ chối: ' + clip(msg, 70));
         logLine('⚠ ' + nm + ' — API từ chối (' + clip(msg, 90) + ')'
           + (win ? ' — ngoài cửa sổ 24h' : ''));
-        /* [v1.93.17] `definitiveNotSent` ⇒ API đã DỨT KHOÁT chưa nhận ⇒ bù ngay, khỏi cổng 10 s. */
         scheduleBuRetry(conv, text, photo, nm, 'API từ chối (' + clip(msg, 90) + ')', ['api'],
-          { ambiguous: true, definitiveNotSent: _definite, via: 'api', sentAt: Date.now() });
+          { ambiguous: true, via: 'api', sentAt: Date.now() });
       } else {
         sendDiag.apiUnknown++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'API không rõ: ' + clip(msg, 60));
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
         logLine('⚠ ' + nm + ' — không rõ kết quả (' + msg + ') — kiểm chứng lịch sử trước khi bù');
         scheduleUncertainVerify(conv, text, photo, Date.now(), msg);
       }
@@ -3835,14 +3612,14 @@
         && String(laneRes.error || '').indexOf('Lỗi kênh:') === 0
         && !deliveredIds[conv.id] && !finalFailedIds[conv.id] && !uncertainIds[conv.id]) {
         sendDiag.apiUnknown++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'API không rõ (lỗi mạng/quá hạn)');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
         logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng/quá hạn) — kiểm chứng lịch sử trước khi bù');
         scheduleUncertainVerify(conv, text, photo, Date.now(), 'lỗi mạng/quá hạn');
       }
     }).catch(() => {
       if (myRun !== runSeq) return;
       sendDiag.apiUnknown++;
-      if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'API không rõ (lỗi mạng)');
+      if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
       logLine('⚠ ' + (conv.name || conv.id) + ' — không rõ kết quả (lỗi mạng) — kiểm chứng lịch sử trước khi bù');
       scheduleUncertainVerify(conv, text, photo, Date.now(), 'lỗi mạng');
     });
@@ -4030,12 +3807,6 @@
     if (/kiểm soát thread|đang kiểm soát/i.test(m)) return true;                             // (#10) 2018300
     if (/1545012|Đã xảy ra lỗi tạm thời/i.test(m)) return true;                              // transientError:1
     if (/(#100)|Không tìm thấy người dùng/i.test(m)) return true;                            // người dùng không tồn tại
-    /* [v1.93.15] `noThreadIdFound` — ĐÚNG hợp đồng app: app KHÔNG hề gọi Extension khi thiếu
-     * `thread_id` (`executeByExtOnce`: `if (k || (k = await eF(...)), !k && !isIGD) return
-     * { success:!1, errorMessage:"noThreadIdFound" }`). Vì script tự bỏ lệnh TRƯỚC khi gửi,
-     * đây là bằng chứng DƯƠNG rằng chưa có lệnh nào tới ext ⇒ `sent:false` là CHẮC CHẮN,
-     * không phải suy đoán ⇒ cùng nhóm "dứt khoát chưa gửi", không cần cổng 10 s. */
-    if (/noThreadIdFound/i.test(m)) return true;
     return false;
   }
 
@@ -4211,67 +3982,6 @@
   // window.findGlobalIdForConv của Pancake trả null cho CẢ Extension mất kết nối,
   // adapter success:false, thiếu data.globalId và exception. Vì vậy null của khâu
   // dò chỉ có nghĩa "CHƯA RÕ", tuyệt đối không phải bằng chứng khách khóa nick.
-  /* ═══ [v1.93.15] `sync_missing_thread_id` — BỔ SUNG `thread_id` TRƯỚC KHI DÒ GID ═══
-   * ĐẶT Ở ĐÂY (ngoài `resolveGlobalId`) là BẮT BUỘC: `threadId` là **tham số** của
-   * `resolveGlobalId`, đã chốt lúc gọi ⇒ mọi nhánh bên trong đều dùng giá trị cũ. Đặt khối
-   * "nếu thiếu threadId thì sync" BÊN TRONG hàm đó là **mã chết** (đã mắc và đã sửa).
-   *
-   * Vì sao cần — nguồn `0.5.62_0/assets/background.js`, `Ee.getGlobalIdFromInbox`:
-   *   nguồn ① `Jt`: `O.get(Jt) && this.threadId`
-   *   nguồn ② `Zt`: `O.get(Zt) && t.cquick_token && this.threadKey`
-   *   nguồn ③ `findThread`: `O.get(rt,st) && (this.threadId || this.customerName)`
-   * ⇒ Thiếu `threadId` thì ① không chạy, ② không chạy, ③ chỉ còn `customerName`.
-   *
-   * VÀ ĐÂY LÀ CHỖ CHẾT NGƯỜI — `Ee.init()` sau khi lấy được kết quả luôn kiểm:
-   *   const o = bn(this.pageId) === true;
-   *   if (this.convType === "INBOX" && !this.isThreadCorrect(i) && !o)
-   *       return t("INCORRECT THREAD");
-   * với `isThreadCorrect(e){ return Array.isArray(e)||(e=[e]),
-   *         e.length === 0 || e.every(t=>!t) || !this.threadId ? false : e.includes(this.threadId) }`
-   * ⇒ `!this.threadId` ⇒ **false** ⇒ **reject `INCORRECT THREAD`** NGAY CẢ KHI nguồn ④ vừa
-   *   tìm ra thread đúng. Tức là: hội thoại thiếu `thread_id` thì extension **vĩnh viễn**
-   *   không trả được gid, dù dò ra thread. Đây là lý do nhóm `INCORRECT THREAD` và nhóm
-   *   "không có gid" trùng nhau rất nhiều.
-   *
-   * `sync_missing_thread_id` trả đúng `{thread_id, thread_key}` để lấp chỗ đó.
-   * Bằng chứng HAR `guisot.har` (2 lần, HTTP 200):
-   *   → {"success":true,"thread_id":"1474059909116660","thread_key":"t_1597054761634327"}
-   *
-   * Hàm này CHỈ ĐỌC (GET), 1 lần/hội thoại/phiên, không throw. */
-  async function ensureThreadId(full, conv, pageId) {
-    try {
-      let threadId = (full && (full.thread_id || full.threadId)) || '';
-      /* App gọi `eF(page_id, convId)` VÔ ĐIỀU KIỆN ở mỗi lần gửi:
-       *   executeByExtOnce(e){ let k = w.thread_id; if(k || (k = await eF(w.page_id, w.id)), …) }
-       * Nhưng `syncMissingThreadId` của chính app CHỈ làm gì đó khi `n.success && n.thread_id`
-       * ⇒ gọi lại với hội thoại ĐÃ có thread_id là **1 request thừa**.
-       * Script chọn: có rồi thì KHÔNG gọi (khác app ở đây là CÓ CHỦ Ý — tiết kiệm 1 request/ca
-       * ở lô 10 000; app gọi vì app chạy 1 ca/lần người dùng). Ghi rõ để không ai "sửa" thành
-       * gọi vô điều kiện. */
-      if (threadId) return { threadId: String(threadId), source: 'conv' };
-      const cid = (full && (full.id || full.convId)) || (conv && conv.id) || '';
-      /* Ưu tiên hàm của app nếu trang có (nó tự dispatch setThreadId + xoá cache gid sai),
-       * fallback về bản của script (gọi trực tiếp endpoint). */
-      let tid = null;
-      if (typeof window.__syncMissingThreadId__ === 'function') {
-        try { tid = await window.__syncMissingThreadId__(pageId, cid); } catch (e0) { tid = null; }
-      }
-      if (!tid) {
-        const synced = await syncMissingThreadId(pageId, cid);
-        if (synced && synced.threadId) {
-          if (full) { full.thread_id = synced.threadId; full.thread_key = synced.threadKey; }
-          if (conv) { conv.threadId = synced.threadId; conv.threadKey = synced.threadKey; }
-          return { threadId: String(synced.threadId), source: 'sync' };
-        }
-        return { threadId: '', source: 'none' };
-      }
-      if (full) full.thread_id = String(tid);
-      if (conv) conv.threadId = String(tid);
-      try { gidStats.threadIdSynced++; } catch (e1) { /* ignore */ }
-      return { threadId: String(tid), source: 'app' };
-    } catch (e) { return { threadId: '', source: 'error' }; }
-  }
-
   async function resolveGlobalId(full, threadId, cacheKey, convFromPsid, forceFind, ctx) {
     const key = (full && full.id) || cacheKey;
     const pageId = (full && full.page_id) || (full && full.pageId) || String(cacheKey || '').split('_')[0];
@@ -4447,45 +4157,9 @@
     const custName = (full && full.from && (full.from.name || full.from.username))
       || (full && (full.customerName || full.name)) || '';
     const rawUpd = String((full && (full.updated_at || full.updatedAt)) || '');
-    /* ═══ [v1.93.15] THIẾU `updated_at` THÌ **KHÔNG** DÙNG `Date.now()` ═══
-     * ĐO ĐƯỢC trên app THẬT (`_app-…v6.js`) — MỌI lời gọi đều dùng `Date.parse(updated_at + "Z")`,
-     * KHÔNG có chỗ nào fallback về giờ hiện tại:
-     *   MAKE_MESSENGER_LINK   conversationUpdatedTime: Date.parse("".concat(e.updated_at,"Z")), uiVersion: n.facebookUiVersion || 6
-     *   GET_PROFILE_LINK      conversationUpdatedTime: Date.parse("".concat(f.updated_at,"Z"))
-     *   LOAD_FACEBOOK_MESSAGES conversationUpdatedTime: Date.parse("".concat(t.updated_at,"Z"))
-     *   BLOCK_FACEBOOK_USER   … Date.parse("".concat(r.updated_at,"Z"))
-     *   REACT_MESSAGE         … Date.parse("".concat(u.inserted_at,"Z")), Date.parse("".concat(o.updated_at,"Z"))
-     *   (còn @961519, @891666)
-     *
-     * VÌ SAO `Date.now()` LÀ SAI NGHIÊM TRỌNG — nguồn `0.5.62_0/assets/background.js`:
-     *   `Ee.getGlobalIdFromInbox()` nguồn ③:
-     *      const u = await this.findThread({ customerName, threadId,
-     *                       graphQLInstance:a, timeCursor: this.conversationUpdatedTime + 6e4 });
-     *   `findThread(e)`:
-     *      const { threadId:t, customerName:a, …, timeCursor:s, count:o=0, category:c="main" } = e;
-     *      … graphqlbatch({ timeCursor: s }), query_params:{ limit: Cn(=20), tags:f, before: s, … }
-     *   ⇒ `conversationUpdatedTime + 6e4` là **`before`** của danh sách thread — một con trỏ lùi
-     *     về quá khứ, KHÔNG phải "mốc thời gian để lọc".
-     *   ⇒ Thiếu `updated_at` mà gửi `Date.now()` thì `before` = **bây giờ** ⇒ danh sách chỉ còn
-     *     thread mới hơn "bây giờ" ⇒ **rỗng** ⇒ `findThread` trả `null` ⇒ mất **nguồn gid ③**.
-     *     Đây là nguồn DUY NHẤT còn lại khi `Jt`/`Zt` thất bại (2 nguồn đầu cần `threadId`+`cquick_token`
-     *     và thường xuyên fail) ⇒ ca thiếu `updated_at` **mất luôn khả năng dò gid**.
-     *
-     * NAY: thiếu `updated_at` ⇒ `updMs = NaN` ⇒ payload **KHÔNG kèm** `conversationUpdatedTime`
-     * (các chỗ gửi đã có `isNaN(updMs) ? Date.now() : updMs` — nay đổi thành bỏ hẳn trường).
-     * Ext thấy `undefined` ⇒ `undefined + 6e4 = NaN` ⇒ `before: NaN`… KHÔNG được: phải có giá trị.
-     * ⇒ Dùng mốc **XẤP XỈ NHƯNG HỢP LỆ**: lấy `updated_at` từ bản ghi khác của cùng hội thoại
-     *   nếu có; nếu không có thì dùng `Date.now()` **nhưng đánh dấu** để không phát ngôn sai
-     *   (`gidStats.updMissing++`) — và `before` lùi 1 ngày để KHÔNG cắt mất thread cũ:
-     *   `Date.now() - 864e5`. Lùi về quá khứ là AN TOÀN (chỉ lấy thêm), tiến về tương lai mới mất. */
-    const updParsed = rawUpd ? Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawUpd) ? rawUpd : rawUpd + 'Z') : NaN;
-    if (isNaN(updParsed)) { try { gidStats.updMissing++; } catch (eUM) { /* ignore */ } }
-    /* `- 864e5` chỉ áp cho ca THIẾU mốc: `before` lùi 1 ngày ⇒ danh sách thread RỘNG hơn,
-     * không bao giờ cắt mất thread cần tìm. Ca có mốc thì giữ nguyên `updated_at`. */
-    const updMs = isNaN(updParsed) ? (Date.now() - 864e5) : updParsed;
+    const updMs = rawUpd ? Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(rawUpd) ? rawUpd : rawUpd + 'Z') : Date.now();
     const hasExtFinder = typeof window.findGlobalIdForConv === 'function'
       || !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
-
 
     // Giải phóng nhánh WebSocket NGAY LẬP TỨC ở 0ms khi nhánh Extension đã kết thúc (tránh giữ chân worker),
     // nhưng giữ PENDING_MESSAGES[pKey] sống hết chu kỳ 30s để MqttHelper.loadThread (@825088) không bị cắt ở trang 1!
@@ -4515,8 +4189,6 @@
     const wsWaitMs = hasExtFinder ? extWaitMs : (shortNoGidWait ? GID_NOGID_SHORT_WAIT_MS : 6000);
     const extStartDelayMs = discoveryPass === 2 ? 0 : 80;
     const raceTasks = [];
-
-
 
     // Nhánh 1: WebSocket PENDING_MESSAGES + wakingUpLoadThread + wsPoll 60ms (bắt ngay global_id ở <60ms khi loadThread về,
     // giữ PENDING_MESSAGES[pKey] tối đa 30s khớp findGlobalId @823397 trong _app để loadThread cuộn đủ 15 trang!)
@@ -4675,106 +4347,27 @@
         const tryMessengerLink = () => {
           const adapter = window.__ExtensionAdapter__;
           if (settled || !adapter || typeof adapter.send !== 'function') { finishExt(null, 'ext'); return; }
-          /* ═══ [v1.93.15] ĐỦ 9 TRƯỜNG — `k_.getGlobalId()` ĐẨY HẾT VÀO `Ee` ═══
-           * ext `class k_` (case MAKE_MESSENGER_LINK):
-           *   constructor({pageId, threadId, threadKey, isBusiness, uiVersion, globalId,
-           *                conversationUpdatedTime, customerName, platform, convId})
-           *   getGlobalId(){ return this.globalId ? Promise.resolve(this.globalId)
-           *     : new Ee({pageId, postId:null, convId:this.convId, convType:"INBOX",
-           *               threadId:this.threadId, threadKey:this.threadKey,
-           *               isBusiness:this.isBusiness,
-           *               conversationUpdatedTime:this.conversationUpdatedTime,
-           *               customerName:this.customerName}).init() } }
-           * Thiếu trường nào là **mất một nguồn dò** của `Ee.getGlobalIdFromInbox`:
-           *   • thiếu `threadKey`      ⇒ mất nguồn ② (`Zt` cần `threadKey` + `cquick_token`)
-           *   • thiếu `customerName`   ⇒ mất nguồn ④ (`getUserInboxByName`) VÀ nhánh khớp tên
-           *                              của `findThread` (nguồn ③)
-           *   • thiếu `conversationUpdatedTime` ⇒ `timeCursor` sai ⇒ danh sách thread của nguồn ③
-           *                              rỗng (xem §32 — đây là con trỏ LÙI)
-           * Script cũ chỉ gửi `pageId, convId, threadId` ⇒ nhánh 3|4|6|7 (nhánh DUY NHẤT trả
-           * `globalId`) gần như luôn thất bại ⇒ `MAKE_MESSENGER_LINK` chỉ còn tác dụng lấy link.
-           *
-           * `platform: 'facebook'`: `k_.init()` `switch(this.platform)` — THIẾU trường này thì
-           * `switch(undefined)` rơi ra ngoài ⇒ trả `undefined` ⇒ `…SUCCESS` không bao giờ tới ⇒
-           * adapter hết hạn. Script cũ KHÔNG gửi `platform` ⇒ đây là lỗi thứ hai.
-           *
-           * `isBusiness: true` — ext dùng để chọn host ở nhánh 1|2|5
-           * (`e===5 ? "web.facebook.com" : this.isBusiness ? "business.facebook.com" : "facebook.com"`). */
           Promise.resolve().then(() => adapter.send({
             type: 'MAKE_MESSENGER_LINK',
             pageId: pageId,
             convId: key,
             threadId: threadId,
-            threadKey: (full && (full.thread_key || full.threadKey)) || ('t_' + threadId),
-            isBusiness: true,
-            platform: 'facebook',
-            conversationUpdatedTime: updMs,
-            customerName: custName,
-            /* ═══ [v1.93.14] BỎ `uiVersion: 6` CỨNG — ĐỂ EXT TỰ DÒ ═══
-             * Nguồn `0.5.62_0/assets/background.js`:
-             *   class k_{ async handleFacebook(){ const e = this.uiVersion || await za.get(this.pageId);
-             *     switch(e){ case 1: case 2: case 5: → { link }                       // chỉ trả link
-             *                case 3: case 4: case 6: case 7: → getGlobalId().then(…{link, globalId}) } } }
-             * `za` = `self.PageFacebookUIVersion` (class Jc): `get(e)` đọc cache
-             * (`fb_ui_version`, TTL `wl = 6048e5` = 7 ngày), không có thì `new Xc({pageId}).init()`
-             * — tự `GET` 1 trong 7 URL của `makeUrl()` để nhận ra UI version của page.
-             *
-             * Script cũ gửi CỨNG `6` cho MỌI page ⇒ page thật là 1/2/5 (vẫn còn nhiều) bị ÉP vào
-             * nhánh 6 ⇒ đi `Ee.init()` (≈4 graphql + 2 fetch HTML) trong khi nhánh 1/2/5 CHỈ cần
-             * ghép chuỗi link, KHÔNG cần gid. Đó là một phần vì sao 5 000 ms (nay 14 000 ms)
-             * không đủ và vì sao `MAKE_MESSENGER_LINK` hay hết hạn.
-             *
-             * Bỏ trường này ⇒ `uiVersion` = undefined ⇒ ext TỰ DÒ đúng version của page.
-             * Lệnh này CHỈ ĐỌC (tạo link / dò gid), không gửi tin ⇒ không thể sinh tin trùng.
-             * `globalId: null` giữ nguyên ⇒ ext dò khi cần. */
+            uiVersion: 6,
             globalId: null,
-            conversationUpdatedTime: updMs,   // [v1.93.15] đã xử lý tại nguồn: thiếu mốc ⇒ lùi 1 ngày (xem `updMs`)
+            conversationUpdatedTime: isNaN(updMs) ? Date.now() : updMs,
             customerName: custName,
             platform: 'facebook',
-          /* ═══ [v1.93.13] 5 000 ms LÀ QUÁ NGẮN — `MAKE_MESSENGER_LINK` CŨNG ĐI QUA `Ee.init()` ═══
-           * Nguồn `0.5.62_0/assets/background.js`:
-           *   case"MAKE_MESSENGER_LINK": … new k_({…, uiVersion:b, globalId:v, …}).init()
-           *   k_.handleFacebook(): case 3,4,6,7 ⇒ return this.getGlobalId().then(…)   // KHÔNG phải chỉ tạo link
-           *   k_.getGlobalId(): this.globalId ? resolve : new Ee({convType:"INBOX", …}).init()
-           *   Ee.init() → getGlobalIdFromInbox():
-           *       const t = await le(this.pageId)                       // ① nạp base page
-           *       … && await ee.preloadDocIds({pageId, isBusiness})     // ② fetch HTML + bóc doc_id
-           *       a.graphql(Jt, …)                                      // ③ nguồn 1
-           *       a.graphql(Zt, …) + r() đệ quy                        // ④ nguồn 2 (+đệ quy)
-           *       this.findThread({…}) → graphqlbatch(rt/st)            // ⑤ nguồn 3
-           *       this.getUserInboxByName(a) → fetch HTML + loadDocIds  // ⑥ nguồn 4
-           *   ⇒ tối đa 4 request graphql + 2 lần fetch HTML, MỖI lần đều có retry/nhịp riêng.
-           * 5 000 ms chỉ đủ cho trường hợp `this.globalId` đã có sẵn. Khi phải DÒ THẬT
-           * (đúng nhóm ca khó ta cần nhất) thì gần như chắc chắn hết hạn ⇒ adapter trả
-           * `{success:false, data:null}` ⇒ script coi là "không ra gid" dù ext vẫn đang chạy.
-           *
-           * Trần đúng phải theo hợp đồng adapter: `REPLY_INBOX_PHOTO` ∉ `u`
-           * (`u = Set(["CONFIG_ROUTING_APP","CACHE_PAGES_ROUTING_APP"])`) ⇒ trần chung `l = 3e4`.
-           * Lấy **14 000 ms**: đủ cho 2–3 lượt graphql (đo p90 dò lịch sử ~1,4 s/request ở
-           * `HTTP fetch p50 1461ms`) mà vẫn ngắn hơn trần chung, để không giữ lane Ext quá lâu.
-           * Đây là lệnh CHỈ ĐỌC (trả link + gid), không gửi tin ⇒ chờ lâu hơn KHÔNG thể sinh trùng. */
-          }, { timeout: 14000 })).then((mlRes) => {
+          }, { timeout: 5000 })).then((mlRes) => {
             if (mlRes && mlRes.success && mlRes.data) {
-              /* [v1.93.13] ĐỌC CẢ TOP-LEVEL — cùng lỗi hình dạng như `GET_GLOBAL_ID_FOR_CONV`.
-               * Ext trả: `{type:"MAKE_MESSENGER_LINK_SUCCESS", taskId, link, globalId}`
-               * (k_.handleFacebook: `…, e.port.postMessage({…, link:V, globalId:z})`).
-               * Adapter app bọc `{success, data: n}` ⇒ `mlRes.data.globalId` (đường cũ, đúng).
-               * Adapter RIÊNG (`__botfake`) bọc phẳng `{success, globalId}` ⇒ đọc thêm `mlRes.globalId`.
-               * Và `globalId` có thể là `null`/rỗng khi `uiVersion` rơi nhánh 1|2|5 ⇒ lúc đó mới
-               * phải bóc `selected_item_id` từ `link` (link nhánh đó KHÔNG có selected_item_id,
-               * nên vế sau chỉ có tác dụng với link nhánh 3|4|6|7). */
-              let mlGid = (mlRes.data && mlRes.data.globalId) || mlRes.globalId || '';
-              const mlLink = (mlRes.data && mlRes.data.link) || mlRes.link || '';
-              if (!mlGid && mlLink) {
+              let mlGid = mlRes.data.globalId || '';
+              if (!mlGid && mlRes.data.link) {
                 try {
-                  const qStr = String(mlLink).split('?')[1] || String(mlLink);
+                  const qStr = String(mlRes.data.link).split('?')[1] || String(mlRes.data.link);
                   const sel = new URLSearchParams(qStr).get('selected_item_id');
                   if (sel && /^\d+$/.test(sel)) mlGid = sel;
                 } catch (e3) { /* ignore */ }
               }
-              if (mlGid && String(mlGid) !== badGid && String(mlGid) !== 'null') {
-                finishExt(String(mlGid), 'ext'); return;
-              }
+              if (mlGid && String(mlGid) !== badGid) { finishExt(mlGid, 'ext'); return; }
             }
             finishExt(null, 'ext');
           }).catch(() => finishExt(null, 'ext'));
@@ -4784,56 +4377,12 @@
           threadId: threadId,
           threadKey: (full && (full.thread_key || full.threadKey)) || ('t_' + threadId),
           isBusiness: true,
-          conversationUpdatedTime: updMs,   // [v1.93.15] đã xử lý tại nguồn: thiếu mốc ⇒ lùi 1 ngày (xem `updMs`)
+          conversationUpdatedTime: isNaN(updMs) ? Date.now() : updMs,
           customerName: custName,
           convType: 'INBOX', postId: null, convId: null,
         };
-        /* ═══ [v1.93.13] BẬT `ENABLE_FIND_THREAD_BY_USERNAME` KHI ĐÃ DÒ HẾT NGUỒN ═══
-         * Nguồn `0.5.62_0/assets/background.js`:
-         *   case"ENABLE_FIND_THREAD_BY_USERNAME":{const{pageId:_,isEnabled:g}=r.data;
-         *     const I=`findThreadByUsername_${_}`; self[I]=g;
-         *     e.port.postMessage({type:"ENABLE_FIND_THREAD_BY_USERNAME_DONE",isEnabled:g}); break}
-         * Cờ đó được đọc ở `bn(pageId)` trong `Ee.getGlobalIdFromInbox()`:
-         *   I = x.find(w => w.all_participants.edges.map(n=>n.messaging_actor.name).includes(a))
-         *   ;!I && a && bn(this.pageId) && (I = x.find(...cùng phép khớp TÊN...))
-         * ⇒ Khi cờ BẬT, ext còn thêm 1 nguồn dò: khớp **customerName** với danh sách
-         *   người tham gia thread.
-         *
-         * VÌ SAO ĐÁNG BẬT — đo được (log 22/11 09:54, lô 8 572):
-         *   • `Ext trả không có gid 2` / `lần dò chưa ra 29` / `gate bỏ Ext no-gid 29`
-         *   • 15 ca "thiếu gid" ⇒ 14 ca kết thúc ❌ "Không tìm được global_id để gửi"
-         *     rồi "Không tìm thấy globalId thật cho Socket" ⇒ hết kênh.
-         *   Cả 4 nguồn trước đó (Jt, Zt, rt/st, ge-tìm-theo-tên) đều đã chạy và cùng không ra.
-         *
-         * RỦI RO ĐÃ ĐO VÀ CHẶN: khớp theo TÊN có thể trúng NGƯỜI KHÁC nếu 2 khách TRÙNG TÊN.
-         *   Ext đã chặn 1 lớp: `isThreadCorrect(threadInfoToRecheck)` — phải chứa đúng
-         *   `this.threadId`, nếu không thì `Ee.init()` **reject `"INCORRECT THREAD"`**.
-         *   Nhưng lớp đó SO `threadId`, mà `threadId` có thể bị chính bước dò gán lại
-         *   (`p ? this.threadId = page_comm_item.id : this.threadId ||= …`) ⇒ KHÔNG đủ.
-         * ⇒ Ta chỉ bật khi CẢ 4 nguồn đã cạn (không phải mặc định), và chỉ bật 1 LẦN/page
-         *   (mỗi lần bật = 1 lệnh gửi ext; nó chỉ set một biến trong SW, KHÔNG gửi tin).
-         *   Đây KHÔNG phải đường gửi ⇒ không thể sinh tin trùng. Nếu ext trả gid SAI thì
-         *   tin đi nhầm người — nên ghi log rõ để đối chiếu, và đây là lý do chỉ bật sau
-         *   khi mọi nguồn khác đã cạn (khi đó phương án thay thế là ❌ mất tin). */
-        const enableFindThreadByName = () => {
-          try {
-            const ad = window.__ExtensionAdapter__;
-            if (!ad || typeof ad.send !== 'function') return;
-            const pg = String(pageId || '');
-            if (!pg || nameSearchEnabled.has(pg)) return;
-            nameSearchEnabled.add(pg);
-            ad.send({ type: 'ENABLE_FIND_THREAD_BY_USERNAME', pageId: pg, isEnabled: true },
-              { timeout: 5000 }).catch(() => { /* ignore */ });
-            try {
-              logLine('🧩 [gid] đã bật ENABLE_FIND_THREAD_BY_USERNAME cho page ' + pg
-                + ' (4 nguồn gid đều cạn ⇒ cho ext khớp thêm theo TÊN khách; ext vẫn tự so threadId)');
-            } catch (e0) { /* ignore */ }
-          } catch (e) { /* ignore */ }
-        };
         const onFinderNull = () => {
           if (extSettled) return; // timer đã chốt nhánh này — không phát thêm lệnh Ext
-          /* Cạn nguồn ⇒ bật khớp-theo-tên cho các lần dò sau (1 lần/page). */
-          enableFindThreadByName();
           // MAKE_MESSENGER_LINK là lệnh Ext phụ: chỉ dùng khi lô không lớn.
           // Ở lô lớn/Pass 2, bắn thêm lệnh này cho mọi ca khó làm Extension
           // càng nghẽn (log 5.637: khâu dò Ext không cứu được ca nào nhưng
@@ -4875,34 +4424,14 @@
            * Trước bản này `ensureDocIds()` CHỈ được gọi trong `requestBatchGlobalIds`.
            * Nay gọi đúng 1 lần trước lệnh dò (idempotent, chỉ đọc, 0 request mới). */
           const callExtFinderOnce = () => Promise.resolve()
-            /* [v1.93.13] AWAIT lệnh bảo đảm doc_id. `ensureDocIds` chỉ gửi
-             * PRELOAD_DOC_IDS (không chờ ext xong) rồi trả ngay ⇒ không giữ lane lâu.
-             * `Ee.getGlobalIdFromInbox()` cần `[Jt,Zt,rt,st]`; gửi trước lệnh dò để
-             * ext có cơ hội nạp, thay vì dò trong lúc ext chưa có doc_id. */
-            .then(() => ensureDocIds(finderPayload.pageId).catch(() => null))
+            .then(() => (docIdReady() ? null : ensureDocIds(finderPayload.pageId).catch(() => null)))
             .then(() => adapter.send(
               Object.assign({ type: 'GET_GLOBAL_ID_FOR_CONV' }, finderPayload),
               { timeout: extWaitMs }
             ));
           callExtFinderOnce().then(async (res) => {
-            /* [v1.93.13] ĐỌC ĐÚNG `globalId` TOP-LEVEL CỦA GET_GLOBAL_ID_FOR_CONV_SUCCESS.
-             * Nguồn `0.5.62_0/assets/background.js`:
-             *   case"GET_GLOBAL_ID_FOR_CONV":
-             *     g.init().then(y=>{ y ? e.port.postMessage({type:"GET_GLOBAL_ID_FOR_CONV_SUCCESS",
-             *                       success:!0, globalId:y, taskId:_}) : I() })
-             * ⇒ `globalId` nằm ở **cấp ngoài**, KHÔNG lồng trong `data`.
-             * Adapter của app bọc: `t({success:!0, data:n})` với `n` = nguyên message
-             * ⇒ đường đúng là `res.data.globalId`. Script đã đọc đúng.
-             * Đường ADAPTER RIÊNG `__botfake` (nếu có) lại bọc phẳng `{success, globalId}`
-             * ⇒ phải chấp nhận CẢ HAI. Trước bản này chỉ đọc `res.data.globalId` nên adapter
-             * phẳng trả gid THẬT mà script vẫn coi là "không có gid". */
-            const _gidOf = (r0) => {
-              if (!r0 || !r0.success) return '';
-              const raw0 = (r0.data && r0.data.globalId) ? r0.data.globalId : r0.globalId;
-              const v0 = (raw0 == null) ? '' : String(raw0);
-              return (v0 && v0 !== badGid && v0 !== 'null' && v0 !== 'undefined') ? v0 : '';
-            };
-            let val = _gidOf(res);
+            let val = (res && res.success && res.data && res.data.globalId
+              && String(res.data.globalId) !== badGid) ? String(res.data.globalId) : '';
             if (val) { finishExt(val, 'ext'); return; }
             const hitMid0 = peekFastGlobalId(full, full, badGid);
             if (hitMid0) { finishExt(hitMid0, 'cache'); return; }
@@ -4915,7 +4444,8 @@
               const hitMid1 = peekFastGlobalId(full, full, badGid);
               if (hitMid1) { finishExt(hitMid1, 'cache'); return; }
               const res2 = await callExtFinderOnce().catch(() => null);
-              val = _gidOf(res2);
+              val = (res2 && res2.success && res2.data && res2.data.globalId
+                && String(res2.data.globalId) !== badGid) ? String(res2.data.globalId) : '';
               if (val) { finishExt(val, 'ext'); return; }
               const d2 = res2 && res2.data;
               const errStr2 = (d2 && typeof d2 === 'object') ? String(d2.errorMessage || d2.error || d2.reason || '') : '';
@@ -4924,28 +4454,6 @@
                 extFinderRespondedNoGid = true;
                 if (ctx) ctx.extFinderRespondedNoGid = true;
                 gidStats.extRespondedNoGid++;
-                /* ═══ [v1.93.13] `INCORRECT THREAD` LÀ CÂU TRẢ LỜI RÕ, KHÔNG PHẢI "IM LẶNG" ═══
-                 * `Ee.init()` (0.5.62):
-                 *   if(this.convType==="INBOX" && !this.isThreadCorrect(i) && !bn(this.pageId))
-                 *     return C.error(`FAIL TO GET GLOBAL ID --> INCORRECT THREAD …`),
-                 *            t("INCORRECT THREAD");
-                 *   isThreadCorrect(e){ … e.length===0||e.every(t=>!t)||!this.threadId ? !1
-                 *                          : e.includes(this.threadId) }
-                 * ⇒ ext TÌM ĐƯỢC thread nhưng `threadId` không nằm trong `threadInfoToRecheck`
-                 *   ⇒ "đã dò xong, KẾT QUẢ ÂM có lý do", khác hẳn "không phản hồi".
-                 * Script cũ gộp cả hai vào `finishExt(null)` ⇒ bộ đếm sức khoẻ làn Ext nhận
-                 * một ca "mù" trong khi ext đã trả lời dứt khoát.
-                 * Ca này CŨNG KHÔNG được bật khớp-theo-tên: `isThreadCorrect` chính là lớp
-                 * đang bảo vệ — bật thêm sẽ đúng cái làm nó trượt. */
-                const incorrectThread2 = /INCORRECT THREAD/i.test(errStr2);
-                if (incorrectThread2) {
-                  gidStats.extIncorrectThread = (gidStats.extIncorrectThread || 0) + 1;
-                  try {
-                    logLine('🧩 [gid] Ext trả INCORRECT THREAD (threadId không nằm trong'
-                      + ' threadInfoToRecheck) — câu trả lời RÕ của ext, KHÔNG phải im lặng;'
-                      + ' không bật khớp-theo-tên cho ca này');
-                  } catch (eIT) { /* ignore */ }
-                }
                 // [v1.92.47] ghi vào cầu dao: đóng đường dò Ext khi dồn đủ ca, hoặc khi
                 // CÙNG thread lặp lại "không có gid" (hình dạng lỗi thật trong log console).
                 noteGidFinderNoGid(threadId);
@@ -5119,33 +4627,6 @@
     let sawJustSynced = false;
     while (Date.now() < deadline && !state.stopRequested) {
       const s = helper && helper.SOCKETS && helper.SOCKETS[pageId];
-      /* ═══ [v1.93.19-p2] SOCKET CHƯA TỒN TẠI ≠ SOCKET CHẾT ═══
-       * Bản 1.93.18: `if (!isSocketAlive(s)) return s;` — hàm này ĐƯỢC VIẾT để CHỜ, nhưng
-       * thoát ngay ở vòng lặp ĐẦU TIÊN khi `SOCKETS[pageId]` chưa có (helper.initSocket chưa
-       * kịp tạo, hoặc chính `warmUpSockets` chưa chạy tới page đó).
-       * ĐO ĐƯỢC (log 21:19, 6 676 chat, bản 1.93.18):
-       *   • `⏳ Socket CHƯA sync (0/1 page) sau 17ms` ⇒ vòng chờ kết thúc ở 17 ms, tức nó
-       *     KHÔNG chờ lần nào;
-       *   • `WAVE ... chọn kênh: Ext-trước(socket chưa sync) 625` ⇒ mọi wave đầu lên kế hoạch
-       *     ['ext','socket'] ⇒ Ext trả lời trước ⇒ **625 chat đi Ext trước**, `peak Ext
-       *     queue/active 369/128` ⇒ dồn tải vào làn 128 ghế ⇒ `Ext p90 phản hồi 6,2 s`
-       *     (dòng 🛰) và 14 ca vượt hạn chờ của tool;
-       *   • cùng lô, Socket chỉ nhận 4 770 lệnh nhưng ACK TB 1 936 ms.
-       * NAY: chỉ coi là CHẾT khi `SOCKETS[pageId]` ĐÃ CÓ đối tượng nhưng instance không chạy
-       * (`sock.instance` tồn tại + isRunning() false). Chưa có đối tượng ⇒ CHỜ tiếp tới hạn
-       * (đúng 2 500 ms mà mọi nơi khác đang dùng — không thêm con số mới). Tối đa hoá cơ hội
-       * cả lô đi làn Socket; nếu tới hạn vẫn chưa có thì trả về như cũ (Ext vẫn là đường dự
-       * phòng ⇒ KHÔNG mất tin, chỉ chậm hơn). */
-      /* Chưa có đối tượng ⇒ CHỜ, nhưng CHỈ khi có bằng chứng là socket ĐANG được tạo
-       * (`socketWarmPromises` / `socketReconnectPromises` đang chạy). Không có gì đang chạy
-       * thì giữ nguyên hành vi cũ (trả về ngay) — để một page không có socket KHÔNG bắt mỗi
-       * chat phải đứng chờ 2,5 s. */
-      if (!s) {
-        const inFlight = !!(socketWarmPromises[pageId] || socketReconnectPromises[pageId]);
-        if (!inFlight) return s;
-        await sleepUntil(Math.min(deadline, Date.now() + 25), 'sock-sync');
-        continue;
-      }
       if (!isSocketAlive(s)) return s;
       if (isSocketSynced(s)) {
         if (sawJustSynced) await sleepUntil(Date.now() + 180, 'sock-sync'); // [v1.92.9]
@@ -5586,106 +5067,6 @@
       .catch((e) => ({ ok: false, error: String(e && e.message || e) }));
   }
 
-  /* ═══ [v1.93.16] BIND fbId TRƯỚC KHI CHIẾM SLOT — TÁCH KHỎI ĐƯỜNG GỬI ═══
-   * Xem chú thích dài ở `runMainItem`. Hàm này CHỈ LÀM MỘT VIỆC: xin fbId
-   * (`is_reusable=false`, đúng `class N` của `_app` @882612 với `reusable:!1`) và cất vào
-   * `preBoundFbIds` theo ĐÚNG `conv.id` — để `uploadOneTimePhoto()` trong làn gửi trả về 0 ms
-   * thay vì 1 088 ms.
-   *
-   * ⚠️ ĐÃ TỰ BẮT ĐƯỢC MỘT LỖI TRONG BẢN NHÁP ĐẦU — ĐỪNG "TỐI ƯU" LẠI THEO HƯỚNG ĐÓ:
-   * bản nháp ghi thẳng `photo.fbId/fbIds/items[].fbId`. Nhìn thì tiện, nhưng `sendOne` dùng
-   * `const noApiPhoto = !!(photo && !photo.fbId)` để quyết định TUYẾN KÊNH:
-   * `goDirect = … || noApiPhoto || …`. Đặt `fbId` vào `photo` làm `noApiPhoto` chuyển `false`
-   * ⇒ chat ngoài 24h (đang `dynamicDirect` sang Ext/Socket) bị đẩy sang API trước — đổi hành vi
-   * định tuyến đã đo đạc (và đúng là lý do `photoArg` cố tình mang `fbId` của đường API
-   * `reusable=true`). Vì vậy kết quả pre-bind đi qua MAP RIÊNG, chỉ `sendOne` đọc.
-   *
-   * BA BẤT BIẾN (không được nới, mỗi cái đều là một đường sinh tin sai):
-   *   1) KHÔNG BAO GIỜ dùng fbId của chat A cho chat B: map khoá bằng `conv.id`.
-   *      `recycleUnusedFbId()` vẫn xoá `ctx.nonReusableFbId` như cũ.
-   *   2) KHÔNG ĐỔI semantics `is_reusable`: pre-bind dùng `reusable:false` y như đường gửi.
-   *      (Đường API tự bind `reusable:true` riêng qua `fbIdByPage/apiFbIdsByPage` — không dính.)
-   *   3) LỖI KHÔNG ĐƯỢC THROW, KHÔNG ĐƯỢC CHẶN: bind hỏng thì đánh dấu `__bindFail` và để
-   *      đường gửi cũ tự xử lý. Pre-bind là TĂNG TỐC, không phải một cổng mới.
-   * Vì sao bind lại được ở đây (không phải "của chat khác"): fbId `is_reusable=false` là
-   * `{conv_id, content_id}` — cùng content_id nhưng KHÁC conv_id ⇒ fbId khác nhau. App cũng
-   * bind ngay trước `sendMqtt` cho từng ca; ta chỉ chạy đúng lệnh đó SỚM HƠN, song song. */
-  const preBoundFbIds = new Map(); // convId → { fbId, fbIds, at } (is_reusable=false, đã bind TRƯỚC slot)
-  const PREBOUND_TTL_MS = 180000;
-  /** Lấy fbId đã pre-bind cho ĐÚNG chat này rồi XOÁ (dùng một lần).
-   *  Xoá là CỐ Ý: fbId `is_reusable=false` đã bị bắn một lần thì FB có thể đốt; lần bù/retry
-   *  phải xin bản mới (`forceFresh` vẫn chạy như cũ) ⇒ không bao giờ gửi lại fbId đã dùng. */
-  function takePreBoundFbId(convId) {
-    const k = String(convId || '');
-    if (!k) return null;
-    const v = preBoundFbIds.get(k);
-    if (!v) return null;
-    preBoundFbIds.delete(k);
-    if (!v.fbId) return null;
-    if (Date.now() - (v.at || 0) > PREBOUND_TTL_MS) return null; // quá cũ ⇒ bỏ, để đường gửi tự bind
-    return v;
-  }
-  /** Promise pre-bind của MỘT chat — chỉ tạo một lần, dùng chung cho khâu khởi động wave và
-   *  cho `runMainItem`. `runMainItem` await TRƯỚC `acquireMainSlot()` ⇒ chờ bind mà KHÔNG
-   *  giữ ghế. Đây là điểm khác biệt quyết định so với bản `await` cả wave (xem chú thích ở
-   *  vòng wave: await cả wave thì tổng = Σ(bind + phát)). */
-  function ensurePreBind(conv) {
-    if (!conv || !conv.id || !conv.__photoArg) return Promise.resolve(null);
-    if (conv.__preBindP) return conv.__preBindP; // đã khởi động ở khâu wave ⇒ dùng chung promise
-    /* [W133] KHÔNG cộng `preBindN` ở đây nữa — nó được cộng ĐÚNG MỘT LẦN ở chỗ bind thật
-     * (trong `bindPhotoForConv`, ngay sau khi `uploadOneTimePhoto` trả về). Bản trước cộng cả ở
-     * đây lẫn ở đó ⇒ log 13:53 in `🧷 PRE-BIND ẢNH: 3832 lần` trong khi lô chỉ có 1916 chat ⇒
-     * **luôn gấp đôi**, và mọi kết luận về hiệu quả pre-bind dựa trên số đó đều sai. */
-    conv.__preBindP = Promise.resolve()
-      .then(() => bindPhotoForConv(conv, conv.__photoArg))
-      .catch(() => null);
-    return conv.__preBindP;
-  }
-  async function bindPhotoForConv(conv, photoOverride) {
-    const photo = photoOverride || (conv && conv.__photoArg);
-    if (!conv || !conv.id || !photo) return null;
-    if (photo.__bindFail || photo.__bindDone) return photo.__bindRes || null;
-    const items = normalizePhotoItems(photo);
-    if (!items.length) return null;
-    /* ═══ GUARD ĐÃ SỬA — BẢN ĐẦU TỰ TẮT PRE-BIND Ở ĐÚNG CA CẦN NHẤT ═══
-     * `photoArg` của đường CÂU NHANH mang sẵn `fbIds = apiFbIdsByPage[p]` — đó là fbId
-     * **`is_reusable=true`** bind cho KÊNH API (`sendGroups` bind theo từng page). Log 12:34
-     * chạy đúng đường này ("câu nhanh, 1 ảnh") và vẫn đo `bind fbId 1 088 ms/ca` ⇒ tức
-     * Socket/Ext KHÔNG dùng lại bản reusable ấy mà xin bản `is_reusable=false` riêng
-     * (`uploadOneTimePhoto` chỉ đọc `ctx.nonReusableFbId/FbIds`, không đọc `photo.fbIds`).
-     * Vì vậy guard cũ `photo.fbIds.length >= items.length ⇒ return null` **bỏ qua pre-bind
-     * cho toàn bộ lô câu nhanh** ⇒ bản vá vô hiệu đúng ở ca cần nó nhất.
-     * Nay pre-bind CHỈ dựa trên thứ đường gửi thật sự dùng: `photo.items[].fbId`
-     * (fbId non-reusable đã có sẵn trên từng item, nếu có). */
-    if (items.every((x) => x && x.fbId)) return null;
-    const pageId = conv.pageId || String(conv.id).split('_')[0];
-    if (!pageId) return null;
-    const ctx = conv.__preCtx || (conv.__preCtx = {});
-    /* ĐO ĐÚNG CHỖ NÀY: mỗi lần bind thật (bỏ qua ca đã có fbId / đã bind) ⇒ `preBindN` +1,
-     * `preBindMs` + thời gian. Đây là số "đã dời được bao nhiêu việc ra ngoài ghế", cộng với
-     * `preBindHit` (số ca lấy lại được ở `sendOne`) thành cặp nghiệm thu §48.6. */
-    const _tBind = Date.now();
-    try {
-      const up = await uploadOneTimePhoto(pageId, photo, conv.id, ctx, false);
-      try { waveDiag.preBindN++; waveDiag.preBindMs += Math.max(0, Date.now() - _tBind); } catch (eBD) { /* ignore */ }
-      if (up && up.ok && up.fbId) {
-        const ids = (up.fbIds && up.fbIds.length) ? up.fbIds.slice() : [up.fbId];
-        /* KHÔNG GHI vào `photo` (xem chú thích ở đầu hàm): đặt `photo.fbId` làm `noApiPhoto`
-         * trong `sendOne` chuyển false ⇒ đổi TUYẾN KÊNH (chat ngoài 24h bị đẩy API trước).
-         * Kết quả đi qua map riêng, chỉ `sendOne` đọc để nạp vào `ctx.nonReusableFbId`. */
-        preBoundFbIds.set(String(conv.id), { fbId: ids[0], fbIds: ids, at: Date.now() });
-        photo.__bindDone = true;
-        photo.__bindRes = { ok: true, fbId: ids[0], fbIds: ids };
-        return photo.__bindRes;
-      }
-      photo.__bindFail = true;
-      return null;
-    } catch (e) {
-      photo.__bindFail = true; // rơi về đường cũ (tự bind trong làn gửi)
-      return null;
-    }
-  }
-
   async function sendViaSocket(conv, text, photo, ctx) {
     if (photo && !ctx && typeof photo === 'object' && !photo.url && !photo.id) {
       // tương thích ngược nếu nơi nào gọi sendViaSocket(conv, text, ctx)
@@ -5742,31 +5123,14 @@
     // 1) Giải quyết threadId & globalId TRƯỚC KHI upload ảnh (đúng thứ tự executeBySocketFB @976000 trong _app):
     //    Nếu chat không tìm được globalId thì dừng ngay, không lãng phí 1 lần upload ảnh reusable=false!
     if (!ctx.threadResolved) {
-      /* [v1.93.15] Dùng `ensureThreadId` (thử hàm app TRƯỚC, fallback endpoint của script).
-       * Trước đây chỉ thử `window.__syncMissingThreadId__` — nếu trang KHÔNG có hàm đó
-       * (bundle khác version / chưa expose) thì im lặng bỏ qua, dù endpoint vẫn dùng được. */
-      const _ens = await ensureThreadId(full, conv, pageId);
-      ctx.threadId = _ens.threadId || null;
+      let threadId = full.thread_id || full.threadId;
+      if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
+        try { threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id); } catch (e) { /* ignore */ }
+      }
+      ctx.threadId = threadId || null;
       ctx.threadResolved = true;
-      if (_ens.source === 'sync') { try { gidStats.threadIdSynced++; } catch (e0) { /* ignore */ } }
     }
     const threadId = ctx.threadId;
-    /* ═══ [v1.93.15] APP BỎ SỚM KHI THIẾU `thread_id` — CẢ ĐƯỜNG SOCKET ═══
-     * `_app-…v6.js` @975143:
-     *   async executeBySocketFB(){ … let w = x.thread_id;
-     *     if (w || (w = await eF(x.page_id, x.id)), !w) return {success:!1, errorMessage:"noThreadIdFound"};
-     *     … let e = await this.concurrentlyGetGLobalId("facebook", x, w), N = e?.[1];
-     *     if (!N) return {success:!1, errorMessage:"getGlobalIdFailed"}; … }
-     * Thứ tự hợp đồng: ① `thread_id` (sync nếu thiếu) → ② gid → ③ gửi. Thiếu ① thì DỪNG.
-     * `resolveGlobalId` vẫn "chạy được" với threadId rỗng (nó rơi xuống nguồn ③/④ theo tên),
-     * nên script cũ đi tiếp rồi bắn publish ⇒ FB trả `1545006`/`#551` (đã đo 11 lần trong HAR)
-     * hoặc treo tới hạn ACK — tốn đúng 1 lượt chờ cho một ca CHẮC CHẮN không gửi được.
-     * Nay trả đúng mã của app TRƯỚC khi dò gid. Ca này chắc chắn chưa gửi ⇒ `sent:false`. */
-    if (!threadId) {
-      try { gidStats.noThreadIdFound++; } catch (eNT2) { /* ignore */ }
-      recycleUnusedFbId(pageId, ctx);
-      return { ok: false, sent: false, error: 'noThreadIdFound', noThreadIdFound: true };
-    }
     if (!ctx.gidResolved) {
       ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
       ctx.gidResolved = true;
@@ -5863,8 +5227,7 @@
           ctx.nonReusableFbId = null;
           ctx.nonReusableFbIds = null;
           sendDiag.photoRetry++;
-          const retryPhotoOnly = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp.fbIds && freshPhotoUp.fbIds.length) ? freshPhotoUp.fbIds : [freshPhotoUp.fbId]),
-            null, { onRejected: () => noteFbRejected(conv.id, 'Socket ACK rejected (gửi ảnh bù) = FB từ chối nhận tin') });
+          const retryPhotoOnly = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp.fbIds && freshPhotoUp.fbIds.length) ? freshPhotoUp.fbIds : [freshPhotoUp.fbId]));
           if (retryPhotoOnly && retryPhotoOnly.kind === 'ok') {
             recordSocketGidSuccess();
             return { ok: true, id: gid, sendBy: 'socket', sent: true };
@@ -5964,25 +5327,7 @@
         }
         // Bắn lại đúng 1 lần qua hàng đợi ưu tiên đan xen công bằng (runPrioritySocket) để giải phóng
         // ngay lập tức, không dồn ứ hàng nghìn ca retry ở đuôi lượt mà vẫn không chặn các chat Lần 1!
-        /* ═══ [v1.93.13] ACK rejected Ở LẦN GỬI ĐẦU CŨNG PHẢI GHI `fbRejectedIds` ═══
-         * LỖI THẬT ĐO ĐƯỢC (log 22/11 09:54, lô 8 572 chat):
-         *   SOCKET ACK OK/rejected/no-ACK : 4715 / 3552 / 0
-         *   ⚠ Không rõ: 3 547 · FB báo không nhận (đã đo): 5
-         *   ⇒ 3 552 − 5 = 3 547 — KHỚP CHÍNH XÁC. Toàn bộ 3 547 ca ⚠ là ca
-         *     **ACK rejected ở lần bắn ĐẦU**, không phải ca mất ACK, không phải ca quá hạn.
-         * Gốc: `socketPublishSend(…, opts)` chỉ gọi `onRejected` khi được truyền vào
-         * (`if (!lateMode && onRejected)`), nhưng trong 6 chỗ gọi hàm này chỉ **1 chỗ**
-         * (đường bù, @5759) truyền `onRejected`. Lần bắn ĐẦU (@5363 và đường đồng bộ
-         * @5818) KHÔNG truyền ⇒ FB từ chối mà `fbRejectedIds` không có gì ⇒
-         *   • cổng 🚫 @11445 (`socksProof==='absent' && isFbRejected`) không kích hoạt
-         *     ⇒ 3 547 ca chạy tiếp vào kiểm chứng/đọc lại rồi chốt ⚠ (vào danh sách gửi tay)
-         *   • cổng @5326 (`isFbRejected && !apiRejected551`, chốt ❌ ngay, không thử lần 2) không
-         *     bao giờ chạy cho ca lần-1 ⇒ vẫn thử lần 2 vô ích.
-         * Nay truyền `onRejected` ⇒ FB đã trả lời DỨT KHOÁT "không nhận" thì ghi sổ.
-         * KHÔNG thêm lệnh gửi nào — chỉ BỎ lần thử lại chắc chắn hỏng và chốt ❌ thay ⚠. */
-        raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, attFbIds),
-          null/* firedCb giữ nguyên (xem @5749) */,
-          { onRejected: () => noteFbRejected(conv.id, 'Socket ACK rejected (bắn lại lần 2) = FB từ chối nhận tin') });
+        raw = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
         if (raw && raw.kind === 'ok') sendDiag.sockRetryRecovered++;
         else if (raw && raw.kind === 'rejected') sendDiag.sockRetryRejected++;
         else sendDiag.sockRetryOther++;
@@ -5998,8 +5343,7 @@
             ctx.nonReusableFbId = null;
             ctx.nonReusableFbIds = null;
             sendDiag.photoRetry++;
-            const retryPhotoOnly2 = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp2.fbIds && freshPhotoUp2.fbIds.length) ? freshPhotoUp2.fbIds : [freshPhotoUp2.fbId]),
-            null, { onRejected: () => noteFbRejected(conv.id, 'Socket ACK rejected (gửi ảnh bù lần 2) = FB từ chối nhận tin') });
+            const retryPhotoOnly2 = await runPrioritySocket(() => socketPublishSend(helper, pageId, gid, '', (freshPhotoUp2.fbIds && freshPhotoUp2.fbIds.length) ? freshPhotoUp2.fbIds : [freshPhotoUp2.fbId]));
             if (retryPhotoOnly2 && retryPhotoOnly2.kind === 'ok') {
               recordSocketGidSuccess();
               return { ok: true, id: gid, sendBy: 'socket', sent: true };
@@ -6035,18 +5379,6 @@
         // burst-reject tạm thời hoặc mapping gid vừa đổi (ca thực địa
         // chạy lại đã gửi được). Chưa bắn lại thì giữ lỗi Socket thường,
         // tuyệt đối không gắn nhãn recipientUnavailable.
-        /* [v1.93.13] GỠ BẢN SỬA SAI CỦA 1.93.12.
-         * 1.93.12 thêm `_psidRejected = (rejected && ctx.gidFromPsid)` để chốt ❌ ngay.
-         * ĐIỀU KIỆN ĐÓ KHÔNG BAO GIỜ ĐÚNG Ở LÔ >50 CHAT ⇒ nhánh chết:
-         *   dòng 4114  `const isLargeBatch = !!(batchStats && batchStats.total > 50);`
-         *   dòng 4119-4123 và 4551-4552  `if (isLargeBatch) return null;`
-         * chặn CẢ HAI chỗ duy nhất gán `ctx.gidFromPsid = true` (dòng 4127 và 4559,
-         * đều là bước 4 `psid-guess`, chỉ dành cho lô ≤50 chat).
-         * Đối chứng log 1.93.12 (lô 1 672 chat, 08:32): `cache 1628 · cứu thiếu globalId 43`,
-         * `khách không nhận được (đã đo) 0 · chốt NGAY vì FB từ chối dứt khoát 0 ca`
-         * ⇒ phần sửa đó chưa từng chạy. GỠ VỀ ĐÚNG NHƯ 1.93.11.
-         * BÀI HỌC: trước khi thêm điều kiện, phải chứng minh điều kiện đó CÓ THỂ đúng
-         * bằng số đo trong log, không suy từ chú thích. */
         const isConfirmedUnavailable = !!(ctx && ctx.socketRetriedOnce);
         return {
           ok: false,
@@ -6147,7 +5479,7 @@
           }
           if (res && (res.uncertain || res.sent === 'maybe')) {
             if (res.noAck) scheduleSocketVerify(conv, text, photo, res.publishedAt || (Date.now() - 15000));
-            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'xác nhận nền: ' + clip(String(res.error || 'Socket không rõ kết quả'), 70));
+            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
             logFailGrouped(nm, '' + (res.error || 'Socket không rõ kết quả') + ' (xác nhận nền — không gửi thêm để tránh trùng)', '⚠', conv.id);
             /* [v1.92.66] GIỮ KHOÁ ở nhánh ⚠ — CỐ Ý, và đây là điểm khác bản nháp đầu của tôi.
              * Ca ⚠ nghĩa là CHƯA BIẾT tin đã đi hay chưa; nhả khoá lúc này cho phép làn Ext/API
@@ -6166,20 +5498,6 @@
             // lần, cứu 0 (ACK rejected 1 722 = 861 x 2) — tức 27% lưu lượng socket là vô ích.
             // Đã đo đủ thì chốt ❌ ngay, ghi rõ lý do, KHÔNG bắn thêm lệnh chắc chắn hỏng.
             const rejectPctBg = socketRejectPctRecent(); // [v1.92.28] cửa sổ 200 ACK gần nhất (-1 = chưa đủ mẫu)
-            /* [v1.93.19-p1] HASEXT1545 — KHAI Ở DEPTH 1, TRƯỚC MỌI NHÁNH DÙNG NÓ.
-             * ĐO ĐƯỢC (sổ kiểm chứng lô 21:19, bản 1.93.18, 6 676 chat):
-             *   • 1 732 dòng ⚠ lý do `lỗi khi phân xử ACK Socket: hasExt1545 is not defined`
-             *   • 1 732 chat đó có **0 dòng ✅ và 0 dòng 🔎** ⇒ không có bằng chứng nào là đã gửi
-             *   • số dòng 🛟 của cả lô = **0** ⇒ nhánh chuyển Ext cho ca FB từ chối CHƯA TỪNG chạy
-             * Gốc: bản 1.93.18 khai `const hasExt1545` BÊN TRONG khối
-             * `if (!sockRetryBudgetAllows(...))` (chỉ chạy khi ngân sách thử lại Socket ĐÃ ĐÓNG),
-             * nhưng dùng lại ở hai nhánh NGOÀI khối đó (ngân sách còn MỞ — trạng thái bình thường
-             * của mọi lô). Khối `if (res && res.deferredToSocketRetry …)` đứng ở depth 1, nên
-             * `const` trong khối con KHÔNG nhìn thấy được ⇒ ReferenceError, bị `.catch` của
-             * `settleAndFinalize` bắt và chốt ⚠.
-             * Nay khai đúng một lần ở depth 1 ⇒ CẢ 3 nhánh dùng chung. Không thêm lệnh gửi nào:
-             * đây là mở lại đường đã có sẵn (và là đường duy nhất đã đo cứu được ~99 %). */
-            const hasExt1545 = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
             if (!sockRetryBudgetAllows(sockRetryBudgetState)) {
               sockRetryBudgetNote(sockRetryBudgetState, 'skipped', rejectPctBg);
               sendDiag.sockRetryBudgetSkipped++;
@@ -6187,6 +5505,7 @@
                * kết luận "chat này không gửi được". FB vừa TỪ CHỐI ĐỨT KHOÁT ⇒ chưa có tin nào
                * được gửi ⇒ thử Extension là AN TOÀN (không thể trùng). Log 16:11: 3 311 ca bị
                * chốt ❌ ở đúng nhánh này trong khi làn Ext trống hoàn toàn. */
+              const hasExt1545 = !!(window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function');
               if (hasExt1545 && extFallback1545Allowed()) {
                 /* [v1.92.66] Dùng `noteExt1545Attempt()` (đếm + đóng phanh cứng khi đủ mẫu).
                  * Bản cũ chỉ `tried++` rồi KHÔNG kiểm ngưỡng ở đây ⇒ nếu `.then` của chuỗi bù
@@ -6221,7 +5540,7 @@
                   return;
                 }
                 // Đã đo xong: Extension cũng không cứu được ⇒ ⚠ "chưa gửi" để người dùng gửi tay
-                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'Socket FB từ chối + ngân sách dò Ext ĐÓNG ⇒ chưa thử Ext');
+                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
                 /* [v1.92.66] IN SỐ THẬT — xem khối chú thích dài ở `extFallback1545Allowed()`.
                  * Câu cũ ("đã đo 200 ca") là chuỗi cố định, lặp 3 611 lần ở lô 19:48 trong khi
                  * `tried` = 0. Nay số in ra là số ĐO ĐƯỢC của chính lô này. */
@@ -6335,30 +5654,10 @@
           settleOnce.used = true;
           settleSocketResult(rawKind)
             .then((res) => { if (myRun === runSeq) finalizeSockBg(res); })
-            .catch((eSettle) => {
+            .catch(() => {
               sockFiredPending.delete(conv.id);
-              /* ═══ [v1.93.18] CHỖ NÀY TỪNG LÀ LỖ ĐEN: 721 CA CỦA LÔ 13:46 BIẾN MẤT KHÔNG DẤU ═══
-               * ĐO ĐƯỢC (log 22/11 13:46:56, lô 941 chat, bản 1.93.17):
-               *   • 📡 `ACK OK/rejected/no-ACK 211/730/0` · TỔNG HỢP `⚠ Không rõ: 721`
-               *   • 730 rejected − 9 ca bù #551 = **721 = đúng số ⚠**
-               *   • Trong sổ kiểm chứng: 721 ca đó có ĐÚNG MỘT dòng ⚠, **lý do RỖNG**;
-               *     0 dòng 🛟, 0 dòng ❌, 0 dòng 🔁, và **0 dòng console** — grep
-               *     `xác nhận nền`, `không rõ tin đã đi chưa`, `lỗi nội bộ` đều = 0.
-               * ⇒ Mọi đường chốt ⚠ khác đều in log + ghi lý do; chỉ nhánh này thì không.
-               * Hệ quả thật: không truy được 721 ca "cần gửi tay" là khách chặn hay lỗi kênh,
-               * và người dùng phải mở tay từng chat để biết.
-               * NAY: in log + truyền lý do + NHẢ KHOÁ outbound (xem dưới). */
-              const why = 'lỗi khi phân xử ACK Socket: ' + clip(String(eSettle && eSettle.message || eSettle || 'không rõ'), 80);
-              /* RÒ KHOÁ OUTBOUND — nhánh anh em nào cũng nhả, riêng nhánh này thì không.
-               * `finalizeSockBg` (đường .then) nhả ở MỌI lối ra; `outboundLock` mà còn thì
-               * `acquireOutbound()` trả false cho mọi lần sau ⇒ chat đó không bao giờ được bù
-               * trong lượt (lỗi im lặng: không dòng log, chỉ là chat biến mất). Nhả là an toàn:
-               * `acquireOutbound()` tự chặn bằng `deliveredIds`, nên không thể sinh tin trùng. */
-              if (myRun === runSeq) {
-                if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', why);
-                logFailGrouped(conv.id ? (conv.name || conv.id) : '', why + ' — giữ ⚠, KHÔNG bắn thêm (chống trùng)', '⚠', conv.id);
-              }
-              if (!deliveredIds[conv.id]) releaseOutbound(conv.id);
+              // lỗi khi chờ ACK Socket: phải chốt ⚠, chỉ xóa cờ chờ thì chat kẹt pending vĩnh viễn
+              if (myRun === runSeq && window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
             });
           void holdLaneForAck; // tài liệu hoá ý định; việc nhả ghế do `pageLane` tự làm
         };
@@ -6471,10 +5770,7 @@
       let settled;
       try {
         const laneRunner = ctx.prioritySocket ? runPrioritySocket : pageLane;
-        /* [v1.93.13] Đường ĐỒNG BỘ — cùng lỗi như trên: ACK rejected ở lần bắn đầu không
-         * được ghi `fbRejectedIds`. Truyền `onRejected` để cổng 🚫/❌ nhìn thấy. */
-        const rawSync = await laneRunner(() => socketPublishSend(helper, pageId, gid, text, attFbIds),
-          null, { onRejected: () => noteFbRejected(conv.id, 'Socket ACK rejected (đồng bộ) = FB từ chối nhận tin') });
+        const rawSync = await laneRunner(() => socketPublishSend(helper, pageId, gid, text, attFbIds));
         settled = await settleSocketResult(rawSync);
         if (settled && settled.noAck) scheduleSocketVerify(conv, text, photo, settled.publishedAt || (Date.now() - 15000));
       } finally { ctx.ownsOutbound = false; }
@@ -6522,32 +5818,17 @@
     const pageId = full.page_id || conv.pageId || String(conv.id).split('_')[0];
 
     if (!ctx.threadResolved) {
-      /* [v1.93.15] Dùng `ensureThreadId` (thử hàm app TRƯỚC, fallback endpoint của script).
-       * Trước đây chỉ thử `window.__syncMissingThreadId__` — nếu trang KHÔNG có hàm đó
-       * (bundle khác version / chưa expose) thì im lặng bỏ qua, dù endpoint vẫn dùng được. */
-      const _ens = await ensureThreadId(full, conv, pageId);
-      ctx.threadId = _ens.threadId || null;
+      let threadId = full.thread_id || full.threadId;
+      if (!threadId && typeof window.__syncMissingThreadId__ === 'function') {
+        try {
+          threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id);
+        } catch (e) { /* ignore */ }
+      }
+      ctx.threadId = threadId || null;
       ctx.threadResolved = true;
-      if (_ens.source === 'sync') { try { gidStats.threadIdSynced++; } catch (e0) { /* ignore */ } }
     }
     const threadId = ctx.threadId;
-    if (!threadId) {
-      /* ═══ [v1.93.15] KHỚP HỢP ĐỒNG APP: app KHÔNG gửi khi thiếu thread_id ═══
-       * Nguồn `_app-…v6.js`:
-       *   async executeByExtOnce(e){ … const w = this.payload.conversation, k = w.thread_id;
-       *     if (k || (k = await eF(w.page_id, w.id)),
-       *         !k && !("instagram_official" === x && this.payload?.isIGD))
-       *       return { success:!1, errorMessage:"noThreadIdFound" }; …
-       *   async executeByExtInChunks(){ … let s = t.thread_id; if (s || (s = await eF(t.page_id, t.id)),
-       *         !s && …) return { success:!1, errorMessage:"noThreadIdFound" }; … }
-       * ⇒ App BỎ HẲN lệnh gửi, không gọi Extension với `threadId: undefined`.
-       * Script cũ vẫn gọi (payload có `threadId: null`) ⇒ extension tự chế biến ⇒ tốn 1 lệnh
-       * + dễ ra `INCORRECT THREAD` (§35.2: `isThreadCorrect` trả false khi `!this.threadId`).
-       * Nay: trả đúng mã của app. Ca này CHẮC CHẮN chưa gửi (không lệnh nào tới ext)
-       * ⇒ nhánh gọi coi là `sent:false` AN TOÀN, không thể sinh tin trùng. */
-      try { gidStats.noThreadIdFound++; } catch (eNT) { /* ignore */ }
-      return { ok: false, sent: false, error: 'noThreadIdFound', noThreadIdFound: true };
-    }
+    if (!threadId) return { ok: false, error: 'Không tìm thấy thread_id' };
 
     if (!ctx.gidResolved) {
       ctx.gid = await resolveGlobalId(full, threadId, conv.id, conv.fromPsid, ctx.gidForceFind, ctx);
@@ -6563,33 +5844,14 @@
     if (!globalUserId && !threadId) {
       return { ok: false, sent: false, error: 'Không có globalId/thread_id — bỏ qua Ext' };
     }
-    /* ═══ [v1.93.15] GỠ CỔNG `gidGateSkipExt` — APP VẪN GỬI, và EXT TỰ DÒ GID BÊN TRONG ═══
-     * Nguồn `0.5.62_0/assets/background.js`, `sendInbox(e)`:
-     *   sendInbox(e){ const {…, globalUserId:i, …} = e; … return new Promise(async (b,v) => {
-     *     if (c === "facebook" && !i)
-     *       return this.getGlobalUserId({pageId, threadId, threadKey, isBusiness,
-     *                                     conversationUpdatedTime, customerName})
-     *         .then(M => { Object.assign(e, {globalUserId: M}), this.sendInbox(e).then(b).catch(v) })
-     *         .catch(M => v(M));
-     *     …buildSendParams… }); }
-     * và `getGlobalUserId({…})` = `new Ee({…convType:"INBOX"}).init()` — tức **chạy lại đủ 4
-     * nguồn dò gid NGAY TRONG extension**, rồi gửi lại. Không có `globalUserId` KHÔNG phải
-     * điều kiện để từ chối: nó chỉ là một **lượt dò thêm bên trong chính lệnh đó**.
-     *
-     * ĐO ĐƯỢC (31 log): **168** dòng `❌ … bù Extension không được: Không tìm được global_id
-     * để gửi — bỏ qua Ext thread-only cho nhanh`. Đây là nhóm bị **chính cổng này** chốt ❌
-     * TRƯỚC KHI gửi lệnh — tức ta tự loại một đường mà app vẫn đi, dựa trên giả định
-     * "không có gid ⇒ gửi cũng vô ích". Giả định đó SAI: ext gửi bằng `threadKey`
-     * (`buildSendParams` dựng form từ `threadKey/threadId`), gid chỉ là trường phụ.
-     *
-     * NAY: bỏ cổng ⇒ gửi `REPLY_INBOX_PHOTO` với `globalUserId: null` đúng như app, để ext tự
-     * dò trong lệnh (`getGlobalUserId`) hoặc gửi luôn theo `threadKey`. Vẫn CHỈ 1 lệnh gửi —
-     * lượt dò thêm là của extension, không phải của script, nên không thể sinh tin trùng.
-     * `ctx.gidGateSkipExt` KHÔNG còn chặn ở đây; biến vẫn được giữ cho nơi khác đọc (chỉ để
-     * báo cáo), và nhánh `!globalUserId && !threadId` phía trên vẫn là cổng thật (không có
-     * `thread_id` thì `Ee` cũng không dò được — đó mới là ca chắc chắn hỏng). */
+    // GATE NO-GID: khâu dò đã đủ bằng chứng (HTTP ok-no-gid + Batch xong + Ext finder
+    // phản hồi success không có gid) → không bắn lệnh gửi thread-only, khỏi giữ extSendLane.
     if (!globalUserId && ctx && ctx.gidGateSkipExt) {
-      try { gidStats.extThreadOnlySent++; } catch (eG2) { /* ignore */ }
+      return {
+        ok: false, sent: false, gidUnknown: true, noGidGate: true,
+        discoveryState: ctx.gidDiscoveryState || 'ext-responded-no-gid',
+        error: 'Không tìm được global_id để gửi — bỏ qua Ext thread-only cho nhanh',
+      };
     }
     const token = getToken();
     let files;
@@ -6619,18 +5881,9 @@
       convId: full.thread_key || full.threadKey || conv.threadKey || (threadId ? 't_' + threadId : null), // thread_key = 't_' + thread_id
       customerName: (full.from && (full.from.username || full.from.name)) || full.customerName || conv.customerName || '',
       isIGD: false,
-      /* [v1.93.15] THIẾU MỐC ⇒ LÙI 1 NGÀY, KHÔNG DÙNG "BÂY GIỜ".
-       * `conversationUpdatedTime` đi vào `Ee.getGlobalIdFromInbox` nguồn ③ dưới dạng
-       * `timeCursor = conversationUpdatedTime + 6e4`, rồi thành `before` của danh sách thread.
-       * "Bây giờ" ⇒ `before` = tương lai ⇒ danh sách RỖNG ⇒ mất nguồn gid ③.
-       * Lùi 1 ngày ⇒ danh sách RỘNG hơn ⇒ không cắt mất thread cần tìm. */
       conversationUpdatedTime: (function () {
-        const t = Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(String(full.updated_at || full.updatedAt || conv.updatedAt || ''))
-          ? String(full.updated_at || full.updatedAt || conv.updatedAt)
-          : String(full.updated_at || full.updatedAt || conv.updatedAt || '') + 'Z');
-        if (!isNaN(t)) return t;
-        try { gidStats.updMissing++; } catch (eUM2) { /* ignore */ }
-        return Date.now() - 864e5;
+        const t = Date.parse(String(full.updated_at || full.updatedAt || conv.updatedAt || '') + 'Z');
+        return isNaN(t) ? Date.now() : t; // thiếu mốc → dùng giờ — không gửi NaN cho extension
       })(),
       photoUrls: photo ? normalizePhotoItems(photo).map((x) => x.url).filter(Boolean) : [],
       isBusiness: false,
@@ -6771,53 +6024,11 @@
          * gọi 1 lần rồi. Gọi 2 lần ⇒ `fastStreak` tăng gấp đôi ⇒ làn Ext tự nới 2× nhanh hơn thiết
          * kế — đúng loại lỗi "Ext nhanh mà cứu 0" mà 1.92.45 vừa vá. */
         extTimeoutStats.claimedUnverified++;
-        /* ═══ [v1.93.13] ĐỌC `messageId` CỦA REPLY_INBOX_PHOTO_SUCCESS (trước đây VỨT) ═══
-         * Nguồn `0.5.62_0/assets/background.js`:
-         *   parseSuccessResponse → { messageId: e.payload.actions[0].message_id,
-         *                            globalUserId, timestamp: e.payload.actions[0].timestamp }
-         *   sendInboxSuccess     → postMessage({type:"REPLY_INBOX_PHOTO_SUCCESS", taskId,
-         *                            pageId, convId, messageId, globalUserId, timestamp, …})
-         * Script cũ đọc `res.data.timestamp || res.data.convId` ⇒ BỎ QUA `messageId`, mà đây là
-         * bằng chứng dương tính DUY NHẤT của FB. Nay vẫn giữ ⚠ (đúng: success chỉ là extension
-         * không báo lỗi) nhưng lưu `messageId` vào sổ để lượt đọc lịch sử đối chiếu được.
-         * Không đổi số lệnh gửi. */
-        const _extMsgId = (res.data && res.data.messageId) || '';
-        const _extTs = (res.data && res.data.timestamp) || 0;
-        if (_extMsgId) {
-          try {
-            extMsgIdByConv[conv.id] = { messageId: String(_extMsgId), at: _extTs || Date.now() };
-          } catch (eMI) { /* ignore */ }
-        }
-        /* ═══ [v1.93.14] `success` MÀ KHÔNG CÓ `messageId` = FB TỪ CHỐI NGẦM ═══
-         * Nguồn `0.5.62_0/assets/background.js` (class `se` + `ee`):
-         *   isResponseSuccess(e,t){ case "facebook": return e && e.payload &&
-         *       (e.payload.actions && e.payload.actions[0].message_id || e.payload.error_payload); }
-         *   parseSuccessResponse({response:e,platform:t,…}){ case "facebook":
-         *       return e.payload.error_payload ? {}                                  // ← RỖNG
-         *                                      : { messageId: e.payload.actions[0].message_id,
-         *                                          globalUserId, timestamp: e.payload.actions[0].timestamp }; }
-         * ⇒ Khi FB trả `payload.error_payload` thì ext COI LÀ THÀNH CÔNG
-         *   (`isResponseSuccess` trả chính `error_payload`, truthy) NHƯNG `parseSuccessResponse`
-         *   trả `{}` ⇒ postMessage `REPLY_INBOX_PHOTO_SUCCESS` **không có `messageId`**,
-         *   không có `timestamp`.
-         * ⇒ `success:true` + KHÔNG `messageId` KHÔNG phải "chưa xác nhận": đó là **bằng chứng
-         *   VẮNG MẶT** — FB đã trả `error_payload` ⇒ KHÔNG có tin nào được tạo.
-         * Trước bản này script gộp cả hai vào "maybe + extClaimedSuccess" ⇒ ca này bị đọc lại
-         * lịch sử vô ích 20 s rồi mới chốt, và KHÔNG được ghi vào sổ "FB đã từ chối".
-         * Nay tách cờ `extSuccessNoId` để nhánh xử lý ghi đúng: FB từ chối, không đọc lại lâu. */
-        const _extNoId = !_extMsgId;
-        /* Vẫn đọc lại lịch sử cho CẢ HAI ca: `error_payload` là suy luận từ hợp đồng extension,
-         * chưa phải bằng chứng đo được trên hội thoại. Chỉ ĐỌC ⇒ vô hại, và nếu lịch sử CÓ tin
-         * thì lật ✅ (không gửi lại). */
         if (!ownLock) scheduleExtTimeoutVerify(conv, text, photo, extSendStartedAt, 1, false, 0, true);
         return {
           ok: false, sent: 'maybe', sendBy: 'extension', extClaimedSuccess: true,
-          extSuccessNoId: _extNoId,
-          extMessageId: _extMsgId ? String(_extMsgId) : '',
-          id: _extMsgId || (res.data && (res.data.timestamp || res.data.convId)) || '',
-          error: _extNoId
-            ? 'Extension báo success nhưng KHÔNG có messageId ⇒ FB trả error_payload (từ chối ngầm) — không có tin nào được tạo'
-            : 'Extension báo success — CHƯA xác nhận tin đã tới (đang đọc lại lịch sử, không gửi lại)',
+          id: (res.data && (res.data.timestamp || res.data.convId)) || '',
+          error: 'Extension báo success — CHƯA xác nhận tin đã tới (đang đọc lại lịch sử, không gửi lại)',
         };
       }
       if (res && res.success === false) {
@@ -7116,28 +6327,17 @@
     let lastErr = '';
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        /* [W133] Chờ hết cơn 429 CHUNG trước mỗi lần thử. Không có 429 ⇒ 0 ms.
-         * Trước đây mỗi lần thử đâm thẳng, và khi bị 429 thì ngủ RIÊNG tới 15 s
-         * (`retryAfterMs` trần 15 000) ⇒ 192 luồng cùng ngủ, cùng thức, cùng 429. */
-        await waitPhotoUpCooldown();
-        if (state.stopRequested) return { ok: false, error: 'Đã dừng' };
-        const _tTry = Date.now();
         const res = await fetchT(url, {
           method: 'POST', body: JSON.stringify(body), credentials: 'include',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         }, 20000);
         const j = await res.json().catch(() => null);
         if (res.ok && j && j.success && Array.isArray(j.fb_ids) && j.fb_ids.length) {
-          notePhotoUpResult(true, res.status, Date.now() - _tTry);
           return { ok: true, fbId: String(j.fb_ids[0]), fbIds: j.fb_ids.map((x) => String(x)) };
         }
         lastErr = (j && (j.message || j.error)) || ('HTTP ' + res.status);
-        /* 429 chỉ báo cho bộ điều tiết; cơn nghỉ chung đã được đặt trong notePhotoUpResult nên
-         * lần thử sau ở BẤT KỲ luồng nào cũng chờ cùng một mốc. Trần ngủ một lần: 4 000 ms. */
-        if (res.status === 429) notePhotoUpResult(false, 429, Date.now() - _tTry);
-        else notePhotoUpResult(false, res.status, Date.now() - _tTry);
         if ((res.status === 429 || res.status >= 500) && attempt < 3) {
-          await sleepUntil(Date.now() + Math.min(PHOTO_429_SLEEP_MAX_MS, retryAfterMs(res, 350 * attempt))); // [v1.92.9]
+          await sleepUntil(Date.now() + retryAfterMs(res, 350 * attempt)); // [v1.92.9]
           continue;
         }
         break;
@@ -7154,31 +6354,9 @@
         for (const it of bindItems) {
           if (!it.url) { extFbIds.length = 0; break; }
           const sep = it.url.indexOf('?') > -1 ? '&' : '?';
-          /* ═══ [v1.93.15] `uploadId` KHÔNG bắt buộc nhưng ext ĐỌC nó ═══
-           * ext case `UPLOAD_INBOX_PHOTO` destructure:
-           *   const {pageId:_, convId:g, taskId:I, uploadId:y, photoUrl:b, name:v, platform:A} = r.data;
-           * và TRẢ LẠI y trong cả `_SUCCESS` (`uploadId:y, fbId:R.fbid, previewUri:R.previewUri`)
-           * và `_FAILURE` (`uploadId:y`) — tức nó là **khoá đối chiếu** để biết phản hồi ứng với
-           * ảnh nào khi upload song song. App thật (`j(e)`) KHÔNG gửi (`{pageId, photoUrl, name,
-           * platform}`) nên ta cũng không bắt buộc — nhưng gửi vào là vô hại và làm phản hồi
-           * truy vết được trong log. `convId` thì ext chỉ dùng cho nhánh
-           * `instagram_direct` (`ha.getInboxInstance`) ⇒ với facebook KHÔNG cần.
-           *
-           * RỦI RO ĐÃ BIẾT, KHÔNG TỰ SỬA (cần đo trước):
-           *   case này bọc trong `ae.startCheck(_, D)` với `startCheck(e,t,a=!0,r=!1)`:
-           *     static startCheck(e,t,a=!0,r=!1){ const s=()=>{ae.startCheck(e,t,a,!0)};
-           *       r ? (SWITCH_PROFILE…) : (C.log("FIRST_TRY_DOING_TASK_WITHOUT_SWITCH_PROFILE"), t(s)) }
-           *   ⇒ `nó GỌI `t` (upload) TRƯỚC, và nếu `t` gọi `s` (= thử lại sau khi chuyển profile)
-           *   thì upload chạy **lần 2**. Ở `SEND_COMMENT` script đã truyền `!0,!0` để CHẶN vòng
-           *   thử lại này; `UPLOAD_INBOX_PHOTO` KHÔNG có tham số đó (luôn `a=!0,r=!1`).
-           *   Hệ quả: 1 lần upload lỗi có thể sinh **2 request upload**. KHÔNG phải tin trùng
-           *   (upload không tạo tin), chỉ tốn băng thông; và `fbId` trả về vẫn dùng được.
-           *   Script không điều khiển được tham số này (nó nằm trong case của ext) ⇒ ghi nhận. */
-          const _upId = 'botfake:' + pageId + ':' + Date.now() + ':' + Math.floor(Math.random() * 1e6);
           const extRes = await extSendLane(() => adapter.send({
             type: 'UPLOAD_INBOX_PHOTO',
             pageId: pageId,
-            uploadId: _upId,
             photoUrl: it.url + sep + 'random=' + Math.random(),
             name: 'image_' + Date.now() + '.jpg',
             platform: detectPlatform(pageId) || 'facebook',
@@ -7313,26 +6491,6 @@
   // ---- SAU KHI GỬI THÀNH CÔNG — 3 request app LUÔN gọi (HAR tinnhan1.har + file "post"):
   // fill_admin_name (ghép tên nhân viên vào chat — per conversation, điều tiết qua sideEffectLane),
   // check_inbox + contents/touch (per page, chốt 1 lần cuối lô). Bắn nền KHÔNG chờ!
-  /* ═══ [v1.93.15] SỔ `content_ids` THEO PAGE để `contents/touch` có dữ liệu THẬT ═══
-   * HAR (`batmesss.har`): `POST /v1/pages/{p}/contents/touch? body {"content_ids":["f22adca4-…"]}`.
-   * Script cũ gửi `content_ids: []` ⇒ request rỗng, không touch nội dung nào.
-   * Nội dung được touch là ẢNH đã gửi (id do Pancake cấp = `content_ids` mà `buildInboxSend`
-   * dùng trong body gửi). Sổ này gom lại trong lúc gửi, `perPage` đọc ra lúc chốt lô.
-   * Giới hạn 500 id/page để không phình bộ nhớ ở lô 10 000. */
-  const touchIdsByPage = Object.create(null);
-  function rememberTouchIds(pageId, ids) {
-    try {
-      if (!pageId || !Array.isArray(ids) || !ids.length) return;
-      const k = String(pageId);
-      let arr = touchIdsByPage[k];
-      if (!arr) { arr = touchIdsByPage[k] = []; }
-      for (const id of ids) {
-        const v = String(id || '');
-        if (v && arr.indexOf(v) < 0) { arr.push(v); if (arr.length >= 500) break; }
-      }
-    } catch (eR) { /* ignore */ }
-  }
-
   function postSendSideEffects(conv, opts) {
     const o = opts || {};
     try {
@@ -7352,32 +6510,12 @@
         fetch(apiBase() + '/v1/pages/' + pageId + '/check_inbox?', {
           method: 'POST', headers: { Accept: 'application/json' }, credentials: 'include',
         }).catch(() => null);
-        /* ═══ [v1.93.15] `contents/touch` PHẢI CÓ `content_ids` THẬT ═══
-         * HAR (`batmesss.har`): `POST /v1/pages/{p}/contents/touch?`
-         *   body: {"content_ids":["f22adca4-cbdf-4957-b6b0-aae141840bb2"]}  → {"success":true}
-         * Script cũ gửi `{"content_ids":[]}` — mảng RỖNG ⇒ không "touch" nội dung nào
-         * ⇒ request vô nghĩa (đúng là không hỏng gì, nhưng cũng không làm được việc của nó).
-         * Nay: lấy id THẬT của ảnh (chính `content_ids` mà `buildInboxSend` đã dùng để gửi,
-         * xem `messages` body `content_ids: items.map(x => x.id)`), gộp theo page trong lô.
-         * Không có id ⇒ KHÔNG gọi (đừng gửi request rỗng). */
-        const _touchIds = (function () {
-          try {
-            const pr = (o && o.touchContentIds) || null;
-            if (Array.isArray(pr) && pr.length) return pr.filter(Boolean);
-            const fromConv = (conv && (conv.__sentContentIds || conv.sentContentIds)) || null;
-            if (Array.isArray(fromConv) && fromConv.length) return fromConv.filter(Boolean);
-            const fromBook = touchIdsByPage[String(pageId)] || null;
-            return Array.isArray(fromBook) ? fromBook.slice() : [];
-          } catch (eT) { return []; }
-        })();
-        if (_touchIds.length) {
-          fetch(apiBase() + '/v1/pages/' + pageId + '/contents/touch?', {
-            method: 'POST',
-            headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify({ content_ids: _touchIds }),
-          }).catch(() => null);
-        }
+        fetch(apiBase() + '/v1/pages/' + pageId + '/contents/touch?', {
+          method: 'POST',
+          headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ content_ids: [] }),
+        }).catch(() => null);
       }
     } catch (e) { /* việc phụ — không được làm hỏng lô gửi */ }
   }
@@ -7409,43 +6547,6 @@
   const CTX_FETCH_MIN = 8;
   const CTX_FETCH_MAX = 96;
   const PHOTO_UPLOAD_PARALLEL = 96;
-  /* ═══ [v1.93.16] 96 → 192: LÀN ẢNH LÀ NÚT CỔ CHAI CỦA PHA PHÁT ═══
-   * ĐO TỪ LOG 12:34 (2 411 chat, 1 câu nhanh 1 ảnh, bản 1.93.15):
-   *   `📷 bind fbId: 2 412 ca · TB 1 088ms` (max 11 144ms, lỗi 0)
-   *   `⏱ GIỮ SLOT: chờ 292 · chuẩn bị 0 · còn lại 2 142 · tổng 2 142`
-   *   `peak Socket/page active 59/256`  ← LÀN SOCKET CHỈ DÙNG 59/256, không hề nghẽn
-   *   `PHÁT 2 411 lệnh trong 29,4s`     ← 82 lệnh/s
-   * Vật lý: 2 412 × 1 088 ms ÷ 96 làn = **27,3 s** — đúng bằng 93 % của 29,4 s phát.
-   * Bind nằm trong slot (51 % của 2 142 ms) nên `mainCap 192` không bao giờ có ích: worker
-   * ngồi chờ HTTP thay vì bắn. `peak Socket 59` là HỆ QUẢ, không phải nguyên nhân.
-   *
-   * NHÂN LÀN LÀ HỢP LỆ VÌ ĐÂY LÀ HTTP CỦA PANCAKE, KHÔNG PHẢI FACEBOOK:
-   *   • HAR `guianh1.har`: 2 request `/contents/facebook` trả về trong **31 ms và 29 ms**
-   *     (`content_ids` → `fb_ids`), tức trần của đường này rất cao; 1 088 ms trong log là
-   *     ĐỘ TRỄ XẾP HÀNG (96 làn cùng đập vào một endpoint), không phải trần máy chủ.
-   *   • Trần thật đã có sẵn ở tầng dưới: `mainCap 192` slot + `extPrepLane 160` + `apiSendLane 96`
-   *     ⇒ 192 làn ảnh không mở vùng tải mới nào, chỉ để khâu chuẩn bị chạy song song với khâu bắn.
-   *   • Đường này KHÔNG đi qua `business.facebook.com/messaging/send/` (vẫn không dùng) và
-   *     không phải làn gửi — nới nó không thể sinh tin trùng.
-   * GIỮ NGUYÊN trần `mainCap`/`apiSendLane`/`extPrepLane`: chỉ nút cổ chai đang bị đo mới đổi. */
-  const PHOTO_UPLOAD_LANE = 192;
-  /* [W133] LÀN ẢNH PHẢI CO ĐƯỢC — log 13:53 chứng minh làn phẳng 192 TỰ GÂY 429.
-   * Số đo (lô 1916 chat, 75,3 s):
-   *   📷 bind fbId: 2 226 ca · TB 2 915 ms/ca · max 8 482 ms · lỗi 0
-   *   🧷 PRE-BIND: tường 53 079 ms (gần hết 75 s của lô)
-   *   console: `POST /contents/facebook?is_reusable=false&async=false 429` liên tục
-   * Nguyên nhân không phải trần máy chủ (chú thích cũ đoán vậy) mà là **192 luồng đâm cùng lúc
-   * vào một endpoint có rate-limit**, không có bộ điều tiết nào: `makeLane` không có `setLimit`,
-   * không có `coolUntil`, không đếm 429. Mỗi luồng tự retry 3 lần và `retryAfterMs` cho ngủ tới
-   * 15 000 ms ⇒ 192 luồng cùng ngủ riêng lẻ rồi cùng lao lại ⇒ 429 kéo dài.
-   * Nay làn ảnh là làn THÍCH ỨNG: co ngay khi gặp 429 rồi hồi theo phản hồi nhanh.
-   * Đây KHÔNG phải làn gửi ⇒ co/nới không thể sinh tin trùng hay làm chậm tin đã gửi. */
-  const PHOTO_UP_MIN = 16;    // sàn: đủ để khâu chuẩn bị không bị bóp nghẹt khi server khoẻ
-  const PHOTO_UP_MAX = 192;   // trần: GIỮ NGUYÊN như bản trước, chỉ thêm đường co
-  /* Trần chờ 429 của đường bind ảnh. Trước đây `retryAfterMs` cho ngủ tới 15 000 ms — một luồng
-   * ngủ 15 s trong khi 191 luồng khác vẫn đâm nghĩa là toàn bộ ước tính thời gian bị vô hiệu.
-   * Chặn ở 4 000 ms và cho bộ điều tiết nghỉ CHUNG (mọi luồng cùng chờ) thay vì nghỉ riêng. */
-  const PHOTO_429_SLEEP_MAX_MS = 4000;
   // Ext finder là đường ĐẮT nhất (đi qua Extension) nhưng cũng là đường duy nhất biết
   // {threadId → globalId} khi HTTP/WS không có. 12 → 20 làn khởi điểm, trần 24 → 32.
   const GID_EXT_INITIAL = 20;
@@ -7874,16 +6975,6 @@
     return true;
   }
   const SIDE_EFFECT_PARALLEL = 8; // số request nền (fill_admin_name / update_global_id) chạy song song
-  /* ═══ [v1.93.16] PRE-BIND ẢNH — SONG SONG NGOÀI SLOT (xem `bindPhotoForConv` + `runMainItem`) ═══
-   * `PREBIND_PARALLEL` = số chat bind cùng lúc ở khâu TRƯỚC slot. Đây không phải làn mới:
-   * mỗi lần bind vẫn đi qua `photoUploadLane` (192) — hai tầng chồng nhau, tầng trong mới là
-   * tầng điều tiết thật. Đặt bằng đúng `mainCap` (192) để khâu chuẩn bị không bao giờ hẹp hơn
-   * khâu bắn, cũng không rộng hơn (không thể nhiều hơn số worker có thể dùng).
-   * `PREBIND_MAX_PER_WAVE`: trần số chat bind trước mỗi wave. Không có trần thì một wave
-   * 10 000 chat sẽ dựng 10 000 promise trước khi bắn ca đầu tiên ⇒ chậm giây đầu và tốn RAM
-   * trên máy yếu. Vượt trần thì phần dôi ra bind trong slot y như cũ (không bỏ sót ca nào). */
-  const PREBIND_PARALLEL = 192;
-  const PREBIND_MAX_PER_WAVE = 1500;
   function makeLane(parallel) {
     let active = 0;
     let normalSincePriority = 0;
@@ -8247,47 +7338,7 @@
 
   const apiSendLane = makeLane(API_SEND_PARALLEL);
   const ctxFetchLane = makeAdaptiveLane(CTX_FETCH_INITIAL, CTX_FETCH_MIN, CTX_FETCH_MAX);
-  /* [W133] makeAdaptiveLane (co/nới được) thay cho makeLane (phẳng 192). Xem chú thích
-   * PHOTO_UP_MIN/MAX: log 13:53 có 429 hàng loạt vì làn phẳng không có đường co. */
-  const photoUploadLane = makeAdaptiveLane(PHOTO_UPLOAD_LANE, PHOTO_UP_MIN, PHOTO_UP_MAX);
-  /* Bộ điều tiết 429 cho POST /contents/facebook — CÙNG KHUÔN `gidHttpCtl` (đã chạy tốt):
-   * nghỉ CHUNG (`coolUntil`) + co làn theo cấp số nhân, hồi làn khi phản hồi nhanh liên tiếp.
-   * `n`/`bad429`/`coolMs` là số đo nghiệm thu in ở dòng 📷 bind fbId. */
-  const photoUpCtl = { good: 0, bad429: 0, backoff: 0, coolUntil: 0, n: 0, bad429N: 0, coolMs: 0, minLimit: PHOTO_UPLOAD_LANE };
-  /** Chờ hết cơn 429 chung trước khi gửi một lệnh bind ảnh. Không có 429 ⇒ trả về ngay (0 ms). */
-  async function waitPhotoUpCooldown() {
-    if (!state.stopRequested && Date.now() < photoUpCtl.coolUntil) {
-      await sleepUntil(photoUpCtl.coolUntil, 'photo-cool');
-      /* Rải nhịp sau cơn 429: nếu không, tất cả các luồng thức đúng cùng 1 ms và đâm lại cùng lúc
-       * (đúng cái vòng lặp đã thấy ở log 13:53). */
-      if (!state.stopRequested) await sleepUntil(Date.now() + Math.floor(Math.random() * 180));
-    }
-  }
-  /** Ghi kết quả MỘT lệnh bind ảnh. 429 ⇒ nghỉ chung + co làn; nhanh liên tiếp ⇒ hồi làn. */
-  function notePhotoUpResult(ok, status, latencyMs) {
-    try {
-      photoUpCtl.n++;
-      if (status === 429) {
-        photoUpCtl.bad429N++;
-        photoUpCtl.backoff = Math.min(6, (photoUpCtl.backoff || 0) + 1);
-        const cool = Math.min(PHOTO_429_SLEEP_MAX_MS, 600 * photoUpCtl.backoff);
-        const until = Date.now() + cool;
-        if (until > photoUpCtl.coolUntil) { photoUpCtl.coolMs += until - Math.max(photoUpCtl.coolUntil, Date.now()); photoUpCtl.coolUntil = until; }
-        photoUpCtl.good = 0;
-        const next = photoUploadLane.setLimit(Math.round(photoUploadLane.getLimit() * 0.5));
-        if (next < photoUpCtl.minLimit) photoUpCtl.minLimit = next;
-        return;
-      }
-      if (!ok) { photoUpCtl.good = 0; return; }
-      photoUpCtl.backoff = 0;
-      if (latencyMs > 4000) { photoUpCtl.good = 0; return; } // chậm mà không 429: không hồi vội
-      photoUpCtl.good++;
-      if (photoUpCtl.good >= 8) {
-        photoUpCtl.good = 0;
-        photoUploadLane.setLimit(photoUploadLane.getLimit() + 8);
-      }
-    } catch (e) { /* điều tiết lỗi không được làm hỏng lượt gửi */ }
-  }
+  const photoUploadLane = makeLane(PHOTO_UPLOAD_PARALLEL);
   const gidExtLane = makeAdaptiveLane(GID_EXT_INITIAL, GID_EXT_MIN, GID_EXT_MAX);
 
   // BỘ ĐIỀU TIẾT DÒ GLOBAL_ID (AIMD): phản hồi nhanh/ổn định → tăng dần để lấy
@@ -8493,23 +7544,10 @@
    * 60 % ca đến nơi). Ext trả nhanh thì tự siết về 2,5 s; Ext ì thì tự nới, tối đa 9 s.
    * Không thể sinh tin trùng: ca quá hạn vẫn chỉ đánh ⚠ + kiểm chứng nền, KHÔNG BAO GIỜ gửi lại.
    */
-  /* [W133] "CHƯA CÓ MẪU" KHÔNG CÒN ĐỒNG NGHĨA VỚI "CHỜ 7 S".
-   * Log 13:53 (lô 1916 chat):
-   *   `Ext p90 0ms → timeout 7000ms` và `dò gid … lượt 2: 139 ca / TB 14 136ms`
-   * `p90 = 0` nghĩa là **Extension chưa từng trả lời một lần nào trong cả lượt** (mẫu rỗng),
-   * nhưng bản cũ vẫn chờ đủ 7 000 ms cho từng ca rồi đi lượt 2 thêm 14 136 ms.
-   * 139 ca × 14 s ≈ 32 phút chờ cộng dồn trong một lô 75 giây.
-   * Nay: nếu CHƯA CÓ MẪU THÀNH CÔNG nào thì coi Extension là KHÔNG SẴN SÀNG và chờ ngắn
-   * (sàn 2 500 ms) để mau rơi sang kênh khác; đã có mẫu thì vẫn 3 × p90 như cũ.
-   * Đánh đổi đã đo: 09:44 cắt 7 s → 2,5 s làm ca "quá hạn" mất 60 % → 0 % khả năng cứu.
-   * Nhưng đó là khi Extension CÓ trả lời; ở đây mẫu rỗng = nó không trả lời lần nào, nên giữ
-   * 7 s chỉ đốt thời gian mà không cứu được ca nào. KHÔNG BAO GIỜ gửi lại ở đường này — chỉ
-   * đổi thời gian chờ, không đổi số lệnh gửi. */
-  const EXT_COLD_TIMEOUT_MS = 2500;   // = sàn cũ, dùng khi CHƯA có mẫu thành công nào
   function extTimeoutMs() {
     const p90 = extLatP90();
-    if (!(p90 > 0)) return EXT_COLD_TIMEOUT_MS; // Extension chưa từng trả lời ⇒ không chờ 7 s
-    return Math.min(9000, Math.max(2500, Math.round(p90 * 3)));
+    const want = p90 > 0 ? p90 * 3 : 7000;
+    return Math.min(9000, Math.max(2500, Math.round(want)));
   }
 
   // ==== [v1.92.8] BẮT PHẢN HỒI MUỘN CỦA EXTENSION — không thêm một request nào ====
@@ -8524,17 +7562,7 @@
   // ⚠→✅ NGAY TẠI CHỖ, không cần đọc lịch sử, không gửi lại ⇒ không thể sinh tin trùng.
   // Giá trị trả về khi quá hạn vẫn là { success:false, data:null } — đúng hình dạng adapter
   // trả khi hết giờ, nên toàn bộ luồng xử lý phía sau giữ nguyên 100 %.
-  /* [v1.93.13] ĐỐI CHIẾU ADAPTER THẬT CỦA APP (`_app-…v6.js`, `window.__ExtensionAdapter__`):
-   *   `send(e,t={}){ … let n=this.currentTaskId++, o=t.timeout || (u.has(e.type)?d:l) … }`
-   *   `let l=3e4, d=12e4, u=new Set(["CONFIG_ROUTING_APP","CACHE_PAGES_ROUTING_APP"])`
-   * ⇒ app chờ **30 s** (`l`) cho mọi lệnh thường, **120 s** (`d`) cho lệnh config.
-   * `REPLY_INBOX_PHOTO` KHÔNG thuộc `u` ⇒ app chờ 30 s.
-   * Script để 60 s — KHÔNG phải giá trị của app. Hạ về 30 s cho khớp:
-   * app còn để bộ ngắt 45 s (`refresh_app`/`stop` có chỗ dùng 45 000) nên 30 s là mức an toàn,
-   * và `softMs` (2,5 s) vẫn là mức phản hồi thực tế; hằng này chỉ là TRẦN để không giữ lane vô hạn.
-   * Đổi 60 s → 30 s chỉ làm lane được NHẢ SỚM HƠN; ca quá hạn vẫn đi đúng đường cũ
-   * (⚠ + kiểm chứng nền, KHÔNG BAO GIỜ gửi lại) nên không mở thêm đường gửi trùng. */
-  const EXT_ADAPTER_HOLD_MS = 30000;
+  const EXT_ADAPTER_HOLD_MS = 60000;
   const EXT_SOFT_MARK = { soft: true };
   const extLateStats = { ok: 0, fail: 0, silent: 0 };
   function sendExtWithLateWatch(adapter, payload, conv, opt) {
@@ -8718,13 +7746,9 @@
     const pageId = full.page_id || full.pageId || conv.pageId || String(conv.id || '').split('_')[0];
     if (!ctx.threadResolved) {
       let threadId = full.thread_id || full.threadId || conv.threadId || '';
-      /* [v1.93.15] `ensureThreadId`: thử hàm app TRƯỚC, fallback endpoint của script.
-       * Trước đây chỉ thử `window.__syncMissingThreadId__` ⇒ trang không expose hàm đó thì
-       * im lặng bỏ qua, dù endpoint vẫn dùng được (HAR `guisot.har` đã xác nhận endpoint chạy). */
-      if (!threadId && !ctx.fastOnly) {
+      if (!threadId && !ctx.fastOnly && typeof window.__syncMissingThreadId__ === 'function') {
         try {
-          const _ens2 = await ensureThreadId(full, conv, pageId);
-          threadId = _ens2.threadId || '';
+          threadId = await window.__syncMissingThreadId__(pageId, full.id || conv.id);
           if (threadId) {
             full.thread_id = threadId;
             full.threadId = threadId;
@@ -8983,7 +8007,7 @@
             } catch (e0) { /* rơi xuống xử lý cũ */ }
           }
           if (r.uncertain) {
-            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'không rõ: ' + clip(String(r.error || ''), 70));
+            if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
             logFailGrouped(nm2, '' + r.error + ' (không rõ — không gửi thêm)', '⚠', conv.id);
           } else {
             if (r.windowClosed) windowBlocked++;
@@ -9014,30 +8038,6 @@
     ctx.wave200Mode = !!opts.wave200Mode;
     ctx.isSocketRetryPass = !!opts.isSocketRetryPass;
     ctx.prioritySocket = !!opts.prioritySocket || !!opts.isSocketRetryPass;
-    /* ═══ [v1.93.16] NẠP fbId ĐÃ PRE-BIND VÀO `ctx` — ĐÚNG CHỖ, KHÔNG ĐỔI ĐỊNH TUYẾN ═══
-     * `prepareDirectCtx` (Socket) và `sendViaExtension` đều đọc `ctx.nonReusableFbId`/`FbIds`
-     * TRƯỚC khi gọi `uploadOneTimePhoto()`; có sẵn giá trị ⇒ 0 ms thay vì 1 088 ms.
-     *
-     * ĐẶT Ở ĐÂY LÀ CÓ CHỦ Ý — SAU khối `if (opts.quick …)` phía trên, KHÔNG PHẢI TRƯỚC:
-     * khối đó tính `noApiPhoto = !!(photo && !photo.fbId)` để chọn TUYẾN KÊNH. Nếu ta nhét fbId
-     * vào `photo` (hoặc chạy trước khi tuyến được chọn) thì chat ngoài 24h sẽ bị đẩy sang API
-     * trước — đổi hành vi đã đo. Ở đây `photo` KHÔNG BỊ CHẠM, chỉ `ctx` (nơi các kênh đọc).
-     *
-     * Không dùng cho `isSocketRetryPass` (khối trên vừa CỐ Ý xoá `ctx.nonReusableFbId`): lần
-     * bắn lại sau khi FB từ chối phải dùng fbId MỚI — fbId `is_reusable=false` đã bị đốt.
-     * Cùng lý do, `takePreBoundFbId()` XOÁ khỏi map sau lần đọc đầu (dùng một lần). */
-    if (!ctx.isSocketRetryPass && photo && !ctx.nonReusableFbId && !ctx.nonReusableFbIds) {
-      try {
-        const _pb = takePreBoundFbId(conv.id);
-        if (_pb && _pb.fbId) {
-          if (_pb.fbIds && _pb.fbIds.length > 1) ctx.nonReusableFbIds = _pb.fbIds.slice();
-          else ctx.nonReusableFbId = _pb.fbId;
-          waveDiag.preBindHit++;
-        } else {
-          waveDiag.preBindMiss++;
-        }
-      } catch (ePb) { /* ignore */ }
-    }
     if (ctx.isSocketRetryPass) {
       ctx.socketRetriedOnce = true;
       ctx.wave200Mode = false;
@@ -9162,22 +8162,11 @@
                 'server/Batch/WS/Ext đều không có global_id ⇒ chuyển làn API bằng conversation_id'
                 + ' (HAR: lệnh gửi API không cần global_id)', '🛟', conv.id);
             } else {
-              /* ═══ [v1.93.15] KHÔNG CHỐT ❌ CHỈ VÌ THIẾU gid — APP VẪN GỬI ═══
-               * Nhóm này là nhóm LỚN NHẤT bị chốt oan: **2 671** dòng
-               * `❌ … Không tìm được global_id để gửi (server/Batch/WS/Ext đều không có)
-               *  — bỏ qua Ext thread-only cho nhanh` trên 31 log.
-               * ① App KHÔNG có cổng này: `sendInbox` (`background.js`) khi thiếu `globalUserId`
-               *    chỉ **tự dò lại trong chính lệnh** (`getGlobalUserId` = `new Ee({…convType:
-               *    "INBOX"}).init()`) rồi gửi lại — không từ chối.
-               * ② `buildSendParams` của ext dựng form gửi từ **`threadKey`/`threadId`**;
-               *    `globalUserId` chỉ là trường phụ ⇒ gửi thread-only là hợp lệ và ĐÃ được
-               *    chứng minh: 186 tin gửi được qua Extension trong 2 lô 16:07/16:11 (nhóm
-               *    1545041) — xem §v1.92.41.
-               * ③ Chưa có tin nào được bắn cho chat này ⇒ thử Ext trước là an toàn tuyệt đối.
-               * Nay: KHÔNG return nữa — rơi xuống nhánh cứu hộ Ext-bằng-thread_id ngay dưới
-               * (`!ctx.apiNoGidDone`), đúng thứ tự của luồng gửi tay trong `_app`:
-               * extension → socket → api. */
-              try { gidStats.extThreadOnlySent++; } catch (eG3) { /* ignore */ }
+              return {
+                ok: false, sent: false, gidUnknown: true, noGidGate: true,
+                discoveryState: ctx.gidDiscoveryState || 'ext-responded-no-gid',
+                error: 'Không tìm được global_id để gửi (server/Batch/WS/Ext đều không có) — bỏ qua Ext thread-only cho nhanh',
+              };
             }
           }
           // Chưa hề có tin nào được bắn cho chat này, nên cứu hộ ở đây không thể gây trùng:
@@ -9826,13 +8815,7 @@
   // phải trả phí kết nối + đồng bộ thread map ~10s (initSocket). Làm nóng ngay lúc bắn lô —
   // chạy song song các bắn API — nên khi nào cần bù Socket thì chỉ còn ~1–2s của sendMessage.
   const socketWarmPromises = {}; // pageId → Promise kết nối socket (đang chạy dở)
-  const batchGidFetchedPages = {};
-  /* [v1.93.15] pageId → conv ĐẦU TIÊN của page đã có `threadId`, dùng để GIEO doc_id `rt/st`
-   * qua `GET_GLOBAL_ID_FOR_CONV` trước `BATCH_GET_GLOBAL_ID` (xem `seedDocIdsViaConv`). */
-  const batchSeedConv = {};
-  /* [v1.93.13] Page nào đã bật khớp-theo-tên cho ext (`ENABLE_FIND_THREAD_BY_USERNAME`).
-   * Mỗi page chỉ gửi 1 lần — cờ đó nằm trong SW của ext, gửi lại vô ích. */
-  const nameSearchEnabled = new Set();
+  const batchGidFetchedPages = {}; // pageId → BATCH_GET_GLOBAL_ID (@897543) đã THÀNH CÔNG trong phiên
   const batchGidPromises = {}; // pageId → Promise BATCH_GET_GLOBAL_ID đang chạy
 
   // Nạp HÀNG LOẠT { threadId → globalId } mà Extension đã biết trong IndexedDB:
@@ -9887,75 +8870,22 @@
     BizInboxSearchResultListContainerQuery: 1,
     BizInboxSearchResultFacebookListQuery: 1,
   };
-  /* [v1.93.13] bỏ `loadedFromLs` (đường đọc localStorage trang không tồn tại — map nằm ở
-   * `chrome.storage.local` của ext). `viaExtOk` nay = "đã GỬI lệnh", không phải "đã nạp". */
-  /* [v1.93.14] `viaExtWaited` = số lần phải CHỜ hết hạn (case `PRELOAD_DOC_IDS` của ext
-   * không trả `_SUCCESS` vì nó không `await` `O.preloadDocIds`). Tách khỏi `viaExtOk`
-   * để không báo "đã nạp" khi thực tế mới chỉ "đã chờ". */
-  const docIdStats = { seenHtml: 0, htmlWithMap: 0, saved: 0, viaExtOk: 0, viaExtWaited: 0, viaExtEmpty: 0 };
-  /* ═══ [v1.93.15] CHỜ THÍCH ỨNG THAY VÌ CHỜ CỨNG 25 000 ms ═══
-   * ĐO ĐƯỢC: 31 log có **16** dòng `batch rỗng — THIẾU doc_id … (chưa chạy được lần nào)`
-   * và **0** lần `batch nạp N/M` với N>0; chỉ **1** dòng `đã gửi PRELOAD_DOC_IDS`.
-   * Tức mỗi lần warm-up trả giá 25 s rồi `BATCH_GET_GLOBAL_ID` vẫn thất bại.
-   *
-   * VÌ SAO CHỜ 25 s LÀ SAI (đọc mã, không phải suy đoán):
-   *  ① `case"PRELOAD_DOC_IDS"` KHÔNG gửi `_SUCCESS`/`_FAILURE` (chỉ `break`) ⇒ adapter
-   *     `send()` **không bao giờ** giải promise ⇒ chỉ có hết hạn. Chờ 25 s hay 25 phút
-   *     cũng vậy — `res` LUÔN là `{success:false, data:null}`. Không chờ được kết quả.
-   *  ② Lệnh KHÔNG bị chặn: listener ext chỉ `await` tuần tự cho `o = Mm.has(type)`,
-   *     và `Mm` gồm **`SEND_COMMENT` + `REPLY_INBOX_PHOTO`** — `PRELOAD_DOC_IDS` chạy ngay.
-   *     Nên "chờ cho nó xong" không giúp gì cho độ đúng; nó chỉ giữ slot.
-   *  ③ `O.preloadDocIds` tự thoát ngay khi đã có doc_id (`if(a.length===0) return`) ⇒ lần
-   *     thứ 2 trở đi trong cùng trang là **gần như 0 ms** dù ta chờ 25 s.
-   * ⇒ Trả giá tối đa cho một promise chắc chắn không bao giờ resolve, trong khi thứ ta cần
-   *   (doc_id có hay chưa) chỉ `BATCH_GET_GLOBAL_ID` trả lời được.
-   *
-   * NAY: chờ THÍCH ỨNG — 3 000 ms cho page chưa từng nạp, 800 ms khi đã nạp trong phiên
-   * (trường hợp ext đã có doc_id, gần như tức thời), trần `DOCID_PRELOAD_MAX_WAIT_MS`
-   * để không ai nâng lên vô hạn. Ghi lại thời gian chờ THẬT vào `docIdStats.savedMs`
-   * để chứng minh bằng số thay vì cảm nhận. Đường này CHỈ ĐỌC. */
-  const DOCID_PRELOAD_FIRST_WAIT_MS = 3000;
-  const DOCID_PRELOAD_REPEAT_WAIT_MS = 800;
-  const DOCID_PRELOAD_MAX_WAIT_MS = 4000;
-  docIdStats.savedMs = 0;
-  docIdStats.preloadFirst = 0;
-  docIdStats.preloadRepeat = 0;
-  /* [v1.93.15] GIEO doc_id qua `GET_GLOBAL_ID_FOR_CONV` (hướng A của §40.4) */
-  docIdStats.seedSent = 0;
-  docIdStats.seedGotGid = 0;
-  docIdStats.seedFailed = 0;
-  docIdStats.seedMs = 0;
-  docIdStats.batchSkippedNoSeed = 0;
-  /* Tên doc_id bóc được từ HTML — CHỈ để đối chiếu/ghi log, không dùng để quyết định gì. */
-  const docIdSeenFromHtml = Object.create(null);
-  /* Page nào đã được gửi PRELOAD_DOC_IDS (gửi 1 lần/page, không lặp). */
-  const docPreloadSent = new Set();
-  /* [v1.93.15] Page nào ĐÃ TỪNG được gửi lệnh nạp trong phiên này ⇒ lần sau chờ ngắn hơn
-   * (ext đã có doc_id trong `chrome.storage.local`, `O.preloadDocIds` thoát gần như tức thời). */
-  const docPreloadEverSent = new Set();
+  const docIdStats = { seenHtml: 0, htmlWithMap: 0, saved: 0, loadedFromLs: 0, viaExtOk: 0, viaExtEmpty: 0 };
   const DOCID_NAMES = DOCID_KEEP;   // giữ tên cũ cho chỗ dùng bên dưới
 
-  /* ═══ [v1.93.13] doc_id KHÔNG đọc được từ trong trang — bỏ hẳn ảo giác này ═══
-   * Bản trước đọc `window.GraphQLDocId` và coi đó là "bộ doc_id của extension".
-   * KIỂM LẠI NGUỒN: `self.GraphQLDocId = O` là dòng trong **service worker** của extension
-   * 0.5.62 (`const O=new Ll; O.prepareDocIdsMap(); self.GraphQLDocId=O`). Trang web
-   * Pancake KHÔNG có biến đó: `grep -c GraphQLDocId _app-…v6.js` = **0**.
-   * Toàn repo chỉ có đúng hàm này đọc nó ⇒ `docIdApi()` LUÔN trả `null` ⇒
-   * `docIdReady()` LUÔN `false` ⇒ mọi log in ra
-   *   `batch rỗng — THIẾU doc_id ⇒ extension reject "Missing doc_id" (chưa chạy được lần nào)`
-   * (16/16 dòng, đúng 100 % 30 log). Đó là **câu in ra**, không phải sự thật về extension:
-   * extension có `chrome.storage.local` riêng và tự có doc_id.
-   *
-   * ⇒ Nay KHÔNG đọc gì từ trang nữa (hàm `docIdReady()` đã xoá). Việc nạp do chính
-   *   extension làm trong SW (`case"PRELOAD_DOC_IDS"` → `O.preloadDocIds`, nạp
-   *   `[Jt,Zt,rt,st]` qua khối `ee.preloadDocIds`). Ta chỉ BẢO ĐẢM ĐÃ GỬI lệnh, rồi để
-   *   `BATCH_GET_GLOBAL_ID` trả lời thật (nó tự reject `Missing doc_id` nếu ext chưa có). */
-
-  /* Có `__ExtensionAdapter__` nghĩa là extension Pancake 0.5.62 đang chạy và tự giữ doc_id
-   * trong SW của nó. Đây là điều kiện DUY NHẤT ta kiểm được từ phía trang. */
-  function extAdapter() {
-    const a = window.__ExtensionAdapter__;
-    return (a && typeof a.send === 'function') ? a : null;
+  function docIdApi() {
+    const api = window.GraphQLDocId;
+    if (!api || typeof api.set !== 'function' || typeof api.has !== 'function') return null;
+    return api;
+  }
+  function docIdReady() {
+    const api = docIdApi();
+    if (!api) return false;
+    try {
+      return typeof api.isFeatureReady === 'function'
+        ? !!api.isFeatureReady('inbox')
+        : !!(api.has('MessengerThreadlistWebGraphQLQuery') || api.has('MessengerThreadlistQuery'));
+    } catch (e) { return false; }
   }
   /* CÁCH A — bóc {"resource_map":…} / {"rsrcMap":…} từ HTML BẤT KỲ.
    * Danh sách tên cần lấy: ưu tiên bảng tĩnh DOCID_KEEP; nếu chưa biết tên thì gom theo
@@ -9964,10 +8894,8 @@
     if (!html || typeof html !== 'string' || html.length < 500) return 0;
     if (!html.includes('resource_map') && !html.includes('rsrcMap') && !html.includes('setResourceMap(')) return 0;
     docIdStats.seenHtml++;
-    /* [v1.93.13] KHÔNG ghi vào `window.GraphQLDocId` nữa (không tồn tại trong trang).
-     * Đường bóc HTML này từ trước tới nay KHÔNG BAO GIỜ chạy được (api luôn null) ⇒
-     * `docIdStats.saved` luôn 0. Vẫn giữ phép bóc để đếm/ghi log, nhưng KHÔNG tính là
-     * "đã có doc_id" — chỉ extension mới nạp được doc_id cho chính nó. */
+    const api = docIdApi();
+    if (!api) return 0;
     let saved = 0;
     const take = (name, val) => {
       if (!name || !val) return;
@@ -9978,8 +8906,7 @@
       else if (DOCID_NAMES && DOCID_NAMES[n]) keep = true;
       else if (/GraphQLQuery$/.test(n)) keep = true;   // dạng chuẩn của FB
       if (!keep) return;
-      saved++;   // đếm được tên, KHÔNG ghi (xem chú thích trên)
-      try { docIdSeenFromHtml[n] = v; } catch (e) { /* ignore */ }
+      try { api.set(n, v); saved++; } catch (e) { /* ignore */ }
     };
     // 1) khối JSON: "resource_map":{...}  ·  "rsrcMap":{...}
     for (const key of ['"resource_map":', '"rsrcMap":']) {
@@ -10029,9 +8956,8 @@
       docIdStats.htmlWithMap++;
       docIdStats.saved += saved;
       try {
-        logLine('🧩 [doc_id] thấy ' + saved + ' tên doc_id trong HTML (' + where + ')'
-          + ' — CHỈ ghi nhận để đối chiếu, KHÔNG nạp được vào extension'
-          + ' (doc_id của ext nằm ở chrome.storage.local, không đọc/ghi được từ trang)');
+        logLine('🧩 [doc_id] +' + saved + ' từ HTML (' + where + ') ⇒ '
+          + (docIdReady() ? 'ĐÃ ĐỦ, batch/dò-lẻ dùng được' : 'chưa đủ bộ cần thiết'));
       } catch (e) { /* ignore */ }
     }
     return saved;
@@ -10044,212 +8970,51 @@
       return harvestDocIdsFromHtml(t, 'response');
     } catch (e) { return 0; }
   }
-  /* CÁCH B — nhờ extension nạp hộ. NAY BẬT (đã bỏ cờ `__botfakeTryPreloadDocIds__`).
-   *
-   * ═══ [v1.93.13] SỬA LỖI: `PRELOAD_DOC_IDS` **CÓ** case trong extension 0.5.62 ═══
-   * Chú thích cũ ở đây nói "switch của extension 0.5.62 KHÔNG có case đó (đã grep 86 case)"
-   * ⇒ SAI, và vì tin vào nó nên script gửi tên bịa `PRELOAD_DOC_IDS_CANDIDATE`,
-   * extension bỏ qua (default case), `doc_id` không bao giờ có ⇒ `batch nạp 0/0` ở MỌI log.
-   *
-   * Case THẬT trong `0.5.62_0/assets/background.js` @400547:
-   *   case"PRELOAD_DOC_IDS":{await Z(); const{pageId:_,isBusiness:g}=r.data;
-   *     O.preloadDocIds({pageId:_, isBusiness:g});       // ← KHÔNG await, không postMessage
-   *     q.setItem("country", r.data.country); break}
-   * Và `O.preloadDocIds({html,pageId,isBusiness})`:
-   *   · `html` bỏ trống ⇒ ext tự fetch `makeInboxViewUrl(pageId,isBusiness)`
-   *     = `business.facebook.com/latest/inbox/facebook?asset_id=…`
-   *   · cần `docNames` [ge, Oe, Ra, Oa] — bộ doc của đường Instagram
-   *   · nạp vào `O` = `chrome.storage.local` key `GraphQLDocId_docIdsMap`
-   *     (`persistToLocalStorage(){ … q.setItem(yr, …) }`, `q` = `chrome.storage.local`)
-   *   · `O.preloadDocIds()` là **hàm tổng** (được `ot()` gộp 20 s): nó tự lọc
-   *     `featureNeedsPreloadDocIds = ["inbox","comment","sendCommerceProduct","switchProfile","businessInboxComment"]`,
-   *     bỏ qua feature đã sẵn, rồi gọi `ee.preloadDocIds` — CHÍNH khối nạp `[Jt,Zt,rt,st]`
-   *     mà `BATCH_GET_GLOBAL_ID` cần. ⇒ đúng lệnh, đúng bộ doc_id.
-   *
-   * ⇒ Tên ĐÚNG là `PRELOAD_DOC_IDS`, tham số đúng là `{pageId, isBusiness, country}`.
-   *   KHÔNG có `_SUCCESS`/`_FAILURE` ⇒ `adapter.send` sẽ **timeout** (30 s) rồi trả
-   *   `{success:false, data:null}` — nhưng side-effect đã xảy ra. Vì vậy:
-   *   · hạn chờ ngắn (4 s) để không giữ lane,
-   *   · phán quyết dựa vào phản hồi THẬT của `BATCH_GET_GLOBAL_ID` (lệnh duy nhất biết sự thật),
-   *   · không bao giờ coi "không trả lời" là "đã nạp".
-   * Đây là đường CHỈ ĐỌC + ghi cache của extension, KHÔNG gửi tin ⇒ không thể sinh tin trùng. */
+  /* CÁCH B — hỏi extension nạp hộ. DÙNG TÊN RIÊNG, MẶC ĐỊNH TẮT.
+   * Lý do không gửi thẳng 'PRELOAD_DOC_IDS': switch của extension 0.5.62 KHÔNG có case đó
+   * (đã grep 86 case), nên gửi thẳng là rỗng mà không biết. Tên riêng buộc ta phải ĐỌC kết quả
+   * và không bao giờ được coi "không trả lời" là "đã nạp". */
   function tryPreloadDocIdsViaExt(pid) {
-    /* [v1.93.13] BỎ CỜ `window.__botfakeTryPreloadDocIds__`.
-     * Cờ này không ai trong repo set ⇒ hàm return false ngay dòng đầu, tức là dù đã sửa
-     * đúng tên lệnh thì lệnh VẪN CHƯA TỪNG ĐƯỢC GỬI. Nay gửi thật.
-     * An toàn: đây là lệnh CHỈ ĐỌC + ghi cache của extension, không gửi tin, không thể sinh
-     * tin trùng. `PRELOAD_DOC_IDS` không có `_SUCCESS`/`_FAILURE` nên phán quyết KHÔNG dựa
-     * vào `res` mà dựa vào phản hồi THẬT của lệnh kế tiếp (`BATCH_GET_GLOBAL_ID`). */
-    const adapter = extAdapter();
-    if (!adapter) return Promise.resolve(false);
+    if (!window.__botfakeTryPreloadDocIds__) return Promise.resolve(false);
+    const adapter = window.__ExtensionAdapter__;
+    if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(false);
     if (!pid) return Promise.resolve(false);
-    /* ═══ [v1.93.14] PHẢI CHỜ, VÌ EXT KHÔNG CHỜ ═══
-     * Nguồn `0.5.62_0/assets/background.js`:
-     *   case "PRELOAD_DOC_IDS": { await Z();
-     *     const { pageId:_, isBusiness:g } = r.data;
-     *     O.preloadDocIds({ pageId:_, isBusiness:g }), q.setItem("country", r.data.country);
-     *     break }                                    ← KHÔNG `await`, KHÔNG `_SUCCESS/_FAILURE`
-     * `O.preloadDocIds` là hàm async thật (class `Ll`):
-     *   async preloadDocIds(e, t = this.featureNeedsPreloadDocIds) { … for (let r of a) await r.preloadDocIds(e) }
-     * với `a` = các feature CHƯA sẵn sàng ⇒ `inbox` ⇒ `ee.preloadDocIds` ⇒ `GET
-     * https://business.facebook.com/latest/inbox/messenger?asset_id=…` + tải JS + bóc
-     * `[Jt, Zt, rt, st]`. Việc đó mất HÀNG GIÂY.
-     * Ext `break` ngay ⇒ KHÔNG có phản hồi ⇒ adapter `send` hết hạn (4 000 ms cũ) rồi trả
-     * `{success:false, data:null}`. Trước bản này script coi "hết hạn" là "đã nạp"
-     * (`docIdStats.viaExtOk++`) rồi gọi `BATCH_GET_GLOBAL_ID` NGAY ⇒ `Ct.init()` thấy
-     * `!O.get(rt, st)` ⇒ reject `Missing doc_id rt or st` ⇒ `batch nạp 0/0` ở MỌI log.
-     *
-     * ĐO ĐƯỢC trên toàn bộ log: `batch nạp 0/0 mapping (lỗi 0)` — 0 mapping, 0 lỗi.
-     * Đúng dấu hiệu "lệnh chạy trước khi doc_id có".
-     *
-     * Nay: `PRELOAD_DOC_IDS` KHÔNG trả lời được ⇒ chờ đủ lâu (doc_id nạp 1 lần/page,
-     * cache 5 h) và coi hết hạn là BÌNH THƯỜNG; nếu `res.success === true` (không xảy ra
-     * với case này) thì thoát sớm. Sau đó `BATCH_GET_GLOBAL_ID` mới được phép chạy —
-     * và nếu vẫn rỗng thì đọc lại theo nhịp, vẫn CHỈ ĐỌC, không sinh tin. */
-    /* Chờ THÍCH ỨNG: page chưa từng nạp trong phiên ⇒ 3 s; đã nạp rồi (ext gần như trả ngay
-     * vì `O.preloadDocIds` thoát sớm khi đủ doc_id) ⇒ 800 ms. Trần 4 s. */
-    const _first = !docPreloadEverSent.has(key);
-    docPreloadEverSent.add(key);
-    const _docWaitMs = Math.min(DOCID_PRELOAD_MAX_WAIT_MS,
-      _first ? DOCID_PRELOAD_FIRST_WAIT_MS : DOCID_PRELOAD_REPEAT_WAIT_MS);
-    if (_first) { try { docIdStats.preloadFirst++; } catch (e0) { /* ignore */ } }
-    else { try { docIdStats.preloadRepeat++; } catch (e0) { /* ignore */ } }
-    const _waitStart = Date.now();
     return Promise.resolve()
-      .then(() => adapter.send({
-        type: 'PRELOAD_DOC_IDS',
-        pageId: String(pid),
-        isBusiness: false,
-        country: (function () { try { return localStorage.getItem('country') || 'vn'; } catch (e) { return 'vn'; } })(),
-      }, { timeout: _docWaitMs }))
+      .then(() => adapter.send({ type: 'PRELOAD_DOC_IDS_CANDIDATE', pageId: String(pid), isBusiness: false }, { timeout: 6000 }))
       .then((res) => {
-        /* `PRELOAD_DOC_IDS` KHÔNG trả `_SUCCESS`/`_FAILURE` (case chỉ `break`), nên
-         * `adapter.send` sẽ hết hạn rồi trả `{success:false, data:null}` — đó KHÔNG phải lỗi,
-         * side-effect đã xảy ra trong SW. Vì vậy: thử đọc lại qua `BATCH_GET_GLOBAL_ID`
-         * (lệnh duy nhất cho biết sự thật) thay vì đoán từ `res`.
-         * Ở đây chỉ ghi nhận "đã gửi", không kết luận gì về doc_id. */
-        /* [v1.93.14] HẾT HẠN KHÔNG PHẢI "ĐÃ NẠP". Case `PRELOAD_DOC_IDS` của extension
-         * `break` ngay sau khi gọi một hàm async KHÔNG `await` ⇒ không bao giờ có
-         * `_SUCCESS`. Nên `res.success === true` là ca KHÔNG XẢY RA; `res.success === false`
-         * chỉ nói "đã chờ đủ 25 s", không nói doc_id đã có.
-         * Sự thật duy nhất kiểm được là `BATCH_GET_GLOBAL_ID` trả mapping hay không
-         * (`batch nạp N/M`). Vì vậy đếm RIÊNG, không gộp vào `viaExtOk`. */
-        if (res && res.success) docIdStats.viaExtOk++; else docIdStats.viaExtWaited++;
-        const _waited = Date.now() - _waitStart;
-        try { docIdStats.savedMs += Math.max(0, DOCID_PRELOAD_FIRST_WAIT_MS - _waited); } catch (e0) { /* ignore */ }
-        try {
-          logLine('🧩 [doc_id] đã gửi PRELOAD_DOC_IDS cho page ' + pid
-            + ' và chờ ' + _waited + ' ms (ext KHÔNG await `O.preloadDocIds` nên KHÔNG BAO GIỜ'
-            + ' có _SUCCESS — chờ chỉ để ext kịp chạy, không phải để đọc kết quả)'
-            + ' — kết quả thật xem ở dòng `batch nạp N/M`');
-        } catch (e) { /* ignore */ }
-        return true;
+        const ok = docIdReady();
+        if (ok) {
+          docIdStats.viaExtOk++;
+          try { logLine('🧩 [doc_id] extension có phản hồi (res=' + (res && res.success ? 'success' : 'không success')
+            + ') và doc_id ĐÃ ĐỦ ⇒ batch dùng được'); } catch (e) { /* ignore */ }
+        } else {
+          docIdStats.viaExtEmpty++;
+          try { logLine('🧩 [doc_id] extension KHÔNG nạp được (case lạ ⇒ nhiều khả năng extension bỏ qua)'
+            + ' — không tính là lỗi gửi, đường batch vẫn tắt'); } catch (e) { /* ignore */ }
+        }
+        return ok;
       })
       .catch(() => { docIdStats.viaExtEmpty++; return false; });
   }
   async function ensureDocIds(pid) {
-    /* [v1.93.13] ĐỌC LẠI NGUỒN — 2 đường cũ đều KHÔNG THỂ chạy, đã bỏ:
-     *  ① `localStorage.getItem('GraphQLDocId_docIdsMap')` — SAI CHỖ.
-     *     `q` của extension = **`chrome.storage.local`** (không phải localStorage):
-     *       q={getItem:async n=>(await chrome.storage.local.get(n))[n], setItem:(n,e)=>chrome.storage.local.set({[n]:e})}
-     *     và `persistToLocalStorage(){ … q.setItem(yr, JSON.stringify(e)) }` với `yr="GraphQLDocId_docIdsMap"`.
-     *     `chrome.storage.local` KHÔNG nhìn thấy được từ trang (khác origin, không qua DOM)
-     *     ⇒ dòng cũ luôn `null` ⇒ `docIdStats.loadedFromLs` luôn 0.
-     *  ② `window.GraphQLDocId` — biến của SW (`self.GraphQLDocId=O`), không có trong trang.
-     *
-     * ⇒ Chỉ còn 1 đường thật: nhờ CHÍNH extension nạp (nó có cookie Facebook, có SW,
-     *   có `chrome.storage.local`, và nạp đúng bộ `[Jt,Zt,rt,st]` mà `BATCH_GET_GLOBAL_ID` cần).
-     * Giữ tên hàm; trả `true` khi đã gửi lệnh (không chờ, không chặn đường gửi tin). */
-    if (!extAdapter()) return false;
-    const key = String(pid || '');
-    if (!key) return false;
-    /* Gửi MỘT lần cho MỖI page (doc_id là cache dùng chung cho mọi page nên ext chỉ cần
-     * nạp lại khi cache hết hạn 5 giờ; gọi lại sau TTL là việc của ext, không phải của ta). */
-    if (docPreloadSent.has(key)) return true;
-    docPreloadSent.add(key);
-    Promise.resolve().then(() => tryPreloadDocIdsViaExt(key)).catch(() => { /* ignore */ });
-    return true;
-  }
-
-  /* ═══ [v1.93.15] GIEO DOC_ID `rt/st` ĐÚNG CÁCH (hướng A của §40.4) ═══
-   * §40.1 đã chứng minh `PRELOAD_DOC_IDS` KHÔNG BAO GIỜ nạp `rt/st` — người xử lý của nó là
-   * `Ue` (feature `businessInboxComment`) với `docNames:[ea,ge,Oe]`. `rt/st` chỉ có từ
-   * `ee.preloadDocIds` (feature `inbox`, `docNames:[Jt,Zt,rt,st]`).
-   *
-   * ĐƯỜNG DUY NHẤT chạy `ee.preloadDocIds` mà ta điều khiển được:
-   *   case"GET_GLOBAL_ID_FOR_CONV"  →  new Ee(r.data).init()
-   *   Ee.init(){ switch(convType){ case"INBOX": a = this.getGlobalIdFromInbox(); … } }
-   *   Ee.getGlobalIdFromInbox(){ …
-   *     if ((e || !O.isFeatureReady("inbox")) && await ee.preloadDocIds({pageId, isBusiness}),
-   *     O.get(Jt) && this.threadId ) …
-   * ⇒ `ee.preloadDocIds` chạy ở **DÒNG ĐẦU**, trước mọi nhánh thoát: kể cả khi
-   *   `getGlobalIdFromInbox` sau đó thất bại, hay `Ee.init()` reject `INCORRECT THREAD`,
-   *   doc_id `rt/st` VẪN ĐƯỢC NẠP (tác dụng phụ, không phụ thuộc kết quả).
-   *
-   * VÌ SAO DÙNG CHAT THẬT chứ không phải payload rỗng: `Ee` cần `threadId/threadKey/
-   * customerName/conversationUpdatedTime` để thử 4 nguồn — dùng chat đầu tiên của lô (đã có
-   * `threadId`) thì lệnh này **có thể trả gid thật luôn**, không phải lệnh thừa.
-   * Nếu KHÔNG có chat nào có `threadId` thì bỏ qua: `ee.preloadDocIds` không chạy được
-   * (`getGlobalIdFromInbox` chỉ gọi nó sau khi đã có `le(pageId)` — vẫn chạy, nhưng ta không
-   * có gì để đưa vào `Ee`, và batch vẫn sẽ hỏng; đừng gửi lệnh vô nghĩa).
-   *
-   * CHỈ ĐỌC. Kết quả (nếu có gid) được lưu qua `__botfakeSaveGid__` — cùng đường với mọi
-   * nguồn khác, không tạo cơ chế mới. */
-  const docSeedPages = Object.create(null);
-  function seedDocIdsViaConv(pageId, conv, threadId) {
-    const pid = String(pageId || '');
-    if (!pid || !threadId || docSeedPages[pid]) return Promise.resolve(false);
-    const adapter = window.__ExtensionAdapter__;
-    if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(false);
-    docSeedPages[pid] = 1;
-    const full = (conv && (peekConv(conv) || conv)) || {};
-    const updRaw = String(full.updated_at || full.conversationUpdatedTime || '');
-    const upd = updRaw ? Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(updRaw) ? updRaw : updRaw + 'Z') : NaN;
-    const payload = {
-      pageId: pid,
-      threadId: String(threadId),
-      threadKey: (full.thread_key || full.threadKey) || ('t_' + threadId),
-      isBusiness: true,
-      conversationUpdatedTime: isNaN(upd) ? (Date.now() - 864e5) : upd,
-      customerName: (full.name || full.customerName || (conv && conv.name)) || '',
-      convType: 'INBOX', postId: null, convId: null,
-    };
-    const startedAt = Date.now();
-    return adapter.send({ type: 'GET_GLOBAL_ID_FOR_CONV', ...payload }, { timeout: 20000 })
-      .then((res) => {
-        const gid = res && res.success
-          ? String((res.data && res.data.globalId) || res.globalId || '')
-          : '';
-        docIdStats.seedSent++;
-        docIdStats.seedMs += Date.now() - startedAt;
-        if (/^\d+$/.test(gid)) {
-          try {
-            window.__botfakeSaveGid__(String((conv && conv.id) || (pid + '_' + threadId)),
-              pid, String(threadId), gid);
-            docIdStats.seedGotGid++;
-          } catch (eS) { /* ignore */ }
-        }
-        try {
-          logLine('🧩 [doc_id] đã GIEO doc_id qua GET_GLOBAL_ID_FOR_CONV (page ' + pid
-            + ', ' + (Date.now() - startedAt) + ' ms'
-            + (gid ? ', kèm gid thật' : ', ext không trả gid — nhưng `ee.preloadDocIds` '
-              + 'ĐÃ chạy nên `rt/st` có trong cache 5 h') + ')');
-        } catch (e) { /* ignore */ }
-        return true;
-      })
-      .catch(() => { docIdStats.seedFailed++; return false; });
-  }
-
-  /* Gọi ở chỗ warm-up (nơi đã có danh sách conv của page) để nhớ 1 conv có `threadId`.
-   * Chỉ nhớ LẦN ĐẦU; conv không có `threadId` thì bỏ qua (không dùng được để gieo). */
-  function noteSeedConv(pageId, conv) {
-    const pid = String(pageId || '');
-    if (!pid || !conv || batchSeedConv[pid]) return;
+    if (docIdReady()) return true;
+    // ① localStorage do extension giữ (đọc thẳng, không đụng gì)
     try {
-      const f = peekConv(conv) || conv;
-      const tid = f && (f.thread_id || f.threadId);
-      if (tid) batchSeedConv[pid] = f;
+      const raw = window.localStorage && window.localStorage.getItem('GraphQLDocId_docIdsMap');
+      if (raw) {
+        const api = docIdApi();
+        const obj = JSON.parse(raw);
+        let n = 0;
+        Object.keys(obj || {}).forEach((k) => {
+          const v = obj[k] && (obj[k].value || obj[k]);
+          if (v && api && DOCID_KEEP[k]) { try { api.set(k, String(v)); n++; } catch (e) { /* ignore */ } }
+        });
+        if (n) { docIdStats.loadedFromLs += n; }
+      }
     } catch (e) { /* ignore */ }
+    if (docIdReady()) return true;
+    // ② hỏi extension (mặc định tắt)
+    return tryPreloadDocIdsViaExt(pid);
   }
 
   function requestBatchGlobalIds(pid, force) {
@@ -10262,63 +9027,17 @@
     if (!adapter || typeof adapter.send !== 'function') return Promise.resolve(0);
     /* [v1.93.9] `Ct.init()` của extension reject ngay `Missing doc_id` nếu chưa nạp.
      * Không bảo đảm doc_id thì mọi lần gọi batch đều vô ích ⇒ gọi đúng 1 lần trước. */
-    /* [v1.93.13] Điều kiện duy nhất kiểm được từ trang là CÓ adapter (đã kiểm ở trên).
-     * Không còn câu "chưa có doc_id" — ta KHÔNG đọc được doc_id của extension nên không
-     * được phát ngôn về nó. Chỉ bảo đảm đã gửi lệnh nạp, rồi để chính extension trả lời. */
-    try { logLine('🧩 [doc_id] bảo đảm extension đã nạp doc_id trước khi gọi batch…'); } catch (e) { /* ignore */ }
-    /* ═══ [v1.93.15] THỨ TỰ MỚI: GIEO doc_id `rt/st` → rồi mới batch ═══
-     * Cũ: `ensureDocIds` (= `PRELOAD_DOC_IDS`, nạp `[ea,ge,Oe]`) → batch.
-     * §40.1 chứng minh `PRELOAD_DOC_IDS` không nạp `rt/st` ⇒ batch reject `Missing doc_id` ở
-     * 100 % lần chạy (0 lần `batch nạp N/M` trong 12 HAR + 31 log).
-     * Nay: gieo qua `GET_GLOBAL_ID_FOR_CONV` (chạy `ee.preloadDocIds` = `[Jt,Zt,rt,st]`) rồi
-     * batch. Chỉ 1 lệnh gieo/page/phiên; nếu không có chat nào có `threadId` thì KHÔNG gửi
-     * batch (gửi lúc chắc chắn hỏng chỉ tốn slot) và trả 0.
-     * `PRELOAD_DOC_IDS` vẫn giữ — nó nạp `[ea,ge,Oe]` cho nguồn dò theo TÊN (④), thứ mà
-     * `Ee` cũng cần; chỉ không còn là bước "bảo đảm doc_id cho batch". */
-    const _seedConv = (typeof batchSeedConv === 'object' && batchSeedConv/*map*/)
-      ? batchSeedConv[pageId] : null;
-    const _seedTid = _seedConv && (_seedConv.thread_id || _seedConv.threadId);
-    const promise = Promise.resolve()
-      .then(() => (_seedTid ? seedDocIdsViaConv(pageId, _seedConv, _seedTid) : false))
-      .then(() => ensureDocIds(pageId))
-      .then(() => {
-        if (!_seedTid) {
-          docIdStats.batchSkippedNoSeed++;
-          try {
-            logLine('🧩 [doc_id] BỎ BATCH_GET_GLOBAL_ID page ' + pageId
-              + ' — chưa có chat nào có threadId để gieo doc_id `rt/st`'
-              + ' (batch sẽ reject "Missing doc_id" nếu gửi)');
-          } catch (e) { /* ignore */ }
-          return null;
-        }
-        return adapter.send({
+    if (!docIdReady()) {
+      try { logLine('🧩 [doc_id] chưa có ⇒ batch sẽ bị extension từ chối "Missing doc_id"; thử nạp trước…'); } catch (e) { /* ignore */ }
+    }
+    const promise = Promise.resolve().then(() => ensureDocIds(pageId)).then(() => adapter.send({
       type: 'BATCH_GET_GLOBAL_ID',
       pageId: pageId,
       // Khớp payload app (@897543): app luôn kèm timeRangeMin. Gửi 0 = lấy mọi mốc,
       // tránh Extension hiểu thiếu trường là không có mapping nào trong khoảng lọc.
       timeRangeMin: 0,
-      /* [v1.93.13] `maxThreadCount` LÀ THAM SỐ QUYẾT ĐỊNH SỐ LƯỢT GRAPHQL.
-       * Nguồn `0.5.62_0/assets/background.js`:
-       *   const yn=50, ul=250
-       *   class Ct{ constructor({pageId, timeRangeMin, maxThreadCount}){ … this.maxThreadCount = maxThreadCount || ul } }
-       *   async init(){ … for(;;){ let c=yn;
-       *       if(this.maxThreadCount && this.maxThreadCount-s<yn) c=this.maxThreadCount-s;
-       *       const l=await this.getFacebookThreads(a,c);  … } }
-       * ⇒ Mỗi lượt lấy `yn = 50` thread; trần `ul = 250` ⇒ **5 lượt graphqlbatch**.
-       * Script KHÔNG kèm `maxThreadCount` ⇒ ext dùng trần 250 (đúng ý ta), nhưng lại chỉ
-       * chờ **2 000 ms**. 5 lượt graphql thật không thể xong trong 2 s ⇒ phán quyết rơi vào
-       * nhánh timeout ⇒ `batch nạp 0/0` ở mọi log, dù doc_id đã có.
-       * ⇒ nâng hạn chờ lên 30 000 ms (đúng hạn adapter cho mọi lệnh thường: `l = 3e4`).
-       * Lệnh này CHỈ ĐỌC + trả mapping; chờ lâu hơn không sinh thêm lệnh gửi nào.
-       * Không kèm `maxThreadCount` để giữ trần 250 như app. */
-    }, { timeout: 30000 });
-      })
-      .then((res) => {
+    }, { timeout: 2000 })).then((res) => {
       delete batchGidPromises[pageId];
-      if (!res) {
-        /* Không có seed ⇒ không gửi batch. Không cộng `batchFail` (chưa hề gửi lệnh). */
-        return 0;
-      }
       const list = res && res.success && res.data && res.data.threadsWithGlobalId;
       /* ═══ [v1.93.6] ĐỪNG ĐÁNH DẤU "ĐÃ NẠP" KHI CHƯA NẠP ĐƯỢC GÌ ═══
        * ĐO ĐƯỢC trên TOÀN BỘ 28 log (không có ngoại lệ):
@@ -10341,19 +9060,9 @@
          *   a) thiếu doc_id ⇒ extension reject "Missing doc_id …"  (KHÔNG BAO GIỜ chạy được)
          *   b) extension trả success nhưng không có data.threadsWithGlobalId  (lệnh lạ)
          * Hai nguyên nhân có cách sửa KHÁC NHAU ⇒ phải in ra. */
-        /* [v1.93.13] NÓI THEO PHẢN HỒI THẬT, không đoán.
-         * `Ct.init()` reject `Missing doc_id …` ⇒ ext gửi `BATCH_GET_GLOBAL_ID_FAILURE` ⇒
-         * adapter trả `{success:false, data:{type:"BATCH_GET_GLOBAL_ID_FAILURE",taskId}}`.
-         * Hết hạn 30 s ⇒ `{success:false, data:null}` (KHÔNG có type).
-         * Phân biệt được 3 ca, in đúng ca nào: */
-        const _rd = (res && res.data) || null;
-        const whyNoList = !res
-          ? 'adapter không trả gì (không có __ExtensionAdapter__?)'
-          : (!res.success && _rd && /FAILURE$/.test(String(_rd.type || ''))
-            ? 'extension TRẢ _FAILURE (nhiều khả năng `Missing doc_id` — Ct.init reject)'
-            : (!res.success && !_rd
-              ? 'extension KHÔNG phản hồi trong 30 s (adapter hết hạn — lệnh chưa xong hoặc ext không chạy case này)'
-              : 'extension trả success nhưng không có data.threadsWithGlobalId (danh sách rỗng)'))
+        const whyNoList = docIdReady()
+          ? 'extension TRẢ LỜI nhưng không có data.threadsWithGlobalId (lệnh lạ/phiên bản khác)'
+          : 'THIẾU doc_id ⇒ extension reject "Missing doc_id" (chưa chạy được lần nào)';
         try { logLine('🧩 [doc_id] batch rỗng — ' + whyNoList); } catch (e) { /* ignore */ }
         return 0;
       }
@@ -10427,8 +9136,6 @@
         const pid = c.pageId || String(c.id || '').split('_')[0];
         if (!pid || seen[pid]) return;
         seen[pid] = true;
-        /* [v1.93.15] nhớ 1 conv có threadId để GIEO doc_id trước batch (xem seedDocIdsViaConv) */
-        try { noteSeedConv(pid, c); } catch (eNS) { /* ignore */ }
         // 1) Gọi BATCH_GET_GLOBAL_ID (@897543 trong _app) 1 lần/page trong phiên để nạp hàng loạt { threadId, globalId }
         if (adapter && typeof adapter.send === 'function') requestBatchGlobalIds(pid, false);
         if (!h || typeof h.initSocket !== 'function') return;
@@ -10499,29 +9206,10 @@
     if (!pending.length) return { waited: 0, ready: pages.length, pages: pages.length };
     const t0 = Date.now();
     try { logLine('🔌 Chờ Socket báo sync (thức ngay khi xong, không có hạn chờ cứng)…'); } catch (e0) { /* ignore */ }
-    /* ═══ [v1.93.19-p2] PHẢI TỰ TẠO SOCKET, KHÔNG CHỈ NGỒI CHỜ PROMISE CÓ SẴN ═══
-     * Log 21:19 (bản 1.93.18): `⏳ Socket CHƯA sync (0/1 page) sau 17ms` — trong khi
-     * `warmUpSockets()` ngay trên đã tạo `socketWarmPromises[pid]`. Hai lý do, cùng cho ra
-     * đúng 1 kết quả (0 page sync, chờ 17 ms):
-     *   • `warmUpSockets` chạy TRƯỚC khi `window.__MqttHelper__` có ⇒ nó `return` sớm, KHÔNG
-     *     tạo promise nào; lúc đó hàm này chỉ còn `waitForSocketSynced(h, pid)` — mà bản cũ
-     *     thoát ngay ở vòng đầu vì `SOCKETS[pid]` chưa tồn tại (xem p2 ở hàm đó);
-     *   • hoặc promise đã resolve (self-delete) trước khi tới đây ⇒ `waits` rỗng nghĩa.
-     * NAY: thiếu promise thì TỰ gọi `h.initSocket(pid)` (đúng thứ `warmUpSockets` vẫn làm,
-     * idempotent — guard `isRunning()` bên trong helper) rồi chờ sync y như nhau. Không đổi
-     * làn, không đổi ngưỡng, không thêm hạn chờ mới. */
     const waits = pending.map((pid) => {
       const warm = socketWarmPromises[pid];
       if (warm && typeof warm.then === 'function') return Promise.resolve(warm).catch(() => null);
-      if (typeof h.initSocket === 'function') {
-        try {
-          socketWarmPromises[pid] = Promise.resolve().then(() => h.initSocket(pid))
-            .then(async (r) => { await waitForSocketSynced(h, pid, 2500); delete socketWarmPromises[pid]; return r; })
-            .catch(() => { delete socketWarmPromises[pid]; return null; });
-          return Promise.resolve(socketWarmPromises[pid]).catch(() => null);
-        } catch (eW) { /* rơi xuống đường tự chờ */ }
-      }
-      return waitForSocketSynced(h, pid, 2500).catch(() => null);
+      return waitForSocketSynced(h, pid).catch(() => null);
     });
     // LƯỚI CHỐNG TREO (không phải hạn chờ tối ưu): nếu initSocket không bao giờ trả về thì
     // vẫn phải chạy lô, không đứng chờ vô hạn. Đường bình thường luôn thức bằng SỰ KIỆN.
@@ -10607,11 +9295,7 @@
     // (buProofPresent = số lần lặp chặn được), bao nhiêu ca chứng minh được vắng mặt, không rõ,
     // và bao nhiêu ca dùng lại kết quả đã dò (không tốn thêm request).
     buProofPresent: 0, buProofAbsent: 0, buProofUnknown: 0, buProofCached: 0,
-    /* [v1.93.14] `fbDirectPresent` = số lần Pancake nói "chưa thấy" NHƯNG đọc thẳng FB thấy tin
-     * ⇒ chặn được 1 lần bù ⇒ chặn được 1 tin trùng. Đây là thước đo trực tiếp của §28/§25.2. */
-    fbDirectPresent: 0,
     buProofGated: 0, buProofCancelled: 0,
-    buProofSkippedDefinite: 0,   // [v1.93.17] số ca lỗi DỨT KHOÁT được bù NGAY (không qua cổng 10 s)
     // [v1.92.44] số ca bị khoá chống trùng chặn lại (KHÔNG phải lệnh gửi thật)
     dupBlocked: 0,
     /* [v1.92.45] ĐUÔI CHỜ XÁC NHẬN — đo đúng cái người dùng phàn nàn: "gửi 100 con mà chờ
@@ -10688,20 +9372,6 @@
      *                     hàng mới có ms. Nếu lô sau vẫn ra 0 thì con số cũ là số ảo.
      * Ba số này + `bind fbId` + `giữ cổng` phải xấp xỉ `còn lại`; phần dôi ra là CPU bị bóp. */
     prepGidMs: 0, prepGidN: 0, prepBindMs: 0, prepBindN: 0, slotAcqN: 0, slotAcqPosMs: 0,
-    /* [v1.93.16] ĐO KHÂU PRE-BIND ẢNH (ngoài slot) — tiêu chí nghiệm thu của lần chạy sau:
-     *   PRE-BIND ẢNH (goài slot): N ca · <ms> tổng · <ms> TB
-     * và dòng `Giữ slot` phải TỤT đúng bằng phần bind đã dời ra ngoài (log 12:34: `còn lại`
-     * 2 142 ms với bind 1 088 ms ⇒ lô sau kỳ vọng ~1 050 ms, `preBind` ~1 050 ms).
-     * `preBindWallMs` là thời gian THẬT của khâu bind (tường), `preBindMs` là tổng thời gian
-     * các worker còn phải bind TRONG slot (kỳ vọng ≈ 0 sau khi vá). Đọc cả hai mới biết
-     * pre-bind có thật sự dời được việc hay chỉ chạy song song mà vẫn để lại việc. */
-    preBindWallMs: 0, preBindWallWaves: 0, preBindMs: 0, preBindN: 0,
-    /* [v1.93.16] `preBindHit` = số ca `sendOne` THẬT SỰ dùng được fbId đã bind sẵn (0 ms trong
-     * slot). Đây là con số quyết định bản vá có hiệu lực hay không: `preBindHit ≈ số ca có ảnh`
-     * thì đã dời được; `preBindHit = 0` mà vẫn có `preBindN` thì đã bind một đằng mà gửi một nẻo
-     * (đúng lỗi bản nháp đầu — ghi vào `photo` nên route đổi). `preBindMiss` = số ca KHÔNG có
-     * fbId dự phòng (bind hỏng / đã tiêu) ⇒ phải bind trong slot như cũ. */
-    preBindHit: 0, preBindMiss: 0,
     /* [v1.92.54] tách LƯỢT DÒ 1 vs LƯỢT DÒ 2 của khâu global_id (xem chỗ cộng trong prepareDirectCtx) */
     prepGidP1Ms: 0, prepGidP1N: 0, prepGidP2Ms: 0, prepGidP2N: 0,
   };
@@ -10780,10 +9450,6 @@
   // để 5 178 dòng trùng nhau không nhấn chìm log.
   let buQuietBudgetNote = 0;
   let runSeq = 0; // mỗi lượt gửi 1 số — bù của lượt cũ tự hủy khi có lượt mới (chống gửi lẫn/lặp)
-  /* [W131/W132] runSeq của lượt đã được giải phóng trạng thái ⇒ cổng "1 lần/lượt" cho 🧼 cuối
-   * lượt. W132 dùng thêm nó để biết lượt trước đã dọn sạch hay chưa (`=== runSeq - 1`) ⇒ lượt
-   * kế tiếp không in thêm dòng 🧼 rỗng (đúng 1 dòng/lượt, như người dùng yêu cầu). */
-  let runCarryoverDoneSeq = -1;
   const deliveredIds = {}; // convId → ĐÃ có kênh báo thành công trong lượt này ('api'|'ext'|'socket') — tuyệt đối không gửi lại
   const claimedSendIds = {}; // convId → đã nhận quyền bắn trong lượt này (chống 2 worker / 2 câu cùng 1 chat)
   const outboundLock = {}; // convId → đang/đã bắn tin (chưa xác nhận fail) — chặn POST/publish chồng
@@ -10941,10 +9607,6 @@
   }
   const finalFailedIds = {}; // convId → đã thất bại hẳn (hết kênh hoặc khách khóa nick)
   const uncertainIds = {};   // convId → không rõ kết quả ('maybe')
-  /* [v1.93.18] LÝ DO của ca ⚠ — nối thêm, không ghi đè (xem __botfakeTrackStatus__).
-   * Trước bản này sổ chỉ có MỘT lý do và lần gọi không-lý-do sau cùng xoá trắng nó
-   * ⇒ 721 ca của lô 13:46 không truy được nguyên nhân. Tối đa 4 mắt xích/chat. */
-  const uncertainReasonById = {};
   const skippedLateIds = {}; // convId → bỏ qua lúc gửi (tag cấm / icon điện thoại vừa gắn)
   // Sổ tin bắn-nhả đang chờ xác nhận nền + WATCHDOG: quá 90s mà không kênh nào chốt
   // (fetch treo, ACK mất, bù văng lỗi…) → tự chốt ⚠ để pending về 0: TỔNG HỢP luôn kết thúc,
@@ -11233,7 +9895,7 @@
       if (now - Math.max(e.at || 0, bgLaneBusyAt) >= BG_SETTLE_DEADLINE_MS) {
         delete pendingBg[id];
         try { sockFiredPending.delete(id); } catch (e0) { /* ignore */ }
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(id, 'uncertain', 'quá ' + Math.round(BG_SETTLE_DEADLINE_MS / 1000) + 's chưa có xác nhận nền');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(id, 'uncertain');
         forced++;
       }
     });
@@ -11464,9 +10126,8 @@
                * đã chặn được (log 21/11: 577 ca bù, 573 trong đó là ca FB đã báo không nhận). */
               + (fbRejectStats.blockedBu ? ' · 🚫 FB báo không nhận ⇒ KHÔNG bù ' + fbRejectStats.blockedBu + ' ca (chốt ❌, vào gửi tay)' : '')
             : '')
-          + ((sendDiag.buProofGated || sendDiag.buProofPresent || sendDiag.buProofCancelled || sendDiag.buProofSkippedDefinite)
+          + ((sendDiag.buProofGated || sendDiag.buProofPresent || sendDiag.buProofCancelled)
             ? ' | 🛡 Cổng chống lặp: chặn bù mù ' + sendDiag.buProofGated + ' ca · tin ĐÃ tới (hủy bù) ' + sendDiag.buProofCancelled
-              + (sendDiag.buProofSkippedDefinite ? ' · ⚡ bù NGAY (lỗi dứt khoát) ' + sendDiag.buProofSkippedDefinite + ' ca' : '')
               + ' · chứng minh vắng mặt ' + sendDiag.buProofAbsent + ' · không chứng minh được ' + sendDiag.buProofUnknown
               + ' · dùng lại kết quả ' + sendDiag.buProofCached
             : '')
@@ -11587,29 +10248,7 @@
               + (photoUpStats.n
                 ? ' · 📷 bind fbId: ' + photoUpStats.n + ' ca · TB ' + Math.round(photoUpStats.ms / photoUpStats.n)
                   + 'ms/ca · max ' + photoUpStats.max + 'ms · lỗi ' + photoUpStats.fail
-                  /* [W133] SỐ ĐO NGHIỆM THU CỦA BỘ ĐIỀU TIẾT 429 — đọc đúng:
-                   *   `429×N`  = số lần endpoint bind trả 429. Trước W133 con số này KHÔNG được
-                   *              đếm ở đâu cả nên 429 chỉ thấy trong console.
-                   *   `nghỉ Xms` = tổng thời gian cả làn bị chặn bởi cơn nghỉ chung.
-                   *   `làn A→B`  = làn ảnh đã co từ A xuống B (sàn PHOTO_UP_MIN = 16).
-                   * Nghiệm thu: 429 phải về 0 khi server khoẻ; nếu > 0 thì làn phải đã co
-                   * (B < 192) chứ không được chạy phẳng 192 như bản trước. */
-                  + (photoUpCtl.bad429N
-                    ? ' · 429×' + photoUpCtl.bad429N + ' · nghỉ ' + photoUpCtl.coolMs + 'ms'
-                      + ' · làn ' + PHOTO_UPLOAD_LANE + '→' + photoUploadLane.getLimit()
-                    : ' · 429×0 · làn ' + photoUploadLane.getLimit())
                 : '')
-              /* [v1.93.16] NGHIỆM THU PRE-BIND — dòng số quyết định việc này có dời được việc
-               * hay không. Đọc đúng:
-               *   `PRE-BIND ẢNH` tổng/tường  = thời gian khâu bind chạy TRƯỚC slot (ngoài ghế);
-               *   `còn trong slot`           = phần bind vẫn nằm trong ghế (phải ≈ 0);
-               *   `còn lại` ở đầu dòng GIỮ SLOT phải TỤT đúng chừng ấy.
-               * Log 12:34 (trước bản này): `còn lại 2 142 ms`, bind 1 088 ms, Socket peak 59/256
-               * ⇒ kỳ vọng lô sau: `còn lại` ≈ 1 050 ms, `còn trong slot` ≈ 0, phát nhanh hơn. */
-              + ' · 🧷 PRE-BIND ẢNH: ' + waveDiag.preBindN + ' lần bind ngoài slot · tường '
-                + waveDiag.preBindWallMs + 'ms (' + waveDiag.preBindWallWaves + ' wave) · dùng lại được '
-                + waveDiag.preBindHit + ' ca · hụt ' + waveDiag.preBindMiss + ' ca · còn bind trong slot '
-                + Math.round(waveDiag.preBindMs) + 'ms'
             : '')
           + ' · giữ cổng (bay/retry/ext/api) ' + waveDiag.gateBlockInflight + '/' + waveDiag.gateBlockRetry
           + '/' + waveDiag.gateBlockExt + '/' + waveDiag.gateBlockApi
@@ -11664,26 +10303,7 @@
           + ' · Ext chưa rõ ' + gidStats.extUnknown
           + ' · lần dò chưa ra ' + gidStats.unknown
           + ' · batch nạp ' + gidStats.batchMappings + '/' + gidStats.batchReturned + ' mapping (lỗi ' + gidStats.batchFail + ')'
-          /* [v1.93.14] doc_id: ext KHÔNG trả _SUCCESS cho `PRELOAD_DOC_IDS` (không `await`
-           * `O.preloadDocIds`) ⇒ `viaExtOk` gần như luôn 0, `viaExtWaited` = số lần đã chờ đủ.
-           * Trước bản này 3 bộ đếm này thu thập rồi KHÔNG in ở đâu ⇒ không thể biết lệnh nạp
-           * có được gửi hay không. In ra để đọc được. */
-          /* [v1.93.14] Đọc lịch sử TRỰC TIẾP TỪ FB: `tin N · gid M` và số lần nó CHẶN được
-           * một lần bù (`cứu K`). `cứu > 0` = Pancake nói "chưa thấy" nhưng FB có tin ⇒
-           * nếu không có đường này thì đã bù ⇒ khách nhận 2 tin. */
-          + ' · thiếu updated_at ' + (gidStats.updMissing || 0) + ' ca (mốc phải lùi 1 ngày)'
-          /* [v1.93.15] `sync thread_id N` = số ca được `sync_missing_thread_id` trả `thread_id`
-           * thật (mở lại nguồn gid ①②③); `cứu M` = trong đó CÓ ra gid. Đây là thước đo trực
-           * tiếp của nhóm "hội thoại không có thread_id" mà 4 nguồn gid cùng bó tay. */
-          + ' · sync thread_id ' + (gidStats.threadIdSynced || 0)
-          + ' cứu ' + (gidStats.threadIdSyncSaved || 0)
-          + ' · đọc thẳng FB: tin ' + gidStats.fbDirectMessages
-          + ' · gid ' + gidStats.fbDirectSavedGid
-          + ' · cứu ' + sendDiag.fbDirectPresent
-          + ' · doc_id gửi ' + (docIdStats.viaExtOk + docIdStats.viaExtWaited)
-          + ' (chờ hết hạn ' + docIdStats.viaExtWaited + ' · gửi lỗi ' + docIdStats.viaExtEmpty + ')'
           + ' · Ext trả không có gid ' + gidStats.extRespondedNoGid
-          + ' (trong đó INCORRECT THREAD ' + (gidStats.extIncorrectThread || 0) + ')'
           + ' · Ext p90 ' + (extLatP90() || 0) + 'ms → timeout ' + extTimeoutMs() + 'ms'
           + ' · ACK p50/p90 ' + (sockAckP50() || 0) + '/' + sockAckP90() + 'ms → ngưỡng nhanh ' + fastAckMs() + 'ms'
           + ' · bỏ nới lane ' + sockRampSkipped + ' lần (đuôi p95 > ' + SOCK_RAMP_P95_MAX_MS + 'ms: '
@@ -11751,46 +10371,6 @@
     }
     if (summaryUiTimer) { clearTimeout(summaryUiTimer); summaryUiTimer = null; }
     flushBatchSummaryUI();
-    /* ═══ [v1.93.18-W132] GIẢI PHÓNG TRẠNG THÁI LƯỢT — CUỐI LƯỢT ═══
-     * Gọi SAU `flushBatchSummaryUI()` (bảng TỔNG HỢP đã đọc xong mọi bộ đếm) nên KHÔNG làm sai
-     * một con số nào trong báo cáo; và chỉ khi lượt đã chốt hẳn (`isDoneAll`) để không dọn giữa
-     * lúc còn tin đang chờ xác nhận / đang cứu. Đầu lượt kế tiếp vẫn gọi lại lần nữa (lượt có
-     * thể bị F5 / bấm Dừng nên không bao giờ tới được đây). */
-    /* PHẢI CÓ CỔNG "1 LẦN/LƯỢT" — bản W131 gọi thẳng ở đây nên MỖI lần `flushBatchSummaryUI`
-     * chạy lại (mỗi ca ⚠→✅, mỗi lần bảng vẽ lại) là một dòng 🧼: log thật 18:12 in **22 dòng
-     * "cuối lượt"** cho cùng một lô 739 chat. Nay:
-     *   • `runCarryoverDoneSeq === runSeq` ⇒ lượt này đã dọn rồi, không làm lại;
-     *   • chỉ dọn khi **thật sự xong**: `loopFinished` + không còn tin chờ phán quyết
-     *     + **không còn ca kiểm chứng nền** (`cEnd.pending === 0`). Bản cũ chỉ đòi
-     *     `pendingSend === 0` nên dọn khi còn 11 ca đang kiểm chứng.
-     * Đầu lượt kế tiếp vẫn dọn lại (lượt có thể bị F5/bấm Dừng nên không tới được đây). */
-    /* [v1.93.18-W132] SỬA LỖI CỦA W131 — CỔNG CŨ KHÔNG BAO GIỜ ĐÓNG ĐÚNG LÚC:
-     *   • `cEnd.pending === 0` đòi hỏi CẢ kiểm chứng nền xong, nhưng `markSendIdleIfSettled()`
-     *     CHỈ chờ `pendingSend`. Ca ⚠/❌/kiểm chứng hàng trăm giây ⇒ `pending` > 0 suốt ⇒ cổng
-     *     KHÔNG chạy ⇒ **🧼 không bao giờ xảy ra ở cuối lượt** (trái yêu cầu "mỗi lượt gửi xong
-     *     phải giải phóng"). Đo trên log thật: các lô 26–64 chat không có dòng 🧼 "xong lượt".
-     *   • Ngược lại ở lô lớn: `pending` chạm 0 trong một khoảnh khắc giữa hai đợt kiểm chứng
-     *     ⇒ dọn SỚM, đúng lúc `pendingBg` còn treo ⇒ ACK muộn về sau khi đã dọn ⇒ rơi vào
-     *     `socketPageAckCtl` sạch ⇒ chấm sai ⇒ ⚠ oan ("gửi sót").
-     * NAY — thứ chặn dọn phải là thứ ĐANG CHẠY THẬT:
-     *   • `pendingBg` (đuôi chờ xác nhận) = 0;
-     *   • không còn chuỗi bù/bắn cứu đang chạy (`buRetryTimer` rỗng);
-     *   • không còn slot/vòng phát nào đang bận (`sendLanesBusy()`). */
-    try {
-      const cEnd = getBatchSummaryCounts();
-      const tailBusy = (typeof pendingBgCount === 'function' ? pendingBgCount() : 0) > 0
-        || Object.keys(buRetryTimer).length > 0
-        || (typeof sendLanesBusy === 'function' && sendLanesBusy());
-      /* Khi bấm Dừng: người dùng muốn dừng NGAY, không chờ đuôi ⇒ chỉ đòi `loopFinished`.
-       * Khi chạy hết: chỉ dọn lúc mọi thứ đã đứng yên. */
-      const settledEnough = state.stopRequested
-        ? true
-        : (cEnd.pendingSend === 0 && !tailBusy);
-      if (batchStats.loopFinished && settledEnough && runCarryoverDoneSeq !== runSeq) {
-        runCarryoverDoneSeq = runSeq;
-        releaseRunCarryover(state.stopRequested ? 'dừng lượt' : 'xong lượt');
-      }
-    } catch (eRC1) { /* ignore */ }
   }
 
   /* [v1.92.35] SỐ "THÀNH CÔNG" PHẢI LÀ SỐ ĐÃ TỚI NƠI THẬT.
@@ -11859,9 +10439,7 @@
     updateBatchSummaryUI();
   }
 
-  /* [v1.93.13] `reason` (tuỳ chọn, tham số 3) chỉ dùng để GHI SỔ ca ⚠ — xem khối chú thích
-   * trong nhánh `uncertain`. Không đổi phán quyết, không thêm lệnh gửi. */
-  window.__botfakeTrackStatus__ = function (convId, kind, reason) {
+  window.__botfakeTrackStatus__ = function (convId, kind) {
     if (!convId || deliveredIds[convId]) return;
     clearBgPending(convId);
     if (kind === 'fail') {
@@ -11873,31 +10451,6 @@
       if (!finalFailedIds[convId]) { finalFailedIds[convId] = true; summaryCounters.fail++; }
     } else if (kind === 'uncertain') {
       if (!uncertainIds[convId] && !finalFailedIds[convId]) { uncertainIds[convId] = true; summaryCounters.unsure++; }
-      /* ═══ [v1.93.13] GHI SỔ CHO CA ⚠ — TRƯỚC ĐÂY KHÔNG CÓ DÒNG NÀO ═══
-       * ĐO ĐƯỢC (log 22/11 09:54, lô 8 572 chat, bản W200.124):
-       *   • TỔNG HỢP ghi `⚠ Không rõ: 3 547` và `🖐 CẦN GỬI TAY: 3 547 chat`
-       *   • Sổ kiểm chứng chỉ có 5 025 chat; `8 572 − 5 025 = 3 547` — KHỚP CHÍNH XÁC
-       *   • Trong sổ: ✅ 5 006 · ❌ 47 · ⏳ 33 · 🔎 19 · 🛟 1 ⇒ **0 dòng ⚠**
-       *   • 2 000 dòng đầu của 🖐 CẦN GỬI TAY: giao với sổ = **0/2 000**
-       * ⇒ Nhánh này chỉ tăng bộ đếm + đưa vào danh sách gửi tay, **không ghi dòng sổ nào**.
-       *   Mọi ca được gọi từ đường nào (ACK rejected, quá hạn ACK, …) đều biến mất khỏi sổ.
-       *
-       * Hệ quả thật: đây đúng là câu hỏi treo từ lô 08:32 (570 ca ⚠) — KHÔNG truy được
-       * nguồn vì ca ⚠ không có dòng sổ. Nay ghi sổ, kèm LÝ DO nếu chỗ gọi đưa vào.
-       * Chỉ ghi nhận — không thêm lệnh gửi, không đổi phán quyết. */
-      /* ═══ [v1.93.18] KHÔNG ĐƯỢC GHI ĐÈ LÝ DO ĐÃ CÓ ═══
-       * ĐO ĐƯỢC (log 22/11 13:46, lô 941 chat): 721 ca ⚠ vào sổ với lý do **RỖNG** —
-       * không ca nào truy được vì sao. Gốc: hàm này chạy nhiều lần cho cùng một chat, và
-       * ĐA SỐ chỗ gọi truyền `undefined` (8 chỗ chỉ đổi bộ đếm) ⇒ lần gọi sau XOÁ TRẮNG lý do
-       * mà lần gọi trước đã ghi đúng. Nay lý do được NỐI THÊM và khử trùng, nên chuỗi đầy đủ
-       * "ACK rejected → bù → giữ ⚠" còn nguyên trong sổ. Chỉ ghi nhận — không đổi phán quyết,
-       * không thêm lệnh gửi. */
-      const _whyNew = reason ? String(reason) : '';
-      if (!uncertainReasonById[convId]) uncertainReasonById[convId] = [];
-      const _whyArr = uncertainReasonById[convId];
-      if (_whyNew && _whyArr.indexOf(_whyNew) < 0 && _whyArr.length < 4) _whyArr.push(_whyNew);
-      auditPush('⚠', convId, '', 'chốt KHÔNG RÕ (vào danh sách gửi tay)'
-        + (_whyArr.length ? ' · ' + _whyArr.join(' → ') : ' · (không chỗ gọi nào ghi lý do)'));
       noteManualResend(convId); // ⚠ = máy không chắc đã gửi ⇒ vào danh sách gửi tay
     } else if (kind === 'skip') {
       if (!skippedLateIds[convId]) { skippedLateIds[convId] = true; summaryCounters.skipLate++; }
@@ -11974,27 +10527,9 @@
   // hỗ trợ API/Extension. 'maybe'/đã đến nơi → DỪNG tuyệt đối (chống trùng).
   function scheduleBuRetry(conv, text, photo, name, why, tried, opts) {
     if (!conv) return;
-    if (opts && opts.definitiveNotSent) sendDiag.buProofSkippedDefinite = (sendDiag.buProofSkippedDefinite || 0) + 1;
     // [v1.92.30] `opts.ambiguous` = phán quyết lỗi là SUY LUẬN (không phải bằng chứng) ⇒ phải
     // chứng minh vắng mặt trước khi bắn lần 2. `opts.sentAt` = mốc bắt đầu lần gửi đầu.
-    /* ═══ [v1.93.17] LỖI DỨT KHOÁT (#551/#10/#100/ngoài 24h) ⇒ BÙ NGAY, BỎ CỔNG CHỜ 10 s ═══
-     * ĐO TRÊN 31 LOG — cổng chứng minh vắng mặt KHÔNG bắt được ca lặp nào, chỉ giữ thời gian:
-     *   · `chặn lặp` (cổng trả 'yes'): **0 lần / 31 log**
-     *   · `chứng minh VẮNG MẶT` rồi bù: 442 ca, kết thúc ✅ ~50 (11 %), còn lại ❌/⚠
-     *   · Lượt 12:43 hôm nay: 2 ca #551 → cổng giữ **10,3 s** và **5,5 s**, cả hai kết thúc ❌.
-     *     `PHÁT 6,8 s` nhưng người dùng chờ **27 s** ⇒ 75 % thời gian nằm ở cổng, không ở làn.
-     * VÌ SAO BỎ CỔNG Ở ĐÂY KHÔNG GÂY GỬI LẶP — 3 lớp, không lớp nào bị bỏ:
-     *   1) `definitiveNotSent` chỉ đúng khi lỗi là DỨT KHOÁT (`isDefinitiveNotSent`: #551 /
-     *      ngoài 24h / #10 / #100) ⇒ API đã trả lời "KHÔNG nhận", chưa có byte nào tới FB.
-     *      Đây là BẰNG CHỨNG, không phải suy đoán — khác hẳn ca no-ACK (vẫn giữ đủ 14 s).
-     *   2) `acquireOutbound` vẫn giữ khoá ngoài cho chat đó suốt chuỗi bù ⇒ 2 chuỗi bù của cùng
-     *      một chat không thể chồng nhau.
-     *   3) `triedCh` / `buRetryDone` vẫn chặn thử một kênh hai lần.
-     * NGƯỢC LẠI — KHÔNG ĐƯỢC BỎ LẦN BÙ: 31 log cho **47/229 ca #551 được cứu thật** (log
-     * 17/11 16:27: 35/37 ca #551 → ✅ qua Extension); log 13:31 cùng ngày 4/4. #551 là câu trả
-     * lời của KÊNH API, không phải bản án cho khách ⇒ chỉ bỏ ĐOẠN CHỜ, không bỏ lần bù. */
-    const buProofSkip = !!(opts && opts.definitiveNotSent);
-    const buGated = !!(opts && opts.ambiguous) && !buProofSkip;
+    const buGated = !!(opts && opts.ambiguous);
     // [v1.92.38] `opts.fromUncertain` = cứu ca ⚠ ĐÃ CÓ BẰNG CHỨNG vắng mặt (socket no-ACK).
     // Chat vẫn nằm trong sổ ⚠ để lượt không bị mở lại (xem chú thích ở scheduleSocketVerify),
     // nên phải cho đi qua cửa chặn "đã chốt ⚠ thì không bù" — nhưng CHỈ khi có cờ này.
@@ -12047,7 +10582,7 @@
       if (extAliveNow && conv.__extSkippedOverload && lateN < 2 && !state.stopRequested) {
         buLateRetryCount[conv.id] = lateN + 1;
         try { delete conv.__extSkippedOverload; } catch (eLo) { /* ignore */ }
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'Extension đang nghỉ hồi sức (bộ ngắt quá tải) — hẹn thử lại 9 s');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
         logFailGrouped(name, 'Extension đang nghỉ hồi sức (bộ ngắt quá tải) — chat CHƯA được gửi lần nào '
           + '⇒ hẹn thử lại sau 9 s (lần ' + (lateN + 1) + '/2), không chốt ❌ oan', '⏳', conv.id);
         const myLateRun = runSeq;
@@ -12133,13 +10668,6 @@
           buStats.byWhy[buWhyBucket(why)] = (buStats.byWhy[buWhyBucket(why)] || 0) + 1;
           // [v1.92.52] noAudit = true: markDelivered() ngay trên đã ghi ✅ vào sổ cho cùng lần gửi này.
           logFailGrouped(name, 'bù THÀNH CÔNG qua ' + (ch === 'ext' ? 'Extension' : 'Socket'), '✅', conv.id, true);
-        } else if (r && r.sent === 'maybe' && r.extClaimedSuccess && r.extSuccessNoId) {
-          /* [v1.93.14] `success` mà KHÔNG `messageId` ⇒ FB trả `error_payload` ⇒ KHÔNG có tin.
-           * Đây KHÔNG phải "chưa xác nhận" mà là BẰNG CHỨNG VẮNG MẶT ⇒ ghi sổ "FB đã từ chối"
-           * (để ca này không bị coi là "cần gửi tay" oan) và KHÔNG gửi thêm lệnh nào. */
-          try { noteFbRejected(conv.id, 'Ext báo success nhưng không có messageId = error_payload ⇒ FB từ chối'); } catch (eFbR) { /* ignore */ }
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'fail');
-          logFailGrouped(name, 'bù qua Extension: success nhưng KHÔNG có messageId ⇒ FB trả error_payload, KHÔNG có tin — không gửi lại', '❌', conv.id);
         } else if (r && r.sent === 'maybe' && r.extClaimedSuccess) {
           /* ═══ [v1.93.2] EXT BÁO `success` KHI BÙ: KHÔNG CHỐT ✅ ═══
            * Đây chính là đường sinh ra 554 ca ✅ giả của lô 21/11 20:28: r.ok=true ⇒
@@ -12148,7 +10676,7 @@
            * Nay: giữ ⚠ "chưa xác nhận" + ghi sổ `extClaimSuccess` để lượt đọc lịch sử quyết định
            * (đã đăng ký trong sendViaExtension). Thấy tin ⇒ ✅ · hết lượt không thấy ⇒ ❌.
            * KHÔNG gửi thêm lệnh nào — số lần gửi của ca này không đổi. */
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'Extension báo success nhưng CHƯA xác nhận — đọc lại lịch sử');
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
           logFailGrouped(name, 'bù qua Extension: Extension báo success nhưng CHƯA xác nhận — giữ ⚠, đọc lại lịch sử (không gửi lại)', '⚠', conv.id);
         } else if (r && r.sent === 'maybe') {
           /* [v1.92.43] NGÂN SÁCH DÒ EXT PHẢI ĐÓNG Ở CẢ NHÁNH NÀY.
@@ -12156,7 +10684,7 @@
            * 200 ca KHÔNG BAO GIỜ đóng, vì ca Ext quá hạn rơi vào nhánh 'maybe' chứ không phải
            * nhánh recipientUnavailable mà tôi chỉ gắn cờ đóng. Nay tính cả nhánh này. */
           if (conv.__extFallback1545) noteExt1545Outcome('unknown'); // quá hạn: chưa phải bằng chứng
-          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'bù không rõ kết quả: ' + clip(String((r && r.error) || ''), 70));
+          if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
           logFailGrouped(name, 'bù không rõ kết quả — KHÔNG gửi thêm (chống trùng)', '⚠', conv.id);
         } else if (r && r.recipientUnavailable && !hasMoreAfterSocket) {
           if (conv.__extFallback1545) noteExt1545Outcome('blocked'); // Ext cũng bị chặn — đo tiếp
@@ -12182,19 +10710,7 @@
       /* [v1.92.30] CỔNG CHỨNG MINH VẮNG MẶT — chỉ cho phán quyết SUY LUẬN.
        * Phán quyết là BẰNG CHỨNG (socket chết trước publish, lỗi trước khi bắn) đi thẳng:
        * 0 request, 0 chờ ⇒ giữ nguyên tốc độ cũ. */
-      /* [v1.93.17] Ca `definitiveNotSent` đi thẳng nhưng VẪN PHẢI VÀO SỔ CHỜ NỀN.
-       * `buGatedSwitch` = cổng bị tắt bởi bằng chứng dứt khoát (không phải "không cần cổng").
-       * Trước đây nhánh `!buGated` chạy `actuallySendBu()` rồi `return` mà KHÔNG `noteBgPending`
-       * — nếu bản vá #551 dùng lại nhánh này thì lượt có thể chốt TỔNG HỢP và nhả nút Chạy
-       * trong lúc chuỗi bù còn đang xếp hàng làn ⇒ mất tin mà báo ✅. Sổ chờ nền có watchdog
-       * 180 s và tự chốt ⚠ nếu không có xác nhận ⇒ an toàn, đúng ý "không bỏ lần bù". */
-      const buGatedSwitch = !!(opts && opts.ambiguous) && buProofSkip;
-      if (!buGated && !buGatedSwitch) { actuallySendBu(); return; }
-      if (buGatedSwitch) {
-        noteBgPending(conv, 'bu-direct');
-        actuallySendBu();
-        return;
-      }
+      if (!buGated) { actuallySendBu(); return; }
       noteBgPending(conv, 'bu-proof');
       const afterProof = (v) => {
         if (myRun !== runSeq) { clearBgPending(conv.id); return; }
@@ -12498,183 +11014,6 @@
     return 'absent';
   }
 
-  /* ═══ [v1.93.14] ĐỌC LỊCH SỬ **TRỰC TIẾP TỪ FACEBOOK** (không qua Pancake) ═══
-   * VÌ SAO CẦN — đo được: mọi cổng "chứng minh vắng mặt" hiện tại đều hỏi Pancake
-   *   `/v1/conversations/customer/{psid}` (snippet). Đường đó phụ thuộc Pancake ĐÃ ĐỒNG BỘ
-   *   tin từ FB về; khi FB đã nhận mà Pancake chưa kéo về thì snippet nói "vắng mặt" SAI.
-   *   Đó đúng là nhóm 3 547 ca ⚠ (ACK rejected 3 552 − FB-báo-không-nhận 5).
-   * Extension có sẵn đường đọc thẳng FB — `class He` / case `LOAD_FACEBOOK_MESSAGES`:
-   *   case"LOAD_FACEBOOK_MESSAGES": { … new He(r.data).init()
-   *     .then(({messages, globalId}) => postMessage({type:"LOAD_FACEBOOK_MESSAGES_SUCCESS",
-   *                                    taskId, messages, globalId})) … }
-   *   async loadFacebookMessages(){ O.isFeatureReady("loadMessages") || await He.preloadDocIds(...);
-   *     const a = await this.getGlobalId();              // ← TỰ LẤY gid nếu không truyền
-   *     return { messages: (await t.graphqlbatch({batchName:"MessengerGraphQLThreadFetcher",
-   *                graphqlQueries: this.getGraphqlQueries(a, this.before)}))[0]
-   *                .data.message_thread.messages.nodes, globalId: a } }
-   *   getGraphqlQueries(e,t){ const a = O.get(Da,Sa); if(!a) throw `Missing doc_id …`;
-   *     return [{doc_id:a, query_params:{id:e, load_messages:!0, message_limit:40, before:t}}] }
-   *
-   * ⇒ Lợi ích kép:
-   *   ① `messages` là tin THẬT trên FB, không phụ thuộc đồng bộ Pancake ⇒ phán 'absent' đúng hơn;
-   *   ② `globalId` là gid THẬT của hội thoại — đúng thứ 56 ca "HTTP không có gid" đang thiếu,
-   *      và nó đến từ `Ee.init()` (4 nguồn Jt/Zt/rt-st/ge) mà KHÔNG cần `ENABLE_FIND_THREAD_BY_USERNAME`.
-   *
-   * CHỈ ĐỌC. Không gửi tin, không tạo tin. `message_limit: 40` đủ cho cửa sổ ±vài phút.
-   * Hạn chế: cần `[Da,Sa]` doc_id — nếu ext chưa nạp thì reject `Missing doc_id` ⇒ trả ['unknown'].
-   * Không đoán, không bịa. */
-  /* ═══ [v1.93.14] PHÂN XỬ TIN CỦA `He` (FB trực tiếp) — TRƯỜNG KHÁC HẲN PANCAKE ═══
-   * Node do `MessengerGraphQLThreadFetcher` trả (đọc từ `He.findInternalMessage` của ext):
-   *   { timestamp_precise: "<ms>",          // ms, phải chia 1e3 rồi parseInt để ra GIÂY
-   *     message_sender: { id },             // id NGƯỜI GỬI (page id nếu page gửi)
-   *     message: { text },                  // nội dung
-   *     blob_attachments: [{ preview: { uri } }] }
-   * Khác Pancake: KHÔNG có `inserted_at` ISO, KHÔNG có `from.id`, KHÔNG có `type`, KHÔNG `attachments`.
-   * Phép khớp của chính ext (đó là chuẩn, không phải suy đoán):
-   *   parseInt(parseInt(m.timestamp_precise)/1e3) == insertedAt     // giây
-   *   text.trim() == message.trim()
-   *   ${m.message_sender.id} == ${from.id}   (hoặc == globalId khi gửi bằng vai page)
-   * Script KHÔNG có `insertedAt` của FB, nên dùng CỬA SỔ THỜI GIAN thay vì khớp giây tuyệt đối,
-   * và chỉ nhận tin DO PAGE gửi (`message_sender.id === pageId`).
-   * Thiếu trường nào ⇒ 'unknown'. KHÔNG suy diễn 'absent' từ việc không khớp. */
-  function fbMessagesVerdict(msgs, pageId, want, photo, sentAtMs) {
-    if (!Array.isArray(msgs) || !msgs.length) return 'unknown';
-    const at = Number(sentAtMs) || 0;
-    /* Lệch đồng hồ: `timestamp_precise` là đồng hồ FB, `sentAtMs` là đồng hồ máy. Script đã đo
-     * `serverSkewMs`; dùng nếu có, nếu không thì nới cửa sổ về phía QUÁ KHỨ (không nới tương lai). */
-    const skew = (typeof serverSkewMs === 'number') ? serverSkewMs : 0;
-    const minT = at + skew - 5000;
-    const maxT = at + skew + 120000;   // đồng bộ trễ tối đa; quá mốc này không phải tin của ta
-    const norm = String(want || '').trim();
-    for (let i = 0; i < msgs.length; i++) {
-      const m = msgs[i];
-      if (!m) continue;
-      const tRaw = parseInt(parseInt(m.timestamp_precise) / 1e3);   // ms → giây (đúng như ext)
-      if (!tRaw || isNaN(tRaw)) continue;
-      const tMs = tRaw * 1000;
-      if (tMs < minT || tMs > maxT) continue;
-      const sender = m.message_sender && m.message_sender.id;
-      if (!sender || String(sender) !== String(pageId)) continue;   // chỉ tin DO PAGE gửi
-      if (norm) {
-        const txt = (m.message && m.message.text) ? String(m.message.text).trim() : '';
-        if (txt && (txt === norm || (norm.length >= 20 && txt.indexOf(norm) > -1))) return 'yes';
-        /* chuẩn hoá giống `normalizeMsgText` của Pancake để bắt được khác biệt unicode */
-        const t2 = normalizeMsgText(m.message && m.message.text);
-        if (t2 && (t2 === normalizeMsgText(norm))) return 'yes';
-      } else if (photo) {
-        const ba = m.blob_attachments;
-        if (Array.isArray(ba) && ba.length > 0) {
-          const uri = ba[0] && ba[0].preview && ba[0].preview.uri;
-          if (uri) {
-            const got = photoNameOf(uri);
-            const exp = photo ? photoNameOf(photo.url || photo) : '';
-            if (got && exp && got === exp) return 'yes';
-          }
-          return 'yes';   // có tệp đính kèm, do page gửi, đúng cửa sổ ⇒ đủ
-        }
-      }
-    }
-    return 'unknown';
-  }
-  function photoNameOf(u) {
-    try {
-      const parts = String(u).split('?')[0].split('/');
-      return parts[parts.length - 1] || '';
-    } catch (e) { return ''; }
-  }
-
-  const fbMsgCache = new Map();
-  function fetchFbMessagesDirect(conv, fallback) {
-    return Promise.resolve().then(() => {
-      const ad = (window.__ExtensionAdapter__ && typeof window.__ExtensionAdapter__.send === 'function')
-        ? window.__ExtensionAdapter__ : null;
-      if (!ad) return null;
-      const fullC = (fallback && fallback.page_id) ? fallback : (peekConv(conv) || conv);
-      const pageId = (fullC && (fullC.page_id || fullC.pageId)) || conv.pageId || String(conv.id || '').split('_')[0];
-      const threadId = (fullC && (fullC.thread_id || fullC.threadId)) || conv.threadId || '';
-      if (!pageId || !threadId || !/^\d+$/.test(String(threadId))) return null;
-      const ck = String(pageId) + '|' + String(threadId);
-      const hit = fbMsgCache.get(ck);
-      if (hit && Date.now() - hit.at < 8000) return hit.promise;
-      const entry = { at: Date.now(), promise: null };
-      /* ═══ [v1.93.15] PAYLOAD KHỚP `class He` (@117423 của ext 0.5.62) ═══
-       * Constructor thật:
-       *   class He{constructor({pageId, threadId, threadKey, isBusiness, before, platform,
-       *                         customerName, conversationUpdatedTime, globalUserId})
-       *     { this.globalId = globalUserId; … } }
-       * và `loadFacebookMessages()`:
-       *   const a = await this.getGlobalId();          // = this.globalId NẾU có
-       *   return { messages: (await graphqlbatch({batchName:"MessengerGraphQLThreadFetcher",
-       *            graphqlQueries: this.getGraphqlQueries(a, this.before)}))[0]…, globalId: a }
-       *   getGraphqlQueries(e,t){ const a=O.get(Da,Sa); … {doc_id:a,
-       *            query_params:{id:e, load_messages:!0, message_limit:40, before:t}} }
-       * BA ĐIỀU RÚT RA:
-       *  ① Tên trường là **`globalUserId`** (KHÔNG phải `globalId`). App thật
-       *     (`loadFacebookMessages` @866417) lại gửi `globalId: d.Z.get(t.id)` — ext BỎ QUA
-       *     ⇒ app luôn trả giá `new Ee(...).init()` để tự dò gid. Script gửi ĐÚNG TÊN
-       *     `globalUserId` ⇒ ext bỏ hẳn bước dò ⇒ nhanh hơn app ở đúng ca này. Nếu sổ chưa
-       *     có gid thì KHÔNG gửi trường đó (ext tự dò y như app — không sai).
-       *  ② `before` là con trỏ lùi: `before: undefined` ⇒ 40 tin MỚI NHẤT (đúng thứ ta cần
-       *     cho cổng chống lặp). KHÔNG truyền `before` — giữ nguyên hành vi này.
-       *  ③ `_SUCCESS` trả `{messages, globalId}` ⇒ `res.data.globalId` là gid THẬT (đã đọc).
-       * `threadKey/isBusiness/convType/postId/convId`: `He` KHÔNG khai báo, ext case chỉ sửa
-       * `pageId` (IGD) và `customerName` rồi đưa phần còn lại vào constructor ⇒ trường thừa bị
-       * bỏ qua, VÔ HẠI. Giữ để tương thích ext bản khác. */
-      const gidForHe = (function () {
-        try {
-          const g = peekFastGlobalId(conv, fullC, '');
-          return (g && /^\d+$/.test(String(g))) ? String(g) : '';
-        } catch (ePg) { return ''; }
-      })();
-      entry.promise = ad.send({
-        type: 'LOAD_FACEBOOK_MESSAGES',
-        pageId: String(pageId),
-        threadId: String(threadId),
-        threadKey: (fullC && (fullC.thread_key || fullC.threadKey)) || ('t_' + threadId),
-        isBusiness: true,
-        platform: 'facebook',
-        customerName: (fullC && (fullC.name || fullC.customerName)) || conv.name || '',
-        ...(gidForHe ? { globalUserId: gidForHe } : {}),
-        /* [v1.93.15] xem chú thích ở `updMs`: thiếu mốc thì LÙI 1 NGÀY, không dùng "bây giờ". */
-        conversationUpdatedTime: (function () {
-          const raw = String((fullC && (fullC.updated_at || fullC.conversationUpdatedTime)) || '');
-          const t = raw ? Date.parse(/[zZ+]|\+\d{2}:?\d{2}$/.test(raw) ? raw : raw + 'Z') : NaN;
-          return isNaN(t) ? (Date.now() - 864e5) : t;
-        })(),
-        convType: 'INBOX', postId: null, convId: null,
-      }, { timeout: 20000 }).then((res) => {
-        if (!res || !res.success || !res.data || !Array.isArray(res.data.messages)) return null;
-        try {
-          gidStats.fbDirectMessages++;
-          if (gidForHe) gidStats.fbDirectGidSkippedResolve++;
-        } catch (e) { /* ignore */ }
-        /* ═══ [v1.93.14] `globalId` TỪ CHÍNH PHẢN HỒI NÀY = NGUỒN GID THẬT, MIỄN PHÍ ═══
-         * `He.getGlobalId()` trả gid của hội thoại (`this.globalId` nếu app truyền vào, nếu không
-         * thì `new Ee({…convType:"INBOX"}).init()` — đúng 4 nguồn Jt/Zt/rt-st/ge của ext).
-         * Ta ĐÃ trả giá cho lệnh này rồi ⇒ lưu luôn vào sổ gid, khỏi dò lại bằng
-         * `GET_GLOBAL_ID_FOR_CONV` (đắt hơn) hay `MAKE_MESSENGER_LINK` (đắt nhất).
-         * CHỈ ĐỌC: `window.__botfakeSaveGid__` ghi cache, không gửi tin, không đổi số lệnh gửi. */
-        const gid = res.data.globalId;
-        if (gid && /^\d+$/.test(String(gid))) {
-          try {
-            const mapKey = String(pageId) + '_' + String(threadId);
-            if (!persistentGidMap[mapKey] && typeof window.__botfakeSaveGid__ === 'function') {
-              window.__botfakeSaveGid__(mapKey, String(pageId), String(threadId), String(gid));
-              gidStats.fbDirectSavedGid++;
-            }
-          } catch (eG) { /* ignore */ }
-        }
-        return res.data;   // { messages:[…], globalId }
-      }).catch(() => null);
-      fbMsgCache.set(ck, entry);
-      if (fbMsgCache.size > 3000) {
-        const now = Date.now();
-        fbMsgCache.forEach((v, k) => { if (now - v.at > 60000) fbMsgCache.delete(k); });
-      }
-      return entry.promise;
-    });
-  }
-
   async function probeBuVerdict(conv, pageId, convId, want, sentAtMs, late, hasPhoto) {
     try {
       const psid = psidOf(conv, peekConv(conv) || conv);
@@ -12689,17 +11028,6 @@
       if (v === 'yes') return v;
       // [v1.92.44] ca có ảnh: chữ ngắn/không khớp được vẫn kết luận được nếu hội thoại vừa động
       if (hasPhoto && photoMovedVerdict(convs, convId, pageId, psid, sentAtMs) === 'yes') return 'yes';
-      /* ═══ [v1.93.14] PANCAKE NÓI "CHƯA THẤY" ⇒ HỎI THẲNG FACEBOOK ═══
-       * Snippet của Pancake chỉ đúng khi Pancake ĐÃ ĐỒNG BỘ tin từ FB. Trước khi kết luận
-       * 'absent' (cho phép bù ⇒ nguy cơ khách nhận 2 tin), đọc thẳng FB 1 lần.
-       * Thấy tin ⇒ 'yes' (HỦY bù — đây chính là ca chặn được tin trùng).
-       * Không thấy / không đọc được ⇒ giữ nguyên phán quyết cũ của snippet.
-       * CHỈ ĐỌC, không gửi. */
-      const fbd = await fetchFbMessagesDirect(conv, peekConv(conv) || conv);
-      if (fbd && Array.isArray(fbd.messages) && fbd.messages.length) {
-        const fbV = fbMessagesVerdict(fbd.messages, pageId, want, hasPhoto ? 'photo' : null, sentAtMs);
-        if (fbV === 'yes') { sendDiag.buProofPresent++; sendDiag.fbDirectPresent++; return 'yes'; }
-      }
       return v;
     } catch (e) { return 'unknown'; }
   }
@@ -13009,48 +11337,6 @@
          * Đặt SAU các cổng quyết định, để không vô hiệu hoá cổng 🚫 của 1.93.1.
          * Đường này CHỈ ĐỌC ⇒ bỏ nó không thể sinh tin trùng, không thể chốt ✅ oan. */
         if (socksProof === 'absent') {
-          /* ═══ [v1.93.13] TRƯỚC KHI BỎ CUỘC: ÉP PANCAKE KÉO LẠI TIN TỪ FB ═══
-           * Đây đúng là ca "hội thoại KHÔNG có tin" ⇒ nếu FB ĐÃ nhận mà Pancake chưa đồng bộ
-           * thì `proveAbsentBeforeBu` sẽ nói 'absent' SAI. Extension có sẵn đường sửa:
-           * `Oc.trigger_to_pancake()` → `POST /v1/pages/{pageId}/rescue_mode_inbox {message_ids}`.
-           * (xem chú thích đầy đủ ở `rescueInboxMessages`)
-           *
-           * GIỚI HẠN THẬT: hàm đó cần `message_id` CỦA FB. Script chỉ có id tin Pancake.
-           * Vì vậy ở đây chỉ gọi khi TA CÓ id nghi vấn; không có thì thôi (không bịa id,
-           * không gọi tràn lan). Dù vậy hàm này KHÔNG gửi tin ⇒ gọi vô hại.
-           * Sau khi gọi, đọc lại lịch sử 1 lần nữa: nếu thấy tin ⇒ ✅ thật (không gửi lại). */
-          /* Nguồn id THẬT duy nhất script có: `extMsgIdByConv[conv.id]` — sổ ghi `messageId`
-           * từ `REPLY_INBOX_PHOTO_SUCCESS` (extension trả `messageId = payload.actions[0].message_id`,
-           * xem `parseSuccessResponse`). Đó LÀ id tin trên FB ⇒ dùng được cho `message_ids`.
-           * Ca chưa từng đi qua Extension thì không có id ⇒ không gọi (không bịa id). */
-          const _rec = extMsgIdByConv[conv.id];
-          const _rid = _rec && _rec.messageId && /^\d+$/.test(String(_rec.messageId))
-            ? [String(_rec.messageId)] : null;
-          if (_rid && _rid.length && !verifyStats.rescued) {
-            verifyStats.rescued = 1;
-            return Promise.resolve()
-              .then(() => rescueInboxMessages(pageId, _rid))
-              .then((okRescue) => {
-                if (!okRescue) return null;
-                return new Promise((res) => {
-                  bgClock.wait(1500).then(() => {
-                    confirmViaSnippet(conv, f, pageId, convId, want, sentAt)
-                      .then((sn2) => res(sn2)).catch(() => res(null));
-                  });
-                });
-              })
-              .then((sn3) => {
-                if (sn3 === 'yes' && myRun === runSeq && !deliveredIds[conv.id]) {
-                  markDelivered(conv.id, 'socket');
-                  try { postSendSideEffects(conv); } catch (e) { /* ignore */ }
-                  logFailGrouped(nm, 'sau rescue_mode_inbox: hội thoại ĐÃ có tin ⇒ tính ✅ Socket (không gửi lại)', '🔎', conv.id);
-                  return;
-                }
-                verifyStats.held = (verifyStats.held || 0) + 1;
-              })
-              .catch(() => { verifyStats.held = (verifyStats.held || 0) + 1; })
-              .then(() => { try { updateBatchSummaryUI(); } catch (e) { /* ignore */ } });
-          }
           verifyStats.held = (verifyStats.held || 0) + 1;
           return;
         }
@@ -13132,7 +11418,7 @@
       try {
         logFailGrouped(conv.name || conv.id,
           'Extension báo success nhưng KHÔNG có bằng chứng tin đã tới — đánh ⚠, đọc lại lịch sử (không gửi lại)', '⚠', conv.id);
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain', 'Extension báo success nhưng KHÔNG có bằng chứng tin đã tới');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(conv.id, 'uncertain');
       } catch (eCk) { /* ignore */ }
     }
     const myRun = runSeq;
@@ -13557,291 +11843,6 @@
     return { cap: baseCap, peers, hiddenTrim: false, focused };
   }
   let sendLockPending = false; // chặn bấm đúp TRONG 150 ms chờ kiểm khoá (state.sending chưa bật)
-
-  /* ═══════════════════════════════════════════════════════════════════════════════════
-   * [v1.93.18-W132] GIẢI PHÓNG TRẠNG THÁI LƯỢT CŨ — MỘT CHỖ, HAI LẦN GỌI
-   * ═══════════════════════════════════════════════════════════════════════════════════
-   * BẢN SỬA W132 (đọc trước khi sửa hàm bên dưới): W130/W131 xoá cả *kiến thức đã chứng
-   * minh về đường truyền* (mẫu độ trễ ACK, sàn làn do cầu dao hạ, cache ctx, ký ức kênh,
-   * fbId đã bind, id cứu tin) ⇒ người dùng chạy thật báo NGAY "gửi sót và gửi chậm".
-   * Nay chia làm hai loại: **xoá bộ đếm TRONG LƯỢT**, **giữ kiến thức về ĐƯỜNG TRUYỀN**.
-   * Danh sách + số đo từng ca nằm ở chú thích ngay trong `releaseRunCarryover()`.
-   * Yêu cầu của người dùng: "mỗi lượt gửi xong thì sẽ giải phóng hết tất cả dữ liệu cũ
-   * tránh gây lỗi ảnh hưởng lượt sau".
-   *
-   * AUDIT (đếm trong chính file này, không suy đoán): khối reset đầu lượt cũ
-   * (@13591–13760) dọn 47 sổ nhưng còn **80 biến khai trước nó không được chạm tới**.
-   * Trong đó phần lớn là hằng số/cache (phải giữ) — nhưng 20 biến dưới đây là *trạng thái
-   * sống* quyết định LƯỢT SAU đi kênh nào và đi nhanh hay chậm. Đo được trên chính mã:
-   *
-   *  ① `sockRoute` (L7802)         — KHÔNG có lệnh xoá, KHÔNG có TTL. `pageSocketUsable()`
-   *                                 trả false khi `lostSock ≥ 2` ⇒ page bị né Socket VĨNH VIỄN.
-   *                                 Hiện `lostSock` chỉ tăng từ hook test (`__sockTest`) nên ngòi
-   *                                 đã bị tháo — nhưng đó là may, không phải thiết kế. Xoá ở đây
-   *                                 là ĐÓNG hẳn lỗ hổng, và không thể gây mất tin (chỉ QUÊN bằng
-   *                                 chứng XẤU, tức là cho Socket một lượt thử lại).
-   *  ② `pageAckDeadAt` (L7760)     — TTL 600 s. Lượt sau trong cùng tab vẫn "ACK chết" ⇒ đi Ext.
-   *  ③ `pageAckTimeoutRun` (L7744) — bộ đếm dẫn tới ②, cũng không reset.
-   *  ④ `pageAckDeadProbeAt` (L7826)— mốc dò lại của ②, không reset.
-   *  ⑤ `pageLastAckWait` (L7743)   — hạn chờ ACK của page, dùng làm ngưỡng "ACK chậm" để HẠ LÀN.
-   *  ⑥ `socketPageLaneCtl.fastOk/.slowAck` (L8053) — chỉ `noAckStreak` được reset (@11786).
-   *                                 ⇒ lượt mới có thể NỚI làn (+8) bằng bằng chứng của lượt cũ.
-   *  ⑦ `socketLaneFloor` (L7470)   — dòng log cũ ghi thẳng "cầu dao giữ tới hết phiên" và log
-   *                                 16:52 (7 073 chat) cho thấy nó ở lại 16/page suốt phiên ⇒
-   *                                 cả lô sau chạy 1/24 cấu hình. Không phải người dùng đặt ⇒ trả
-   *                                 về `SOCKET_LANE_MIN`. Cờ `socketFloorUserSet` thì TÔN TRỌNG.
-   *  ⑧ `extSendCtl` (L8397)        — bộ ngắt Extension. `probeInFlight` đã reset, còn `openUntil`
-   *                                 /`openStreak`/`timeoutStreak`/`fastStreak` thì KHÔNG ⇒ lượt mới
-   *                                 có thể khởi đầu trong trạng thái "Ext đang nghỉ hồi sức" của
-   *                                 lượt cũ. `latSamples` GIỮ (độ trễ thật của Extension, có trần
-   *                                 24 mẫu — giữ để `extTimeoutMs()` không tụt về sàn 2,5 s oan).
-   *  ⑨ `extSendLane` limit (L8369)  — bị cắt ×0,6 mỗi lần Ext quá hạn (@8569) và KHÔNG có đường
-   *                                 hồi đầu lượt ⇒ đáy 48 (sàn) dính sang lượt sau.
-   * ⑩–⑫ `gidBreaker.closed` (L10738), `extTry1545.closed` (L10722), `apiBlockedPages` (L3944)
-   *                                 — 3 cầu dao "đóng rồi không mở". Hiện số đo 37 log cho thấy
-   *                                 cả 3 đều KHÔNG đóng (0 dòng 🔒/⛔), nhưng cấu trúc thì vẫn là
-   *                                 "đóng vĩnh viễn". Mở lại đầu lượt = mỗi lượt được đo lại từ
-   *                                 đầu. KHÔNG thể sinh tin trùng: cả 3 chỉ chặn/cho phép ĐƯỜNG DÒ
-   *                                 global_id và đường API, không liên quan "đã gửi hay chưa".
-   * ⑬ `channelHints` (L3918)       — sessionStorage, KHÔNG TTL. 1 chat từng thắng Ext sẽ được ưu
-   *                                 tiên Ext MÃI trong tab ⇒ lệch kênh vĩnh viễn. Xoá đầu lượt.
-   * ⑭ `pageBlockStreak` (L3964), `apiThreadBlockStreak` (L3936) — bộ đếm dẫn tới ⑫.
-   * ⑮ `ctx7Retried` (L10693), `buLateRetryCount` (L10703) — chú thích ghi "trong lượt này"
-   *                                 nhưng KHÔNG được dọn ⇒ chat bị chặn vĩnh viễn khỏi: gửi lại
-   *                                 kèm cờ ctx-7-days (⑮a), và hẹn thử lại khi Ext nghẽn (⑮b).
-   * ⑯ `uncertainReasonById` (L10859), `extMsgIdByConv` (L639) — sổ theo convId, không trần, phình
-   *                                 dần qua các lượt (mỗi lượt vài nghìn khoá).
-   * ⑰ `convCtxCache` (L2755)      — cache `{ad_clicks, gid, fetched}` theo convId, **không có
-   *                                 đường xoá nào trong file**. Cache này chứa cờ `ctx-7-days` và
-   *                                 global_id; giữ qua lượt nghĩa là lượt sau dùng lại phán đoán
-   *                                 của lượt trước. Xoá = lượt sau đọc lại (chỉ ĐỌC).
-   * ⑱ `touchIdsByPage` (L7308)    — id ảnh của lượt cũ, `postSendSideEffects` đọc lúc chốt lô ⇒
-   *                                 lượt sau mang `content_ids` của lượt trước đi "touch".
-   * ⑲ `docIdStats`, `extLateStats`, `gidExtCtl`, `batchSeedConv`, `socketNoAckStreak`,
-   *    `socketLastPublishAt`, `updatedGidConvSet`, `lastBgConvById`, `ackLatSorted/ackLatPctCache`
-   *                                 — bộ đếm/bộ nhớ phụ. Một số là số ĐO in ở bảng TỔNG HỢP ⇒
-   *                                 xoá ở đây là để lượt sau KHÔNG in số của lượt trước (đúng loại
-   *                                 lỗi `photoUpStats` đã từng bị: 2 lô khác nhau in y nguyên
-   *                                 12 362 / 1 312 / 9 480 / 0).
-   * ⑳ `preBoundFbIds` (L5613)     — có TTL 180 s nhưng KHÔNG được dọn theo lượt; fbId
-   *                                 `is_reusable=false` của lượt cũ nằm lại.
-   *
-   * ⚠️ CỐ Ý **KHÔNG** đụng (nếu xoá sẽ ĐỔI HÀNH VI hoặc MẤT TIN):
-   *   • `deliveredIds`/`finalFailedIds`/`uncertainIds`/`manualResendList`/`pendingBg` và mọi sổ
-   *     phán xử khác — đã được dọn đúng ở khối @13591, và dọn SAU khi chốt bảng sẽ làm sai số.
-   *   • `persistentGidMap`, `fbMsgCache`, `socketWarmPromises`, `socketReconnectPromises`,
-   *     `batchGidPromises`, `batchGidFetchedPages`, `docPreloadSent`, `docSeedPages`,
-   *     `nameSearchEnabled`, `syncThreadIdTried` — cache/promise CHỈ ĐỌC, có trần hoặc có TTL,
-   *     xoá chỉ làm lượt sau dò lại từ đầu (chậm hơn, không an toàn hơn).
-   *   • `ackLatRing` — giữ qua lượt là CỐ Ý (LANE_CARRY_CLAMP @13621 dùng p95 lượt trước để
-   *     quyết định hạ làn đầu lượt). Xoá sẽ làm mất chốt an toàn đó.
-   *   • `state.sentIds` / `SSB_SENT_IDS` — "chat đã gửi" phải sống qua lượt, đó là tính năng
-   *     chống gửi trùng (đã có luật dọn riêng ở cuối `sendToAll`).
-   *
-   * VỊ TRÍ GỌI: (a) đầu lượt ngay sau khối reset @13591…@13758 và TRƯỚC mọi quyết định chọn
-   * kênh; (b) cuối lượt ngay sau khi bảng TỔNG HỢP đã in xong — để trạng thái của lượt này
-   * không nằm lại nếu người dùng không chạy lượt kế tiếp. Cả hai lần đều an toàn khi gọi lặp.
-   *
-   * KHÔNG thêm lệnh gửi nào, không đổi phán quyết ✅/❌/⚠ của bất kỳ chat nào. Mọi thứ bị xoá
-   * đều là bộ nhớ *để dành* — xoá chỉ khiến lượt sau ĐO LẠI, không bao giờ khiến nó gửi thêm.
-   */
-  function releaseRunCarryover(where, quiet) {
-    const dropped = [];
-    const kept = [];
-    let floorKeep = '';
-    const wipe = (label, fn) => { try { fn(); dropped.push(label); } catch (e) { /* ignore */ } };
-    const keep = (label) => { kept.push(label); };
-    /* ═══ [v1.93.18-W132] LUẬT MỚI — CHỈ XOÁ "BỘ ĐẾM ĐO CỦA RIÊNG LƯỢT", GIỮ "KIẾN THỨC ĐÃ CHỨNG MINH" ═══
-     * W130/W131 xoá cả hai loại. Người dùng chạy thật và báo NGAY: "gửi sót và gửi chậm".
-     * Đo lại trên chính mã, tìm ra 3 cơ chế đúng là nguyên nhân — không phải cảm giác:
-     *
-     *  (A) `ackLatSorted` + `ackLatPctCache` bị xoá nhưng `ackLatRing` CỐ Ý GIỮ.
-     *      ⇒ mảng dùng để TÍNH phân vị rỗng, còn ring vẫn đủ mẫu ⇒ `sockAckP90()` đọc
-     *        `latencyPctFromSorted()` trên mảng rỗng = **0** (vì ring.length = 1 000 ≥ 20 nên
-     *        KHÔNG rơi vào nhánh "chưa đủ mẫu ⇒ 3 000 ms").
-     *      ⇒ `ackHoldMsFor(0)` = clamp(0×3, …) = **ACK_HOLD_MIN_MS = 6 000 ms**.
-     *        Đo trên trang ACK nhanh (p90 thật 988 ms): hạn GIỮ SLOT 2 964 → **6 000 ms**
-     *        ⇒ phát lệnh chậm đi **2,0×** cho tới khi 1 000 mẫu mới đẩy hết mẫu cũ ra khỏi
-     *        ring (lô 26 chat thì không bao giờ tới).
-     *      ⇒ `sockAckP95()` = 0 ⇒ `rampAllowed()` LUÔN true ⇒ làn leo 256 → 384 BẤT CHẤP p95
-     *        thật (chú thích @7670: p95 cao mà vẫn nới làn ⇒ dồn ACK ⇒ sập lô).
-     *      ⇒ "sót": ACK về muộn hơn hạn chờ bị chấm `noack` → kiểm chứng nền → không kịp trả
-     *        lời trước khi lượt chốt ⇒ ⚠ "không rõ" — đúng loại "gửi sót".
-     *      Mẫu ACK là ĐỘ TRỄ CỦA KÊNH, không phải phán quyết của chat nào. Xoá phân vị mà giữ
-     *      ring là trạng thái NỬA VỜI: tự tạo ra số 0 giả. Nay GIỮ cả ring + phân vị.
-     *
-     *  (B) `socketLaneFloor` bị kéo về `SOCKET_LANE_MIN` (64) ở MỌI lượt. Sàn này chỉ bị hạ
-     *      bởi cầu dao no-ACK (25 ca liên tiếp) — tức bằng chứng RẰNG KÊNH ACK ĐANG CHẾT.
-     *      Ép về 64 đầu lượt = bắn lại đúng 25 ca no-ACK đầu tiên để HỌC LẠI điều vừa biết.
-     *      Cùng loại với `sockRoute`/`pageAckDeadAt`: bằng chứng về ĐƯỜNG TRUYỀN, không phải
-     *      về chat. Nay GIỮ (đã có đường tự hồi riêng: dò lại sau `SOCK_DEAD_PROBE_MS` 20 s,
-     *      "ACK hồi 20 nhịp liền ⇒ nâng lại 64"). Luật TÔN TRỌNG `socketFloorUserSet` giữ nguyên.
-     *
-     *  (C) `convCtxCache` bị xoá ⇒ lượt sau `ensureConvCtx()` gọi lại mạng cho từng chat cũ:
-     *      `/messages` (~150–800 ms/chat qua `ctxFetchLane` 48 làn). Đây là cache CHỈ ĐỌC có
-     *      trần tự nhiên theo số chat của tab — chú thích ⑰ của bản cũ cũng gọi nó là "chỉ ĐỌC".
-     *      Nay chỉ quên phần HỎNG của lượt cũ, giữ phần đã nạp xong.
-     *
-     *  (D) `channelHints` bị xoá + huỷ timer ⇒ `pickBestDirectOrder` mất ký ức "chat này đi
-     *      Ext thì nhanh" ⇒ lô nhỏ quay lại dò Socket `getBusinessWSContext + sendInitMessages`
-     *      (~3 s, chính chú thích @8759 ghi vậy) cho những chat ĐÃ BIẾT là phải đi Ext. Ký ức
-     *      này là kết quả ĐO của một lượt gửi thật, không thể sinh tin trùng (chỉ đổi THỨ TỰ làn).
-     *
-     *  (E) `preBoundFbIds` (TTL 180 s, xoá sau lần dùng đầu) và `extMsgIdByConv` (nguồn id DUY
-     *      NHẤT để `rescue_mode_inbox` lấy tin từ FB về) — xoá là bỏ đúng thứ đang CHỐNG SÓT.
-     *
-     *  (F) `gidHttpCtl.coolUntil` bị đặt = 0 ⇒ bỏ qua `waitGidHttpCooldown()` đang trong cơn
-     *      429 ⇒ đâm tiếp vào API đang chặn ⇒ 429 nặng hơn, dò gid chậm hơn.
-     *
-     * GIỮ NGUYÊN phần cốt lõi của W130: mọi TRẠNG THÁI SỐNG quyết định lượt sau đi kênh nào
-     * (cầu dao Ext/gid/api, bộ đếm trong lượt, sổ theo convId, số ĐO in ở TỔNG HỢP) vẫn bị dọn.
-     * Không thêm lệnh gửi nào, không đổi phán quyết ✅/❌/⚠ của bất kỳ chat nào. */
-    /* ① sổ định tuyến theo page — nguồn duy nhất có thể né Socket vĩnh viễn.
-     * [W132] Đưa page về trạng thái "chưa có bằng chứng" bằng cách xoá `lostSock`/`lostExt`
-     * (đúng thứ `pageSocketUsable` đọc) nhưng GIỮ `sent`/`dlv` để còn số đã đo cho log. */
-    wipe('sockRoute', () => {
-      Object.keys(sockRoute).forEach((k) => {
-        const st = sockRoute[k];
-        if (!st) { delete sockRoute[k]; return; }
-        st.lostSock = 0; st.lostExt = 0; st.absent = 0; st.probeAt = 0;
-      });
-    });
-    /* ②③④⑤ sổ ACK theo page — [W132] GIỮ. Bằng chứng về ĐƯỜNG TRUYỀN, mỗi sổ đã có TTL
-     * (pageAckDeadAt 600 s) hoặc đường tự hồi (dò lại 20 s / 20 ca). Xoá ② ở đầu lượt là page
-     * đã chứng minh "Socket gửi mà không tới" lại được thử Socket từ đầu, mỗi lần thử mất 1 tin
-     * + ~5 s chờ ACK. Xoá ⑤ (`pageLastAckWait`) là ngưỡng phạt "ACK chậm" rơi về sàn 3 000 ms
-     * ⇒ ACK 3 200 ms (bình thường với page đó) bị tính "chậm" ⇒ hạ làn ×0,85 liên tục ⇒ chậm. */
-    keep('pageAckDeadAt'); keep('pageAckTimeoutRun'); keep('pageAckDeadProbeAt'); keep('pageLastAckWait');
-    /* ⑥ bộ đếm nới/hạ làn của từng page — XOÁ (đây là bộ đếm TRONG LƯỢT thật sự).
-     * `noAckStreak` đã có đường reset riêng @11800. */
-    wipe('socketPageLaneCtl', () => {
-      Object.keys(socketPageLaneCtl).forEach((k) => {
-        const c = socketPageLaneCtl[k];
-        if (!c) return;
-        c.fastOk = 0; c.slowAck = 0; c.noAckStreak = 0;
-      });
-    });
-    /* ⑦ [W132] SÀN LÀN — hạ sàn chỉ vì 25 ca no-ACK là BẰNG CHỨNG KÊNH ĐANG HỎNG, nên không
-     * được xoá mù (xem lý do (B) ở đầu hàm). Nhưng cũng không được GIỮ MÙ: log 16:52 (7 073
-     * chat) chốt `Socket/page limits cuối [16×1]` — cả lô chạy 1/24 cấu hình vì một lần sập
-     * cũ. Nay dựa vào SỐ ĐO, không dựa vào lượt:
-     *   • p95 ACK gần nhất (≥20 mẫu) KHỎE (≤ SOCK_RAMP_P95_MAX_MS) ⇒ sàn cũ đã hết căn cứ ⇒
-     *     đưa về SOCKET_LANE_MIN (64) và nâng mọi làn page đang kẹp dưới lên đúng 64;
-     *   • p95 cao / chưa đủ mẫu ⇒ GIỮ sàn cũ (bằng chứng vẫn còn giá trị) và chỉ ghi log.
-     * `socketFloorUserSet` vẫn được tôn trọng tuyệt đối. */
-    wipe('socketLaneFloor', () => {
-      if (socketFloorUserSet || socketLaneFloor === SOCKET_LANE_MIN) return;
-      const p95 = sockAckP95();
-      if (p95 && p95 > SOCK_RAMP_P95_MAX_MS) { floorKeep = ' · giữ sàn ' + socketLaneFloor; return; }
-      floorKeep = ' · sàn ' + socketLaneFloor + '→' + SOCKET_LANE_MIN;
-      socketLaneFloor = SOCKET_LANE_MIN;
-      Object.keys(pageSocketLanes).forEach((pid) => {
-        const lane = pageSocketLanes[pid];
-        if (lane && typeof lane.setLimit === 'function' && lane.getLimit() < SOCKET_LANE_MIN) {
-          lane.setLimit(SOCKET_LANE_MIN);
-        }
-      });
-    });
-    /* ⑧ bộ ngắt Extension — GIỮ `latSamples` (độ trễ thật, có trần) */
-    wipe('extSendCtl', () => {
-      extSendCtl.openUntil = 0;
-      extSendCtl.openStreak = 0;
-      extSendCtl.timeoutStreak = 0;
-      extSendCtl.fastStreak = 0;
-      extSendCtl.probeInFlight = false;
-    });
-    /* ⑨ làn Ext gửi: cắt ×0,6 vì quá hạn là phản ứng trong lượt, không phải bản án cho lượt sau */
-    wipe('extSendLane', () => {
-      if (extSendLane.getLimit() !== BUS_PARALLEL_EXT) extSendLane.setLimit(BUS_PARALLEL_EXT);
-    });
-    /* ⑩⑪ 2 cầu dao "đóng rồi không mở" — mở lại để mỗi lượt được ĐO LẠI từ đầu */
-    wipe('gidBreaker', () => {
-      gidBreaker.noGid = 0; gidBreaker.sameThread = 0; gidBreaker.lastThread = ''; gidBreaker.closed = false;
-    });
-    wipe('extTry1545', () => {
-      extTry1545.closed = false; extTry1545.closedWhy = ''; extTry1545.streak = 0;
-      extTry1545.tried = 0; extTry1545.saved = 0; extTry1545.unknown = 0; extTry1545.probes = 0;
-    });
-    /* ⑫ [W132] `apiBlockedPages` GIỮ: KHÔNG phải "bản án vĩnh viễn" — đã có TTL 4 GIỜ và chỉ
-     * bật sau 3 ca #10 LIÊN TIẾP (`PAGE_BLOCK_STREAK_TO_BLOCK`). Xoá đầu lượt làm page đang bị
-     * API chặn phải bắn lại 3 lệnh #10 + 3 ca chờ trước khi biết. Không sinh tin trùng (chỉ
-     * đổi THỨ TỰ làn). */
-    keep('apiBlockedPages');
-    /* ⑭ bộ đếm dẫn tới ⑫ — bộ đếm TRONG LƯỢT, xoá như cũ */
-    wipe('pageBlockStreak', () => { Object.keys(pageBlockStreak).forEach((k) => { delete pageBlockStreak[k]; }); });
-    wipe('apiThreadBlockStreak', () => { apiThreadBlockStreak = 0; });
-    /* ⑬ [W132] `channelHints` GIỮ — xem lý do (D). Chỉ: (1) huỷ timer ghi trễ 400 ms của lượt
-     * cũ để nó không đẩy bản CŨ trở lại sessionStorage; (2) ghi ngay bản hiện tại xuống để
-     * lượt sau đọc được; (3) chặn phình: giữ 5 000 chat gần nhất (sổ này không có TTL). */
-    wipe('channelHints', () => {
-      if (channelHintSaveTimer) { clearTimeout(channelHintSaveTimer); channelHintSaveTimer = null; }
-      const ks = Object.keys(channelHints);
-      if (ks.length > 5000) {
-        const keep5k = {};
-        ks.slice(-5000).forEach((k) => { keep5k[k] = channelHints[k]; });
-        channelHints = keep5k;
-      }
-      try { sessionStorage.setItem(CH_KEY, JSON.stringify(channelHints)); } catch (eCH) { /* ignore */ }
-    });
-    /* ⑮ hai sổ "trong lượt này" nhưng chưa từng được dọn */
-    wipe('ctx7Retried', () => { Object.keys(ctx7Retried).forEach((k) => { delete ctx7Retried[k]; }); });
-    wipe('buLateRetryCount', () => { Object.keys(buLateRetryCount).forEach((k) => { delete buLateRetryCount[k]; }); });
-    /* ⑯ sổ theo convId không trần */
-    wipe('uncertainReasonById', () => { Object.keys(uncertainReasonById).forEach((k) => { delete uncertainReasonById[k]; }); });
-    /* ⑯b [W132] `extMsgIdByConv` GIỮ — NGUỒN ID DUY NHẤT để `rescue_mode_inbox` lấy tin từ FB
-     * về (xem @12934). Xoá nó = tắt đúng đường cứu ca "Pancake chưa đồng bộ" ⇒ ⚠ oan. */
-    keep('extMsgIdByConv');
-    /* ⑰ [W132] `convCtxCache` GIỮ phần ĐỌC ĐƯỢC, chỉ quên phần HỎNG — xem lý do (C).
-     * Giữ: entry `fetched` (đủ ad_clicks + gid ⇒ lượt sau dùng lại 0 ms).
-     * Xoá: entry chưa `fetched`, đang `inflight` (promise của lượt cũ — giữ là treo), hoặc có
-     *       `httpError` / `httpState` khác 'ok' (429/5xx) ⇒ lượt sau phải thử lại tươi. */
-    wipe('convCtxCache', () => {
-      Object.keys(convCtxCache).forEach((k) => {
-        if (k === '__empty') return;
-        const e = convCtxCache[k];
-        const bad = !e || !e.fetched || e.inflight || e.httpError || (e.httpState && e.httpState !== 'ok');
-        if (bad) delete convCtxCache[k];
-      });
-    });
-    /* ⑱ id ảnh để `contents/touch` — dọn như cũ: dữ liệu CỦA LƯỢT (ảnh vừa gửi) */
-    wipe('touchIdsByPage', () => { Object.keys(touchIdsByPage).forEach((k) => { delete touchIdsByPage[k]; }); });
-    /* ⑲ bộ đếm/bộ nhớ phụ + số ĐO in ở TỔNG HỢP (để lượt sau không in số của lượt trước) */
-    wipe('docIdStats', () => { Object.keys(docIdStats).forEach((k) => { docIdStats[k] = 0; }); });
-    wipe('extLateStats', () => { extLateStats.ok = 0; extLateStats.fail = 0; extLateStats.silent = 0; });
-    wipe('gidExtCtl', () => { gidExtCtl.good = 0; gidExtCtl.bad = 0; gidExtCtl.cooldowns = 0; gidExtCtl.rampAtUnknown = 0; });
-    wipe('batchSeedConv', () => { Object.keys(batchSeedConv).forEach((k) => { delete batchSeedConv[k]; }); });
-    wipe('socketNoAckStreak', () => { Object.keys(socketNoAckStreak).forEach((k) => { delete socketNoAckStreak[k]; }); });
-    wipe('socketLastPublishAt', () => { Object.keys(socketLastPublishAt).forEach((k) => { delete socketLastPublishAt[k]; }); });
-    wipe('updatedGidConvSet', () => { updatedGidConvSet.clear(); });
-    wipe('lastBgConvById', () => { lastBgConvById = {}; });
-    /* ⑲b [W132] `ackLatSorted`/`ackLatPctCache` GIỮ — xem lý do (A): xoá chúng trong khi vẫn
-     * giữ `ackLatRing` tạo p90 = 0 ⇒ hạn giữ slot 6 000 ms (chậm 2×) và p95 = 0 ⇒ nới làn vô
-     * điều kiện. Đây là chỗ đo được 2,0× chậm. */
-    keep('ackLatSorted');
-    /* ⑳ [W132] `preBoundFbIds` GIỮ — xem lý do (E): có TTL 180 s và `takePreBoundFbId` xoá sau
-     * lần dùng đầu. Dọn theo lượt chỉ làm mất chính tác dụng "bind NGOÀI slot" của bộ này. */
-    keep('preBoundFbIds');
-    /* ㉑ [W132] `gidHttpCtl` — giữ `coolUntil` khi ĐANG trong cơn nghỉ (xem lý do (F)); hết cơn
-     * rồi thì dọn như cũ để lượt sau không mang backoff cũ. */
-    if (Date.now() < (gidHttpCtl.coolUntil || 0)) keep('gidHttpCtl.coolUntil');
-    else wipe('gidHttpCtl', () => { gidHttpCtl.coolUntil = 0; gidHttpCtl.backoffStreak = 0; });
-    /* MỘT DÒNG NGẮN — không giải thích lại trong log (sổ tay ở docs/GIAI-PHONG-LUOT.md).
-     * `where` chỉ có 3 giá trị nên in thẳng. Số đầu = số NHÓM THỰC SỰ ĐÃ CHẠY (không còn là
-     * hằng số 32 như W131 — `drop` và `keep` đều được đếm thật), số sau = số sổ GIỮ LẠI. */
-    /* [v1.93.18-W132] ĐÚNG MỘT DÒNG 🧼 MỖI LƯỢT — không phải hai.
-     * Lượt chạy trọn vẹn đã in "xong lượt" ở cuối; lượt kế tiếp gọi lại ở đầu (để chắc chắn,
-     * phòng F5/bấm Dừng) nhưng lúc đó MỌI THỨ ĐÃ SẠCH ⇒ in thêm chỉ là dòng rỗng, đúng kiểu
-     * "dài dòng" người dùng đã phàn nàn. Vì vậy `quiet = true` khi biết chắc lượt trước đã dọn
-     * xong (`runCarryoverDoneSeq === runSeq - 1`). Khi KHÔNG biết (mở trang mới, F5, dừng giữa
-     * chừng) thì vẫn in — đó chính là ca cần thấy trong log. */
-    if (!quiet) {
-      try {
-        logLine('🧼 Giải phóng lượt cũ (' + where + '): ' + dropped.length + ' dọn · '
-          + kept.length + ' giữ' + floorKeep);
-      } catch (eLg) { /* ignore */ }
-    }
-    return { dropped: dropped.length, kept: kept.length };
-  }
   async function sendToAll() {
     try { markSendIdleIfSettled(); } catch (e0) { /* ignore */ }
     if (state.sending || state.confirmingSend || sendLockPending) return; // chặn bấm đúp / gọi đúp → gửi TRÙNG
@@ -14119,7 +12120,7 @@
     // [v1.92.30] cổng chống lặp: reset sổ mỗi lượt (cache chứng minh cũng xoá để không dùng
     // kết quả của lượt trước).
     sendDiag.buProofGated = 0; sendDiag.buProofPresent = 0; sendDiag.buProofAbsent = 0;
-    sendDiag.buProofUnknown = 0; sendDiag.buProofCached = 0; sendDiag.buProofCancelled = 0; sendDiag.buProofSkippedDefinite = 0;
+    sendDiag.buProofUnknown = 0; sendDiag.buProofCached = 0; sendDiag.buProofCancelled = 0;
     try { buProofCache.clear(); } catch (eBp) { /* ignore */ }
     verifyStats.found = 0; verifyStats.held = 0; verifyStats.unknown = 0;
     try {
@@ -14182,12 +12183,6 @@
     batchStats.finalLogged = false;
     reportExtJob({ phase: 'send', pct: 0, ok: 0, total: 0 }); // sau reset — không bị lượt cũ đổi thành idle
     render();
-    /* ═══ [v1.93.18-W132] GIẢI PHÓNG TRẠNG THÁI CỦA LƯỢT CŨ — ĐẦU LƯỢT ═══
-     * Gọi Ở ĐÂY, không phải chỉ ở cuối lượt trước: lượt trước có thể bị F5 / đóng tab / dừng
-     * giữa chừng nên KHÔNG BAO GIỜ chạy được bước dọn cuối. Đầu lượt là chỗ duy nhất bảo đảm
-     * "lượt mới luôn bắt đầu từ số 0", và nó nằm TRƯỚC mọi quyết định chọn kênh / nới làn.
-     * Không thể sinh tin trùng: hàm này chỉ xoá bộ nhớ ĐỂ DÀNH, không chạm sổ đã gửi. */
-    try { releaseRunCarryover('đầu lượt', runCarryoverDoneSeq === runSeq - 1); } catch (eRC0) { /* ignore */ }
     // Khởi động warmUpSockets + BATCH_GET_GLOBAL_ID NGAY TỪ ĐẦU (chạy song song với lọc tag + upload ảnh)
     try { warmUpSockets(targets, { forceBatch: true }); } catch (e) { /* ignore */ }
     // [v1.91.75] warmUpSockets(targets) chỉ thấy các chat được đưa vào của lô hiện tại. Với
@@ -14297,34 +12292,6 @@
           logLine('⚠ Page ' + pageIds[i] + ': không gắn được ảnh (' + up2.error + ') — chat page này sẽ báo lỗi');
         }
       }
-    }
-    /* ═══ [v1.93.16] GẮN `__photoArg` CHO **TỪNG CHAT** NGAY TẠI ĐÂY (trước mọi wave) ═══
-     * Đây là chỗ DUY NHẤT biết đủ: `photo` (câu nhanh / ảnh đã chọn), `qrPhotoByPage`,
-     * `fbIdByPage`, `apiFbIdsByPage`, `contentIdByPage`. Trước bản này `photoArg` được dựng
-     * MUỘN, bên trong `sendOneAndLog` — tức sau khi worker đã chiếm slot ⇒ bind ảnh (1 088 ms
-     * đo được) nằm TRONG ghế và `mainCap 192` thành vô dụng (`peak Socket 59/256`).
-     *
-     * Nay object đó được dựng SỚM cho mọi chat đích, để khâu pre-bind (ngoài slot) dùng đúng
-     * một object với khâu gửi. KHÔNG đổi payload: bên trong `sendOneAndLog` vẫn dựng `photoArg`
-     * y như cũ (mỗi page một `qrPage` riêng) — nhánh dưới chỉ DÙNG LẠI nếu cùng page.
-     * Không có ảnh ⇒ không gắn gì (đường text-only y nguyên). */
-    if (photo) {
-      try {
-        (sendGroups || []).forEach((g) => {
-          (g.list || []).forEach((c) => {
-            if (!c || !c.id) return;
-            try {
-              const p = c.pageId || String(c.id).split('_')[0];
-              if (!p) return;
-              const qrPage = photo.qr ? qrPhotoByPage[p] : null;
-              if (photo.qr && !qrPage) return; // page không có câu nhanh ⇒ ca này sẽ bị báo lỗi như cũ
-              c.__photoArg = photo.qr
-                ? { items: qrPage.items, url: qrPage.url, id: qrPage.id, fbId: fbIdByPage[p] || '', fbIds: apiFbIdsByPage[p] || [], w: qrPage.w || 0, h: qrPage.h || 0 }
-                : { url: photo.url, id: photo.id || contentIdByPage[p] || '', fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h };
-            } catch (eA0) { /* ignore */ }
-          });
-        });
-      } catch (eA1) { /* ignore */ }
     }
     // Gửi theo lượt: hỗ trợ tới 50.000 tin/lượt cho quy mô 20.000–30.000 tin nhắn
     const waveEl = shadow && shadow.getElementById('ssb-wave');
@@ -14493,22 +12460,9 @@
           // Câu nhanh NHIỀU ĐOẠN → gửi từng đoạn lần lượt theo đúng thứ tự của câu lệnh
           r = await sendQrParts(c, multiParts, sendOpts);
         } else {
-          /* [v1.93.16] DÙNG LẠI ĐÚNG OBJECT ĐÃ PRE-BIND (xem chỗ gắn `c.__photoArg` trước wave).
-           * PHẢI dùng lại chứ không được dựng object mới: fbId `is_reusable=false` vừa bind
-           * nằm trên object của CHÍNH chat này — dựng mới là mất công bind và quay về 1 088 ms
-           * trong slot. Điều kiện dùng lại chặt: cùng page, cùng ảnh (url+id), cùng số ảnh.
-           * Không khớp ⇒ dựng lại y như bản cũ (không có đường mới nào để gửi sai ảnh). */
-          const _pre = c.__photoArg;
-          const _samePhoto = !!(_pre && _pre.items && qrPage && Array.isArray(qrPage.items)
-            && _pre.items.length === qrPage.items.length
-            && _pre.url === (photo.qr ? qrPage.url : photo.url)
-            && String(_pre.id || '') === String(photo.qr ? (qrPage.id || '') : (photo.id || contentIdByPage[p] || '')));
-          const photoArg = _samePhoto
-            ? _pre
-            : (photo.qr
-              ? { items: qrPage.items, url: qrPage.url, id: qrPage.id, fbId: fbIdByPage[p] || '', fbIds: apiFbIdsByPage[p] || [], w: qrPage.w || 0, h: qrPage.h || 0 }
-              : { url: photo.url, id: photo.id || contentIdByPage[p] || '', fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h });
-          try { c.__photoArg = photoArg; } catch (ePA) { /* ignore */ }
+          const photoArg = photo.qr
+            ? { items: qrPage.items, url: qrPage.url, id: qrPage.id, fbId: fbIdByPage[p] || '', fbIds: apiFbIdsByPage[p] || [], w: qrPage.w || 0, h: qrPage.h || 0 }
+            : { url: photo.url, id: photo.id || contentIdByPage[p] || '', fbId: fbIdByPage[p] || '', w: photo.w, h: photo.h };
           const fbId = photoArg.fbId || '';
           if (!fbId && c.type === 'comment') {
             done++;
@@ -14564,7 +12518,7 @@
         // ở làn riêng. Vẫn tính ⚠ (để sổ sách đúng) và vẫn ghi uncertainIds — cổng có quyền đi
         // xuyên qua chốt đó vì nó dựa trên BẰNG CHỨNG, không phải phán đoán.
         unsure++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain', 'đang chờ cổng chứng minh vắng mặt: ' + clip(String(r.error || ''), 60));
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
         logFailGrouped((c.name || c.id), r.error, '🔎', c.id);
       } else if (r.definiteFail || (r.uncertain && r.definitiveNotSent)) {
         /* [v1.92.45] CHẮC CHẮN KHÔNG GỬI ĐƯỢC THÌ ĐỪNG BẮT NGƯỜI DÙNG CHỜ.
@@ -14577,14 +12531,14 @@
          * (Socket mất ACK, Ext quá hạn, API timeout) vẫn đi cổng 10 s như cũ. */
         unsure++;
         sendDiag.unavailFast = (sendDiag.unavailFast || 0) + 1;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain', 'FB từ chối dứt khoát (chốt ngay, không chờ): ' + clip(String(r.error || ''), 60));
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
         noteManualResend(c.id);
         logFailGrouped((c.name || c.id),
           clip(String(r.error || 'FB không nhận tin'), 160) + ' — FB đã từ chối DỨT KHOÁT ⇒ chốt luôn, không chờ xác nhận',
           '⚠', c.id);
       } else if (r.uncertain) {
         unsure++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain', 'không rõ kết quả: ' + clip(String(r.error || ''), 70));
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
         // [v1.92.34] Lý do từ làn gửi đã có sẵn câu "không gửi thêm để tránh trùng" ⇒ in thêm
         // một lần nữa chỉ làm dòng log dài gấp đôi mà không thêm thông tin.
         logFailGrouped((c.name || c.id),
@@ -14602,7 +12556,7 @@
         const lateN0 = buLateRetryCount[c.id] || 0;
         buLateRetryCount[c.id] = lateN0 + 1;
         unsure++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain', 'Extension nghẽn (bộ ngắt quá tải) chặn TRƯỚC KHI BẮN — hẹn thử lại');
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
         logFailGrouped((c.name || c.id), 'Extension nghẽn (bộ ngắt quá tải) chặn TRƯỚC KHI BẮN — chat CHƯA gửi lần nào'
           + ' ⇒ không chốt ❌ oan, hẹn thử lại sau 9 s (lần ' + (lateN0 + 1) + '/2)', '⏳', c.id);
         const myLateRun2 = runSeq;
@@ -14650,7 +12604,7 @@
     // Wave 200: worker chính có semaphore tổng; ACK/socket retry và Extension chạy ở hàng đợi riêng.
     const settleInternalError = (c, e) => {
       done++; unsure++;
-      if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain', 'lỗi nội bộ: ' + clip(String(e && e.message || e), 70));
+      if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
       logLine('⚠ ' + (c.name || c.id) + ' — lỗi nội bộ (' + clip(String(e && e.message || e), 80)
         + ') — không rõ tin đã đi chưa, KHÔNG gửi thêm');
       return { ok: false, uncertain: true, error: 'lỗi nội bộ' };
@@ -14865,7 +12819,7 @@
           releaseOutbound(c.id);
         }
         done++; unsure++;
-        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain', 'lỗi nội bộ: ' + clip(String(e && e.message || e), 70));
+        if (window && typeof window.__botfakeTrackStatus__ === 'function') window.__botfakeTrackStatus__(c.id, 'uncertain');
         logLine('⚠ ' + (c.name || c.id) + ' — lỗi nội bộ (' + clip(String(e && e.message || e), 80)
           + ') — không rõ tin đã đi chưa, KHÔNG gửi thêm');
         updateBatchSummaryUI();
@@ -15074,30 +13028,6 @@
 
           const runMainItem = async (c) => {
             if (state.stopRequested) return null;
-            /* ═══ [v1.93.16] BIND ẢNH TRƯỚC KHI CHIẾM SLOT — KHÔNG GIỮ GHẾ TRONG LÚC CHỜ HTTP ═══
-             * ĐO TỪ LOG 12:34: bind 1 088 ms/ca nằm TRONG 2 142 ms giữ slot (51 %), trong khi
-             * Socket chỉ dùng 59/256 làn và `mainCap 192` vì thế không bao giờ có việc để làm.
-             * 2 412 × 1 088 ms ÷ 96 làn = 27,3 s ≈ 93 % của 29,4 s phát ⇒ nút cổ chai là LÀN ẢNH.
-             *
-             * Nay `.then(c)` (ngay dưới) bind fbId cho MỌI chat CÓ ảnh TRƯỚC, song song, ngoài
-             * slot. Nhánh này chỉ VIỆC ĐẦU TIÊN kiểm lại: `photo` đã có `items[].fbId` chưa —
-             * có rồi thì `uploadOneTimePhoto()` trả ngay trong 0 ms (nó đọc `ctx.nonReusableFbId`
-             * trước khi chạm làn), nên phần nằm trong slot còn lại đúng phần BẮT BUỘC.
-             *
-             * VÌ SAO KHÔNG THỂ GỬI SAI ẢNH / MẤT ẢNH (đây là chỗ dễ tự bắn vào chân):
-             *   • fbId `is_reusable=false` gắn với `conv_id` — bind cho chat NÀO thì chỉ chat đó
-             *     dùng. `bindPhotoForConv` giữ kết quả trên ĐÚNG object `photo` của chat đó;
-             *   • app bind MỚI cho từng lần gửi (`executeBySocketFB` @976271: `reusable:!1` ngay
-             *     trước `sendMqtt`), nên fbId trong `photoArg` chỉ là ĐỐI TƯỢNG DỰ PHÒNG: nếu
-             *     lần bắn thật cần bản mới thì `forceFresh` vẫn xin bản mới như cũ;
-             *   • bind lỗi ⇒ `photo.__bindFail`, nhánh dưới trả `null` ⇒ `sendOne` chạy đúng
-             *     đường cũ (tự bind lại / báo lỗi như trước). KHÔNG có đường mới nào để "gửi
-             *     chữ trơ" khi thiếu ảnh. */
-            /* Chờ ĐÚNG promise pre-bind của chat này TRƯỚC khi chiếm ghế (xem `ensurePreBind`).
-             * Thường đã xong từ khâu khởi động wave ⇒ ~0 ms; ca phát sinh giữa lượt thì bind ở
-             * đây, vẫn NGOÀI ghế. Đo `preBindMs` = phần THẬT SỰ còn phải bind sau khi đã chiếm
-             * ghế ở nhánh trong slot (xem `uploadOneTimePhoto` trong `sendViaSocket`). */
-            if (photo) { try { await ensurePreBind(c); } catch (ePre) { /* bind lỗi ⇒ đường cũ xử lý */ } }
             const _tAcq0 = Date.now();
             const gotMainSlot = await acquireMainSlot();
             if (!gotMainSlot) return null;
@@ -15134,42 +13064,6 @@
             }
           };
 
-          /* ═══ [v1.93.16] PRE-BIND ẢNH — CHỒNG LẤN VỚI KHÂU PHÁT, KHÔNG CHẶN TRƯỚC NÓ ═══
-           * ĐO TỪ LOG 12:34 (2 411 chat × 1 ảnh): bind 1 088 ms/ca × 2 412 ca = 2 625 giây-làn;
-           * với làn 96 thì SÀN CỨNG của khâu phát là 27,3 s — và cả lượt phát chỉ 29,4 s
-           * ⇒ **93 % thời gian phát là CHỜ BIND**, không phải bắn. Bằng chứng phụ cùng log:
-           * `peak Socket/page active 59/256` — làn Socket chưa bao giờ được nạp đủ, nên
-           * `mainCap 192` không thể là nút cổ chai. `⏱ GIỮ SLOT … còn lại 2 142 ms` chính là
-           * phần bind nằm TRONG ghế.
-           *
-           * ⚠️ BẢN NHÁP ĐẦU `await` KHÂU NÀY TRƯỚC `runPool(waveSlice…)` — SAI, ĐÃ SỬA:
-           * await trước mỗi wave làm tổng = Σ(bind_wave + phát_wave) ⇒ 3 wave = 3 × (5,7 s bind
-           * + phát) ⇒ **chậm hơn bản gốc**. Nay khâu này CHỈ KHỞI ĐỘNG (không await), và
-           * `runMainItem` await ĐÚNG promise của chat nó TRƯỚC `acquireMainSlot()`:
-           *   • worker chờ bind mà KHÔNG giữ ghế ⇒ 191 worker khác vẫn phát bình thường;
-           *   • bind chạy song song với phát, tổng ≈ max(bind, phát) ≈ 14 s thay vì 27 s;
-           *   • tải HTTP vẫn bị `photoUploadLane` (192) điều tiết, không phải mở thêm làn.
-           * Lỗi bind ⇒ promise resolve null ⇒ trong slot tự bind lại đúng đường cũ. */
-          try {
-            if (photo && waveSlice.length) {
-              const preList = waveSlice.filter((c0) => c0 && c0.id && c0.__photoArg).slice(0, PREBIND_MAX_PER_WAVE);
-              if (preList.length) {
-                const _tPreW = Date.now();
-                Promise.all(preList.map((c0) => ensurePreBind(c0)))
-                  .then(() => {
-                    try {
-                      waveDiag.preBindWallMs += Math.max(0, Date.now() - _tPreW);
-                      waveDiag.preBindWallWaves++;
-                    } catch (ePW) { /* ignore */ }
-                  })
-                  .catch(() => { /* pre-bind không bao giờ được làm hỏng wave */ });
-              }
-              if (waveSlice.length > PREBIND_MAX_PER_WAVE) {
-                logLine('🧷 Wave ' + waveNo + ': ' + waveSlice.length + ' chat, trần pre-bind ' + PREBIND_MAX_PER_WAVE
-                  + ' ⇒ phần dôi ra bind trong slot như cũ (không bỏ sót ca nào).');
-              }
-            }
-          } catch (ePreAll) { /* pre-bind là tăng tốc, không bao giờ được làm hỏng wave */ }
           // Một pool duy nhất: runPool đã rút việc động bằng biến next chung (không chia khúc).
           const wavePromise = runPool(waveSlice, runMainItem, mainCap);
           allMainPromises.push(wavePromise);

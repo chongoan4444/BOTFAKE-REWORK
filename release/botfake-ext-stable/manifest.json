@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "BOTFAKE LITE",
-  "version": "1.93.18",
-  "description": "Gửi hàng loạt Pancake trong background + overlay Pancake #1/#2 khi đổi tab",
+  "name": "BOTFAKE STABLE",
+  "version": "1.93.11",
+  "description": "Bản ổn định: gửi hàng loạt trong tab Pancake. Không nhớ/lọc chat lỗi, có công tắc phím Tab, log cuối gọn.",
   "permissions": [
     "tabs",
     "storage",
