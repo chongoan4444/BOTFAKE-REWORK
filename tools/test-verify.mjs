@@ -2260,8 +2260,28 @@ const _preSrc = stripComments(SRC);
 
 // (5) Làn ảnh 96 → 192, và lý do phải ghi ngay cạnh hằng số
 {
-  check('[prebind] photoUploadLane dùng PHOTO_UPLOAD_LANE', /makeLane\(PHOTO_UPLOAD_LANE\)/.test(_preSrc), true);
+  /* [W133] LÀN ẢNH PHẢI CO ĐƯỢC. Test cũ khoá `/makeLane\(PHOTO_UPLOAD_LANE\)/` — tức khoá
+   * đúng cái làn PHẲNG 192 đã sinh ra 429 hàng loạt ở log 13:53 (bind TB 2 915 ms/ca,
+   * max 8 482 ms, tường PRE-BIND 53 079 ms). Đổi sang làn thích ứng có sàn/trần rõ ràng. */
+  check('[W133] photoUploadLane là làn THÍCH ỨNG (co được khi 429)',
+    /makeAdaptiveLane\(PHOTO_UPLOAD_LANE, PHOTO_UP_MIN, PHOTO_UP_MAX\)/.test(_preSrc), true);
+  check('[W133] làn ảnh KHÔNG còn là làn phẳng makeLane',
+    /const photoUploadLane = makeLane\(/.test(_preSrc), false);
   check('[prebind] PHOTO_UPLOAD_LANE = 192', /const PHOTO_UPLOAD_LANE = 192;/.test(_preSrc), true);
+  check('[W133] sàn làn ảnh PHOTO_UP_MIN = 16 (không co tới 0)',
+    /const PHOTO_UP_MIN = 16;/.test(_preSrc), true);
+  check('[W133] trần làn ảnh GIỮ 192 (không nới)',
+    /const PHOTO_UP_MAX = 192;/.test(_preSrc), true);
+  check('[W133] có bộ điều tiết 429 dùng chung (coolUntil) cho đường bind ảnh',
+    /const photoUpCtl = \{[^}]*coolUntil: 0/.test(_preSrc), true);
+  check('[W133] bind ảnh CHỜ cơn nghỉ chung trước mỗi lần thử',
+    /await waitPhotoUpCooldown\(\);/.test(_preSrc), true);
+  check('[W133] 429 ⇒ co làn một nửa',
+    /notePhotoUpResult[\s\S]{0,900}?photoUploadLane\.setLimit\(Math\.round\(photoUploadLane\.getLimit\(\) \* 0\.5\)\)/.test(_preSrc), true);
+  check('[W133] nghỉ 429 một lần KHÔNG vượt 4 000 ms (cũ: tới 15 000 ms)',
+    /const PHOTO_429_SLEEP_MAX_MS = 4000;/.test(_preSrc), true);
+  check('[W133] sau cơn nghỉ có rải nhịp ngẫu nhiên (không cùng lao lại 1 ms)',
+    /photo-cool[\s\S]{0,300}?Math\.random\(\) \* 180/.test(_preSrc), true);
   check('[prebind] chú thích nêu số đo quyết định (1 088 ms · 2 412 ca · 59/256)',
     /1 088 ms/.test(SRC) && /2 412 ca/.test(SRC) && /59\/256|59\s*\/\s*256/.test(SRC), true);
   // Không được nới mainCap / apiSendLane / extPrepLane trong cùng bản vá này
@@ -2747,6 +2767,101 @@ const _preSrc = stripComments(SRC);
   checkNot('[v1.93.18-W132] KHÔNG dọn `fbMsgCache`/`socketWarmPromises` (CHỈ ĐỌC)', fnSrc, /fbMsgCache|socketWarmPromises/);
   checkNot('[v1.93.18-W132] KHÔNG đặt sàn làn về hằng số một cách mù quáng',
     fnSrc, /socketLaneFloor = SOCKET_LANE_MIN;\s*\n\s*Object\.keys\(pageSocketLanes\)[\s\S]{0,200}\n\s*\}\);/);
+}
+
+
+/* ═══════════════════════ [1.93.18-W133] ĐIỀU TIẾT 429 · ĐẾM PRE-BIND · EXT NGUỘI ═══════════════════════
+ * Ba lỗi lấy từ MỘT log thật (lô 1916 chat, 75,3 s):
+ *   📷 bind fbId: 2 226 ca · TB 2 915 ms/ca · max 8 482 ms  (429 liên tục trong console)
+ *   🧷 PRE-BIND ẢNH: 3832 lần  ← 1916 × 2 ⇒ đếm gấp đôi
+ *   Ext p90 0ms → timeout 7000ms · dượt 2: 139 ca / TB 14 136 ms
+ */
+{
+  // ── Bộ điều tiết 429 của làn ảnh: chạy THẬT, không chỉ so regex ─────────────
+  const noteSrc = extractFn('notePhotoUpResult');
+  check('[W133] notePhotoUpResult đọc được', noteSrc.length > 200, true);
+
+  const mkCtl = () => {
+    const lane = {
+      limit: 192,
+      setLimit(n) { this.limit = Math.max(16, Math.min(192, Math.round(n))); return this.limit; },
+      getLimit() { return this.limit; },
+    };
+    const ctl = { good: 0, bad429: 0, backoff: 0, coolUntil: 0, n: 0, bad429N: 0, coolMs: 0, minLimit: 192 };
+    const note = new Function('photoUpCtl', 'photoUploadLane', 'PHOTO_429_SLEEP_MAX_MS', 'PHOTO_UPLOAD_LANE',
+      'const Math2 = Math;' + noteSrc + '\nreturn notePhotoUpResult;')(ctl, lane, 4000, 192);
+    return { lane, ctl, note };
+  };
+
+  // 1) 429 ⇒ làn co một nửa + đặt cơn nghỉ chung
+  {
+    const { lane, ctl, note } = mkCtl();
+    note(false, 429, 120);
+    check('[W133] 429 ⇒ làn 192 → 96', lane.getLimit(), 96);
+    check('[W133] 429 ⇒ coolUntil được đặt (nghỉ chung)', ctl.coolUntil > Date.now(), true);
+    check('[W133] 429 ⇒ đếm bad429N', ctl.bad429N, 1);
+    note(false, 429, 120);
+    check('[W133] 429 lần 2 ⇒ làn 96 → 48', lane.getLimit(), 48);
+    check('[W133] cơn nghỉ dài dần (backoff)', ctl.backoff, 2);
+    note(false, 429, 120); note(false, 429, 120); note(false, 429, 120);
+    check('[W133] làn KHÔNG co dưới sàn 16', lane.getLimit(), 16);
+  }
+
+  // 2) Thành công nhanh liên tiếp ⇒ làn hồi +8 mỗi 8 ca, không vượt trần 192
+  {
+    const { lane, ctl, note } = mkCtl();
+    lane.limit = 16;
+    for (let i = 0; i < 8; i++) note(true, 200, 200);
+    check('[W133] 8 ca nhanh ⇒ làn 16 → 24', lane.getLimit(), 24);
+    for (let i = 0; i < 200; i++) note(true, 200, 200);
+    check('[W133] hồi làn KHÔNG vượt trần 192', lane.getLimit(), 192);
+  }
+
+  // 3) Ca chậm (>4 s) không được tính là "nhanh" ⇒ không hồi làn vô căn cứ
+  {
+    const { lane, ctl, note } = mkCtl();
+    lane.limit = 48;
+    for (let i = 0; i < 40; i++) note(true, 200, 4800);
+    check('[W133] ca chậm 4,8 s KHÔNG làm hồi làn', lane.getLimit(), 48);
+  }
+
+  // 4) Lỗi không phải 429: KHÔNG co làn (tránh co vì khách chết / ảnh hỏng)
+  {
+    const { lane, ctl, note } = mkCtl();
+    lane.limit = 100;
+    for (let i = 0; i < 10; i++) note(false, 400, 100);
+    check('[W133] lỗi 400 KHÔNG co làn', lane.getLimit(), 100);
+    check('[W133] lỗi 400 KHÔNG đặt cơn nghỉ', ctl.coolUntil, 0);
+  }
+
+  // ── Cửa sổ chờ: không có 429 ⇒ 0 ms; có 429 ⇒ chờ đúng mốc ─────────────────
+  check('[W133] waitPhotoUpCooldown tồn tại và chờ theo coolUntil',
+    /Date\.now\(\) < photoUpCtl\.coolUntil/.test(extractFn('waitPhotoUpCooldown')), true);
+
+  // ── ĐẾM PRE-BIND: chỉ được cộng Ở MỘT CHỖ ─────────────────────────────────
+  check('[W133] ensurePreBind KHÔNG còn cộng preBindN (sửa đếm gấp đôi 3832/1916)',
+    /preBindN\+\+/.test(extractFn('ensurePreBind')), false);
+  check('[W133] bindPhotoForConv vẫn cộng preBindN đúng 1 lần',
+    (extractFn('bindPhotoForConv').match(/preBindN\+\+/g) || []).length, 1);
+
+  // ── EXT "NGUỘI": chưa có mẫu ⇒ KHÔNG chờ 7 s ──────────────────────────────
+  const extFn = extractFn('extTimeoutMs');
+  {
+    const run = (samples) => new Function('extSendCtl', 'EXT_COLD_TIMEOUT_MS',
+      'function extLatP90(){const a=extSendCtl.latSamples;if(!a.length)return 0;'
+      + 'const b=a.slice().sort((x,y)=>x-y);return b[Math.min(b.length-1,Math.floor(b.length*0.9))]||0;}'
+      + extFn + '\nreturn extTimeoutMs;')({ latSamples: samples }, 2500)();
+    check('[W133] Ext CHƯA có mẫu ⇒ chờ 2 500 ms (KHÔNG phải 7 000)', run([]), 2500);
+    check('[W133] Ext có mẫu p90 1 000 ms ⇒ 3×p90 = 3 000 ms', run([1000, 1000, 1000]), 3000);
+    check('[W133] Ext có mẫu rất nhanh ⇒ không dưới sàn 2 500', run([100, 100]), 2500);
+    check('[W133] Ext có mẫu rất chậm ⇒ không vượt trần 9 000', run([9000, 9000]), 9000);
+  }
+
+  // ── Log nghiệm thu ────────────────────────────────────────────────────────
+  check('[W133] dòng 📷 bind fbId in số 429 (trước đây 429 không được đếm ở đâu)',
+    /429×' \+ photoUpCtl\.bad429N/.test(SRC), true);
+  check('[W133] dòng 📷 bind fbId in làn cuối (nghiệm thu: 429 > 0 ⇒ làn phải < 192)',
+    /' · làn ' \+ PHOTO_UPLOAD_LANE \+ '→' \+ photoUploadLane\.getLimit\(\)/.test(SRC), true);
 }
 
 

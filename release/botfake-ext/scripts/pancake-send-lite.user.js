@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BOTFAKE LITE (Wave 200 · Tab + Clipboard)
 // @namespace    salescript
-// @version      1.93.18-w200.132
+// @version      1.93.18-w200.133
 // @description  BOTFAKE — nền v1.91.72 Tab + Clipboard, điều phối Wave 200 cục bộ trong tab Pancake (4 làn chính + 2 làn bù song song).
 // @author       SALESCRIPT
 // @match        https://pancake.vn/*
@@ -62,7 +62,7 @@
   /* ============================ HẰNG SỐ ============================ */
 
   const PANEL_ID = 'ssb-root';          // ssb = SaleScript Bulk — không đụng pk-*/adj-*/pancake-* của script khác
-  const APP_VERSION = '1.93.18-W200.132'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
+  const APP_VERSION = '1.93.18-W200.133'; // hiện ở tiêu đề panel — đối chiếu với @version trong header
   const STYLE_ID = 'ssb-style';
 
   const MAX_NAME_LIST = 12;             // số tên hiển thị khi xác nhận
@@ -5632,7 +5632,10 @@
   function ensurePreBind(conv) {
     if (!conv || !conv.id || !conv.__photoArg) return Promise.resolve(null);
     if (conv.__preBindP) return conv.__preBindP; // đã khởi động ở khâu wave ⇒ dùng chung promise
-    try { waveDiag.preBindN++; } catch (e0) { /* ignore */ }
+    /* [W133] KHÔNG cộng `preBindN` ở đây nữa — nó được cộng ĐÚNG MỘT LẦN ở chỗ bind thật
+     * (trong `bindPhotoForConv`, ngay sau khi `uploadOneTimePhoto` trả về). Bản trước cộng cả ở
+     * đây lẫn ở đó ⇒ log 13:53 in `🧷 PRE-BIND ẢNH: 3832 lần` trong khi lô chỉ có 1916 chat ⇒
+     * **luôn gấp đôi**, và mọi kết luận về hiệu quả pre-bind dựa trên số đó đều sai. */
     conv.__preBindP = Promise.resolve()
       .then(() => bindPhotoForConv(conv, conv.__photoArg))
       .catch(() => null);
@@ -7113,17 +7116,28 @@
     let lastErr = '';
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
+        /* [W133] Chờ hết cơn 429 CHUNG trước mỗi lần thử. Không có 429 ⇒ 0 ms.
+         * Trước đây mỗi lần thử đâm thẳng, và khi bị 429 thì ngủ RIÊNG tới 15 s
+         * (`retryAfterMs` trần 15 000) ⇒ 192 luồng cùng ngủ, cùng thức, cùng 429. */
+        await waitPhotoUpCooldown();
+        if (state.stopRequested) return { ok: false, error: 'Đã dừng' };
+        const _tTry = Date.now();
         const res = await fetchT(url, {
           method: 'POST', body: JSON.stringify(body), credentials: 'include',
           headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         }, 20000);
         const j = await res.json().catch(() => null);
         if (res.ok && j && j.success && Array.isArray(j.fb_ids) && j.fb_ids.length) {
+          notePhotoUpResult(true, res.status, Date.now() - _tTry);
           return { ok: true, fbId: String(j.fb_ids[0]), fbIds: j.fb_ids.map((x) => String(x)) };
         }
         lastErr = (j && (j.message || j.error)) || ('HTTP ' + res.status);
+        /* 429 chỉ báo cho bộ điều tiết; cơn nghỉ chung đã được đặt trong notePhotoUpResult nên
+         * lần thử sau ở BẤT KỲ luồng nào cũng chờ cùng một mốc. Trần ngủ một lần: 4 000 ms. */
+        if (res.status === 429) notePhotoUpResult(false, 429, Date.now() - _tTry);
+        else notePhotoUpResult(false, res.status, Date.now() - _tTry);
         if ((res.status === 429 || res.status >= 500) && attempt < 3) {
-          await sleepUntil(Date.now() + retryAfterMs(res, 350 * attempt)); // [v1.92.9]
+          await sleepUntil(Date.now() + Math.min(PHOTO_429_SLEEP_MAX_MS, retryAfterMs(res, 350 * attempt))); // [v1.92.9]
           continue;
         }
         break;
@@ -7415,6 +7429,23 @@
    *     không phải làn gửi — nới nó không thể sinh tin trùng.
    * GIỮ NGUYÊN trần `mainCap`/`apiSendLane`/`extPrepLane`: chỉ nút cổ chai đang bị đo mới đổi. */
   const PHOTO_UPLOAD_LANE = 192;
+  /* [W133] LÀN ẢNH PHẢI CO ĐƯỢC — log 13:53 chứng minh làn phẳng 192 TỰ GÂY 429.
+   * Số đo (lô 1916 chat, 75,3 s):
+   *   📷 bind fbId: 2 226 ca · TB 2 915 ms/ca · max 8 482 ms · lỗi 0
+   *   🧷 PRE-BIND: tường 53 079 ms (gần hết 75 s của lô)
+   *   console: `POST /contents/facebook?is_reusable=false&async=false 429` liên tục
+   * Nguyên nhân không phải trần máy chủ (chú thích cũ đoán vậy) mà là **192 luồng đâm cùng lúc
+   * vào một endpoint có rate-limit**, không có bộ điều tiết nào: `makeLane` không có `setLimit`,
+   * không có `coolUntil`, không đếm 429. Mỗi luồng tự retry 3 lần và `retryAfterMs` cho ngủ tới
+   * 15 000 ms ⇒ 192 luồng cùng ngủ riêng lẻ rồi cùng lao lại ⇒ 429 kéo dài.
+   * Nay làn ảnh là làn THÍCH ỨNG: co ngay khi gặp 429 rồi hồi theo phản hồi nhanh.
+   * Đây KHÔNG phải làn gửi ⇒ co/nới không thể sinh tin trùng hay làm chậm tin đã gửi. */
+  const PHOTO_UP_MIN = 16;    // sàn: đủ để khâu chuẩn bị không bị bóp nghẹt khi server khoẻ
+  const PHOTO_UP_MAX = 192;   // trần: GIỮ NGUYÊN như bản trước, chỉ thêm đường co
+  /* Trần chờ 429 của đường bind ảnh. Trước đây `retryAfterMs` cho ngủ tới 15 000 ms — một luồng
+   * ngủ 15 s trong khi 191 luồng khác vẫn đâm nghĩa là toàn bộ ước tính thời gian bị vô hiệu.
+   * Chặn ở 4 000 ms và cho bộ điều tiết nghỉ CHUNG (mọi luồng cùng chờ) thay vì nghỉ riêng. */
+  const PHOTO_429_SLEEP_MAX_MS = 4000;
   // Ext finder là đường ĐẮT nhất (đi qua Extension) nhưng cũng là đường duy nhất biết
   // {threadId → globalId} khi HTTP/WS không có. 12 → 20 làn khởi điểm, trần 24 → 32.
   const GID_EXT_INITIAL = 20;
@@ -8216,7 +8247,47 @@
 
   const apiSendLane = makeLane(API_SEND_PARALLEL);
   const ctxFetchLane = makeAdaptiveLane(CTX_FETCH_INITIAL, CTX_FETCH_MIN, CTX_FETCH_MAX);
-  const photoUploadLane = makeLane(PHOTO_UPLOAD_LANE);
+  /* [W133] makeAdaptiveLane (co/nới được) thay cho makeLane (phẳng 192). Xem chú thích
+   * PHOTO_UP_MIN/MAX: log 13:53 có 429 hàng loạt vì làn phẳng không có đường co. */
+  const photoUploadLane = makeAdaptiveLane(PHOTO_UPLOAD_LANE, PHOTO_UP_MIN, PHOTO_UP_MAX);
+  /* Bộ điều tiết 429 cho POST /contents/facebook — CÙNG KHUÔN `gidHttpCtl` (đã chạy tốt):
+   * nghỉ CHUNG (`coolUntil`) + co làn theo cấp số nhân, hồi làn khi phản hồi nhanh liên tiếp.
+   * `n`/`bad429`/`coolMs` là số đo nghiệm thu in ở dòng 📷 bind fbId. */
+  const photoUpCtl = { good: 0, bad429: 0, backoff: 0, coolUntil: 0, n: 0, bad429N: 0, coolMs: 0, minLimit: PHOTO_UPLOAD_LANE };
+  /** Chờ hết cơn 429 chung trước khi gửi một lệnh bind ảnh. Không có 429 ⇒ trả về ngay (0 ms). */
+  async function waitPhotoUpCooldown() {
+    if (!state.stopRequested && Date.now() < photoUpCtl.coolUntil) {
+      await sleepUntil(photoUpCtl.coolUntil, 'photo-cool');
+      /* Rải nhịp sau cơn 429: nếu không, tất cả các luồng thức đúng cùng 1 ms và đâm lại cùng lúc
+       * (đúng cái vòng lặp đã thấy ở log 13:53). */
+      if (!state.stopRequested) await sleepUntil(Date.now() + Math.floor(Math.random() * 180));
+    }
+  }
+  /** Ghi kết quả MỘT lệnh bind ảnh. 429 ⇒ nghỉ chung + co làn; nhanh liên tiếp ⇒ hồi làn. */
+  function notePhotoUpResult(ok, status, latencyMs) {
+    try {
+      photoUpCtl.n++;
+      if (status === 429) {
+        photoUpCtl.bad429N++;
+        photoUpCtl.backoff = Math.min(6, (photoUpCtl.backoff || 0) + 1);
+        const cool = Math.min(PHOTO_429_SLEEP_MAX_MS, 600 * photoUpCtl.backoff);
+        const until = Date.now() + cool;
+        if (until > photoUpCtl.coolUntil) { photoUpCtl.coolMs += until - Math.max(photoUpCtl.coolUntil, Date.now()); photoUpCtl.coolUntil = until; }
+        photoUpCtl.good = 0;
+        const next = photoUploadLane.setLimit(Math.round(photoUploadLane.getLimit() * 0.5));
+        if (next < photoUpCtl.minLimit) photoUpCtl.minLimit = next;
+        return;
+      }
+      if (!ok) { photoUpCtl.good = 0; return; }
+      photoUpCtl.backoff = 0;
+      if (latencyMs > 4000) { photoUpCtl.good = 0; return; } // chậm mà không 429: không hồi vội
+      photoUpCtl.good++;
+      if (photoUpCtl.good >= 8) {
+        photoUpCtl.good = 0;
+        photoUploadLane.setLimit(photoUploadLane.getLimit() + 8);
+      }
+    } catch (e) { /* điều tiết lỗi không được làm hỏng lượt gửi */ }
+  }
   const gidExtLane = makeAdaptiveLane(GID_EXT_INITIAL, GID_EXT_MIN, GID_EXT_MAX);
 
   // BỘ ĐIỀU TIẾT DÒ GLOBAL_ID (AIMD): phản hồi nhanh/ổn định → tăng dần để lấy
@@ -8422,10 +8493,23 @@
    * 60 % ca đến nơi). Ext trả nhanh thì tự siết về 2,5 s; Ext ì thì tự nới, tối đa 9 s.
    * Không thể sinh tin trùng: ca quá hạn vẫn chỉ đánh ⚠ + kiểm chứng nền, KHÔNG BAO GIỜ gửi lại.
    */
+  /* [W133] "CHƯA CÓ MẪU" KHÔNG CÒN ĐỒNG NGHĨA VỚI "CHỜ 7 S".
+   * Log 13:53 (lô 1916 chat):
+   *   `Ext p90 0ms → timeout 7000ms` và `dò gid … lượt 2: 139 ca / TB 14 136ms`
+   * `p90 = 0` nghĩa là **Extension chưa từng trả lời một lần nào trong cả lượt** (mẫu rỗng),
+   * nhưng bản cũ vẫn chờ đủ 7 000 ms cho từng ca rồi đi lượt 2 thêm 14 136 ms.
+   * 139 ca × 14 s ≈ 32 phút chờ cộng dồn trong một lô 75 giây.
+   * Nay: nếu CHƯA CÓ MẪU THÀNH CÔNG nào thì coi Extension là KHÔNG SẴN SÀNG và chờ ngắn
+   * (sàn 2 500 ms) để mau rơi sang kênh khác; đã có mẫu thì vẫn 3 × p90 như cũ.
+   * Đánh đổi đã đo: 09:44 cắt 7 s → 2,5 s làm ca "quá hạn" mất 60 % → 0 % khả năng cứu.
+   * Nhưng đó là khi Extension CÓ trả lời; ở đây mẫu rỗng = nó không trả lời lần nào, nên giữ
+   * 7 s chỉ đốt thời gian mà không cứu được ca nào. KHÔNG BAO GIỜ gửi lại ở đường này — chỉ
+   * đổi thời gian chờ, không đổi số lệnh gửi. */
+  const EXT_COLD_TIMEOUT_MS = 2500;   // = sàn cũ, dùng khi CHƯA có mẫu thành công nào
   function extTimeoutMs() {
     const p90 = extLatP90();
-    const want = p90 > 0 ? p90 * 3 : 7000;
-    return Math.min(9000, Math.max(2500, Math.round(want)));
+    if (!(p90 > 0)) return EXT_COLD_TIMEOUT_MS; // Extension chưa từng trả lời ⇒ không chờ 7 s
+    return Math.min(9000, Math.max(2500, Math.round(p90 * 3)));
   }
 
   // ==== [v1.92.8] BẮT PHẢN HỒI MUỘN CỦA EXTENSION — không thêm một request nào ====
@@ -11503,6 +11587,17 @@
               + (photoUpStats.n
                 ? ' · 📷 bind fbId: ' + photoUpStats.n + ' ca · TB ' + Math.round(photoUpStats.ms / photoUpStats.n)
                   + 'ms/ca · max ' + photoUpStats.max + 'ms · lỗi ' + photoUpStats.fail
+                  /* [W133] SỐ ĐO NGHIỆM THU CỦA BỘ ĐIỀU TIẾT 429 — đọc đúng:
+                   *   `429×N`  = số lần endpoint bind trả 429. Trước W133 con số này KHÔNG được
+                   *              đếm ở đâu cả nên 429 chỉ thấy trong console.
+                   *   `nghỉ Xms` = tổng thời gian cả làn bị chặn bởi cơn nghỉ chung.
+                   *   `làn A→B`  = làn ảnh đã co từ A xuống B (sàn PHOTO_UP_MIN = 16).
+                   * Nghiệm thu: 429 phải về 0 khi server khoẻ; nếu > 0 thì làn phải đã co
+                   * (B < 192) chứ không được chạy phẳng 192 như bản trước. */
+                  + (photoUpCtl.bad429N
+                    ? ' · 429×' + photoUpCtl.bad429N + ' · nghỉ ' + photoUpCtl.coolMs + 'ms'
+                      + ' · làn ' + PHOTO_UPLOAD_LANE + '→' + photoUploadLane.getLimit()
+                    : ' · 429×0 · làn ' + photoUploadLane.getLimit())
                 : '')
               /* [v1.93.16] NGHIỆM THU PRE-BIND — dòng số quyết định việc này có dời được việc
                * hay không. Đọc đúng:

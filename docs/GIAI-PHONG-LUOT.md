@@ -1,4 +1,4 @@
-# Giải phóng trạng thái lượt cũ — 1.93.18-W200.132
+# Giải phóng trạng thái lượt cũ — 1.93.18-W200.133
 
 **Yêu cầu:** "mỗi lượt gửi xong thì sẽ giải phóng hết tất cả dữ liệu cũ tránh gây lỗi ảnh hưởng lượt sau".
 
@@ -221,3 +221,108 @@ in thêm dòng rỗng**. Số đầu là số nhóm **thực sự đã chạy** 
    phải 6 000 ms (6 000 = dấu hiệu p90 đang bị đọc thành 0).
 3. `📡 SOCKET … bỏ nới lane N lần` phải > 0 khi p95 cao — `0` nghĩa là `p95` đang bằng 0 giả.
 4. `🧼` xuất hiện **đúng 1 dòng** cho mỗi lượt (kể cả khi chạy liền nhiều lô nhỏ).
+
+---
+
+## 7. Đo tốc độ từ file HAR — `tools/har-latency.mjs`
+
+Câu hỏi cần trả lời mỗi khi người dùng báo chậm: **chậm vì phản hồi server, hay vì máy tự
+chờ?** Hai nguyên nhân dẫn tới hai cách sửa khác hẳn nhau, nên tách bằng số trước khi sửa.
+
+```bash
+node tools/har-latency.mjs test123.har          # báo cáo đầy đủ
+node tools/har-latency.mjs test123.har --only messages --top 5
+```
+
+Ba nhóm số (đọc mục 1 trước, nó quyết định mọi thứ):
+
+1. **Chia nguồn gốc thời gian** — `Σ wait` (chờ server) · `gaps` (không có lệnh nào đang bay)
+   · `blocked` (trình duyệt xếp hàng). `gaps` cao ⇒ phía máy tự bỏ thời gian ra (nhịp wave,
+   chờ ACK, chờ lane) ⇒ tăng làn/bỏ nhịp mới nhanh; server **không** phải thủ phạm.
+2. **Phản hồi theo endpoint** — p50/p90/max của `wait`, xếp theo *tổng* thời gian chờ.
+3. **Độ song song** — p50/p90/max số lệnh đang bay. p50 = 1 ⇒ tuần tự hoá, thêm làn vô nghĩa.
+
+Ví dụ trên HAR có sẵn trong repo (đo thật, không suy đoán):
+
+| File | wait server | gaps (máy tự chờ) | song song p50/max | Kết luận |
+|---|---|---|---|---|
+| `guianh1.har` | 3,8 s **9,3 %** | **37,9 s 91,5 %** | 2 / 7 | server nhanh (p50 66 ms) — **máy chờ** |
+| `batmesss.har` | **125,5 s 85,5 %** | 50,3 s 34,3 % | 3 / 15 | server chậm thật (p90 1,0 s, max 6,6 s) |
+
+⇒ Cùng là "chậm" nhưng hai nguyên nhân trái ngược. **Phải đo trước khi sửa.**
+
+---
+
+## 8. W200.133 — vì sao "1–2 ngày nay tự nhiên gửi chậm hẳn": 429 ở khâu bind ảnh
+
+Nguồn: **một log thật** (lô 1916 chat, 75,3 s) + console của cùng lượt. Không suy đoán.
+
+### 8.1 Ba con số chỉ thẳng vào nút cổ chai
+
+```
+[13:53:33] ⚡ PHÁT 1916 lệnh / 75.3s = 25.44/giây · đuôi xác nhận 25.3s
+[13:53:33] 📷 bind fbId: 2 226 ca · TB 2 915 ms/ca · max 8 482 ms · lỗi 0
+[13:53:33] 🧷 PRE-BIND ẢNH: 3832 lần bind ngoài slot · tường 53 079 ms
+[13:53:33] 🧭 dò gid 418 ca · TB 5 383 ms (lượt 2: 139 ca / TB 14 136 ms) · Ext p90 0ms → timeout 7000ms
+console  : POST /contents/facebook?is_reusable=false&async=false  429 (Too Many Requests)  × rất nhiều
+```
+
+**Tường PRE-BIND 53 079 ms trong một lô 75 300 ms** — 70 % thời gian lô nằm ở khâu chuẩn bị ảnh,
+không phải ở khâu gửi. Mỗi ca bind 2,9 s (cá biệt 8,5 s) vì endpoint trả **429**.
+
+### 8.2 Nguyên nhân gốc trong mã
+
+`photoUploadLane = makeLane(PHOTO_UPLOAD_LANE)` — **làn phẳng 192, không `setLimit`**:
+
+- không có `coolUntil` ⇒ 192 luồng cùng bị 429, cùng ngủ riêng, cùng lao lại;
+- `retryAfterMs(res, 350*attempt)` cho ngủ tới **15 000 ms** ⇒ một luồng ngủ 15 s trong khi 191
+  luồng khác vẫn đập, nên "nghỉ" không có tác dụng điều tiết;
+- 429 **không được đếm ở bất kỳ đâu** ⇒ không thể nghiệm thu, chỉ thấy trong console.
+
+So sánh: đường dò globalId đã có `gidHttpCtl` (nghỉ chung + co làn) từ lâu. Đường ảnh thì chưa.
+
+### 8.3 Ba bản sửa
+
+| # | Sửa | Chỗ | Trước | Sau |
+|---|---|---|---|---|
+| 1 | Làn ảnh thành **làn thích ứng** `makeAdaptiveLane(192, 16, 192)` | `photoUploadLane` | phẳng 192 | co được, sàn 16, trần giữ 192 |
+| 2 | **Bộ điều tiết 429** dùng chung: `photoUpCtl { coolUntil, backoff, bad429N }` + `waitPhotoUpCooldown()` trước mỗi lần thử + `notePhotoUpResult()` | chỗ bind ảnh | không có | 429 ⇒ nghỉ chung (tối đa 4 000 ms/lần, backoff ×6) + co làn ÷2; 8 ca nhanh ⇒ hồi +8 |
+| 3 | `extTimeoutMs()`: **chưa có mẫu ⇒ 2 500 ms**, không phải 7 000 | `extTimeoutMs` | `p90 > 0 ? p90*3 : 7000` | `!(p90>0) → 2 500` |
+
+Sửa thêm một **lỗi đếm**: `waveDiag.preBindN++` bị cộng ở **hai chỗ** (`ensurePreBind` @5635 và
+`bindPhotoForConv` @5667) ⇒ log in `3832 lần` cho lô **1916** chat, luôn gấp đôi. Bỏ dòng ở
+`ensurePreBind`; nay cộng đúng **một lần** ở chỗ bind thật.
+
+### 8.4 Vì sao KHÔNG sửa những chỗ còn lại
+
+| Ứng viên | Số đo phản bác |
+|---|---|
+| Nới `ACK_HOLD_CEIL_MS` 6 000 (p90 8 108) | 265 ca hết hạn, **265/265 về muộn đều là "FB từ chối", 0 ca cứu được ✅** ⇒ nới trần chỉ giữ slot lâu hơn, không đổi kết quả một ca nào (đúng chú thích v1.92.63 đã ghi). |
+| Tăng làn Socket | `Socket/page limits cuối [256×1]` — **đã ở trần**, tăng nữa vô nghĩa. |
+| Sửa `rampAllowed()` | `bỏ nới lane 0 lần` ⇒ cổng đó **không hề được gọi** (`fastAckMs` 2 502 ms, gần như không ca ACK nhanh ⇒ `fastOk` không đạt 20). Vấn đề không nằm ở ngưỡng. |
+| Cắt pacing | Đã có `PHÁT 25,44/giây` với đuôi 25,3 s; nút cổ chai là bind ảnh, không phải nhịp phát. |
+
+### 8.5 Nghiệm thu
+
+```
+npm test          ✓ 634/634 (thêm 29 kịch bản W133)
+npm run check     ✓
+check:stable      ✗  (đúng chủ ý — scripts/pancake-send-stable.user.js không đụng)
+mutation ×7       ĐỎ 100 % (co làn · coolUntil · ext nguội · đếm preBindN · chờ cooldown · làn phẳng · hồi làn khi chậm)
+```
+
+Test W133 chạy **thật** `notePhotoUpResult` và `extTimeoutMs` (không chỉ so regex): 192→96→48→…→16 khi
+429 liên tiếp, 16→24 khi 8 ca nhanh, **không** hồi khi ca chậm >4 s, lỗi 400 **không** co làn.
+
+### 8.6 Số đo cần đọc ở lô sau
+
+Dòng `📷 bind fbId` nay có thêm đuôi:
+
+```
+📷 bind fbId: N ca · TB X ms/ca · max Y ms · lỗi Z · 429×K · nghỉ T ms · làn 192→L
+```
+
+- `429×0` ⇒ server khoẻ, bộ điều tiết không phải can thiệp.
+- `429×K > 0` **và** `L < 192` ⇒ cơ chế đã hoạt động. Nếu `K > 0` mà `L = 192` ⇒ làn không co được (lỗi).
+- So với bản W132 cùng cỡ lô: **`TB bind` phải tụt từ 2 915 ms**, **`tường PRE-BIND` tụt từ 53 079 ms**,
+  **`🧷 PRE-BIND ẢNH: N` phải bằng đúng số chat có ảnh** (hết gấp đôi), **`dò gid lượt 2` TB tụt từ 14 136 ms**.
